@@ -15,6 +15,9 @@
 package eventlog
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,6 +50,7 @@ func Files(path string) []string { return []string{path + ".1", path} }
 // path discards (with the warning).
 type Log struct {
 	path    string
+	noIndex bool         // the index's own Log: no sink, so no recursion
 	why     error        // why path is empty, for the warning
 	warn    func(string) // receives the one-time warning; nil drops it
 	once    sync.Once
@@ -101,6 +105,24 @@ func (l *Log) Write(p []byte) (int, error) {
 		l.fail(l.why)
 		return len(p), nil
 	}
+	var line []byte
+	var ok, seeded bool
+	if !l.noIndex {
+		// Seed before the event-log write, so the seed doesn't also copy this record.
+		if line, ok = IndexLine(p); ok {
+			seeded = seedIndex(l.path) == nil
+		}
+	}
+	l.append(p)
+	if ok && seeded {
+		// Fail-open and silent (ADR 0291): the index is findability only.
+		(&Log{path: IndexPath(l.path), noIndex: true}).append(line)
+	}
+	return len(p), nil
+}
+
+// append is Write's rotate-open-write, warning once on a failure.
+func (l *Log) append(p []byte) {
 	// ponytail: two processes crossing the cap at once can both rename, the second
 	// clobbering .1 with a near-empty file (ADR 0028). flock on a sibling .lock
 	// around stat+rename is the upgrade if that lost backup ever matters.
@@ -111,13 +133,84 @@ func (l *Log) Write(p []byte) (int, error) {
 	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 	if err != nil {
 		l.fail(err)
-		return len(p), nil
+		return
 	}
 	defer f.Close()
 	if _, err := f.Write(p); err != nil {
 		l.fail(err)
 	}
-	return len(p), nil
+}
+
+// seedIndex copies the index lines of the event log's .1 then live file into a
+// fresh index, once: only when neither index file exists (ADR 0293). The temp file
+// is linked into place, so the create is atomic and a lost race just discards it.
+// Any error leaves the index absent, for the next matching record to retry.
+func seedIndex(logPath string) error {
+	idx := IndexPath(logPath)
+	for _, p := range []string{idx, idx + ".1"} {
+		if _, err := os.Stat(p); err == nil {
+			return nil
+		}
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(idx), "sessions.jsonl.seed*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	for _, p := range Files(logPath) {
+		b, err := os.ReadFile(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, ln := range bytes.SplitAfter(b, []byte("\n")) {
+			if out, ok := IndexLine(ln); ok {
+				if _, err := tmp.Write(out); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(tmp.Name(), idx); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
+}
+
+// IndexPath is the session index beside the event log at logPath (ADR 0291).
+func IndexPath(logPath string) string {
+	return filepath.Join(filepath.Dir(logPath), "sessions.jsonl")
+}
+
+var indexMsgs = []string{"session.started", "hitl.launched", "hitl.resumed", "session.ended", "session.failed", "hitl.exited", "hitl.failed"}
+
+// IndexLine is what the session index keeps of one event-log line: ok when it is a
+// session start or end carrying a session attr (ADR 0294), the line itself except
+// session.ended, which is re-encoded without its result.
+func IndexLine(line []byte) (out []byte, ok bool) {
+	if !bytes.Contains(line, []byte(`"session":"`)) {
+		return nil, false
+	}
+	var m map[string]any
+	if json.Unmarshal(line, &m) != nil {
+		return nil, false
+	}
+	msg, _ := m["msg"].(string)
+	if sid, _ := m["session"].(string); sid == "" || !slices.Contains(indexMsgs, msg) {
+		return nil, false
+	}
+	if msg != "session.ended" {
+		return line, true
+	}
+	delete(m, "result")
+	b, err := json.Marshal(m)
+	return append(b, '\n'), err == nil
 }
 
 func (l *Log) fail(err error) {
@@ -152,9 +245,9 @@ func (l *Log) Path() (string, error) {
 }
 
 // BeadAttrs are the common attrs naming a bead (ADR 0029 §3): bead, parent,
-// crewmate.
+// crewmate, and kind (raw, even unregistered).
 func BeadAttrs(b bd.Bead) []any {
-	return []any{"bead", b.ID, "parent", b.Parent, "crewmate", owner(b)}
+	return []any{"bead", b.ID, "parent", b.Parent, "crewmate", owner(b), "kind", string(b.Kind)}
 }
 
 // owner is b's registry owner, or "" for an unregistered kind.
@@ -243,12 +336,102 @@ func RecordAbandoned(b bd.Bead, effort, branch string, pauseErr error) {
 // ponytail: effort reaches claim/land events only via MUGICREW_EFFORT (a worktree
 // child); an in-process effort that landed or unclaimed would record them without
 // it (FR18). No in-process route does today; thread e.attrs through if one ever does.
-func RecordLand(b bd.Bead, branch, sha string, err error) {
-	attrs := append(BeadAttrs(b), "branch", branch, "into", git.Mainline())
+//
+// nested are the context=/repo=/into= attrs of a land in a child repo, replacing the
+// Workspace's into= (none otherwise, so unlabelled events are unchanged).
+func RecordLand(b bd.Bead, branch, sha string, err error, nested ...any) {
+	attrs := landAttrs(b, branch, nested)
 	if err == nil {
 		attrs = append(attrs, "sha", sha)
 	}
 	Record("land.done", "land.failed", err, attrs...)
+}
+
+// RecordLandPending records a gitlab Landing waiting on its Merge Request: land.pending
+// at Info with the MR iid and whether this tick pushed the pin and opened the MR.
+func RecordLandPending(b bd.Bead, branch string, mr int, pushed, opened bool, nested ...any) {
+	slog.Info("land.pending", append(landAttrs(b, branch, nested), "mr", mr, "pushed", pushed, "opened", opened)...)
+}
+
+// RecordGraphPush records an automatic Graph push at a Landing: graph.push at Info,
+// or graph.push_failed at Warn with the error. It never holds the Landing (ADR 0216).
+func RecordGraphPush(b bd.Bead, ref string, err error) {
+	if err != nil {
+		slog.Warn("graph.push_failed", append(BeadAttrs(b), "ref", ref, "err", err.Error())...)
+		return
+	}
+	slog.Info("graph.push", append(BeadAttrs(b), "ref", ref)...)
+}
+
+// RecordManualGraphPush records a `mugicrew graph push` by hand, which has no
+// Landing and so no bead: the same graph.push / graph.push_failed events, so a manual
+// success clears the TUI's failed-push warning.
+func RecordManualGraphPush(ref string, err error) {
+	if err != nil {
+		slog.Warn("graph.push_failed", "ref", ref, "err", err.Error())
+		return
+	}
+	slog.Info("graph.push", "ref", ref)
+}
+
+// landAttrs is a land event's bead and branch attrs plus nested, or the Workspace's
+// into= when nested is empty.
+func landAttrs(b bd.Bead, branch string, nested []any) []any {
+	if len(nested) == 0 {
+		nested = []any{"into", git.Mainline()}
+	}
+	return append(append(BeadAttrs(b), "branch", branch), nested...)
+}
+
+// LandOutcome is the suffix of a land.<outcome> event.
+type LandOutcome string
+
+const (
+	LandRetried        LandOutcome = "retried"
+	LandConflict       LandOutcome = "conflict"
+	LandClosed         LandOutcome = "closed"
+	LandPipelineFailed LandOutcome = "pipeline_failed"
+	LandLanded         LandOutcome = "landed"
+	LandStalled        LandOutcome = "stalled"         // a failed pipeline on an older head, the new head with none
+	LandReviewComment  LandOutcome = "review_comment"  // review threads filed as beads on the container
+	LandThreadReplied  LandOutcome = "thread_replied"  // Jinbe replied on a review thread whose bead closed
+	LandThreadResolved LandOutcome = "thread_resolved" // Jinbe resolved a review thread
+	LandThreadSkipped  LandOutcome = "thread_skipped"  // a 403/404 on a thread's reply or resolve
+)
+
+// RecordLandOutcome records a gitlab Forge outcome of a Landing as land.<outcome>
+// (retried, conflict, closed, pipeline_failed, landed, stalled, review_comment,
+// thread_replied, thread_resolved, thread_skipped) with the MR iid when it has one
+// (mr 0 omits it). retried, landed, thread_replied and thread_resolved are Info; the
+// rest, which end or hold the Landing, are Warn.
+func RecordLandOutcome(b bd.Bead, outcome LandOutcome, mr int, extra ...any) {
+	attrs := BeadAttrs(b)
+	if mr != 0 {
+		attrs = append(attrs, "mr", mr)
+	}
+	level := slog.LevelWarn
+	if outcome == LandRetried || outcome == LandLanded || outcome == LandThreadReplied || outcome == LandThreadResolved {
+		level = slog.LevelInfo
+	}
+	slog.Log(context.Background(), level, "land."+string(outcome), append(attrs, extra...)...)
+}
+
+// RecordGate records a gate.* event of a Checkpoint Landing's pre-land build (ADR
+// 0151): every one carries the Landing's attrs plus the pin, base and composed shas
+// and the attempt (1–3), then extra. Levels: started and passed Info, failed and
+// infra Error, pending Warn. Called around Jinbe's seams so git and the nix wrapper
+// stay event-free.
+func RecordGate(event string, l bd.Bead, pin, base, composed string, attempt int, extra ...any) {
+	attrs := append(BeadAttrs(l), "pin", pin, "base", base, "composed", composed, "attempt", attempt)
+	attrs = append(attrs, extra...)
+	level := slog.LevelInfo
+	switch event {
+	case "gate.failed", "gate.infra":
+		level = slog.LevelError
+	case "gate.pending":
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, event, attrs...)
 }
 
 // RecordRevert records a Rollback's git.Revert of target's land (squash) on mainline:
@@ -256,8 +439,15 @@ func RecordLand(b bd.Bead, branch, sha string, err error) {
 // A re-run that finds the revert already on main records revert.done with its sha.
 // A conflict is the planned fix-forward outcome (ADR 0049), not a failure:
 // revert.conflict at Warn with the conflicted paths.
-func RecordRevert(b bd.Bead, target, squash, sha string, err error) {
-	attrs := append(BeadAttrs(b), "target", target, "squash", squash, "into", git.Mainline())
+//
+// nested are the context=/repo=/into= attrs of a revert in a child repo; none means
+// into the Workspace's trunk.
+func RecordRevert(b bd.Bead, target, squash, sha string, err error, nested ...any) {
+	if len(nested) == 0 {
+		nested = []any{"into", git.Mainline()}
+	}
+	attrs := append(BeadAttrs(b), "target", target, "squash", squash)
+	attrs = append(attrs, nested...)
 	var conflict *git.RevertConflict
 	if errors.As(err, &conflict) {
 		slog.Warn("revert.conflict", append(attrs, "paths", strings.Join(conflict.Paths, ", "))...)
@@ -269,13 +459,65 @@ func RecordRevert(b bd.Bead, target, squash, sha string, err error) {
 	Record("revert.done", "revert.failed", err, attrs...)
 }
 
+// RecordRevertPending records a gitlab Rollback waiting on its revert MR: revert.pending
+// at Info with the target, MR iid, whether this tick pushed and opened, and the pinned commit.
+func RecordRevertPending(b bd.Bead, target string, mr int, pushed, opened bool, commit string, nested ...any) {
+	slog.Info("revert.pending", append(append(BeadAttrs(b), "target", target, "mr", mr, "pushed", pushed, "opened", opened, "commit", commit), nested...)...)
+}
+
+// RecordRevertRebuilt records a clean rebuild of a pending revert on the fetched main
+// (ADR 0209 §1): revert.rebuilt at Info with the MR iid and the old and new commit.
+func RecordRevertRebuilt(b bd.Bead, mr int, oldCommit, newCommit string, nested ...any) {
+	slog.Info("revert.rebuilt", append(append(BeadAttrs(b), "mr", mr, "old", oldCommit, "new", newCommit), nested...)...)
+}
+
+// RecordRevertRetried records the one retry of a revert MR's failed pipeline:
+// revert.retried at Info.
+func RecordRevertRetried(b bd.Bead, mr, pipeline int, nested ...any) {
+	slog.Info("revert.retried", append(append(BeadAttrs(b), "mr", mr, "pipeline", pipeline), nested...)...)
+}
+
+// RecordRevertPipelineFailed records a revert MR held on a HITL Task: revert.pipeline_failed
+// at Warn with the pipeline, whether it was an infra failure, and the Task's id.
+func RecordRevertPipelineFailed(b bd.Bead, mr, pipeline int, infra bool, task string, nested ...any) {
+	slog.Warn("revert.pipeline_failed", append(append(BeadAttrs(b), "mr", mr, "pipeline", pipeline, "infra", infra, "task", task), nested...)...)
+}
+
+// RecordRevertClosed records a human closing a Rollback's revert MR: revert.closed at Warn.
+func RecordRevertClosed(b bd.Bead, mr int, nested ...any) {
+	slog.Warn("revert.closed", append(append(BeadAttrs(b), "mr", mr), nested...)...)
+}
+
+// RecordRevertStranded records a Rollback whose revert MR was closed after a successor
+// was cut but with no fix-forward pin: revert.stranded at Warn, since Jinbe leaves
+// the Rollback open for a human. The caller logs it once per Rollback.
+func RecordRevertStranded(b bd.Bead, mr int, nested ...any) {
+	slog.Warn("revert.stranded", append(append(BeadAttrs(b), "mr", mr), nested...)...)
+}
+
+// RecordRevertMRClosed records Jinbe closing a Rollback's open revert MR as the
+// Rollback closes: revert.mr_closed at Info with the MR iid and why.
+func RecordRevertMRClosed(b bd.Bead, mr int, reason string, nested ...any) {
+	slog.Info("revert.mr_closed", append(append(BeadAttrs(b), "mr", mr, "reason", reason), nested...)...)
+}
+
+// RecordLandMRClosed records Jinbe closing the open MR left on a container's branch as
+// the container lands: land.mr_closed at Info with the MR iid and why.
+func RecordLandMRClosed(b bd.Bead, mr int, reason string, nested ...any) {
+	slog.Info("land.mr_closed", append(append(BeadAttrs(b), "mr", mr, "reason", reason), nested...)...)
+}
+
 // RecordIntegrate records an effort's git.Integrate onto container (Spec D13,
 // FR55): integrate.done with the squash sha ("" when nothing was ahead), a
 // conflict the caller surfaces as integrate.conflict at Warn with its reason
 // (rebase|held|landed), or integrate.failed at Error, reason contended when the
 // retries were spent.
-func RecordIntegrate(b bd.Bead, container, sha string, retries int, by IntegrateBy, err error) {
+//
+// nested are the context=/repo=/into= attrs of an integrate in a child repo (none
+// otherwise, so unlabelled events are unchanged).
+func RecordIntegrate(b bd.Bead, container, sha string, retries int, by IntegrateBy, err error, nested ...any) {
 	attrs := append(BeadAttrs(b), "container", container, "branch", git.EffortBranch(b.ID), "retries", retries, "by", string(by))
+	attrs = append(attrs, nested...)
 	var conflict *git.IntegrateConflict
 	switch {
 	case errors.As(err, &conflict):

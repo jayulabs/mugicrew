@@ -3,6 +3,7 @@ package promptguard
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -175,6 +176,74 @@ func TestPivotMergeRule(t *testing.T) {
 			if !strings.Contains(texts[p], want) {
 				t.Errorf("%s does not state the pivot merge rule: missing %q", p, want)
 			}
+		}
+	}
+}
+
+// Spec D4: every prompt or crew doc that tells an agent to run a parented
+// bd create carries the shared re-run sentence beside each such command.
+func TestParentedCreatesCarryRerunLine(t *testing.T) {
+	const rerun = "If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID."
+	files, _ := filepath.Glob("../*/prompts/*.md")
+	docs, _ := filepath.Glob("../crewdocs/*.md")
+	files = append(files, docs...)
+	if len(files) < 20 {
+		t.Fatalf("found only %d prompt/crew-doc files", len(files))
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parented := 0
+		for _, c := range bdCreate.FindAllString(string(b), -1) {
+			if strings.Contains(c, "--parent") {
+				parented++
+			}
+		}
+		if got := strings.Count(string(b), rerun); got < parented {
+			t.Errorf("%s: %d parented bd create(s), %d re-run line(s)", f, parented, got)
+		}
+	}
+}
+
+// bdCreate matches a bd create command through its backslash continuations.
+var bdCreate = regexp.MustCompile(`bd create(?:\\\n|[^\n])*`)
+
+// inlineSignalCreates returns the bd create commands (continuations included)
+// in text that carry kind:signal.
+func inlineSignalCreates(text string) []string {
+	var out []string
+	for _, c := range bdCreate.FindAllString(text, -1) {
+		if strings.Contains(c, "kind:signal") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestInlineSignalCreates(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		bad  bool
+	}{
+		{"bd create --type task --labels kind:signal,drafted-by:x", true},
+		{"bd create --type task \\\n  -l kind:signal \\\n  --title t", true},
+		{"bd create --type task --labels kind:critique,drafted-by:x", false},
+		{"file a kind:signal bead; bd create is in the crew doc", false},
+	} {
+		if got := inlineSignalCreates(c.text); (len(got) > 0) != c.bad {
+			t.Errorf("inlineSignalCreates(%q) = %q, want bad=%v", c.text, got, c.bad)
+		}
+	}
+}
+
+// Spec FR15: signal-filing.md is the one place a Signal's bd create lives; no
+// prompt inlines its own. Crew docs are not scanned.
+func TestPromptsInlineNoSignalCreate(t *testing.T) {
+	for p, text := range promptTexts(t) {
+		if hits := inlineSignalCreates(text); len(hits) > 0 {
+			t.Errorf("%s: inline Signal create(s) %q; Read crew doc signal-filing.md instead", p, hits)
 		}
 	}
 }

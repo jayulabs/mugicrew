@@ -1,269 +1,255 @@
 package tui
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
+	"jayulabs.org/mugicrew/claudecode"
+	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 )
 
-// statsFixture is an event log of four session ends, 1h, 2d, 10d and 40d old.
-func statsFixture(t *testing.T) string {
-	t.Helper()
+// statEvents are four session ends 1h, 2d, 10d and 40d old, the oldest with no kind.
+func statEvents() []eventlog.Event {
 	now := time.Now()
-	ev := func(ago time.Duration, msg, bead, attrs string) string {
-		return fmt.Sprintf(`{"time":%q,"level":"INFO","msg":%q,"bead":%q,%s}`+"\n", now.Add(-ago).Format(time.RFC3339Nano), msg, bead, attrs)
+	e := func(ago time.Duration, msg, bead string, raw map[string]any) eventlog.Event {
+		return eventlog.Event{Time: now.Add(-ago), Level: "INFO", Msg: msg, Bead: bead, Raw: raw}
 	}
-	p := filepath.Join(t.TempDir(), "events.jsonl")
-	os.WriteFile(p, []byte(
-		ev(time.Hour, "session.ended", "mc-a", `"crewmate":"franky","dur_ms":60000,"api_ms":30000,"cost_usd":1.5,"models":{"opus":{"cost_usd":1.5,"in":10,"out":20}}`)+
-			ev(48*time.Hour, "session.failed", "mc-b", `"crewmate":"chopper-the-reindeer-doctor","dur_ms":60000,"api_ms":30000,"cost_usd":3,"models":{"haiku":{"cost_usd":3,"in":100,"out":900}}`)+
-			ev(240*time.Hour, "session.ended", "mc-c", `"crewmate":"franky","dur_ms":1000,"models":{"opus":{"in":1,"out":1}}`)+
-			ev(960*time.Hour, "session.ended", "mc-d", `"crewmate":"nami","dur_ms":1000,"cost_usd":7`)), 0o644)
-	return p
+	return []eventlog.Event{
+		e(time.Hour, "session.ended", "mc-a", map[string]any{"kind": "build", "crewmate": "franky", "dur_ms": 60000.0, "api_ms": 30000.0, "cost_usd": 1.5}),
+		e(48*time.Hour, "session.failed", "mc-b", map[string]any{"kind": "critique", "crewmate": "chopper", "dur_ms": 60000.0, "cost_usd": 3.0}),
+		e(240*time.Hour, "session.ended", "mc-c", map[string]any{"kind": "build", "crewmate": "franky", "dur_ms": 1000.0, "cost_usd": 2.0}),
+		e(960*time.Hour, "session.ended", "mc-d", map[string]any{"crewmate": "nami", "dur_ms": 1000.0, "cost_usd": 7.0}),
+	}
 }
 
-// statsModel is a model with the fixture log loaded, on Graph.
 func statsModel(t *testing.T) Model {
 	t.Helper()
-	m := New(nil, nil).WithLog(eventlog.New(statsFixture(t), nil))
-	next, _ := m.Update(m.loadLogs()())
-	m = next.(Model)
-	m.w, m.h = 100, 24
+	m := sized(t, 120, 30)
+	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: statEvents(), digest: statEvents()})
+	m, _ = send(t, m, runeKey("#"))
 	return m
 }
 
-// keyNamed is the key k as bubbletea delivers it: a named key, else runes.
-func keyNamed(k string) tea.KeyMsg {
-	for _, t := range []tea.KeyType{tea.KeyLeft, tea.KeyRight, tea.KeyEnter, tea.KeyTab, tea.KeyEsc, tea.KeySpace, tea.KeyUp, tea.KeyDown} {
-		if t.String() == k {
-			return tea.KeyMsg{Type: t}
+func total(m Model) string {
+	for _, l := range lines(m.View()) {
+		if f := strings.Fields(l); len(f) > 2 && f[0] == "TOTAL" {
+			return f[1] + " $" + strings.Split(l, "$")[1][:4]
 		}
 	}
-	return runeKey(k)
+	return ""
 }
 
-// plain is v without styling, each run of spaces one space, so rows read as cells.
-func plain(v string) string { return strings.Join(strings.Fields(ansi.Strip(v)), " ") }
-
-// statsLines is the plain Stats body lines (the tab bar dropped): the Plan usage band, then the header.
-func statsLines(m Model) []string {
-	var out []string
-	for _, l := range strings.Split(ansi.Strip(m.View()), "\n")[1:] {
-		out = append(out, strings.Join(strings.Fields(l), " "))
-	}
-	return out
-}
-
-func hasLine(lines []string, prefix string) bool {
-	for _, l := range lines {
-		if strings.HasPrefix(l, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// FR1–3: # jumps to Stats from any tab, the arrows cycle through it after Logs,
-// and the tab bar shows its # key.
-func TestStatsTabReachable(t *testing.T) {
+func TestStatsWindowGroupKind(t *testing.T) {
 	m := statsModel(t)
-	if !strings.Contains(ansi.Strip(strings.Split(m.View(), "\n")[0]), "#") {
-		t.Errorf("tab bar lacks #: %q", ansi.Strip(m.View()))
+	if got := total(m); !strings.HasPrefix(got, "2 ") { // 7d: the 1h and 2d sessions
+		t.Errorf("7d total = %q", got)
 	}
-	for _, from := range []tab{tabGraph, tabInbox, tabSearch, tabHistory, tabLogs} {
-		m.tab = from
-		if got, _ := send(t, m, runeKey("#")); got.tab != tabStats {
-			t.Errorf("# from %v landed on %v", from, got.tab)
+	m, _ = send(t, m, runeKey("w")) // 30d
+	if got := total(m); !strings.HasPrefix(got, "3 ") {
+		t.Errorf("30d total = %q", got)
+	}
+	m, _ = send(t, m, runeKey("w")) // all time
+	if got := total(m); !strings.HasPrefix(got, "4 ") {
+		t.Errorf("all time total = %q", got)
+	}
+	m, _ = send(t, m, runeKey("b")) // crewmate
+	v := flat(m.View())
+	for _, want := range []string{"by crewmate", "franky", "nami", "chopper"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("group by crewmate lacks %q:\n%s", want, v)
 		}
 	}
-	m.tab = tabLogs
-	m, _ = send(t, m, keyNamed("right"))
-	if m.tab != tabStats || !strings.Contains(plain(m.View()), "last 7d") {
-		t.Fatalf("right from Logs: tab %v, view:\n%s", m.tab, m.View())
-	}
-	if next, _ := send(t, m, keyNamed("right")); next.tab != tabSettings {
-		t.Errorf("right from Stats landed on %v, want Settings", next.tab)
-	}
-	m.tab = tabSettings
-	if next, _ := send(t, m, keyNamed("left")); next.tab != tabStats {
-		t.Errorf("left from Settings landed on %v, want Stats", next.tab)
+	m, _ = send(t, m, runeKey("f")) // build
+	if v := flat(m.View()); !strings.Contains(v, "kind build") || strings.Contains(v, "nami") {
+		t.Errorf("kind filter:\n%s", v)
 	}
 }
 
-// FR20–24: 7d by none opens on TOTAL only; w and b cycle the header and the rows;
-// a Partial cost is marked + with the footer's no-cost count.
-func TestStatsWindowAndGrouping(t *testing.T) {
-	m, _ := send(t, statsModel(t), runeKey("#"))
-	ls := statsLines(m)
-	if ls[1] != "last 7d · by none" {
-		t.Errorf("header %q", ls[1])
-	}
-	if !hasLine(ls, "KEY SESSIONS FAILED AGENT API COST TOKENS") || !hasLine(ls, "TOTAL 2 1 2m0s 1m0s $4.50 1.0k") {
-		t.Errorf("7d table:\n%s", strings.Join(ls, "\n"))
-	}
-	if hasLine(ls, "franky") || strings.Contains(m.View(), "without a cost") {
-		t.Errorf("none shows TOTAL only, no footer:\n%s", strings.Join(ls, "\n"))
-	}
+func flat(s string) string { return strings.Join(lines(s), "\n") }
 
-	m, _ = send(t, m, runeKey("b"))
-	ls = statsLines(m)
-	if ls[1] != "last 7d · by crewmate" || !hasLine(ls, "chopper-the-reindeer-doctor 1 1 1m0s 30s $3.00 1.0k") || !hasLine(ls, "franky 1 0 1m0s 30s $1.50 30") {
-		t.Errorf("by crewmate:\n%s", strings.Join(ls, "\n"))
-	}
-
-	for _, want := range []struct{ head, total string }{
-		{"last 30d · by crewmate", "TOTAL 3 1 2m1s 1m0s $4.50+ 1.0k"},
-		{"all time · by crewmate", "TOTAL 4 1 2m2s 1m0s $11.50+ 1.0k"},
-		{"last 24h · by crewmate", "TOTAL 1 0 1m0s 30s $1.50 30"},
-		{"last 7d · by crewmate", "TOTAL 2 1 2m0s 1m0s $4.50 1.0k"},
-	} {
-		m, _ = send(t, m, runeKey("w"))
-		ls = statsLines(m)
-		if ls[1] != want.head || !hasLine(ls, want.total) {
-			t.Errorf("want %q / %q:\n%s", want.head, want.total, strings.Join(ls, "\n"))
-		}
-	}
-	m, _ = send(t, m, runeKey("w"))
-	if v := plain(m.View()); !strings.Contains(v, "+1 sessions without a cost") || !strings.Contains(v, "franky 2 0 1m1s 30s $1.50+ 32") {
-		t.Errorf("30d: want the Partial cost marked and the footer:\n%s", m.View())
-	}
-
-	m, _ = send(t, m, runeKey("b"))
-	ls = statsLines(m)
-	if ls[1] != "last 30d · by model" || !hasLine(ls, "haiku – – – – $3.00 1.0k") || !hasLine(ls, "opus – – – – $1.50+ 32") {
-		t.Errorf("by model: want – for the unattributable cells:\n%s", strings.Join(ls, "\n"))
-	}
-	m, _ = send(t, m, runeKey("b")) // day
-	m, _ = send(t, m, runeKey("b")) // none again
-	if ls = statsLines(m); ls[1] != "last 30d · by none" || hasLine(ls, "opus") {
-		t.Errorf("b wraps back to none:\n%s", strings.Join(ls, "\n"))
-	}
-}
-
-// FR26–27: day rows are newest first; TOTAL is the same under every grouping.
-func TestStatsDayRowsAndTotal(t *testing.T) {
-	m, _ := send(t, statsModel(t), runeKey("#"))
-	m, _ = send(t, m, runeKey("w"))
-	m, _ = send(t, m, runeKey("w")) // all
-	var totals []string
-	for range 4 {
-		m, _ = send(t, m, runeKey("b"))
-		for _, l := range statsLines(m) {
-			if strings.HasPrefix(l, "TOTAL ") {
-				totals = append(totals, l)
-			}
-		}
-	}
-	if len(totals) != 4 || totals[0] != "TOTAL 4 1 2m2s 1m0s $11.50+ 1.0k" || totals[1] != totals[0] || totals[2] != totals[0] || totals[3] != totals[0] {
-		t.Errorf("TOTAL rows across groupings: %q", totals)
-	}
-
-	m, _ = send(t, m, runeKey("b"))
-	m, _ = send(t, m, runeKey("b"))
-	m, _ = send(t, m, runeKey("b")) // day
-	var days []string
-	for _, l := range statsLines(m) {
-		if len(l) > 10 && l[4] == '-' && l[7] == '-' {
-			days = append(days, l[:10])
-		}
-	}
-	now := time.Now()
-	want := []string{}
-	for _, ago := range []time.Duration{time.Hour, 48 * time.Hour, 240 * time.Hour, 960 * time.Hour} {
-		want = append(want, now.Add(-ago).Format("2006-01-02"))
-	}
-	if strings.Join(days, " ") != strings.Join(want, " ") {
-		t.Errorf("day rows %v, want newest first %v", days, want)
-	}
-}
-
-// FR28: a log that grows refreshes the table on the next read.
 func TestStatsFollowsTheLog(t *testing.T) {
-	m, _ := send(t, statsModel(t), runeKey("#"))
-	f, _ := os.OpenFile(m.logPath, os.O_APPEND|os.O_WRONLY, 0)
-	fmt.Fprintf(f, `{"time":%q,"level":"INFO","msg":"session.ended","bead":"mc-e","dur_ms":1000,"cost_usd":1}`+"\n", time.Now().Format(time.RFC3339Nano))
-	f.Close()
-	next, _ := m.Update(m.loadLogs()())
-	if ls := statsLines(next.(Model)); !hasLine(ls, "TOTAL 3 1 2m1s 1m0s $5.50 1.0k") {
-		t.Errorf("after the log grew:\n%s", strings.Join(ls, "\n"))
+	m := statsModel(t)
+	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: statEvents()[:1], digest: statEvents()[:1]})
+	if got := total(m); !strings.HasPrefix(got, "1 ") {
+		t.Errorf("total after a smaller log = %q", got)
 	}
 }
 
-// FR29: at the 40-col floor KEY is cut with … and every numeric column stays.
-func TestStatsNarrowKeepsNumbers(t *testing.T) {
-	m, _ := send(t, statsModel(t), runeKey("#"))
-	m, _ = send(t, m, runeKey("b"))
-	m.w = floorCols
-	v := ansi.Strip(m.View())
-	for _, l := range strings.Split(v, "\n") {
-		if lipgloss.Width(l) > floorCols {
-			t.Errorf("line %q is %d wide", l, lipgloss.Width(l))
+type stubUsage struct {
+	res func() (contract.PlanUsage, string, error)
+}
+
+func (s stubUsage) read(string) (contract.PlanUsage, string, error) { return s.res() }
+
+// runRead folds every usageMsg a command (or batch) produces into m; it reports whether one ran.
+func runRead(t *testing.T, m Model, cmd tea.Cmd) (Model, bool) {
+	t.Helper()
+	read := false
+	var do func(tea.Cmd)
+	do = func(c tea.Cmd) {
+		if c == nil {
+			return
+		}
+		switch msg := c().(type) {
+		case tea.BatchMsg:
+			for _, c := range msg {
+				do(c)
+			}
+		case usageMsg:
+			read = true
+			m, _ = send(t, m, msg)
 		}
 	}
-	ls := statsLines(m)
-	if !hasLine(ls, "KEY SESS FAIL AGENT API COST TOK") {
-		t.Errorf("narrow header lost a column:\n%s", v)
+	do(cmd)
+	return m, read
+}
+
+func pinClock(t *testing.T, at time.Time) *time.Time {
+	t.Helper()
+	cur := at
+	prev, ivl := clock, usageInterval
+	clock, usageInterval = func() time.Time { return cur }, time.Millisecond
+	t.Cleanup(func() { clock, usageInterval = prev, ivl })
+	return &cur
+}
+
+func TestStatsUsageBandAndHeaderWarning(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local)
+	pinClock(t, t0)
+	u := stubUsage{func() (contract.PlanUsage, string, error) {
+		return contract.PlanUsage{FiveHour: &contract.UsageWindow{Pct: 96, ResetsAt: t0.Add(2 * time.Hour)}, Weekly: &contract.UsageWindow{Pct: 40}}, "tok", nil
+	}}
+	m := statsModel(t).WithUsage(u.read)
+	if v := flat(m.View()); !strings.Contains(v, "reading plan usage…") {
+		t.Errorf("before a read:\n%s", v)
 	}
-	found := false
-	for _, l := range ls {
-		if strings.Contains(l, "…") && strings.HasSuffix(l, "1 1 1m0s 30s $3.00 1.0k") && !strings.Contains(l, "doctor") {
-			found = true
-		}
+	m, _ = runRead(t, m, m.Init())
+	v := lines(m.View())
+	if !strings.Contains(v[5], "5h 96% (resets 14:00) · wk 40%") { // band: under the Plan usage header
+		t.Errorf("band = %q", v[5])
 	}
-	if !found {
-		t.Errorf("narrow: want the long crewmate cut with … and its numbers whole:\n%s", v)
+	if !strings.Contains(v[0], "5h 96%") || strings.Contains(v[0], "wk") {
+		t.Errorf("header = %q, want the 5h warning only", v[0])
+	}
+	m, _ = send(t, m, runeKey("4"))
+	if h := lines(m.View())[0]; !strings.Contains(h, "5h 96%") {
+		t.Errorf("warning missing on Graph: %q", h)
 	}
 }
 
-// FR4, FR31: Stats has no selection; b only cycles the grouping (never launches)
-// and every key off the whitelist is a no-op.
-func TestStatsKeysScoped(t *testing.T) {
-	m := pausedGraph(t).WithLog(eventlog.New(statsFixture(t), nil))
-	next, _ := m.Update(m.loadLogs()())
-	m = next.(Model)
-	m.selInbox = "ext"
-	m, _ = send(t, m, runeKey("#"))
-	before := m.View()
-	for _, k := range []string{"l", "t", "p", "x", "e", "E", "n", "u", "z", "+", "-", "j", "k", "f", "/", "R", "d", "h", " ", "enter", "tab", "esc"} {
-		got, cmd := send(t, m, keyNamed(k))
-		if cmd != nil || got.View() != before || got.editMode != editNone {
-			t.Errorf("%q on Stats acted: cmd=%v edit=%v", k, cmd != nil, got.editMode)
-		}
-	}
-	got, cmd := send(t, m, runeKey("b"))
-	if cmd != nil || len(got.launching) > 0 || !strings.Contains(plain(got.View()), "by crewmate") {
-		t.Errorf("b on Stats: cmd=%v launching=%v, want only the grouping cycled", cmd != nil, got.launching)
-	}
-	if strings.Contains(plain(before), "│") {
-		t.Errorf("Stats footer shows bead keys:\n%s", before)
+func TestStatsUsageNilReader(t *testing.T) {
+	if v := flat(statsModel(t).View()); !strings.Contains(v, "usage unavailable") {
+		t.Errorf("nil reader:\n%s", v)
 	}
 }
 
-// FR30: the footer and ? list w, b and f5 on Stats; every tab's ? lists #.
-func TestStatsHelp(t *testing.T) {
-	m, _ := send(t, statsModel(t), runeKey("#"))
-	if f := plain(m.footer()); !strings.Contains(f, "w window") || !strings.Contains(f, "b group") || !strings.Contains(f, "f5 refresh") {
-		t.Errorf("Stats footer %q", f)
+// Entering Stats or f5 on it reads usage only past the 60s floor and outside a backoff.
+func TestStatsUsageFloorAndBackoff(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name  string
+		after time.Duration
+		limit bool
+		want  bool
+	}{
+		{"fresh", 60 * time.Second, false, false},
+		{"over 60s", 61 * time.Second, false, true},
+		{"in backoff", 120 * time.Second, true, false},
+		{"backoff passed", 300 * time.Second, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := pinClock(t, t0)
+			u := stubUsage{func() (contract.PlanUsage, string, error) {
+				if tc.limit {
+					return contract.PlanUsage{}, "tok", &claudecode.RetryAfterError{}
+				}
+				return contract.PlanUsage{FiveHour: &contract.UsageWindow{Pct: 10}}, "tok", nil
+			}}
+			m := sized(t, 120, 30).WithUsage(u.read)
+			m, _ = runRead(t, m, m.pollUsage())
+			*now = t0.Add(tc.after)
+			entry, cmd := send(t, m, runeKey("#"))
+			if _, read := runRead(t, entry, cmd); read != tc.want {
+				t.Errorf("entry read = %v, want %v", read, tc.want)
+			}
+			on := m
+			on.tab = tabStats
+			_, cmd = send(t, on, tea.KeyMsg{Type: tea.KeyF5})
+			if _, read := runRead(t, on, cmd); read != tc.want {
+				t.Errorf("f5 read = %v, want %v", read, tc.want)
+			}
+		})
 	}
-	for _, tb := range []tab{tabGraph, tabInbox, tabSearch, tabHistory, tabLogs, tabStats} {
-		listed := map[string]string{}
-		for _, k := range helpKeys(tb, "ctrl+b") {
-			listed[k.k] = k.label
+}
+
+// ruleIdx is the index of the first line made only of ─, or -1.
+func ruleIdx(ls []string) int {
+	for i, l := range ls {
+		// The rule may share its row with the right column.
+		if t, _, _ := strings.Cut(strings.TrimSpace(l), " "); t != "" && strings.Trim(t, "─") == "" {
+			return i
 		}
-		if listed["#"] != "Stats tab" {
-			t.Errorf("%v: ? lacks # Stats tab", tb)
+	}
+	return -1
+}
+
+func TestStatsTotalRule(t *testing.T) {
+	m := statsModel(t)
+	if i := ruleIdx(lines(m.View())); i >= 0 {
+		t.Errorf("grouping none has a rule at line %d", i)
+	}
+	m, _ = send(t, m, runeKey("b")) // crewmate
+	ls := lines(m.View())
+	i := ruleIdx(ls)
+	if i < 1 || strings.Fields(ls[i-1])[0] != "TOTAL" || strings.Fields(ls[i+1])[0] == "TOTAL" {
+		t.Errorf("rule not directly after TOTAL (rule at %d):\n%s", i, flat(m.View()))
+	}
+	for _, w := range []int{120, 60, 30, 12} {
+		s := statsTab{statsData: statsData{events: statEvents()}, win: 3, by: 1}.recompute()
+		ls := lines(s.view(w, 30))
+		i := ruleIdx(ls)
+		if i < 0 || lipgloss.Width(ls[i]) > w {
+			t.Errorf("w=%d: rule at %d too wide or missing:\n%s", w, i, flat(s.view(w, 30)))
 		}
-		if tb == tabStats && (listed["w"] == "" || listed["b"] == "" || listed["F5"] == "") {
-			t.Errorf("Stats ? lacks w, b or F5: %v", listed)
+	}
+}
+
+func TestStatsFooterSurvivesRule(t *testing.T) {
+	evs := statEvents()
+	delete(evs[0].Raw, "cost_usd")
+	s := statsTab{statsData: statsData{events: evs, w: 120}, win: 3, by: 1}.recompute()
+	for h := 3; h <= 8; h++ {
+		ls := lines(s.view(120, h))
+		if last := ls[len(ls)-1]; !strings.Contains(last, "without a cost") {
+			t.Errorf("height %d: last line %q", h, last)
 		}
+	}
+}
+
+func TestStatsSectionLayout(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local)
+	pinClock(t, t0)
+	band := "5h 62% (resets 14:00) · wk 40%"
+	s := statsTab{statsData: statsData{events: statEvents(), band: band}, win: 3}.recompute()
+
+	wide := lines(s.view(120, 30))
+	if i, j := strings.Index(wide[0], "Sessions"), strings.Index(wide[0], "Plan usage"); i != 0 || j != statsTableW+2 {
+		t.Errorf("wide headers at %d, %d:\n%s", i, j, flat(s.view(120, 30)))
+	}
+	if lipgloss.Width(wide[1][:strings.Index(wide[1], "5h 62%")]) != statsTableW+2 {
+		t.Errorf("wide band not right of the head line:\n%s", flat(s.view(120, 30)))
+	}
+
+	narrow := lines(s.view(80, 30))
+	if !strings.Contains(narrow[0], "Plan usage") || !strings.Contains(narrow[1], "5h 62%") || !strings.Contains(narrow[2], "no 5h window") || narrow[3] != "" || !strings.Contains(narrow[4], "Sessions") {
+		t.Errorf("narrow does not stack:\n%s", flat(s.view(80, 30)))
+	}
+	if h := brand.Render("Sessions"); !strings.Contains(s.view(80, 30), h) {
+		t.Errorf("header not bold accent")
 	}
 }

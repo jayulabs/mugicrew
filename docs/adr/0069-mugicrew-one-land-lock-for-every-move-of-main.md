@@ -97,6 +97,10 @@ Decided in grilling.
 - The clash check leaves Nami for `git/` (or a land wrapper under the lock), so
   both reconcilers share it.
 
+> **Amended by ADR 0147:** Checkpoint and Chart lands now have a bead (a
+> Landing) and run behind a land-strategy seam; the other moves of main stay
+> bead-less.
+
 ## Amendment: every move of main runs the `*MainDirty` pre-check
 
 §6 framed the pre-check for `Land` only. It is one guard in the land-lock
@@ -116,3 +120,5 @@ and `Revert`. `Reapply` only moves its successor branch, so it never runs it.
   the revert record), and the next tick retries. The CLI (Zoro pivot confirm,
   `reconcile`) exits non-zero with "clean main, then re-run". A TUI action
   shows the same message in its status line. There is no new event name.
+
+> **Amended by ADR 0166:** "one at a time per repo" is now "one land lock per Workspace", covering lands in declared child repos too.

@@ -13,11 +13,12 @@ import (
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 )
 
-// stubAbort stubs Abort's four seams, recording each call in order into *calls.
+// stubAbort stubs Abort's five seams (the lock unheld), recording each call in order into *calls.
 func stubAbort(t *testing.T, status string, pauseErr error, pids []int, killErr map[int]error) *[]string {
 	t.Helper()
-	oShow, oPause, oPids, oKill := show, abortPause, abortPids, killGroup
-	t.Cleanup(func() { show, abortPause, abortPids, killGroup = oShow, oPause, oPids, oKill })
+	oShow, oPause, oPids, oKill, oHeld := show, abortPause, abortPids, killGroup, abortHeld
+	t.Cleanup(func() { show, abortPause, abortPids, killGroup, abortHeld = oShow, oPause, oPids, oKill, oHeld })
+	abortHeld = func(string) bool { return false }
 	var calls []string
 	show = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Status: status}, nil }
 	abortPause = func(id, cause string) error { calls = append(calls, "pause "+id+" "+cause); return pauseErr }
@@ -31,7 +32,7 @@ func stubAbort(t *testing.T, status string, pauseErr error, pids []int, killErr 
 func TestAbortRefusesNothingInFlight(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	calls := stubAbort(t, "open", nil, []int{7}, nil)
-	if _, err := Abort("mc-a", "cli"); err == nil || err.Error() != "mc-a: nothing in flight" {
+	if _, _, err := Abort("mc-a", "cli"); err == nil || err.Error() != "mc-a: nothing in flight" {
 		t.Fatalf("err = %v, want nothing in flight", err)
 	}
 	if len(*calls) != 0 || len(*evs) != 0 {
@@ -45,7 +46,7 @@ func TestAbortPauseErrorSignalsNothing(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	boom := errors.New("bd down")
 	calls := stubAbort(t, "in_progress", boom, []int{7}, nil)
-	if _, err := Abort("mc-a", "cli"); !errors.Is(err, boom) {
+	if _, _, err := Abort("mc-a", "cli"); !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the pause error", err)
 	}
 	if !slices.Equal(*calls, []string{"pause mc-a manual"}) || len(*evs) != 0 {
@@ -58,7 +59,7 @@ func TestAbortPauseErrorSignalsNothing(t *testing.T) {
 func TestAbortPausesLogsThenKills(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	calls := stubAbort(t, "in_progress", nil, []int{7, 8, 9}, map[int]error{8: syscall.ESRCH})
-	got, err := Abort("mc-a", "tui")
+	got, _, err := Abort("mc-a", "tui")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +82,24 @@ func TestAbortPausesLogsThenKills(t *testing.T) {
 func TestAbortNoPidsPausesOnly(t *testing.T) {
 	eventlogtest.Capture(t)
 	calls := stubAbort(t, "in_progress", nil, nil, nil)
-	got, err := Abort("mc-a", "cli")
+	got, _, err := Abort("mc-a", "cli")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("Abort = %v, %v, want no pids, no error", got, err)
+	}
+	if !slices.Equal(*calls, []string{"pause mc-a manual", "pids"}) {
+		t.Errorf("calls = %v, want pause then pids only", *calls)
+	}
+}
+
+// A dispatcher-only hold (a held lock, no pid): paused, nothing signalled, not
+// refused, and the result says held (ADR 0155).
+func TestAbortNoPidsLockHeldPausesAndReportsHeld(t *testing.T) {
+	eventlogtest.Capture(t)
+	calls := stubAbort(t, "in_progress", nil, nil, nil)
+	abortHeld = func(string) bool { return true }
+	got, held, err := Abort("mc-a", "cli")
+	if err != nil || len(got) != 0 || !held {
+		t.Fatalf("Abort = %v, %v, %v, want no pids, held, no error", got, held, err)
 	}
 	if !slices.Equal(*calls, []string{"pause mc-a manual", "pids"}) {
 		t.Errorf("calls = %v, want pause then pids only", *calls)
@@ -112,7 +128,7 @@ func TestFailedOutcomeReportsManualPause(t *testing.T) {
 func TestAbortReturnsOtherKillErrors(t *testing.T) {
 	eventlogtest.Capture(t)
 	stubAbort(t, "in_progress", nil, []int{7, 8}, map[int]error{7: syscall.EPERM})
-	got, err := Abort("mc-a", "cli")
+	got, _, err := Abort("mc-a", "cli")
 	if !errors.Is(err, syscall.EPERM) || !slices.Equal(got, []int{8}) {
 		t.Errorf("Abort = %v, %v, want [8] and EPERM", got, err)
 	}
@@ -127,7 +143,7 @@ func TestAbortExcludesItsOwnPid(t *testing.T) {
 	var killed []int
 	stubAbort(t, "in_progress", nil, []int{7, self, 9}, nil)
 	killGroup = func(pid int) error { killed = append(killed, pid); return nil }
-	got, err := Abort("mc-a", "cli")
+	got, _, err := Abort("mc-a", "cli")
 	if err != nil || !slices.Equal(got, []int{7, 9}) || !slices.Equal(killed, []int{7, 9}) {
 		t.Fatalf("Abort = %v, %v, killed %v, want [7 9] without self %d", got, err, killed, self)
 	}

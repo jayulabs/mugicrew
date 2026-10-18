@@ -1,6 +1,6 @@
 # ADR 0020: mugicrew Luffy — the one rich-presentation HITL crewmate whose thin Go launches an approval session
 
-Status: Accepted
+Status: Accepted (§5 amended by ADR 0203)
 Date: 2026-09-24
 
 Builds on: ADR 0002 (owner-from-kind routing), ADR 0016 (Checkpoint read-model +
@@ -65,7 +65,7 @@ Sanji do.
 the human's explicit OK the agent runs `bd close <approval> --reason="approved"`.
 It must **not** alter the inherited `Commit: <sha>` body line — Jinbe's
 `approvedAtHead` gate compares that pin to `rev-parse checkpoint/<id>` (ADR 0016
-§4). HITL here is **authorization, not authorship** (the Sanji division): the
+§4; the gate counts only an approved close, ADR 0203 §5). HITL here is **authorization, not authorship** (the Sanji division): the
 agent crafts the `bd close`, the human approves it. Approval is **read-only** on
 every tree — like Usopp's review it gets **no route case** and falls through to
 `RepoRoot` (decision 6).

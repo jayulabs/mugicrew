@@ -21,6 +21,9 @@ graph, and you read them there first:
 
       bd dep list %[1]s --direction=up --json     # the Chart's defog children (its dependents)
 
+  Skip the kind:survey child: it is the Chart's charting session, not a defog
+  bead, and records no decision.
+
 - **Prototype side-refs.** A prototype defog bead's artifact lives outside the
   bead body, at refs/mugicrew/prototypes/%[1]s. Read it for the exact validated
   mechanism (state machine, schema, type shape) — that mechanism is the decision,

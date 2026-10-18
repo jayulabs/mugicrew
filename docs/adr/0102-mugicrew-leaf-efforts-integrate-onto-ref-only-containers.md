@@ -39,6 +39,10 @@ Decided in grilling.
    Any session that commits uses one, own-container sessions included (charting,
    speccing: `effort/<container-id>`). "Container-level steps work as today"
    now means only that they are scheduled serially.
+
+   > **Amended by ADR 0264:** the cut writes `refs/mugicrew/cut/<id>`, and
+   > squash integrate rebases `--onto <tip> <cut>` (§3), so a sibling cut before
+   > a replace rewrite replays only its own commits.
 2. **Squash commit.** Integrate puts one commit on the container: subject
    `integrate <bead-id>`, trailer `TrailerFor(kind, id)`. The trailer is the
    idempotency key. If it is already on the container, the effort is already
@@ -59,13 +63,26 @@ Decided in grilling.
    on main.
 
    Exit codes: 0 integrated or nothing ahead, 2 rebase conflict (left stopped
-   in the tree), 1 transient. Deleting the branch and tree is the caller's job.
+   in the tree) or held, 3 the container already landed, 1 transient.
+   Deleting the branch and tree is the caller's job.
 4. **Replace mode for history-rewriting leaves.** This covers chart-conflict
    and Franky Conflict. Their effort branch is cut at the container's pinned
    Tip, and integrate is a replace-CAS (`update-ref <container> <rewritten>
    <pinned>`) with no squash. If the container moved past the pin, the verb
-   first replays `pinned..tip` onto the effort branch (`rebase --onto`), with
-   conflicts handled as in §5. The bead's kind selects this mode.
+   first replays `pinned..tip` onto the effort branch (an interactive rebase
+   of explicit picks that keeps the effort branch checked out, closing with a
+   `Replayed:` trailer), with conflicts handled as in §5. The bead's kind
+   selects this mode.
+
+   > **Amended by ADR 0262:** replace mode now serves the Franky Conflict and
+   > the Chart-conflict (each with the `rebase-conflict`, `number-clash` and
+   > human-filed `requested` variants) and the Base-pinned Critique (ADR 0152).
+
+   > **Amended by ADR 0264:** a replace integrate refused as "rewritten off
+   > its pinned tip" is not transient. It closes moot if the container already
+   > descends from the bead's `Base:`, else re-pins `Tip:` and re-dispatches on a
+   > fresh cut, and pauses if refused again. Squash integrate with no
+   > recoverable cut point after a rewrite refuses non-transiently.
 5. **On conflict, the agent resolves.** It resolves in its tree, runs
    `git rebase --continue`, and re-runs the verb. If it judges the conflict
    unresolvable (in HITL, after asking the human), it runs `git rebase
@@ -76,8 +93,13 @@ Decided in grilling.
    before `removeWorktree`. It runs the same verb with no agent:
    - Successful effort, nothing ahead or integrated: delete the effort branch
      and tree.
-   - Conflict: `rebase --abort`, write the pause, reopen the bead if it was
-     already closed, and keep the branch and tree for the human.
+   - Conflict (rebase, held): `rebase --abort`, write the pause, reopen the
+     bead if it was already closed, and keep the branch and tree for the human.
+   - Landed (exit 3): the commits can never integrate, so the backstop files
+     them as an offshoot Signal for intake, closes the bead `obsolete:
+     container landed; carried by <signal>`, removes the tree and keeps
+     `effort/<id>`. If the Signal or the close fails it falls back to the
+     conflict pause.
    - Transient: keep the branch, remove the tree. The next tick retries.
    - Failed effort: it does not integrate. It keeps the branch for roll
      forward and removes the tree.

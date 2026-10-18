@@ -29,6 +29,10 @@ The taxonomy sits on the settled frame (ADR 0001): chain-not-mutation, the spine
 > branch too (charting artifacts merge on defog; prototypes go to a side ref).
 > "Checkpoint = the branch" becomes "container kinds are branches."
 
+> **Amended by ADR 0135:** `initiative` is a third container kind with **no**
+> branch and no land — only `chart` and `checkpoint` are branches. It parents
+> every bead of its member chains and is `caused-by` the Signal triaged into it.
+
 ## Decision
 
 ### Kind is a label; bd type is derived from it

@@ -1,90 +1,101 @@
 package liveness
 
 import (
+	"bufio"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
-// fakeProc lays a /proc-shaped tree: one <pid>/cmdline per argv (NUL-joined, with
-// the kernel's trailing NUL), and points procDir at it for the test.
-func fakeProc(t *testing.T, argvs ...[]string) {
+// fakeLocks points lockDir at a fresh temp dir for the test.
+func fakeLocks(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	for i, argv := range argvs {
-		pid := filepath.Join(dir, string(rune('1'+i)))
-		if err := os.Mkdir(pid, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(pid, "cmdline"), []byte(strings.Join(argv, "\x00")+"\x00"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	orig := procDir
-	procDir = dir
-	t.Cleanup(func() { procDir = orig })
+	dir := filepath.Join(t.TempDir(), "mugicrew-efforts")
+	orig := lockDir
+	lockDir = dir
+	t.Cleanup(func() { lockDir = orig })
+	return dir
 }
 
-func TestAlive(t *testing.T) {
-	reconcile := []string{"/usr/local/bin/mugicrew", "reconcile", "ws-a13.4"}
-	claude := []string{"claude", "-p", "do the thing", "--output-format", "json", "--name", "ws-a13.4"}
-	cases := []struct {
-		name  string
-		procs [][]string
-		want  bool
-	}{
-		{"reconcile only", [][]string{reconcile}, true},
-		{"claude only", [][]string{claude}, true},
-		{"both", [][]string{reconcile, claude}, true},
-		{"neither", [][]string{{"bash"}}, false},
-		{"prefix collision", [][]string{{"mugicrew", "reconcile", "ws-a13.40"}}, false},
-		{"id inside a longer token", [][]string{{"claude", "-p", "Bead to implement: ws-a13.4 (read it)"}}, false},
-		{"id on a foreign argv[0]", [][]string{{"/usr/bin/zsh", "-c", "ws-a13.4"}, {"bd", "show", "ws-a13.4"}}, false},
+func TestHold(t *testing.T) {
+	dir := fakeLocks(t)
+	if Held("e1") {
+		t.Fatal("no lock file must read dead")
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			fakeProc(t, c.procs...)
-			if got := Alive([]string{"ws-a13.4"})["ws-a13.4"]; got != c.want {
-				t.Errorf("alive = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// A vanished pid (no cmdline) or an unreadable one is skipped, never an error,
-// and doesn't hide the live processes beside it.
-func TestAliveSkipsVanishedAndUnreadable(t *testing.T) {
-	fakeProc(t, []string{"mugicrew", "reconcile", "mc-x"})
-	if err := os.Mkdir(filepath.Join(procDir, "98"), 0o755); err != nil { // vanished: no cmdline
+	h, err := Acquire("e1")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(procDir, "99", "cmdline"), 0o755); err != nil { // unreadable: cmdline is a dir
-		t.Fatal(err)
+	if !Held("e1") {
+		t.Error("held lock must read alive")
 	}
-	got := Alive([]string{"mc-x", "mc-y"})
-	if !got["mc-x"] || got["mc-y"] {
-		t.Errorf("Alive = %v, want mc-x alive, mc-y dead", got)
+	if Held("e2") {
+		t.Error("another id must read dead")
 	}
-	if _, ok := got["mc-y"]; !ok {
-		t.Error("every queried id gets a verdict, dead included")
+	if _, err := Acquire("e1"); err == nil {
+		t.Error("second Acquire while held must fail")
 	}
+	h.Release()
+	if Held("e1") {
+		t.Error("released lock must read dead")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "e1.lock")); err != nil {
+		t.Errorf("Release must leave the file: %v", err)
+	}
+	h2, err := Acquire("e1")
+	if err != nil {
+		t.Fatalf("re-Acquire after Release: %v", err)
+	}
+	h2.Release()
 }
 
-// Pids are the pids of the bead's live mugicrew/claude processes, on the same
-// exact-token match as Alive: a prefix collision and a foreign argv[0] are left out.
-func TestPids(t *testing.T) {
-	fakeProc(t,
-		[]string{"/usr/local/bin/mugicrew", "reconcile", "ws-a13.4"}, // pid 1
-		[]string{"mugicrew", "reconcile", "ws-a13.40"},               // 2: prefix collision
-		[]string{"bd", "show", "ws-a13.4"},                           // 3: foreign argv[0]
-		[]string{"claude", "-p", "x", "--name", "ws-a13.4"},          // 4
-	)
-	if got := Pids("ws-a13.4"); !slices.Equal(got, []int{1, 4}) {
-		t.Errorf("Pids = %v, want [1 4]", got)
+// TestHoldHelper is the holder process of TestSigkilledHolderFreesLockDespiteOrphan, not a test.
+func TestHoldHelper(t *testing.T) {
+	dir := os.Getenv("LIVENESS_HELPER_DIR")
+	if dir == "" {
+		t.Skip("helper process only")
 	}
-	if got := Pids("ws-none"); len(got) != 0 {
-		t.Errorf("Pids of a dead bead = %v, want none", got)
+	lockDir = dir
+	if _, err := Acquire("e1"); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout.WriteString(strconv.Itoa(child.Process.Pid) + "\n")
+	select {}
+}
+
+// A SIGKILLed holder frees its lock at once, and the child it spawned (which
+// would carry an inherited fd) does not keep it held: O_CLOEXEC.
+func TestSigkilledHolderFreesLockDespiteOrphan(t *testing.T) {
+	dir := fakeLocks(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHoldHelper$")
+	cmd.Env = append(os.Environ(), "LIVENESS_HELPER_DIR="+dir)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPid, _ := strconv.Atoi(strings.TrimSpace(line))
+	t.Cleanup(func() { syscall.Kill(childPid, syscall.SIGKILL) })
+	if !Held("e1") {
+		t.Fatal("helper's hold must read alive")
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	if Held("e1") {
+		t.Error("lock still held after holder SIGKILL; orphaned child inherited it")
 	}
 }

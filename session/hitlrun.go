@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -51,12 +52,15 @@ var (
 	removeWorktree = removeSessionWorktree
 )
 
-// publish is bd.Publish, and showBead / successorOf the graph reads that gate its
-// close; vars so HitlRun is testable without a live bd.
+// publish is bd.Publish, showBead / successorOf / listDrafts the graph reads that
+// gate its close, and releaseClaim a clean exit's release (settle); vars so
+// HitlRun is testable without a live bd.
 var (
-	publish     = bd.Publish
-	showBead    = bd.Show
-	successorOf = bd.SuccessorOf
+	publish      = bd.Publish
+	showBead     = bd.Show
+	successorOf  = bd.SuccessorOf
+	listDrafts   = bd.Drafts
+	releaseClaim = bd.Unclaim
 )
 
 // hupGrace is how long a clean exit waits for a drop's hangup to land before
@@ -69,12 +73,13 @@ var hupGrace = 100 * time.Millisecond
 // PublishDrafts publishes the Drafts bead's session created (ADR 0059 §4),
 // recording draft.published with the ids, or draft.failed. None records nothing.
 // The batch hands no edges: the carry stays outside it (ADR 0085 §4). It closes
-// the bead only when it is a Signal with a caused-by Chart or Spec successor, so
+// the bead only when it is a Signal with a caused-by Chart, Spec or Initiative successor, so
 // a charted Signal closes as its successor becomes visible (ADR 0096; Spec
-// D2); every other prompt closes its own bead (§5). A failed graph read
-// fails the publish, keeping the session for a resume or drop.
+// D2), or a Survey whose charting is done (Spec mc-r832 D8); every other prompt
+// closes its own bead (§5). A failed graph read fails the publish, keeping the
+// session for a resume or drop.
 func PublishDrafts(bead string, attrs []any) error {
-	closing, err := signalClosing(bead)
+	closing, err := sessionClosing(bead)
 	var ids []string
 	if err == nil {
 		ids, err = publish(bead, nil, closing)
@@ -82,55 +87,124 @@ func PublishDrafts(bead string, attrs []any) error {
 	return eventlog.RecordDrafts("draft.published", bead, ids, err, attrs...)
 }
 
-// signalClosing is PublishDrafts' close: the bead itself when it is a Signal with
-// a Chart or Spec successor (any status), else nil.
-func signalClosing(bead string) (*bd.Closing, error) {
+// sessionClosing is PublishDrafts' close: the bead itself when it is a Signal with
+// a Chart, Spec or Initiative successor (any status), or a Survey whose parent
+// Chart is closed (push-back) or whose Drafts include a child of the Chart (fog
+// seeded), else nil. A Go read, since the batch can't read: the keep path's fog
+// and the Survey close then land in one transaction, never a drained fog-less
+// Chart (Spec mc-r832 D8).
+func sessionClosing(bead string) (*bd.Closing, error) {
 	b, err := showBead(bead)
-	if err != nil || b.Kind != contract.KindSignal {
+	if err != nil {
 		return nil, err
 	}
-	for _, k := range []contract.Kind{contract.KindChart, contract.KindSpec} {
-		if _, ok, err := successorOf(bead, k); err != nil {
-			return nil, err
-		} else if ok {
-			return &bd.Closing{ID: bead}, nil
+	var done bool
+	switch b.Kind {
+	case contract.KindSignal:
+		done, err = signalCharted(bead)
+	case contract.KindSurvey:
+		done, err = surveyDone(b)
+	}
+	if err != nil || !done {
+		return nil, err
+	}
+	return &bd.Closing{ID: bead}, nil
+}
+
+func signalCharted(bead string) (bool, error) {
+	for _, k := range []contract.Kind{contract.KindChart, contract.KindSpec, contract.KindInitiative} {
+		if _, ok, err := successorOf(bead, k); err != nil || ok {
+			return ok, err
 		}
 	}
-	return nil, nil
+	return false, nil
+}
+
+func surveyDone(s bd.Bead) (bool, error) {
+	chart, err := showBead(s.Parent)
+	if err != nil || chart.Status == "closed" {
+		return err == nil, err
+	}
+	drafts, err := listDrafts(s.ID)
+	return slices.ContainsFunc(drafts, func(d bd.Bead) bool { return d.Parent == s.Parent }), err
+}
+
+// settle is a clean exit's settle, run after its publish: a bead still
+// in_progress goes back to open and unassigned, so a premature quit strands no
+// claim (Spec mc-rjvx) and a Survey quit before it seeded fog returns to the
+// Inbox (Spec mc-r832 D9). Judged by status, not by whether this launch claimed
+// it, so a Signal the publish closed is left alone. Exempt: a Task (stays claimed
+// and idle for l), a Surgery (claimed at filing, as a drop treats it) and a
+// Discussion (an early /exit leaves it open and claimed for a rejoin, FR 35). A
+// closed Survey whose parent Chart the session closed (push-back) with no caused-by Spec successor names chart/<parent>
+// for HitlRun to delete once the tree is down (ADR 0130 §6, re-keyed on the
+// Survey).
+// In Go, so the prompt can't skip it.
+func settle(bead string) (branch string, err error) {
+	b, err := showBead(bead)
+	if err != nil {
+		return "", err
+	}
+	if b.Status == "in_progress" {
+		if b.Kind == contract.KindTask || b.Kind == contract.KindSurgery || b.Kind == contract.KindDiscussion || b.Kind == contract.KindCheckup {
+			return "", nil
+		}
+		return "", releaseClaim(bead)
+	}
+	if b.Kind != contract.KindSurvey || b.Status != "closed" {
+		return "", nil
+	}
+	chart, err := showBead(b.Parent)
+	if err != nil || chart.Status != "closed" {
+		return "", err
+	}
+	if _, ok, err := successorOf(chart.ID, contract.KindSpec); err != nil || ok {
+		return "", err
+	}
+	return git.BranchName(string(contract.KindChart), chart.ID), nil
 }
 
 // HitlRun is the hidden `mugicrew hitl-run` wrapper every tmux session pane runs
 // (ADR 0037 §1): it records hitl.launched (hitl.resumed when started with
 // --resume, ADR 0037 §4), swaps the server's stale env for the launcher's from
 // the MUGICREW_ENV_FILE handoff (ADR 0037 note), exports the pane's address for
-// hitl-hook (paneVar), runs the agent argv after --,
+// hitl-hook (paneVar), runs the agent argv from --argv-file (writeArgvFile's),
 // and returns the agent's exit status for the process to exit with. A clean exit
 // (rc=0) first marks its session Closing and switches its viewers to their TUIs
-// (ADR 0108 §1–2), then publishes the bead's Drafts (ADR 0059 §4) and tears the
-// session's worktree down, so the window closes, the session leaves the table and
-// the branch is free (§2). A non-zero exit or a signal keeps everything: remain-on-exit failed leaves the dead pane listed as exited and the
+// (ADR 0108 §1–2), then publishes the bead's Drafts (ADR 0059 §4), settles the
+// bead (settle: releases it if still in_progress, bar a Task, Surgery or
+// Discussion; a failed release fails the session) and tears the session's
+// worktree down, then deletes a pushed-back Chart's branch after its Survey session (ADR 0130),
+// so the branch is free (§2). The last act, after hitl.exited, is killing the
+// pane's own tmux session (endSession), which removes it from the table whatever
+// other panes are open in it (ADR 0037 (session-end-teardown-in-pane)). A non-zero exit or a signal keeps everything:
+// remain-on-exit failed leaves the dead pane listed as exited and the
 // worktree on disk for a resume (§3). It is the one place that sees every session
 // end, so it writes hitl.exited / hitl.failed (ADR 0029 amendment), with the
 // Session cost meter reads around the agent run for the session attr. meter is the
 // harness's (claudecode.MeterCost), passed in so session stays harness-blind.
-func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) int {
+func HitlRun(args []string, meter func(sessionID string) func() contract.Metered) int {
 	// Every --key=value before -- is an event attr (Start passes the bead attrs and
 	// session); --worktree also names the tree a clean exit removes ("" = repo root).
 	var attrs []any
-	worktree, bead, sess, startEvent := "", "", "", "hitl.launched"
-	i := 0
-	for ; i < len(args) && args[i] != "--"; i++ {
-		if args[i] == "--resume" {
+	worktree, bead, sess, argvFile, envFile, startEvent := "", "", "", "", "", "hitl.launched"
+	for _, a := range args {
+		if a == "--resume" {
 			startEvent = "hitl.resumed"
 			continue
 		}
-		k, v, ok := strings.Cut(strings.TrimPrefix(args[i], "--"), "=")
-		if !ok || !strings.HasPrefix(args[i], "--") {
+		k, v, ok := strings.Cut(strings.TrimPrefix(a, "--"), "=")
+		if !ok || !strings.HasPrefix(a, "--") {
 			break
 		}
-		if k == "worktree" {
+		switch k {
+		case "worktree":
 			worktree = v
-		} else {
+		case "argv-file":
+			argvFile = v
+		case "env-file":
+			envFile = v
+		default:
 			attrs = append(attrs, k, v)
 		}
 		switch k {
@@ -140,8 +214,8 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 			sess = v
 		}
 	}
-	if i+1 >= len(args) || args[i] != "--" {
-		fmt.Fprintln(os.Stderr, "usage: mugicrew hitl-run [--resume] [--key=value ...] [--worktree=<wt>] -- <argv>")
+	if argvFile == "" {
+		fmt.Fprintln(os.Stderr, "usage: mugicrew hitl-run [--resume] [--key=value ...] [--profile=<name>] [--worktree=<wt>] --argv-file=<path> [--env-file=<path>]")
 		return 2
 	}
 
@@ -159,7 +233,7 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 	// ponytail: only the agent gets the fresh env; this wrapper's logger was set
 	// up by main from the server's env (MUGICREW_LOG_LEVEL, the effort id). Apply
 	// the file in main before eventlog.Open if those ever need to be fresh.
-	if err := applyEnvFile("TERM"); err != nil {
+	if err := applyEnvFile(envFile, "TERM"); err != nil {
 		// Loud, not a fall-through: the stale server env is what FR5 rules out.
 		fmt.Fprintln(os.Stderr, "mugicrew hitl-run:", err)
 		eventlog.Record("hitl.exited", "hitl.failed", err, append(attrs, "dur_ms", time.Since(began).Milliseconds())...)
@@ -172,6 +246,12 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 	} else {
 		os.Unsetenv(paneVar)
 	}
+	argv, err := readArgvFile(argvFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "mugicrew hitl-run:", err)
+		eventlog.Record("hitl.exited", "hitl.failed", err, append(attrs, "dur_ms", time.Since(began).Milliseconds())...)
+		return 1
+	}
 	// After applyEnvFile: the agent's CLAUDE_CONFIG_DIR is where its transcript is.
 	readCost := meter(sess)
 	sessAttrs := slices.Clip(attrs) // the bead and session attrs, for the backstop's events
@@ -179,10 +259,12 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 	if sock, _, _ := strings.Cut(tmuxEnv, ","); sock != "" && pane != "" {
 		go autoExitClock(sock, pane, bead, fire, done) // with no TUI open too (FR13)
 	}
-	err := runAgent(args[i+1:], fire)
+	err = runAgent(argv, fire)
 	close(done)
-	cost := readCost().Attrs()
+	metered := readCost()
+	cost, follow := Handoff(sessAttrs, metered, SpawnFollower) // resolves the log before the teardown
 	dropped := err == nil && bead != "" && hungUp(hup)
+	chartBranch, stranded := "", false
 	if err == nil && bead != "" && !dropped {
 		// The human is back before the close runs (ADR 0108 §1): @closing first, so
 		// a TUI's first tick after the switch already reads Closing (§2). A failed
@@ -192,7 +274,9 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 		// A failed publish fails the session: the pane and Drafts stay for a resume
 		// (which publishes on its own clean exit) or a drop. A hangup is a drop's
 		// kill-session: an agent exiting 0 on it must not publish what the drop deletes.
-		err = PublishDrafts(bead, attrs)
+		if err = PublishDrafts(bead, attrs); err == nil {
+			chartBranch, err = settle(bead)
+		}
 	}
 	attrs = append(append(attrs, eventlog.ExitAttrs(err)...), "dur_ms", time.Since(began).Milliseconds())
 	attrs = append(attrs, cost...)
@@ -214,7 +298,8 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 		// failure (FR 43); kept says effort/<id> outlives it, its bead reopened if
 		// the session closed it.
 		var terr error
-		stranded, kept := Backstop(eb, worktree, false, func() { terr = removeWorktree(worktree) }, os.Stdout, sessAttrs...)
+		var kept bool
+		stranded, kept = Backstop(eb, worktree, false, func() { terr = removeWorktree(worktree) }, os.Stdout, sessAttrs...)
 		err = terr
 		if stranded {
 			attrs = append(attrs, "stranded", true)
@@ -228,7 +313,19 @@ func HitlRun(args []string, meter func(sessionID string) func() contract.Cost) i
 		// integrates, and Drop keeps effort/<id> with whatever it has committed.
 		err = removeWorktree(worktree)
 	}
+	// After the teardown, so an effort tree's backstop has integrated onto the
+	// branch first; a stranded tree keeps it for its relaunch. A failed delete is
+	// only branch.kept: the session's work is done either way.
+	if err == nil && chartBranch != "" && !stranded {
+		eventlog.RecordBranches([]bd.BranchOutcome{{Branch: chartBranch, Err: deleteBranch(chartBranch)}}, sessAttrs...)
+	}
+	follow() // before hitl.exited, which it never delays (Spec mc-11b8 D4)
 	if eventlog.Record("hitl.exited", "hitl.failed", err, attrs...) == nil {
+		// The close is done and recorded: end the session with every pane a human
+		// or crewmate split into it (ADR 0037). Its SIGHUP lands on hup, unread now.
+		if !dropped && pane != "" {
+			endSession(tmuxEnv, pane)
+		}
 		return 0
 	}
 	return exitCode(err)
@@ -346,6 +443,24 @@ var returnViewers = func(tmuxEnv, pane string) {
 	}
 }
 
+// endSession kills the tmux session that holds pane (HitlRun calls it only with
+// one), with every pane and window in it, as a clean finish's last act. The pane
+// id resolves to its own session, so a name collision can't hit another (no
+// =<name> lookup). Best-effort: a failed kill only logs. A var so HitlRun's
+// clean exit is testable without tmux.
+var endSession = func(tmuxEnv, pane string) {
+	sock, _, _ := strings.Cut(tmuxEnv, ",")
+	if err := runTmux(sock, killSessionArgv(pane)); err != nil {
+		slog.Warn("hitl.ended", "err", err)
+	}
+}
+
+// killSessionArgv is endSession's tmux argv: the pane id, never a session name.
+// A func of its own so the argv is testable without tmux.
+func killSessionArgv(pane string) []string {
+	return []string{"kill-session", "-t", pane}
+}
+
 // hungUp reports whether the pane was hung up (kill-session), waiting hupGrace
 // for the signal to land.
 func hungUp(hup <-chan os.Signal) bool {
@@ -358,12 +473,11 @@ func hungUp(hup <-chan os.Signal) bool {
 }
 
 // applyEnvFile replaces the process env with the launcher's, from the file
-// envFileVar names (writeEnvFile's), deleting the file at once since it holds
-// the user's env. The pane's own keep vars survive (tmux's TERM describes the
-// pane's terminal). No envFileVar, nothing to apply.
-func applyEnvFile(keep ...string) error {
-	path, ok := os.LookupEnv(envFileVar)
-	if !ok {
+// path names (writeEnvFile's), deleting the file at once since it holds the
+// user's env. The pane's own keep vars survive (tmux's TERM describes the
+// pane's terminal). No path, nothing to apply.
+func applyEnvFile(path string, keep ...string) error {
+	if path == "" {
 		return nil
 	}
 	b, err := os.ReadFile(path)
@@ -387,6 +501,20 @@ func applyEnvFile(keep ...string) error {
 		os.Setenv(k, v)
 	}
 	return nil
+}
+
+// readArgvFile is the agent argv from writeArgvFile's file, deleted at once since
+// it holds the prompt. An empty or unreadable file is an error.
+func readArgvFile(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	os.Remove(path)
+	if err == nil && len(b) == 0 {
+		err = errors.New("empty file")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("argv handoff: %w", err)
+	}
+	return strings.Split(string(b), "\x00"), nil
 }
 
 // exitCode is the status the wrapper passes through: the agent's own code, 128+n
@@ -413,10 +541,63 @@ func removeSessionWorktree(wt string) error {
 	if err != nil {
 		return err
 	}
+	var root string
+	if len(declaredRepos(".")) > 0 { // no repo = declared: no git call
+		var rerr error
+		if root, rerr = repoRoot(); rerr != nil {
+			return rerr
+		}
+	}
 	if err := os.Chdir(common); err != nil {
 		return err
 	}
+	if root != "" {
+		if _, err := removeChildren(root, wt); err != nil {
+			return err
+		}
+	}
 	return removeTree(wt)
+}
+
+// removeNested is removeChildren for a Workspace that declares a repo =, the
+// no-config launch paying no git call. It returns the declared child repos, for
+// DropOrphan's prune.
+func removeNested(wt string) ([]git.Repo, error) {
+	if len(declaredRepos(".")) == 0 {
+		return nil, nil
+	}
+	root, err := repoRoot()
+	if err != nil {
+		return nil, err
+	}
+	return removeChildren(root, wt)
+}
+
+// removeChildWorktree and pruneChild are the child repo's remove and prune, seams so
+// DropOrphan's child-first order is testable.
+var (
+	repoRoot            = git.RepoRoot
+	removeChildWorktree = func(r git.Repo, path string) error { return r.RemoveWorktree(path) }
+	pruneChild          = func(r git.Repo) { r.PruneWorktrees() }
+)
+
+// removeChildren takes down the child trees materialized in the host wt. A nested
+// tree's child comes down first: removing the host first strands the child's admin
+// entry and keeps effort/<id> checked out there (Spec FR 22). It returns the
+// declared child repos, sorted by dir; a failed child remove stops before the host
+// is touched.
+func removeChildren(root, wt string) ([]git.Repo, error) {
+	var repos []git.Repo
+	for _, dir := range slices.Sorted(maps.Values(declaredRepos(root))) {
+		r := git.Repo(filepath.Join(root, dir))
+		repos = append(repos, r)
+		if fi, err := os.Stat(filepath.Join(wt, dir, ".git")); err == nil && fi.Mode().IsRegular() {
+			if err := removeChildWorktree(r, filepath.Join(wt, dir)); err != nil {
+				return repos, fmt.Errorf("remove child worktree %s: %w", filepath.Join(wt, dir), err)
+			}
+		}
+	}
+	return repos, nil
 }
 
 // gitRemoveWorktree is git.RemoveWorktree, a var so Drop and DropOrphan are

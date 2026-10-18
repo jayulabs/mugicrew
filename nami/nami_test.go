@@ -7,14 +7,18 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
+	"jayulabs.org/mugicrew/contexts/contextstest"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
+	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
 )
@@ -37,7 +41,7 @@ func (h *stubHarness) LaunchCommand(inv contract.Invocation) (contract.LaunchCom
 	return contract.AgentCommand{Argv: []string{"claude", inv.Prompt}}, nil
 }
 
-func (h *stubHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *stubHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -45,48 +49,14 @@ type stubCtx struct{ h contract.Harness }
 
 func (c stubCtx) Harness() contract.Harness { return c.h }
 
-// Launch(signal) → an agent-variety command whose prompt names the Signal and
-// fixes the accept (`mugicrew reconcile`) / reject (`bd close --reason`) contract
-// this ticket owns (§7.2–7.3), anchored to the bead via --name (BeadID).
-func TestLaunchSignalComposesChartingSession(t *testing.T) {
-	h := &stubHarness{}
-	lc, err := Nami{}.Launch(stubCtx{h}, contract.Bead{ID: "ws-sig", Kind: contract.KindSignal})
-	if err != nil {
-		t.Fatalf("Launch: %v", err)
+// ADR 0129: Signal triage is Luffy's, so Nami keeps no Signal arm — Launch and
+// Reconcile on a Signal are loud errors.
+func TestSignalIsNoLongerNamis(t *testing.T) {
+	if _, err := (Nami{}).Launch(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-sig", Kind: contract.KindSignal}); err == nil {
+		t.Error("Launch of a Signal must error")
 	}
-	if _, ok := lc.(contract.AgentCommand); !ok {
-		t.Fatalf("Launch must return the agent variety, got %T", lc)
-	}
-	if h.inv.BeadID != "ws-sig" {
-		t.Errorf("Invocation must anchor to the Signal id, got %q", h.inv.BeadID)
-	}
-	p := h.inv.Prompt
-	// The Chart-scope guardrail: defog-only, implementation is downstream,
-	// and children never inherit the Chart's kind. Pinned so an edit can't silently
-	// drop it — that gap once let an impl bead land as a Chart child.
-	for _, want := range []string{"ws-sig", "mugicrew reconcile ws-sig", "bd close ws-sig --reason",
-		"out of scope", "--no-inherit-labels",
-		// The fast lane (ADR 0035 §11): a fourth sibling outcome + its seeding verb.
-		"### FAST LANE", "mugicrew reconcile ws-sig --spec ",
-		// Scope-tracking titles: charting retitles the Chart in its body write,
-		// the fast lane names what is built — no kind prefix.
-		`bd update <chartID> --title "<Destination name>"`, `--spec <body-file> --title "<what is built>"`,
-		"No kind prefix"} {
-		if !strings.Contains(p, want) {
-			t.Errorf("charting prompt missing %q", want)
-		}
-	}
-	// A fast-laned Spec takes the standard template so Zoro slices it like any Spec:
-	// the one spec-template Crew doc, so the two can't fork.
-	_, fastLane, _ := strings.Cut(p, "### FAST LANE")
-	fastLane, _, _ = strings.Cut(fastLane, "\n### ")
-	if !slices.Contains(promptguard.CrewDocRefs(fastLane), "spec-template.md") {
-		t.Errorf("charting FAST LANE must read the spec-template Crew doc:\n%s", fastLane)
-	}
-	assertSpecSections(t, "spec-template.md", promptguard.Docs(t)["spec-template.md"])
-	// mugi-grill is retired: the fast lane replaced its Spec door.
-	if strings.Contains(p, "mugi-grill") {
-		t.Error("charting prompt still points at the retired mugi-grill")
+	if err := (Nami{}).Reconcile(nil, bd.Bead{ID: "ws-sig", Kind: contract.KindSignal, Status: "open"}); err == nil {
+		t.Error("Reconcile of a Signal must error")
 	}
 }
 
@@ -230,6 +200,9 @@ func TestReconcileChartNotDefoggedDispatchesPromoteOrStamp(t *testing.T) {
 // (see reconcileChart), so it must match the constant exactly.
 func TestSpecSuccessorIsPlaceholderSpecLeaf(t *testing.T) {
 	s := specSuccessor(bd.Bead{ID: "c", Title: "a chart"})
+	if s.Context != "" {
+		t.Errorf("unlabelled Chart yields Context %q, want none", s.Context)
+	}
 	if s.Kind != contract.KindSpec {
 		t.Errorf("successor kind = %q, want spec", s.Kind)
 	}
@@ -285,28 +258,7 @@ func TestReconcileChartHandsCloseToPublish(t *testing.T) {
 	}
 }
 
-// The Chart reconcileSignal seeds carries the shared placeholder body the prompts
-// reference, and is a Draft by the Signal (ADR 0059 §7).
-func TestChartSuccessorSeedsPlaceholderBody(t *testing.T) {
-	c := chartSuccessor(bd.Bead{ID: "s", Title: "a signal"})
-	if c.Kind != contract.KindChart || !c.Container {
-		t.Errorf("Chart successor must be a kind:chart container, got kind=%q container=%v", c.Kind, c.Container)
-	}
-	if c.Title != "a signal" {
-		t.Errorf("Chart title = %q, want the Signal's title verbatim", c.Title)
-	}
-	if c.Description != contract.ChartPlaceholderBody {
-		t.Errorf("Chart seed body = %q, want the shared placeholder constant %q", c.Description, contract.ChartPlaceholderBody)
-	}
-	// ADR 0059 §7: the Chart is a Draft by the Signal until the charting session's
-	// hitl-run publishes it with its fog, so promote-or-stamp never judges it early.
-	if c.DraftedBy != "s" {
-		t.Errorf("Chart successor DraftedBy = %q, want the Signal's id", c.DraftedBy)
-	}
-}
-
-// The pure part of the Signal retrofit: the Chart's branch name
-// reconcileSignal cuts is chart/<chartID>, built from git/'s naming rule (ADR
+// The Chart's branch name reconcileChart lands is chart/<chartID>, built from git/'s naming rule (ADR
 // 0010 §3). The real cut behavior is git/ Seam B's; here we fix only the name
 // the handler computes.
 func TestChartBranchName(t *testing.T) {
@@ -331,9 +283,9 @@ func TestChartTrailer(t *testing.T) {
 // D4), the variant the resolve session runs and any clashing ADRs. Pure — the
 // spawn itself (idempotency, parent edge) is bd.SpawnChildIfAbsent's contract.
 func TestChartConflictBodyCarriesBranchAndBase(t *testing.T) {
-	body := chartConflictBody("mc-x", "deadbeef42", "t1psha", conflictADRClash, []string{"docs/adr/0031-a.md"})
-	for _, want := range []string{"branch: chart/mc-x", git.BasePin("deadbeef42"), git.TipPin("t1psha"),
-		"variant: " + conflictADRClash, "clashes:\n- docs/adr/0031-a.md"} {
+	body := ChartConflictBody("mc-x", "deadbeef42", "t1psha", ConflictNumberClash, []string{"docs/adr/0031-a.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0031-b.md)"})
+	for _, want := range []string{"numbered-file clash", "ADR 0219", "branch: chart/mc-x", git.BasePin("deadbeef42"), git.TipPin("t1psha"),
+		"variant: " + ConflictNumberClash, "clashes:\n- docs/adr/0031-a.md (rule **/docs/adr/{n:4}-*.md)"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("conflict body payload missing %q, got %q", want, body)
 		}
@@ -398,8 +350,11 @@ func chartConflictSeams(t *testing.T, bead *bd.Bead, checkErr error) *chartConfl
 	r := &chartConflictRecord{}
 	swap(t, &showBead, func(string) (bd.Bead, error) { return *bead, nil })
 	swap(t, &branchHead, func(string) (string, error) { return "startsha", nil })
-	swap(t, &checkResolved, func(base, tip string) error { r.checks = append(r.checks, [2]string{base, tip}); return checkErr })
-	swap(t, &restoreResolved, func(start string) error { r.restores = append(r.restores, start); return nil })
+	swap(t, &checkResolved, func(_ git.Repo, base, tip string) error {
+		r.checks = append(r.checks, [2]string{base, tip})
+		return checkErr
+	})
+	swap(t, &restoreResolved, func(_ git.Repo, start string) error { r.restores = append(r.restores, start); return nil })
 	swap(t, &integrate, func(w io.Writer) int {
 		r.integrates = append(r.integrates, fmt.Sprintf("after %d checks", len(r.checks)))
 		fmt.Fprintf(w, "integrate exited %d", r.integrateRC)
@@ -428,7 +383,7 @@ func chartConflictSeams(t *testing.T, bead *bd.Bead, checkErr error) *chartConfl
 
 func openChartConflict() bd.Bead {
 	return bd.Bead{ID: "ws-cf", Kind: contract.KindChartConflict, Status: "open", Parent: "ws-chart",
-		Description: chartConflictBody("ws-chart", "b4se", "t1p", conflictRebase, nil)}
+		Description: ChartConflictBody("ws-chart", "b4se", "t1p", ConflictRebase, nil)}
 }
 
 // Resolved: + a passing check → one Open()-guarded close through the publish,
@@ -628,28 +583,78 @@ func TestChartConflictPromptLeavesIntegrateToGo(t *testing.T) {
 	}
 }
 
-// Spec D11 rows 2/6: the charting session creates its defog children as Drafts by
-// the Signal (the shared block, not a re-phrasing), so its hitl-run publishes the
-// Draft Chart and its fog in one batch.
-func TestChartingPromptCarriesDraftInstruction(t *testing.T) {
-	got := chartingPrompt("ws-sig")
-	if !strings.Contains(got, contract.DraftInstruction("ws-sig")) {
-		t.Errorf("charting prompt must embed contract.DraftInstruction(signal):\n%s", got)
+// Spec mc-r832 D6–D7 (FR 2, 11–13): launching a Survey opens Nami's charting
+// session anchored on the Survey. The prompt claims and drafts as the Survey, but
+// parents, appends to, links and pushes back on its parent Chart; hand-back and
+// reject close the Chart with --force (the open Survey is still its child).
+func TestLaunchSurveyRendersChartingPromptWithBothIDs(t *testing.T) {
+	swap(t, &showBead, func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Kind: contract.KindSurvey, Status: "open", Parent: "ws-chart"}, nil
+	})
+	h := &stubHarness{}
+	if _, err := (Nami{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-srv", Kind: contract.KindSurvey}); err != nil {
+		t.Fatalf("Launch Survey: %v", err)
 	}
-	if !strings.Contains(got, "-s deferred -l kind:<grilling|research|prototype>,drafted-by:ws-sig") {
-		t.Errorf("charting prompt's defog-child create must be a Draft by the Signal:\n%s", got)
+	got := strings.Join(strings.Fields(h.inv.Prompt), " ")
+	if h.inv.BeadID != "ws-srv" {
+		t.Errorf("Invocation anchored on %q, want the Survey", h.inv.BeadID)
+	}
+	for _, want := range []string{
+		"Survey: ws-srv (your bead — read it with: bd show ws-srv)",
+		"Chart: ws-chart (its parent — read it with: bd show ws-chart)",
+		"bd update ws-srv --claim",
+		"-l kind:<grilling|research|prototype>,drafted-by:ws-srv",
+		"--parent ws-chart --no-inherit-labels",
+		"signal-filing.md",
+		"mugicrew signal offshoot --from ws-srv --drafted-by ws-srv",
+		"--order none",
+		`bd close ws-chart --force --reason "handed back:`,
+		`bd close ws-chart --force --reason "<why>"`,
+		"bd supersede ws-chart --with",
+		"mugicrew chart drop ws-chart Destination",
+		"mugicrew chart append ws-chart Destination",
+		"bd dep add <task> ws-chart",
+		strings.Join(strings.Fields(contract.DraftInstruction("ws-srv")), " "),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("charting prompt missing %q:\n%s", want, h.inv.Prompt)
+		}
+	}
+	for _, gone := range []string{
+		"bd update ws-chart --claim", "drafted-by:ws-chart", "--parent ws-srv",
+		"discovered-from:ws-srv", "discovered-from ws-chart", "--from ws-chart", "bd close ws-srv", "Signal under triage", "mugicrew reconcile", "FAST LANE",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("charting prompt carries %q", gone)
+		}
 	}
 }
 
-// Spec D5 (ADR 0096): ACCEPT and FAST LANE say reconcile does not close the
-// Signal — mugicrew closes it at the clean-exit publish — and no longer that it does.
-func TestChartingPromptSaysSignalClosesAtPublish(t *testing.T) {
-	got := strings.Join(strings.Fields(chartingPrompt("ws-sig")), " ")
-	if strings.Count(got, "does NOT close the Signal") != 2 || !strings.Contains(got, "mugicrew closes it when this session exits cleanly") {
-		t.Errorf("charting prompt must say, on both legs, that mugicrew closes the Signal at publish:\n%s", got)
+// Spec mc-r832 D6 (FR 3): a Chart is a container, so launching one is refused
+// like any other; a Survey with no parent Chart, or an unreadable one, errors.
+func TestLaunchRefusesChart(t *testing.T) {
+	if _, err := (Nami{}).Launch(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-chart", Kind: contract.KindChart}); err == nil {
+		t.Error("Launch of a Chart must error")
 	}
-	if strings.Contains(got, "and closes the Signal") {
-		t.Errorf("charting prompt must no longer say reconcile closes the Signal:\n%s", got)
+	for name, show := range map[string]func(string) (bd.Bead, error){
+		"no parent":  func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Kind: contract.KindSurvey}, nil },
+		"read fails": func(string) (bd.Bead, error) { return bd.Bead{}, errors.New("bd: locked") },
+	} {
+		swap(t, &showBead, show)
+		if _, err := (Nami{}).Launch(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-srv", Kind: contract.KindSurvey}); err == nil {
+			t.Errorf("%s: Launch of the Survey must error", name)
+		}
+	}
+}
+
+// Spec mc-r832 D2 (FR 22–23): a Survey is not a defog bead, so promote-or-stamp
+// and speccing skip a closed kind:survey child when they gather the Chart's
+// closed children.
+func TestJudgeAndSpeccingSkipClosedSurvey(t *testing.T) {
+	for name, p := range map[string]string{"promote-or-stamp": promoteOrStampPrompt("mc-x"), "speccing": speccingPrompt("mc-x")} {
+		if flat := strings.Join(strings.Fields(p), " "); !strings.Contains(flat, "Skip the kind:"+string(contract.KindSurvey)+" child") {
+			t.Errorf("%s prompt must skip the closed kind:survey child:\n%s", name, p)
+		}
 	}
 }
 
@@ -671,7 +676,7 @@ func TestGrillingPromptDraftsFogBeforeClose(t *testing.T) {
 // Spec D9: the defog prompts that tend the Chart body do it one line at
 // a time through the locked verb, never a whole-description bd update.
 func TestDefogPromptsTendChartThroughVerb(t *testing.T) {
-	for name, got := range map[string]string{"grilling": grillingPrompt("mc-x"), "research": researchPrompt("mc-x")} {
+	for name, got := range map[string]string{"charting": chartingPrompt("mc-srv", "mc-x"), "grilling": grillingPrompt("mc-x"), "research": researchPrompt("mc-x")} {
 		if !strings.Contains(got, "mugicrew chart append") || strings.Contains(got, "bd update <chartID>") {
 			t.Errorf("%s prompt must tend the Chart through mugicrew chart append:\n%s", name, got)
 		}
@@ -694,7 +699,7 @@ func TestChartingGrillingPromptsSkillFree(t *testing.T) {
 		got  string
 		docs []string
 	}{
-		"charting": {chartingPrompt("mc-x"), []string{"grilling.md", "domain-modeling.md", "chart-body.md", "spec-template.md"}},
+		"charting": {chartingPrompt("mc-srv", "mc-x"), []string{"grilling.md", "domain-modeling.md", "chart-body.md"}},
 		"grilling": {grillingPrompt("mc-x"), []string{"grilling.md", "domain-modeling.md", "defog-session.md"}},
 	} {
 		promptguard.Check(t, name, c.got)
@@ -718,7 +723,7 @@ func TestAFKPromptsSkillFree(t *testing.T) {
 		"speccing":         {speccingPrompt("mc-x"), []string{"spec-template.md", "chart-body.md"}},
 		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), []string{"chart-body.md"}},
 		"research":         {researchPrompt("mc-x"), nil},
-		"chart-conflict":   {chartConflictPrompt("mc-x"), []string{"adr-renumber.md"}},
+		"chart-conflict":   {chartConflictPrompt("mc-x"), []string{"sequence-renumber.md"}},
 	} {
 		promptguard.Check(t, name, c.got)
 		refs := promptguard.CrewDocRefs(c.got)
@@ -750,7 +755,7 @@ func TestReconcileUnknownKindErrors(t *testing.T) {
 // TestPromptsRender guards the go:embed'd prompt templates: a broken embed path
 // or a stray literal % (which fmt.Sprintf turns into %!(...)) fails here.
 func TestPromptsRender(t *testing.T) {
-	for _, got := range []string{chartingPrompt("mc-x"), grillingPrompt("mc-x"), chartConflictPrompt("mc-x"), speccingPrompt("mc-x"), promoteOrStampPrompt("mc-x")} {
+	for _, got := range []string{chartingPrompt("mc-srv", "mc-x"), grillingPrompt("mc-x"), chartConflictPrompt("mc-x"), speccingPrompt("mc-x"), promoteOrStampPrompt("mc-x")} {
 		if !strings.Contains(got, "mc-x") || strings.Contains(got, "%!") {
 			t.Fatalf("bad prompt render: %q", got)
 		}
@@ -807,9 +812,13 @@ func TestSpecTemplateOptionalTasksAfterFurtherNotes(t *testing.T) {
 // Spec D5 (FR 4, 10): charting, grilling and promote-or-stamp may draft
 // a free-standing Task blocked on a Chart or Spec, never a Chart child.
 func TestChartSessionsMayDraftFreeStandingTask(t *testing.T) {
-	for name, p := range map[string]string{"charting": chartingPrompt("mc-x"), "grilling": grillingPrompt("mc-x"), "promote-or-stamp": promoteOrStampPrompt("mc-x")} {
-		flat := strings.Join(strings.Fields(p), " ")
-		for _, want := range []string{"-l kind:task," + contract.DraftedBy("mc-x"), "never a Chart child", "Carry moves"} {
+	for name, c := range map[string]struct{ p, drafter string }{
+		"charting":         {chartingPrompt("mc-srv", "mc-x"), "mc-srv"},
+		"grilling":         {grillingPrompt("mc-x"), "mc-x"},
+		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), "mc-x"},
+	} {
+		flat := strings.Join(strings.Fields(c.p), " ")
+		for _, want := range []string{"-l kind:task," + contract.DraftedBy(c.drafter), "never a Chart child", "Carry moves"} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s prompt missing %q", name, want)
 			}
@@ -899,7 +908,7 @@ func (h *recordingHarness) LaunchCommand(contract.Invocation) (contract.LaunchCo
 	return nil, nil
 }
 
-func (h *recordingHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *recordingHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -910,15 +919,18 @@ func (h *recordingHarness) ResumeCommand(string) (contract.AgentCommand, error) 
 // Chart was closed. Restores the real funcs on cleanup. Mirrors loop_test.go.
 func stubChartSeams(t *testing.T, show func(id string) (bd.Bead, error)) *[]string {
 	t.Helper()
-	origOpen, origLand, origSpawn, origShow := openChildren, landBranch, spawnSuccessor, showBead
-	origSpawnChild, origLanded := spawnChildIfAbsent, landedBase
+	origOpen, origSpawn, origShow := openChildren, spawnSuccessor, showBead
+	origSpawnChild := spawnChildIfAbsent
 	t.Cleanup(func() {
-		openChildren, landBranch, spawnSuccessor, showBead = origOpen, origLand, origSpawn, origShow
-		spawnChildIfAbsent, landedBase = origSpawnChild, origLanded
+		openChildren, spawnSuccessor, showBead = origOpen, origSpawn, origShow
+		spawnChildIfAbsent = origSpawnChild
 	})
 	closed := &[]string{}
 	openChildren = func(string) (int, error) { return 0, nil }
-	landBranch = func(_, _ string) (string, error) { return "landsha", nil }
+	swap(t, &landedBase, func(string) (string, error) { return "landsha", nil })
+	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return nil, nil })
+	swap(t, &openBlockers, func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil })
+	swap(t, &openAnyBlockers, func(string) ([]bd.Bead, error) { return nil, nil })
 	spawnSuccessor = func(string, bd.Successor) (string, bool, error) { return "ws-spec", true, nil }
 	showBead = show
 	swap(t, &closeOnPublish, func(ctx contract.Ctx, id, reason string, es []bd.Edge) error {
@@ -928,9 +940,11 @@ func stubChartSeams(t *testing.T, show func(id string) (bd.Bead, error)) *[]stri
 		*closed = append(*closed, id)
 		return nil
 	})
-	landedBase = func(string) (string, error) { return "", errors.New("not landed") }
 	swap(t, &carry, func(string, string) ([]string, []bd.CarrySkip, error) { return nil, nil, nil })
 	swap(t, &branchHead, func(string) (string, error) { return "chartsha", nil })
+	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return nil, nil })
+	swap(t, &forgeProject, func(git.Repo) (forge.Project, error) { return forge.Project{}, nil })
+	swap(t, &forgeFindOpenMR, func(forge.Project, string) (*forge.MR, error) { return nil, nil })
 	return closed
 }
 
@@ -980,7 +994,10 @@ func TestReconcileChartWaitsOnAClosedChildWithAnEffortRef(t *testing.T) {
 		open, held := bd.DrainBlockersOver(kids, efforts)
 		return open + len(held), nil
 	}
-	landBranch = func(_, _ string) (string, error) { t.Fatal("a Chart with a held child must not land"); return "", nil }
+	landedBase = func(string) (string, error) {
+		t.Fatal("a Chart with a held child must not look at the land")
+		return "", nil
+	}
 
 	if err := reconcileChart(stubCtx{h}, defoggedChart("open")); err != nil {
 		t.Fatalf("reconcileChart: %v", err)
@@ -1063,99 +1080,12 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// The Chart land records land.done with branch, into and the landed sha.
-func TestChartLandIsAnEvent(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	stubChartSeams(t, func(string) (bd.Bead, error) {
-		return bd.Bead{ID: "ws-spec", Status: "closed", Description: "the authored spec body"}, nil
-	})
-	reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("closed"))
-	if len(*evs) != 1 || (*evs)[0].Name != "land.done" {
-		t.Fatalf("events = %+v, want one land.done", *evs)
-	}
-	if a := (*evs)[0].Attrs; a["bead"] != "ws-chart" || a["branch"] != "chart/ws-chart" || a["into"] != git.Mainline() || a["sha"] != "landsha" {
-		t.Errorf("land.done attrs = %v", a)
-	}
-}
-
-// ADR 0030 §1, ADR 0069: Land's *ADRClash (a Chart adding an ADR number the locked
-// base already holds) files exactly one chart-conflict member naming the
-// adr-number-clash variant, the colliding files, the branch and the base, and the
-// Chart doesn't land on. A re-run (the conflict still open) files no second.
-func TestReconcileChartADRClashFilesOneConflictWithoutLanding(t *testing.T) {
-	closed := stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
-	landBranch = func(_, _ string) (string, error) {
-		return "", &git.ADRClash{Clashes: []string{"apps/mugicrew/docs/adr/0031-chart.md (vs mainline apps/mugicrew/docs/adr/0031-main.md)"}, Base: "basesha"}
-	}
-	spawnSuccessor = func(string, bd.Successor) (string, bool, error) {
-		t.Error("an ADR-number clash must spawn no Spec")
-		return "", false, nil
-	}
-	var filed []bd.Successor
-	// openChildren stays 0 (the stub default) so the re-run reaches the spawn's
-	// open-child guard rather than short-circuiting on the drain check.
-	spawnChildIfAbsent = func(parent string, s bd.Successor) (string, bool, error) {
-		if len(filed) > 0 {
-			return "ws-cc", false, nil
-		}
-		filed = append(filed, s)
-		return "ws-cc", true, nil
-	}
-
-	for range 2 {
-		if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
-			t.Fatalf("reconcileChart: %v", err)
-		}
-	}
-	if len(*closed) != 0 {
-		t.Errorf("closed %v, want the Chart left open", *closed)
-	}
-	if len(filed) != 1 {
-		t.Fatalf("want exactly one chart-conflict filed, got %d", len(filed))
-	}
-	if filed[0].Kind != contract.KindChartConflict {
-		t.Errorf("filed kind = %q, want chart-conflict", filed[0].Kind)
-	}
-	for _, want := range []string{conflictADRClash, "chart/ws-chart", git.BasePin("basesha"), git.TipPin("chartsha"), "apps/mugicrew/docs/adr/0031-chart.md", "apps/mugicrew/docs/adr/0031-main.md"} {
-		if !strings.Contains(filed[0].Description, want) {
-			t.Errorf("conflict body missing %q, got %q", want, filed[0].Description)
-		}
-	}
-}
-
-// A *RebaseConflict files one chart-conflict pinning the land's base and the Chart
-// branch tip the failed land saw (Spec D4), and the Chart doesn't land.
-func TestReconcileChartRebaseConflictPinsBaseAndTip(t *testing.T) {
-	closed := stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
-	landBranch = func(_, _ string) (string, error) { return "", &git.RebaseConflict{Base: "basesha"} }
-	var filed []bd.Successor
-	spawnChildIfAbsent = func(_ string, s bd.Successor) (string, bool, error) {
-		filed = append(filed, s)
-		return "ws-cc", true, nil
-	}
-	chart := defoggedChart("open")
-	chart.Title = "a chart"
-	if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
-		t.Fatalf("reconcileChart: %v", err)
-	}
-	if len(*closed) != 0 || len(filed) != 1 {
-		t.Fatalf("closed %v, filed %d; want the Chart open and one conflict", *closed, len(filed))
-	}
-	if want := "a chart conflicts with main"; filed[0].Title != want {
-		t.Errorf("conflict title = %q, want %q (no kind prefix)", filed[0].Title, want)
-	}
-	base, tip, err := chartConflictPins(bd.Bead{ID: "ws-cc", Description: filed[0].Description})
-	if err != nil || base != "basesha" || tip != "chartsha" || !strings.Contains(filed[0].Description, conflictRebase) {
-		t.Errorf("pins = (%q, %q, %v), body %q; want basesha/chartsha rebase-conflict", base, tip, err, filed[0].Description)
-	}
-}
-
 // The AFK arm's pin reader (Spec FR 36–38): a new body yields base and tip; a
 // legacy body (lowercase base:, no Tip:) yields its base, an empty tip and a
 // check-3-skipped warning; a body with no base is an error, not a guess.
 func TestChartConflictPins(t *testing.T) {
 	evs := eventlogtest.Capture(t)
-	base, tip, err := chartConflictPins(bd.Bead{ID: "mc-n", Description: chartConflictBody("mc-x", "b4se", "t1p", conflictRebase, nil)})
+	base, tip, err := chartConflictPins(bd.Bead{ID: "mc-n", Description: ChartConflictBody("mc-x", "b4se", "t1p", ConflictRebase, nil)})
 	if err != nil || base != "b4se" || tip != "t1p" || len(*evs) != 0 {
 		t.Errorf("new body = (%q, %q, %v) events %+v; want (b4se, t1p, nil), no events", base, tip, err, *evs)
 	}
@@ -1172,482 +1102,105 @@ func TestChartConflictPins(t *testing.T) {
 	}
 }
 
-// ADR 0069: a *MainDirty from the Chart's land files no chart-conflict (one
-// sticky dirty main must not spawn a bead per Chart), leaves the Chart open, and
-// is the returned error, recorded on land.failed for the next tick to retry.
-func TestReconcileChartMainDirtyFilesNoBead(t *testing.T) {
-	evs := eventlogtest.Capture(t)
+// A drained, stamped Chart with no trailer spawns a plain Landing pinned to the
+// Chart branch head and never lands, specs or closes (ADR 0145).
+func TestReconcileChartSpawnsLandingAtHead(t *testing.T) {
 	closed := stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
-	landBranch = func(_, _ string) (string, error) { return "", &git.MainDirty{Path: "/repo"} }
-	spawnChildIfAbsent = func(string, bd.Successor) (string, bool, error) {
-		t.Error("a dirty main must file no chart-conflict")
-		return "", false, nil
+	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
+	var filed []bd.Successor
+	spawnChildIfAbsent = func(_ string, s bd.Successor) (string, bool, error) {
+		filed = append(filed, s)
+		return "ws-landing", true, nil
 	}
 	spawnSuccessor = func(string, bd.Successor) (string, bool, error) {
-		t.Error("a dirty main must spawn no Spec")
+		t.Error("an unlanded Chart must spawn no Spec")
 		return "", false, nil
 	}
-	err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open"))
-	var dirty *git.MainDirty
-	if !errors.As(err, &dirty) {
-		t.Fatalf("reconcileChart = %v, want *MainDirty", err)
+	chart := defoggedChart("open")
+	chart.Title = "a chart"
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if len(filed) != 1 || filed[0].Kind != contract.KindLanding || filed[0].Title != "a chart" || filed[0].Description != git.CommitPin("chartsha") {
+		t.Fatalf("filed = %+v, want one Landing titled like the Chart pinned at chartsha", filed)
 	}
 	if len(*closed) != 0 {
 		t.Errorf("closed %v, want the Chart left open", *closed)
 	}
-	if len(*evs) != 1 || (*evs)[0].Name != "land.failed" || !strings.Contains(fmt.Sprint((*evs)[0].Attrs["err"]), "clean main, then re-run") {
-		t.Errorf("events = %+v, want one land.failed carrying the *MainDirty", *evs)
-	}
 }
 
-// No clash → the Chart lands exactly as before, no conflict filed.
-func TestReconcileChartNoADRClashLands(t *testing.T) {
-	closed := stubChartSeams(t, func(string) (bd.Bead, error) {
-		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
-	})
-	var landed int
-	landBranch = func(_, _ string) (string, error) { landed++; return "landsha", nil }
+// An open Signal blocking the Chart freezes it the same way (ADR 0268).
+func TestReconcileChartBlockingSignalHoldsTheLanding(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
+	openAnyBlockers = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-sig", Kind: contract.KindSignal, Status: "open"}}, nil
+	}
 	spawnChildIfAbsent = func(string, bd.Successor) (string, bool, error) {
-		t.Fatal("no clash must file no chart-conflict")
+		t.Error("an open blocking Signal must hold the Landing")
 		return "", false, nil
 	}
 	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
 		t.Fatalf("reconcileChart: %v", err)
 	}
-	if landed != 1 || len(*closed) != 1 {
-		t.Errorf("want one land and the Chart closed, got landed=%d closed=%v", landed, *closed)
+}
+
+// An open Task blocking the Chart (a human's closed-MR call) holds the next Landing
+// until it closes (Spec FR 23).
+func TestReconcileChartBlockingTaskHoldsTheLanding(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
+	openAnyBlockers = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open"}}, nil
+	}
+	spawnChildIfAbsent = func(string, bd.Successor) (string, bool, error) {
+		t.Error("an open blocking Task must hold the Landing")
+		return "", false, nil
+	}
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
 	}
 }
 
-// fakeSignalGraph is a stateful stand-in for the bd/git legs reconcileSignal and
-// SeedSpec drive (ADR 0035 §10): the Signal's caused-by successors by kind, the
-// trailers on mainline, and every write — so leg choice, the refusal to mix legs,
-// and crash-rerun idempotence are checkable with no live bd or git. There is no
-// close seam: reconcile never closes the Signal (ADR 0096), the publish does.
-type fakeSignalGraph struct {
-	succ     map[contract.Kind]string
-	bodies   map[string]bd.Successor
-	trailers map[string]bool
-	spawns   int
-	anchors  int
-	cuts     []string // branches cut, in order
-	failAt   string   // "anchor": crash there once
-	seq      []string // carry calls, in order: "carry <pred> <succ>"
-	carryErr error    // carry: the error bd.Carry returns
+// An open Landing with no trailer: return, no Spec, no second Landing.
+func TestReconcileChartOpenLandingWaits(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
+	landingsOf = func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil }
+	spawnChildIfAbsent = func(string, bd.Successor) (string, bool, error) {
+		t.Error("an open Landing must not be respawned")
+		return "", false, nil
+	}
+	spawnSuccessor = func(string, bd.Successor) (string, bool, error) {
+		t.Error("an open Landing must spawn no Spec")
+		return "", false, nil
+	}
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
 }
 
-// drop deletes the Signal's successor Draft, as a session drop does (bd delete).
-func (g *fakeSignalGraph) drop(k contract.Kind) { delete(g.succ, k) }
-
-func stubSignalSeams(t *testing.T) *fakeSignalGraph {
-	t.Helper()
-	// AnchorIfAbsent takes the land lock under the git-common-dir: give it a scratch
-	// repo, so the test needs no checkout (Nix sandbox) and never touches the real one.
-	t.Chdir(t.TempDir())
-	if out, err := exec.Command("git", "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	g := &fakeSignalGraph{succ: map[contract.Kind]string{}, bodies: map[string]bd.Successor{}, trailers: map[string]bool{}}
-	swap(t, &successorOf, func(_ string, k contract.Kind) (string, bool, error) { id, ok := g.succ[k]; return id, ok, nil })
-	swap(t, &spawnSuccessor, func(_ string, s bd.Successor) (string, bool, error) {
-		if id, ok := g.succ[s.Kind]; ok {
-			return id, false, nil
-		}
-		g.spawns++
-		id := "ws-" + string(s.Kind)
-		if g.spawns > 1 {
-			id += fmt.Sprint(g.spawns) // a re-spawn after a drop gets a new id
-		}
-		g.succ[s.Kind], g.bodies[id] = id, s
-		return id, true, nil
+// The trailer on mainline with a Landing still open closes the Landing landed:
+// <sha> first, then spawns the Spec.
+func TestReconcileChartTrailerClosesLandingThenSpecs(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
 	})
-	swap(t, &landedBase, func(tr string) (string, error) {
-		if g.trailers[tr] {
-			return "landedsha", nil
-		}
-		return "", git.ErrNotLanded
-	})
-	swap(t, &writeAnchor, func(tr string) (string, error) {
-		if g.failAt == "anchor" {
-			g.failAt = ""
-			return "", errors.New("crash")
-		}
-		g.anchors++
-		g.trailers[tr] = true
-		return "anchorsha", nil
-	})
-	swap(t, &cutBranch, func(b, _ string) (bool, error) {
-		if slices.Contains(g.cuts, b) {
-			return false, nil
-		}
-		g.cuts = append(g.cuts, b)
-		return true, nil
-	})
-	swap(t, &carry, func(pred, succ string) ([]string, []bd.CarrySkip, error) {
-		g.seq = append(g.seq, "carry "+pred+" "+succ)
-		return nil, nil, g.carryErr
-	})
-	return g
-}
-
-// swap points a package seam at v for the rest of the test.
-func swap[T any](t *testing.T, seam *T, v T) {
-	old := *seam
-	t.Cleanup(func() { *seam = old })
-	*seam = v
-}
-
-func openSignal() bd.Bead {
-	return bd.Bead{ID: "ws-sig", Kind: contract.KindSignal, Status: "open", Title: "sharp fix"}
-}
-
-// ADR 0035 §10: --spec seeds one kind:spec leaf successor with the body verbatim
-// and the defaulted title; reconcile then anchors "Spec: <id>" once, carries,
-// emits one triage.fastlane, and never takes the Chart leg. It leaves the Signal
-// open: the session's clean-exit publish closes it (ADR 0096).
-func TestFastLaneSeedsAnchorsAndLeavesSignalForPublish(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	g := stubSignalSeams(t)
-	sig := openSignal()
-	if err := SeedSpec(sig, "", "the spec body"); err != nil {
-		t.Fatalf("SeedSpec: %v", err)
+	var seq []string
+	landingsOf = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-landing", Status: "open"}, {ID: "ws-old", Status: "closed"}}, nil
 	}
-	if err := reconcileSignal(sig); err != nil {
-		t.Fatalf("reconcileSignal: %v", err)
+	closeBead = func(id, reason string) error { seq = append(seq, "close "+id+" "+reason); return nil }
+	spawnSuccessor = func(string, bd.Successor) (string, bool, error) {
+		seq = append(seq, "spec")
+		return "ws-spec", true, nil
 	}
-	s := g.bodies["ws-spec"]
-	if g.spawns != 1 || s.Kind != contract.KindSpec || s.Container || s.Description != "the spec body" || s.Title != "sharp fix" || s.DraftedBy != "ws-sig" {
-		t.Errorf("spawns=%d spec=%+v, want one leaf kind:spec Draft by the Signal with the body and defaulted title", g.spawns, s)
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
 	}
-	if g.anchors != 1 || !g.trailers["Spec: ws-spec"] {
-		t.Errorf("anchors=%d trailers=%v, want one \"Spec: ws-spec\"", g.anchors, g.trailers)
+	if want := []string{"close ws-landing landed: landsha", "spec"}; !slices.Equal(seq, want) {
+		t.Errorf("seq = %v, want %v", seq, want)
 	}
-	if want := []string{"carry ws-sig ws-spec"}; !slices.Equal(g.seq, want) {
-		t.Errorf("seq = %v, want %v", g.seq, want)
-	}
-	if _, chart := g.succ[contract.KindChart]; chart || len(g.cuts) != 0 {
-		t.Errorf("fast lane must not take the Chart leg (chart=%v cuts=%v)", chart, g.cuts)
-	}
-	if len(*evs) != 1 || (*evs)[0].Name != "triage.fastlane" || (*evs)[0].Attrs["spec"] != "ws-spec" || (*evs)[0].Attrs["anchor"] != "anchorsha" {
-		t.Errorf("events = %+v, want one triage.fastlane naming the spec and anchor", *evs)
-	}
-}
-
-// A re-run that finds the anchor already landed writes none and logs the found sha.
-func TestFastLaneFoundAnchorLogsLandedSha(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	g := stubSignalSeams(t)
-	g.succ[contract.KindSpec], g.trailers["Spec: ws-spec"] = "ws-spec", true
-	if err := reconcileSignal(openSignal()); err != nil {
-		t.Fatalf("reconcileSignal: %v", err)
-	}
-	if g.anchors != 0 || len(*evs) != 1 || (*evs)[0].Attrs["anchor"] != "landedsha" {
-		t.Errorf("anchors=%d events=%+v, want no write and one triage.fastlane with anchor=landedsha", g.anchors, *evs)
-	}
-}
-
-// Spec D6: every fast-lane failure — anchor read, anchor write, carry — logs one
-// triage.failed at Error with spec and err.
-func TestFastLaneFailureLogsTriageFailed(t *testing.T) {
-	for _, crash := range []string{"read", "anchor", "carry"} {
-		evs := eventlogtest.Capture(t)
-		g := stubSignalSeams(t)
-		g.succ[contract.KindSpec] = "ws-spec"
-		switch crash {
-		case "read":
-			landedBase = func(string) (string, error) { return "", errors.New("git broke") }
-		case "carry":
-			g.carryErr = errors.New("bd down")
-		default:
-			g.failAt = crash
-		}
-		if err := reconcileSignal(openSignal()); err == nil {
-			t.Fatalf("crash at %s: want an error", crash)
-		}
-		triage := slices.DeleteFunc(slices.Clone(*evs), func(e eventlogtest.Event) bool { return !strings.HasPrefix(e.Name, "triage.") })
-		if len(triage) != 1 || triage[0].Name != "triage.failed" || triage[0].Level != slog.LevelError ||
-			triage[0].Attrs["spec"] != "ws-spec" || triage[0].Attrs["err"] == nil {
-			t.Errorf("crash at %s: events = %+v, want one triage.failed with spec and err", crash, *evs)
-		}
-	}
-}
-
-// ADR 0069: a dirty main refusing the fast-lane anchor files nothing and carries
-// nothing; the *MainDirty surfaces as the error on the one triage.failed.
-func TestFastLaneMainDirtyFilesNoBead(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	g := stubSignalSeams(t)
-	g.succ[contract.KindSpec] = "ws-spec"
-	swap(t, &writeAnchor, func(string) (string, error) { return "", &git.MainDirty{Path: "/repo"} })
-	err := reconcileSignal(openSignal())
-	var dirty *git.MainDirty
-	if !errors.As(err, &dirty) {
-		t.Fatalf("reconcileSignal = %v, want *MainDirty", err)
-	}
-	if g.spawns != 0 || len(g.cuts) != 0 || len(g.seq) != 0 {
-		t.Errorf("a dirty main must write no bead: spawns=%d cuts=%v seq=%v", g.spawns, g.cuts, g.seq)
-	}
-	if len(*evs) != 1 || (*evs)[0].Name != "triage.failed" || !strings.Contains(fmt.Sprint((*evs)[0].Attrs["err"]), "clean main, then re-run") {
-		t.Errorf("events = %+v, want one triage.failed carrying the *MainDirty", *evs)
-	}
-}
-
-// An explicit --title wins over the default.
-func TestSeedSpecExplicitTitle(t *testing.T) {
-	g := stubSignalSeams(t)
-	if err := SeedSpec(openSignal(), "custom", "body"); err != nil {
-		t.Fatalf("SeedSpec: %v", err)
-	}
-	if got := g.bodies["ws-spec"].Title; got != "custom" {
-		t.Errorf("title = %q, want the explicit one", got)
-	}
-}
-
-// A crash at any step converges on re-run — with or without --spec: no second
-// Spec, no second anchor, no Chart; the carry re-runs idempotently and nothing
-// closes the Signal (the publish does, ADR 0096).
-func TestFastLaneRerunAfterCrashConverges(t *testing.T) {
-	for _, crash := range []string{"anchor", "carry"} {
-		for _, reseed := range []bool{true, false} {
-			g := stubSignalSeams(t)
-			if crash == "carry" {
-				g.carryErr = errors.New("bd down")
-			} else {
-				g.failAt = crash
-			}
-			sig := openSignal()
-			if err := SeedSpec(sig, "", "body"); err != nil {
-				t.Fatalf("SeedSpec: %v", err)
-			}
-			if err := reconcileSignal(sig); err == nil {
-				t.Fatalf("crash at %s: want an error", crash)
-			}
-			g.carryErr = nil
-			if reseed {
-				if err := SeedSpec(sig, "", "body"); err != nil {
-					t.Fatalf("re-SeedSpec: %v", err)
-				}
-			}
-			if err := reconcileSignal(sig); err != nil {
-				t.Fatalf("re-run after %s crash: %v", crash, err)
-			}
-			// A third run once the publish closed the Signal is a pure no-op.
-			g.seq = nil
-			sig.Status = "closed"
-			if err := reconcileSignal(sig); err != nil {
-				t.Fatalf("re-run on closed Signal: %v", err)
-			}
-			if g.spawns != 1 || g.anchors != 1 || len(g.seq) != 0 || len(g.cuts) != 0 {
-				t.Errorf("crash=%s reseed=%v: spawns=%d anchors=%d seq=%v cuts=%v, want 1/1/none/none",
-					crash, reseed, g.spawns, g.anchors, g.seq, g.cuts)
-			}
-			if _, chart := g.succ[contract.KindChart]; chart {
-				t.Errorf("crash=%s reseed=%v: a re-run spawned a Chart", crash, reseed)
-			}
-		}
-	}
-}
-
-// Refusal to mix legs: --spec on a Signal that already has a Chart successor fails
-// loudly and writes nothing.
-func TestSeedSpecRefusesChartedSignal(t *testing.T) {
-	g := stubSignalSeams(t)
-	g.succ[contract.KindChart] = "ws-chart"
-	if err := SeedSpec(openSignal(), "", "body"); err == nil {
-		t.Fatal("--spec on a charted Signal must error")
-	}
-	if g.spawns != 0 || g.anchors != 0 || len(g.seq) != 0 {
-		t.Errorf("refusal must change nothing: spawns=%d anchors=%d seq=%v", g.spawns, g.anchors, g.seq)
-	}
-}
-
-// The fast-lane Spec (ADR 0035 §10, Spec D2) is a leaf kind:spec carrying
-// Nami's body verbatim; the title defaults to exactly the Signal's title.
-func TestSpecFastLaneSuccessorShape(t *testing.T) {
-	sig := bd.Bead{ID: "s", Title: "a signal"}
-	s := specFastLaneSuccessor(sig, "", "the body")
-	if s.Kind != contract.KindSpec || s.Container {
-		t.Errorf("fast-lane Spec must be a kind:spec leaf, got kind=%q container=%v", s.Kind, s.Container)
-	}
-	if s.Title != "a signal" || s.Description != "the body" {
-		t.Errorf("got title=%q body=%q, want the defaulted title and the body verbatim", s.Title, s.Description)
-	}
-	if s := specFastLaneSuccessor(sig, "custom", "b"); s.Title != "custom" {
-		t.Errorf("explicit title overridden: %q", s.Title)
-	}
-}
-
-// A closed Signal with no Spec (REJECT/DUPLICATE) never takes the fast lane; one
-// already fast-laned and published (its Spec exists) re-runs as a no-op.
-func TestSeedSpecClosedSignal(t *testing.T) {
-	g := stubSignalSeams(t)
-	sig := openSignal()
-	sig.Status = "closed"
-	if err := SeedSpec(sig, "", "body"); err == nil || g.spawns != 0 {
-		t.Errorf("closed un-seeded Signal: err=%v spawns=%d, want an error and no spawn", err, g.spawns)
-	}
-	g.succ[contract.KindSpec] = "ws-spec"
-	if err := SeedSpec(sig, "", "body"); err != nil || g.spawns != 0 {
-		t.Errorf("closed fast-laned Signal: err=%v spawns=%d, want a no-op", err, g.spawns)
-	}
-}
-
-// --spec is valid only on a Signal, and needs a body.
-func TestSeedSpecUsageErrors(t *testing.T) {
-	g := stubSignalSeams(t)
-	if err := SeedSpec(bd.Bead{ID: "mc-c", Kind: contract.KindChart}, "", "body"); err == nil {
-		t.Error("--spec on a non-Signal must be a usage error")
-	}
-	if err := SeedSpec(openSignal(), "", "  \n"); err == nil {
-		t.Error("--spec with an empty body must error")
-	}
-	if g.spawns != 0 {
-		t.Errorf("usage errors must spawn nothing, spawned %d", g.spawns)
-	}
-}
-
-// A bare reconcile on a Signal with no successor takes the Chart leg: one Chart,
-// its branch cut, the carry, no anchor — and the Signal left open for the publish.
-func TestBareReconcileTakesChartLeg(t *testing.T) {
-	g := stubSignalSeams(t)
-	if err := reconcileSignal(openSignal()); err != nil {
-		t.Fatalf("reconcileSignal: %v", err)
-	}
-	if _, chart := g.succ[contract.KindChart]; !chart || !slices.Equal(g.cuts, []string{"chart/ws-chart"}) || g.anchors != 0 ||
-		!slices.Equal(g.seq, []string{"carry ws-sig ws-chart"}) {
-		t.Errorf("chart=%v cuts=%v anchors=%d seq=%v, want the Chart leg", chart, g.cuts, g.anchors, g.seq)
-	}
-	if _, spec := g.succ[contract.KindSpec]; spec {
-		t.Error("the Chart leg must not spawn a Spec")
-	}
-}
-
-// FR18 / Spec D1: a Signal with both a Spec and a Chart successor is a loud
-// error that mutates nothing — no anchor read or write, no spawn, cut, or carry.
-func TestReconcileSignalBothSuccessorsErrorsWithoutMutation(t *testing.T) {
-	g := stubSignalSeams(t)
-	g.succ[contract.KindSpec], g.succ[contract.KindChart] = "ws-spec", "ws-chart"
-	landedBase = func(string) (string, error) {
-		t.Error("landedBase read with both successors")
-		return "", git.ErrNotLanded
-	}
-	if err := reconcileSignal(openSignal()); err == nil {
-		t.Fatal("both successors present must error")
-	}
-	if g.spawns != 0 || g.anchors != 0 || len(g.cuts) != 0 || len(g.seq) != 0 {
-		t.Errorf("spawns=%d anchors=%d cuts=%v seq=%v, want nothing written", g.spawns, g.anchors, g.cuts, g.seq)
-	}
-}
-
-// A Chart successor present means the Chart leg: no "Spec:" anchor is written.
-func TestReconcileSignalChartedWritesNoAnchor(t *testing.T) {
-	g := stubSignalSeams(t)
-	g.succ[contract.KindChart] = "ws-chart"
-	if err := reconcileSignal(openSignal()); err != nil {
-		t.Fatalf("reconcileSignal: %v", err)
-	}
-	if g.anchors != 0 || g.spawns != 0 || len(g.cuts) != 1 {
-		t.Errorf("anchors=%d spawns=%d cuts=%v, want the Chart leg with no anchor", g.anchors, g.spawns, g.cuts)
-	}
-}
-
-// A failed LandedBase read is not absence: the leg errors and writes no anchor,
-// so a transient git failure can't stamp a second "Spec: <id>" commit.
-func TestFastLaneFailedAnchorReadWritesNothing(t *testing.T) {
-	g := stubSignalSeams(t)
-	g.succ[contract.KindSpec] = "ws-spec"
-	landedBase = func(string) (string, error) { return "", errors.New("git log: boom") }
-	if err := reconcileSignal(openSignal()); err == nil {
-		t.Fatal("a failed anchor read must error")
-	}
-	if g.anchors != 0 || len(g.seq) != 0 {
-		t.Errorf("anchors=%d seq=%v, want nothing written", g.anchors, g.seq)
-	}
-}
-
-// Spec D1 (ADR 0096), Signal→Chart and Signal→Spec: reconcile of an open
-// Signal carries its Ordering edges to the successor and never closes it — the
-// clean-exit publish does; a carry error fails the reconcile; a re-run on the open
-// Signal re-carries without a second successor; a closed Signal carries nothing.
-func TestReconcileSignalCarriesAndLeavesCloseToPublish(t *testing.T) {
-	for _, leg := range []contract.Kind{contract.KindChart, contract.KindSpec} {
-		succ := "ws-" + string(leg)
-		g := stubSignalSeams(t)
-		if leg == contract.KindSpec {
-			if err := SeedSpec(openSignal(), "", "body"); err != nil {
-				t.Fatalf("SeedSpec: %v", err)
-			}
-		}
-		if err := reconcileSignal(openSignal()); err != nil {
-			t.Fatalf("%s leg: reconcileSignal: %v", leg, err)
-		}
-		if want := []string{"carry ws-sig " + succ}; !slices.Equal(g.seq, want) {
-			t.Errorf("%s leg: seq = %v, want %v", leg, g.seq, want)
-		}
-
-		g.seq = nil
-		if err := reconcileSignal(openSignal()); err != nil {
-			t.Fatalf("%s leg: re-run: %v", leg, err)
-		}
-		if want := []string{"carry ws-sig " + succ}; !slices.Equal(g.seq, want) || g.spawns != 1 || len(g.cuts) > 1 || g.anchors > 1 {
-			t.Errorf("%s leg: re-run seq=%v spawns=%d cuts=%v anchors=%d, want a re-carry and no second successor, branch or anchor",
-				leg, g.seq, g.spawns, g.cuts, g.anchors)
-		}
-
-		g.seq, g.carryErr = nil, errors.New("bd down")
-		if err := reconcileSignal(openSignal()); err == nil {
-			t.Errorf("%s leg: a carry error must fail the reconcile", leg)
-		}
-
-		g.seq, g.carryErr = nil, nil
-		sig := openSignal()
-		sig.Status = "closed"
-		if err := reconcileSignal(sig); err != nil {
-			t.Fatalf("%s leg: re-entrant reconcileSignal: %v", leg, err)
-		}
-		if len(g.seq) != 0 {
-			t.Errorf("%s leg: a closed Signal must not carry again, got %v", leg, g.seq)
-		}
-	}
-}
-
-// Spec FR 18–19: a re-run after a drop deleted the Draft, on the still-open
-// Signal, spawns a successor with a new id — on the Chart leg with a new
-// chart/<newID>, on the fast lane (re-seeded) with a fresh Spec: <newID> anchor.
-func TestReconcileSignalRerunAfterDropSpawnsFreshSuccessor(t *testing.T) {
-	t.Run("chart", func(t *testing.T) {
-		g := stubSignalSeams(t)
-		if err := reconcileSignal(openSignal()); err != nil {
-			t.Fatalf("reconcileSignal: %v", err)
-		}
-		g.drop(contract.KindChart)
-		if err := reconcileSignal(openSignal()); err != nil {
-			t.Fatalf("re-run after drop: %v", err)
-		}
-		if g.spawns != 2 || !slices.Equal(g.cuts, []string{"chart/ws-chart", "chart/ws-chart2"}) ||
-			!slices.Equal(g.seq, []string{"carry ws-sig ws-chart", "carry ws-sig ws-chart2"}) {
-			t.Errorf("spawns=%d cuts=%v seq=%v, want a new Chart, branch and carry", g.spawns, g.cuts, g.seq)
-		}
-	})
-	t.Run("fast lane", func(t *testing.T) {
-		evs := eventlogtest.Capture(t)
-		g := stubSignalSeams(t)
-		for range 2 {
-			if err := SeedSpec(openSignal(), "", "body"); err != nil {
-				t.Fatalf("SeedSpec: %v", err)
-			}
-			if err := reconcileSignal(openSignal()); err != nil {
-				t.Fatalf("reconcileSignal: %v", err)
-			}
-			g.drop(contract.KindSpec)
-		}
-		if g.spawns != 2 || g.anchors != 2 || !g.trailers["Spec: ws-spec"] || !g.trailers["Spec: ws-spec2"] {
-			t.Errorf("spawns=%d anchors=%d trailers=%v, want a new Spec and a fresh anchor (the old one inert)", g.spawns, g.anchors, g.trailers)
-		}
-		if len(*evs) != 2 || (*evs)[1].Name != "triage.fastlane" || (*evs)[1].Attrs["spec"] != "ws-spec2" || (*evs)[1].Attrs["anchor"] != "anchorsha" {
-			t.Errorf("events = %+v, want a triage.fastlane per run, the last naming the new Spec and anchor", *evs)
-		}
-	})
 }
 
 // Spec D2, Chart→Spec: once the Spec body is authored, the Chart's
@@ -1708,5 +1261,744 @@ func TestCommittingPromptsIntegrateEffortBranch(t *testing.T) {
 		if !strings.Contains(got, "effort/") {
 			t.Errorf("%s must say the session works on its effort branch", name)
 		}
+	}
+}
+
+// swap points a package seam at v for the rest of the test.
+func swap[T any](t *testing.T, seam *T, v T) {
+	old := *seam
+	t.Cleanup(func() { *seam = old })
+	*seam = v
+}
+
+// Spec D2, FR11: the Spec a drained Chart spawns is born inside the Chart's
+// Initiative, and outside one when the Chart has none.
+func TestReconcileChartSpecJoinsTheChartsInitiative(t *testing.T) {
+	for _, tc := range []struct{ parent, want string }{{"ws-init", "ws-init"}, {"ws-closed-init", ""}, {"", ""}} {
+		t.Run(tc.parent, func(t *testing.T) {
+			stubChartSeams(t, func(string) (bd.Bead, error) {
+				return bd.Bead{ID: "ws-spec", Status: "deferred", Description: "the authored spec body"}, nil
+			})
+			swap(t, &initiativeOf, func(b bd.Bead) (string, error) {
+				if b.Parent == "ws-init" {
+					return "ws-init", nil
+				}
+				return "", nil
+			})
+			var spawned bd.Successor
+			spawnSuccessor = func(_ string, s bd.Successor) (string, bool, error) { spawned = s; return "ws-spec", true, nil }
+			chart := defoggedChart("open")
+			chart.Parent = tc.parent
+			if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+				t.Fatalf("reconcileChart: %v", err)
+			}
+			if spawned.Parent != tc.want {
+				t.Errorf("Spec Parent = %q, want %q", spawned.Parent, tc.want)
+			}
+		})
+	}
+}
+
+func TestSpecSuccessorCopiesTheChartsContext(t *testing.T) {
+	s := specSuccessor(bd.Bead{ID: "c", Labels: []string{"kind:chart", "context:apps-x"}})
+	if s.Context != "apps-x" {
+		t.Errorf("Spec Context = %q, want apps-x", s.Context)
+	}
+	if s := specSuccessor(bd.Bead{ID: "c", Labels: []string{"context:apps-x", "repo:vendor/x"}}); s.Repo != "vendor/x" {
+		t.Errorf("Spec Repo = %q, want vendor/x", s.Repo)
+	}
+}
+
+// Grilling's focus line comes from its parent Chart; a no-context Workspace never reads it.
+func TestLaunchGrillingFocus(t *testing.T) {
+	launch := func(label string, noShow bool) string {
+		oShow := showBead
+		t.Cleanup(func() { showBead = oShow })
+		showBead = func(id string) (bd.Bead, error) {
+			if noShow && id != "ws-grl" { // the grilling's own body read is the Thread: probe
+				t.Fatal("bd show of a container on a no-context Workspace")
+			}
+			if id == "ws-grl" {
+				return bd.Bead{ID: id, Parent: "ws-chart"}, nil
+			}
+			return bd.Bead{ID: id, Labels: []string{label}}, nil
+		}
+		h := &stubHarness{}
+		if _, err := (Nami{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-grl", Kind: contract.KindGrilling}); err != nil {
+			t.Fatal(err)
+		}
+		return h.inv.Prompt
+	}
+	repo := func(cfg string) {
+		d := t.TempDir()
+		exec.Command("git", "init", "-q", d).Run()
+		os.MkdirAll(d+"/.mugicrew", 0o755)
+		os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+		t.Chdir(d)
+	}
+	repo("")
+	plain := launch("context:a", true)
+	repo("[context.a]\npath = \"apps/a\"\n")
+	if got := launch("kind:chart", false); got != plain {
+		t.Error("unlabelled container changed the prompt")
+	}
+	if got := launch("context:a", false); got != plain+"\n\n"+contexts.FocusLine(map[string]string{"a": "apps/a"}, bd.Bead{Labels: []string{"context:a"}}) {
+		t.Errorf("labelled prompt is not old + focus line")
+	}
+}
+
+// ADR 0157: every Nami prompt that gains a focus line is the old render with no
+// [context] table, still the old render under an unlabelled container, and the old
+// render plus exactly the focus line under a labelled one. With no table, no
+// container is read through the bd show seam.
+func TestNamiFocusLineByteIdentity(t *testing.T) {
+	// ctr serves the container bead; on a no-context Workspace reading it is a failure.
+	ctr := func(label string, noShow bool) func(string) (bd.Bead, error) {
+		return func(id string) (bd.Bead, error) {
+			switch id {
+			case "ws-chart":
+				if noShow {
+					t.Fatal("bd show for a container on a no-context Workspace")
+				}
+				return bd.Bead{ID: id, Kind: contract.KindChart, Labels: []string{label}}, nil
+			case "ws-leaf":
+				if noShow {
+					t.Fatal("bd show for a leaf on a no-context Workspace")
+				}
+				return bd.Bead{ID: id, Parent: "ws-chart"}, nil
+			}
+			return bd.Bead{ID: id, Status: "open", Description: "authored", Labels: []string{label}}, nil
+		}
+	}
+	chartBead := func(label string, defogged bool) bd.Bead {
+		c := bd.Bead{ID: "ws-chart", Kind: contract.KindChart, Status: "open", Description: "Destination: ship it", Labels: []string{label}}
+		if defogged {
+			c.Labels = append(c.Labels, contract.LabelDefogged)
+		}
+		return c
+	}
+	runs := map[string]func(label string, noShow bool) string{
+		"speccing": func(label string, noShow bool) string {
+			authored := false
+			h := &recordingHarness{authored: &authored}
+			stubChartSeams(t, func(id string) (bd.Bead, error) {
+				if id == "ws-spec" && !authored {
+					return bd.Bead{ID: id, Status: "open", Description: placeholderSpecBody}, nil
+				}
+				return ctr(label, noShow)(id)
+			})
+			if err := reconcileChart(stubCtx{h}, chartBead(label, true)); err != nil {
+				t.Fatal(err)
+			}
+			return h.invs[0].Prompt
+		},
+		"promote-or-stamp": func(label string, noShow bool) string {
+			h := &recordingHarness{}
+			stubChartSeams(t, ctr(label, noShow))
+			if err := reconcileChart(stubCtx{h}, chartBead(label, false)); err != nil {
+				t.Fatal(err)
+			}
+			return h.invs[0].Prompt
+		},
+		"charting": func(label string, noShow bool) string {
+			swap(t, &showBead, func(id string) (bd.Bead, error) {
+				if id == "ws-survey" {
+					return bd.Bead{ID: id, Parent: "ws-chart"}, nil
+				}
+				return ctr(label, noShow)(id)
+			})
+			h := &stubHarness{}
+			if _, err := (Nami{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-survey", Kind: contract.KindSurvey}); err != nil {
+				t.Fatal(err)
+			}
+			return h.inv.Prompt
+		},
+		"research": func(label string, noShow bool) string {
+			swap(t, &showBead, ctr(label, noShow))
+			h := &stubHarness{}
+			if err := (Nami{}).Run(stubCtx{h}, contract.Bead{ID: "ws-leaf", Kind: contract.KindResearch}); err != nil {
+				t.Fatal(err)
+			}
+			return h.runInv.Prompt
+		},
+		"chart-conflict": func(label string, noShow bool) string {
+			b := openChartConflict()
+			chartConflictSeams(t, &b, nil)
+			swap(t, &showBead, func(id string) (bd.Bead, error) {
+				if id == "ws-cf" {
+					return b, nil
+				}
+				return ctr(label, noShow)(id)
+			})
+			h := &stubHarness{}
+			(Nami{}).Run(stubCtx{h}, contract.Bead{ID: "ws-cf", Kind: contract.KindChartConflict}) // the empty Output errors; the prompt is what is under test
+			return h.runInv.Prompt
+		},
+	}
+	repo := func(cfg string) {
+		d := t.TempDir()
+		exec.Command("git", "init", "-q", d).Run()
+		os.MkdirAll(d+"/.mugicrew", 0o755)
+		os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+		t.Chdir(d)
+	}
+	focus := "\n\n" + contexts.FocusLine(map[string]string{"a": "apps/a"}, bd.Bead{Labels: []string{"context:a"}})
+	for name, run := range runs {
+		repo("")
+		plain := run("context:a", true)
+		repo("[context.a]\npath = \"apps/a\"\n")
+		if got := run("kind:chart", false); got != plain {
+			t.Errorf("%s: unlabelled container changed the prompt", name)
+		}
+		if got := run("context:a", false); got != plain+focus {
+			t.Errorf("%s: labelled prompt is not old + focus line", name)
+		}
+	}
+}
+
+// A nested Chart's conflict resolves in the child: the session-start head, the
+// post-resolve check and the restore all act on the child repo, against the pinned
+// base (Spec FR 30). A no-context Workspace reads nothing about the Chart.
+func TestRunChartConflictActsOnTheNestedChild(t *testing.T) {
+	for _, nested := range []bool{true, false} {
+		b := openChartConflict()
+		var shown []string
+		var checkedIn, restoredIn []git.Repo
+		var kid string
+		if nested {
+			_, kid = contextstest.Workspace(t)
+		} else {
+			t.Chdir(t.TempDir())
+		}
+		chart := bd.Bead{ID: "ws-chart", Labels: []string{contextstest.Label}}
+		checkErr := &git.ResolveCheckFailed{Assertion: 2, Reason: "ADR-number clash"}
+		chartConflictSeams(t, &b, checkErr)
+		swap(t, &showBead, func(id string) (bd.Bead, error) {
+			shown = append(shown, id)
+			if id == "ws-chart" {
+				return chart, nil
+			}
+			return b, nil
+		})
+		swap(t, &checkResolved, func(r git.Repo, base, tip string) error { checkedIn = append(checkedIn, r); return checkErr })
+		swap(t, &restoreResolved, func(r git.Repo, start string) error { restoredIn = append(restoredIn, r); return nil })
+		ctx := &publishingCtx{stubCtx: stubCtx{&stubHarness{out: "Resolved: done"}}}
+		err := (Nami{}).Run(ctx, contract.Bead{ID: "ws-cf", Kind: contract.KindChartConflict})
+		var failed *git.ResolveCheckFailed
+		if !errors.As(err, &failed) {
+			t.Fatalf("nested=%v: err = %v, want the child's clash", nested, err)
+		}
+		want := git.Repo("")
+		if nested {
+			want = git.Repo(kid)
+		}
+		if !reflect.DeepEqual(checkedIn, []git.Repo{want}) || !reflect.DeepEqual(restoredIn, []git.Repo{want}) {
+			t.Errorf("nested=%v: check in %q, restore in %q, want both in %q", nested, checkedIn, restoredIn, want)
+		}
+		if !nested && slices.Contains(shown, "ws-chart") {
+			t.Errorf("a no-context Workspace read the Chart: %q", shown)
+		}
+	}
+}
+
+// The restore lands in the effort tree's child, never the human's main checkout of it.
+func TestRunChartConflictRestoresInTheEffortTreeChild(t *testing.T) {
+	ws, kid := contextstest.Workspace(t)
+	effort := filepath.Join(t.TempDir(), "effort")
+	contextstest.Git(t, ws, "worktree", "add", "-q", "-b", "effort/x", effort)
+	tree := filepath.Join(effort, "kid")
+	contextstest.Git(t, effort, "clone", "-q", kid, tree)
+	startKid := contextstest.Git(t, tree, "rev-parse", "HEAD")
+	contextstest.Git(t, kid, "commit", "-q", "--allow-empty", "-m", "human work")
+	humanHead := contextstest.Git(t, kid, "rev-parse", "HEAD")
+	t.Chdir(effort)
+
+	b := openChartConflict()
+	chart := bd.Bead{ID: "ws-chart", Labels: []string{contextstest.Label}}
+	chartConflictSeams(t, &b, nil)
+	swap(t, &showBead, func(id string) (bd.Bead, error) {
+		if id == "ws-chart" {
+			return chart, nil
+		}
+		return b, nil
+	})
+	swap(t, &checkResolved, func(git.Repo, string, string) error { return &git.ResolveCheckFailed{Assertion: 2, Reason: "x"} })
+	swap(t, &restoreResolved, git.Repo.RestoreResolved)
+	ctx := &publishingCtx{stubCtx: stubCtx{&commitHarness{stubHarness{out: "Resolved: done"}, func() {
+		contextstest.Git(t, tree, "commit", "-q", "--allow-empty", "-m", "agent work")
+	}}}}
+	if err := (Nami{}).Run(ctx, contract.Bead{ID: "ws-cf", Kind: contract.KindChartConflict}); err == nil {
+		t.Fatal("want the failed check")
+	}
+	if got := contextstest.Git(t, tree, "rev-parse", "HEAD"); got != startKid {
+		t.Errorf("effort child head = %s, want restored to %s", got, startKid)
+	}
+	if got := contextstest.Git(t, kid, "rev-parse", "HEAD"); got != humanHead {
+		t.Errorf("main checkout of the child moved to %s, want %s", got, humanHead)
+	}
+}
+
+// An unusable sequences config fails the post-resolve check like any refusal: the
+// session restores and the error surfaces.
+func TestChartConflictUnusableSequenceConfigRestores(t *testing.T) {
+	b := openChartConflict()
+	r := chartConflictSeams(t, &b, errors.New("sequences: .mugicrew/config.toml: unusable"))
+	err := (Nami{}).Run(&stubCtx{&stubHarness{out: "Resolved: done"}}, contract.Bead{ID: "ws-cf", Kind: contract.KindChartConflict})
+	if err == nil || !strings.Contains(err.Error(), "config.toml") || len(r.restores) != 1 || len(r.integrates) != 0 {
+		t.Errorf("err %v restores %v integrates %v, want the error, one restore, no integrate", err, r.restores, r.integrates)
+	}
+}
+
+// commitHarness runs a side effect during the session, as the agent's commits would.
+type commitHarness struct {
+	stubHarness
+	during func()
+}
+
+func (h *commitHarness) Run(c contract.Ctx, inv contract.Invocation) (contract.Result, error) {
+	h.during()
+	return h.stubHarness.Run(c, inv)
+}
+
+// Under gitlab a stale-pin trailer found by the Chart's reconcile files the Signal
+// before the Landing closes landed (Spec FR 20).
+func TestReconcileChartStalePinFilesSignal(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+	})
+	oStrategy := git.LandStrategyName
+	t.Cleanup(func() { git.LandStrategyName = oStrategy })
+	git.LandStrategyName = func() (string, error) { return git.LandStrategyGitlab, nil }
+	landingsOf = func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil }
+	closeBead = func(string, string) error { return nil }
+	var origins []string
+	swap(t, &spawnSignal, func(origin, _, _ string) (string, bool, error) {
+		origins = append(origins, origin)
+		return "sig", true, nil
+	})
+	swap(t, &landedTip, func(string) (string, bool) { return "oldtip", true })
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if len(origins) != 1 || origins[0] != "ws-landing" {
+		t.Errorf("origins %v, want one Signal from the Landing", origins)
+	}
+}
+
+// A nested Chart's land.landed carries context=/repo=/into= (Spec FR 30); a Workspace
+// Chart's carries none.
+func TestReconcileChartLandedEventNestedAttrs(t *testing.T) {
+	for _, nested := range []bool{true, false} {
+		stubChartSeams(t, func(string) (bd.Bead, error) {
+			return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+		})
+		swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+		swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
+		swap(t, &closeBead, func(string, string) error { return nil })
+		swap(t, &landedTip, func(string) (string, bool) { return "", false })
+		swap(t, &repoDirOf, func(bd.Bead) (git.Repo, string) {
+			if nested {
+				return git.Repo("/nonexistent/apps/a"), "apps/a"
+			}
+			return "", ""
+		})
+		evs := eventlogtest.Capture(t)
+		chart := defoggedChart("open")
+		chart.Labels = append(chart.Labels, "context:a")
+		if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+			t.Fatalf("reconcileChart: %v", err)
+		}
+		var got *eventlogtest.Event
+		for i, e := range *evs {
+			if e.Name == "land.landed" {
+				got = &(*evs)[i]
+			}
+		}
+		if got == nil {
+			t.Fatalf("nested=%v: no land.landed event in %v", nested, eventlogtest.Names(*evs))
+		}
+		if nested && (got.Attrs["context"] != "a" || got.Attrs["repo"] != "apps/a" || got.Attrs["into"] != "main") {
+			t.Errorf("nested attrs = %v, want context=a repo=apps/a into=main", got.Attrs)
+		}
+		if _, has := got.Attrs["repo"]; !nested && has {
+			t.Errorf("Workspace land.landed carries nested attrs: %v", got.Attrs)
+		}
+	}
+}
+
+// A nested Chart's stale-pin check reads the landed tip in the child, never the
+// Workspace's (Spec FR 11).
+func TestReconcileChartStalePinReadsTheNestedChild(t *testing.T) {
+	for _, nested := range []bool{true, false} {
+		if nested {
+			contextstest.Workspace(t)
+		} else {
+			t.Chdir(t.TempDir())
+		}
+		stubChartSeams(t, func(string) (bd.Bead, error) {
+			return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+		})
+		swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+		swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
+		swap(t, &closeBead, func(string, string) error { return nil })
+		swap(t, &spawnSignal, func(string, string, string) (string, bool, error) { return "sig", true, nil })
+		wsReads := 0
+		swap(t, &landedTip, func(string) (string, bool) { wsReads++; return "oldtip", true })
+		chart := defoggedChart("open")
+		if nested {
+			chart.Labels = append(chart.Labels, contextstest.Label)
+		}
+		if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+			t.Fatalf("nested=%v: reconcileChart: %v", nested, err)
+		}
+		if (wsReads > 0) == nested {
+			t.Errorf("nested=%v: Workspace tip reads = %d", nested, wsReads)
+		}
+	}
+}
+
+// A stale-pin MR merged after its Landing closed obsolete: the newest (closed) Landing
+// is flagged (Spec FR 20).
+func TestReconcileChartStalePinFlagsClosedLanding(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+	})
+	oStrategy := git.LandStrategyName
+	t.Cleanup(func() { git.LandStrategyName = oStrategy })
+	git.LandStrategyName = func() (string, error) { return git.LandStrategyGitlab, nil }
+	landingsOf = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-landing", Status: "closed", CloseReason: "obsolete: branch advanced without landing"}}, nil
+	}
+	closeBead = func(string, string) error { return nil }
+	var origins []string
+	swap(t, &spawnSignal, func(origin, _, _ string) (string, bool, error) {
+		origins = append(origins, origin)
+		return "sig", true, nil
+	})
+	swap(t, &landedTip, func(string) (string, bool) { return "oldtip", true })
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if len(origins) != 1 || origins[0] != "ws-landing" {
+		t.Errorf("origins %v, want one Signal from the closed Landing", origins)
+	}
+}
+
+// A drained Chart whose trailer another graph landed files the hold Task (FR 41).
+func TestReconcileChartForeignLandFilesHold(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	foreign := &git.ForeignLanding{Trailer: "Chart: ws-chart", Ours: "a", Theirs: "b", Sha: "f00d"}
+	swap(t, &landedBase, func(string) (string, error) { return "", foreign })
+	var keys []string
+	swap(t, &bd.SpawnBlockingTask, func(_, key, _, _ string) (string, bool, error) { keys = append(keys, key); return "ws-t", true, nil })
+	var fe *git.ForeignLanding
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); !errors.As(err, &fe) {
+		t.Fatalf("err = %v, want *ForeignLanding", err)
+	}
+	if !reflect.DeepEqual(keys, []string{"Foreign: f00d\n"}) {
+		t.Errorf("hold keys = %q, want one Foreign: f00d", keys)
+	}
+}
+
+// A grilling whose body carries a "Thread:" key line launches the reviewer-change
+// variant; a quoted "> Thread:" or no line keeps the plain prompt byte-for-byte.
+func TestLaunchGrillingThreadVariant(t *testing.T) {
+	for name, c := range map[string]struct {
+		body    string
+		variant bool
+	}{
+		"key line":   {"Thread: abc123\nwhy", true},
+		"later line": {"intro\nThread: abc123", true},
+		"quoted":     {"> Thread: abc123", false},
+		"none":       {"plain question", false},
+	} {
+		swap(t, &showBead, func(string) (bd.Bead, error) { return bd.Bead{Description: c.body}, nil })
+		h := &stubHarness{}
+		if _, err := (Nami{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-grl", Kind: contract.KindGrilling}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		p := h.inv.Prompt
+		if got := strings.Contains(p, "A reviewer asked for this change"); got != c.variant {
+			t.Errorf("%s: variant=%v want %v", name, got, c.variant)
+		}
+		if c.variant {
+			if !strings.Contains(p, contract.DraftInstruction("ws-grl")) || !strings.Contains(p, "bd close ws-grl") {
+				t.Errorf("%s: variant must keep Draft instruction and close:\n%s", name, p)
+			}
+		} else if !strings.HasSuffix(p, grillingPrompt("ws-grl")) || strings.Contains(p, "reviewer asked") {
+			t.Errorf("%s: plain prompt changed:\n%s", name, p)
+		}
+	}
+}
+
+func TestThreadGrillingPromptRendersCleanly(t *testing.T) {
+	got := threadGrillingPrompt("mc-y")
+	if strings.Contains(got, "%!") {
+		t.Errorf("stray format error in prompt:\n%s", got)
+	}
+	if want := threadGrillingTmpl + "\n" + grillingPrompt("mc-y"); got != want {
+		t.Errorf("prompt != preamble + grillingPrompt:\n%s", got)
+	}
+}
+
+// Spec FR 28: the chart-conflict prompt routes number-clash and the legacy
+// adr-number-clash token to the one renumber section.
+func TestChartConflictPromptRoutesBothClashTokens(t *testing.T) {
+	got := chartConflictPrompt("mc-x")
+	for _, want := range []string{"`number-clash` (legacy: `adr-number-clash`", "## Variant: number-clash (or legacy adr-number-clash)", "sequence-renumber.md"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("chart-conflict prompt lacks %q", want)
+		}
+	}
+}
+
+// stubRenumberChart is a landed gitlab Chart over stubbed mint seams; seq records the
+// order of the mint, the Landing close and the Spec spawn.
+func stubRenumberChart(t *testing.T, clashes []git.PostLandClash, clashErr error) (seq *[]string, builds *int) {
+	t.Helper()
+	stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+	})
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	seq, builds = &[]string{}, new(int)
+	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
+	swap(t, &landedTip, func(string) (string, bool) { return "", false })
+	swap(t, &closeBead, func(id, _ string) error { *seq = append(*seq, "close "+id); return nil })
+	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return clashes, clashErr })
+	swap(t, &initiativeOf, func(bd.Bead) (string, error) { return "", nil })
+	swap(t, &subtreeIDs, func(string) ([]string, error) { return nil, nil })
+	swap(t, &cutBranch, func(string, string) (bool, error) { return true, nil })
+	swap(t, &buildChildren, func(string) (int, error) { return *builds, nil })
+	swap(t, &spawnChildIfAbsent, func(string, bd.Successor) (string, bool, error) { *builds++; return "ws-build", true, nil })
+	swap(t, &spawnSuccessor, func(_ string, s bd.Successor) (string, bool, error) {
+		if s.Kind == contract.KindCheckpoint {
+			*seq = append(*seq, "renumber "+s.Title)
+			return "ws-ren", true, nil
+		}
+		*seq = append(*seq, "spec")
+		return "ws-spec", true, nil
+	})
+	return seq, builds
+}
+
+// The later side's landed Chart files one renumber Checkpoint with one Build before its
+// Landing closes and its Spec spawns.
+func TestReconcileChartLaterSideMintsRenumberFirst(t *testing.T) {
+	seq, builds := stubRenumberChart(t, []git.PostLandClash{{Added: "docs/adr/0009-x.md", Others: []string{"docs/adr/0009-y.md"}, Mainline: "tip"}}, nil)
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if want := []string{"renumber Renumber docs/adr/0009-x.md from ws-chart", "close ws-landing", "spec"}; !slices.Equal(*seq, want) || *builds != 1 {
+		t.Errorf("seq = %v, builds = %d, want %v and one Build", *seq, *builds, want)
+	}
+}
+
+// The earlier side (no clashes) files nothing and proceeds as today.
+func TestReconcileChartEarlierSideFilesNoRenumber(t *testing.T) {
+	seq, builds := stubRenumberChart(t, nil, nil)
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if want := []string{"close ws-landing", "spec"}; !slices.Equal(*seq, want) || *builds != 0 {
+		t.Errorf("seq = %v, builds = %d, want %v and no Build", *seq, *builds, want)
+	}
+}
+
+// A check error leaves the Chart open (no close, no Spec); the re-run, with the
+// Checkpoint and Build already filed, adds no second Build.
+func TestReconcileChartCheckErrorLeavesChartOpenAndRerunDoesNotDuplicate(t *testing.T) {
+	clashes := []git.PostLandClash{{Added: "docs/adr/0009-x.md", Others: []string{"docs/adr/0009-y.md"}, Mainline: "tip"}}
+	seq, _ := stubRenumberChart(t, nil, errors.New("git down"))
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err == nil {
+		t.Fatal("want the check error")
+	}
+	if len(*seq) != 0 {
+		t.Errorf("seq = %v, want nothing closed or spawned", *seq)
+	}
+	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return clashes, nil })
+	for range 2 {
+		if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+			t.Fatalf("reconcileChart: %v", err)
+		}
+	}
+	n := 0
+	swap(t, &buildChildren, func(string) (int, error) { return 1, nil })
+	swap(t, &spawnChildIfAbsent, func(string, bd.Successor) (string, bool, error) { n++; return "", false, nil })
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil || n != 0 {
+		t.Errorf("re-run with a Build filed: err = %v, spawned %d Builds, want none", err, n)
+	}
+}
+
+// Under land_strategy=local nothing new runs.
+func TestReconcileChartLocalStrategyRunsNoClashCheck(t *testing.T) {
+	stubRenumberChart(t, nil, nil)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyLocal, nil })
+	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) {
+		t.Error("the clash check must not run under local")
+		return nil, nil
+	})
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+}
+
+// ADR 0262: a requested rebase is a variant of the existing conflict bodies; both
+// shapes round-trip through the pins and the variant read, and Route sends them
+// to Replace at Tip: like any conflict.
+func TestRequestedBodiesRoundTrip(t *testing.T) {
+	for name, body := range map[string]string{
+		"chart":      ChartConflictBody("mc-x", "b4se", "t1p", ConflictRequested, nil),
+		"checkpoint": RequestedCheckpointBody("mc-cp", "b4se", "t1p"),
+	} {
+		base, _ := git.ParseBase(body)
+		tip, _ := git.ParseTip(body)
+		if base != "b4se" || tip != "t1p" || BodyVariant(body) != ConflictRequested {
+			t.Errorf("%s: base %q tip %q variant %q", name, base, tip, BodyVariant(body))
+		}
+		if strings.Contains(body, "clashes:") {
+			t.Errorf("%s: requested body must carry no clashes:", name)
+		}
+	}
+	if !strings.Contains(ChartConflictBody("mc-x", "b", "t", ConflictRequested, nil), "not a land conflict") {
+		t.Error("chart header must name a requested rebase")
+	}
+	if BodyVariant("Checkpoint-land rebase conflict\nBase: b\nTip: t") != "" {
+		t.Error("a body without variant: reads as none")
+	}
+	if RequestedChartTitle("Foo") != "Foo rebases onto main" || RequestedCheckpointTitle("mc-cp") != "Checkpoint mc-cp rebases onto main" {
+		t.Error("titles")
+	}
+}
+
+func TestChartConflictPromptHasRequestedArm(t *testing.T) {
+	if p := chartConflictPrompt("mc-x"); !strings.Contains(p, "## Variant: requested") {
+		t.Error("chart-conflict prompt lacks a requested arm")
+	}
+}
+
+func TestChartConflictBodyRequestedHeaderNamesTheRebase(t *testing.T) {
+	body := ChartConflictBody("mc-x", "b4se", "t1p", ConflictRequested, nil)
+	if !strings.HasPrefix(body, "Requested rebase") || strings.Contains(body, "reconcileChart re-lands") {
+		t.Errorf("requested body = %q, want its own header with no land-conflict text", body)
+	}
+}
+
+// Under gitlab a landed Chart's open MR on chart/<id> closes before the Landing, with a
+// land.mr_closed event; none open makes no close call; a CloseMR error leaves Landing and
+// Chart open; local makes no Forge call (Spec FR 3-11).
+func TestReconcileChartClosesLandedMR(t *testing.T) {
+	for _, tc := range []struct {
+		name, strategy string
+		open           *forge.MR
+		closeErr       error
+		wantClosed     []int
+		wantOrder      []string // MR close, then the Landing
+		wantFind       bool
+	}{
+		{"open MR", git.LandStrategyGitlab, &forge.MR{IID: 7}, nil, []int{7}, []string{"mr", "bead:ws-landing"}, true},
+		{"none open", git.LandStrategyGitlab, nil, nil, nil, []string{"bead:ws-landing"}, true},
+		{"close fails", git.LandStrategyGitlab, &forge.MR{IID: 7}, errors.New("boom"), []int{7}, []string{"mr"}, true},
+		{"local", git.LandStrategyLocal, &forge.MR{IID: 7}, nil, nil, []string{"bead:ws-landing"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubChartSeams(t, func(string) (bd.Bead, error) {
+				return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+			})
+			swap(t, &git.LandStrategyName, func() (string, error) { return tc.strategy, nil })
+			swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
+			var order []string
+			swap(t, &closeBead, func(id, _ string) error { order = append(order, "bead:"+id); return nil })
+			finds, mrClosed := 0, []int(nil)
+			swap(t, &forgeFindOpenMR, func(forge.Project, string) (*forge.MR, error) { finds++; return tc.open, nil })
+			swap(t, &forgeCloseMR, func(_ forge.Project, iid int) error {
+				mrClosed = append(mrClosed, iid)
+				order = append(order, "mr")
+				return tc.closeErr
+			})
+			evs := eventlogtest.Capture(t)
+			err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open"))
+			if (err != nil) != (tc.closeErr != nil) {
+				t.Fatalf("err = %v", err)
+			}
+			if !reflect.DeepEqual(mrClosed, tc.wantClosed) {
+				t.Errorf("closed MRs %v, want %v", mrClosed, tc.wantClosed)
+			}
+			if (finds > 0) != tc.wantFind {
+				t.Errorf("find calls = %d", finds)
+			}
+			if !slices.Equal(order, tc.wantOrder) {
+				t.Errorf("order %v, want %v", order, tc.wantOrder)
+			}
+			if got := slices.Contains(eventlogtest.Names(*evs), "land.mr_closed"); got != (tc.closeErr == nil && len(tc.wantClosed) > 0) {
+				t.Errorf("land.mr_closed = %v", got)
+			}
+		})
+	}
+}
+
+// A nested Chart's MR is found and closed on the child's project (Spec FR 8).
+func TestReconcileChartClosesLandedMRNested(t *testing.T) {
+	stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+	})
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &closeBead, func(string, string) error { return nil })
+	swap(t, &repoDirOf, func(bd.Bead) (git.Repo, string) { return git.Repo("/nonexistent/apps/a"), "apps/a" })
+	var asked git.Repo
+	swap(t, &forgeProject, func(r git.Repo) (forge.Project, error) { asked = r; return forge.Project{ID: "g%2Fchild"}, nil })
+	var found, closedOn forge.Project
+	swap(t, &forgeFindOpenMR, func(p forge.Project, _ string) (*forge.MR, error) { found = p; return &forge.MR{IID: 3}, nil })
+	swap(t, &forgeCloseMR, func(p forge.Project, _ int) error { closedOn = p; return nil })
+	evs := eventlogtest.Capture(t)
+	chart := defoggedChart("open")
+	chart.Labels = append(chart.Labels, "context:a")
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+		t.Fatal(err)
+	}
+	if asked != "/nonexistent/apps/a" || found.ID != "g%2Fchild" || closedOn.ID != "g%2Fchild" {
+		t.Errorf("project asked %q found %v closed %v", asked, found, closedOn)
+	}
+	for _, e := range *evs {
+		if e.Name == "land.mr_closed" && e.Attrs["repo"] == "apps/a" {
+			return
+		}
+	}
+	t.Errorf("no nested land.mr_closed in %v", eventlogtest.Names(*evs))
+}
+
+// A Forge 429 on the landed MR close is held once: nil error, nothing closes, one
+// land.rate_limited and no land.landed; the next tick that clears closes the MR, then the Landing.
+func TestReconcileChartHoldsRateLimitedMRClose(t *testing.T) {
+	closed := stubChartSeams(t, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+	})
+	rateLimited.Clear()
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
+	var order []string
+	swap(t, &closeBead, func(id, _ string) error { order = append(order, "bead:"+id); return nil })
+	findErr := error(forge.ErrRateLimited)
+	swap(t, &forgeFindOpenMR, func(forge.Project, string) (*forge.MR, error) {
+		if findErr != nil {
+			return nil, fmt.Errorf("read: %w", findErr)
+		}
+		return &forge.MR{IID: 7}, nil
+	})
+	swap(t, &forgeCloseMR, func(_ forge.Project, iid int) error { order = append(order, "mr"); return nil })
+	evs := eventlogtest.Capture(t)
+	for range 2 {
+		if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+			t.Fatalf("err = %v, want the 429 held", err)
+		}
+	}
+	if len(order) != 0 || len(*closed) != 0 || !slices.Equal(eventlogtest.Names(*evs), []string{"land.rate_limited"}) {
+		t.Fatalf("order %v closed %v events %v", order, *closed, eventlogtest.Names(*evs))
+	}
+	findErr = nil
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(order, []string{"mr", "bead:ws-landing"}) {
+		t.Errorf("order %v, want the MR then the Landing", order)
 	}
 }

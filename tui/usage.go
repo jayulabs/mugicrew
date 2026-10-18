@@ -1,12 +1,13 @@
 package tui
 
-// The Plan usage poller (Spec §4): the reader runs off the event loop on
+// The Plan usage poller (FR53; Spec §4): the reader runs off the event loop on
 // its own 300s tick, the Model keeps the state and backoff, and render only
 // formats what is cached (ADR 0101, ADR 0098).
 
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ const (
 	usageErrPct     = 95
 	usageBackoff    = 300 * time.Second // a RetryAfter with no retry-after
 	usageMaxBackoff = 3600 * time.Second
-	usageFloor      = 60 * time.Second  // Stats entry and f5 read only past this
+	usageFloor      = 60 * time.Second  // entering Stats and f5 on it read only past this
 	usageStale      = 600 * time.Second // the band dims a good read older than this
 )
 
@@ -30,8 +31,8 @@ var (
 	clock         = time.Now          // the poller's clock, a var so cadence tests pin it
 	usageInterval = 300 * time.Second // the background poll, a var so tests don't wait on its tick
 
-	usageWarnSty = waitSty // the amber warn colour
-	usageErrSty  = warn    // the red error colour
+	usageWarnSty = waitSt // the amber warn colour
+	usageErrSty  = warnSt // the red error colour
 )
 
 // usageReader is claudecode.ReadUsage's shape: the token that last got a 401 in,
@@ -45,6 +46,18 @@ type usageMsg struct {
 	usage contract.PlanUsage
 	token string
 	err   error
+}
+
+// usageState is the poller's cache and backoff; the shell owns it and render only
+// formats it.
+type usageState struct {
+	usageRead   usageReader        // the Plan usage reader (WithUsage); nil = unavailable, no polling
+	usage       contract.PlanUsage // the last good Plan usage read
+	usageAt     time.Time          // when that read landed; zero = no good read yet
+	usageErr    error              // the latest read's failure, its text the unavailable reason; nil after a good read
+	usageNext   time.Time          // a RetryAfter backoff: polls before it send nothing
+	usageReadAt time.Time          // the latest read's fire or landing, for the 60s floor
+	usageSkip   string             // the token that last got a 401, passed back as skipToken
 }
 
 // WithUsage hands the model its Plan usage reader (main wires claudecode.ReadUsage).
@@ -100,6 +113,7 @@ func (m *Model) foldUsage(msg usageMsg) {
 	switch {
 	case msg.err == nil:
 		m.usage, m.usageAt = msg.usage, now
+		logUsageRead(msg.usage)
 	case errors.Is(msg.err, claudecode.ErrTokenExpired):
 		m.usageSkip = msg.token // a new token in the file differs, so it clears itself
 	case errors.As(msg.err, &ra):
@@ -110,6 +124,26 @@ func (m *Model) foldUsage(msg usageMsg) {
 		m.usageNext = now.Add(min(d, usageMaxBackoff))
 		m.usageErr = fmt.Errorf("rate-limited, retry %s", m.usageNext.Format("15:04"))
 	}
+}
+
+// logUsageRead records a good read as a usage.read event: the Plan usage history
+// the Stats tab charts (ADR 0260). Attrs are flat, an absent window or zero reset
+// omits its own, and there is no top-level kind (it would join the f picker).
+func logUsageRead(u contract.PlanUsage) {
+	var attrs []any
+	for _, w := range []struct {
+		key string
+		win *contract.UsageWindow
+	}{{"five_hour", u.FiveHour}, {"weekly", u.Weekly}} {
+		if w.win == nil {
+			continue
+		}
+		attrs = append(attrs, w.key+"_pct", w.win.Pct)
+		if !w.win.ResetsAt.IsZero() {
+			attrs = append(attrs, w.key+"_resets_at", w.win.ResetsAt)
+		}
+	}
+	slog.Info("usage.read", attrs...)
 }
 
 // usageWindows is the last good read's windows, labelled as the tab bar and band show them.
@@ -136,7 +170,7 @@ func (m Model) usageWarning() string {
 		if w.win.Pct >= usageErrPct {
 			st = usageErrSty
 		}
-		s += dim.Render(" · ") + st.Render(fmt.Sprintf("%s %d%%", w.label, int(w.win.Pct)))
+		s += dimSt.Render(" · ") + st.Render(fmt.Sprintf("%s %d%%", w.label, int(w.win.Pct)))
 	}
 	return s
 }
@@ -147,11 +181,11 @@ func (m Model) usageWarning() string {
 func (m Model) usageBand() string {
 	switch {
 	case m.usageAt.IsZero() && m.usageErr != nil:
-		return warn.Render("usage unavailable: " + m.usageErr.Error())
+		return warnSt.Render("usage unavailable: " + m.usageErr.Error())
 	case m.usageAt.IsZero() && m.usageRead == nil:
-		return warn.Render("usage unavailable")
+		return warnSt.Render("usage unavailable")
 	case m.usageAt.IsZero():
-		return dim.Render("reading plan usage…")
+		return dimSt.Render("reading plan usage…")
 	}
 	now := clock()
 	stale := m.usageErr != nil || now.Sub(m.usageAt) > usageStale
@@ -174,7 +208,7 @@ func (m Model) usageBand() string {
 	}
 	s := strings.Join(parts, " · ")
 	if stale {
-		return dim.Render(s + " · as of " + m.usageAt.Format("15:04"))
+		return dimSt.Render(s + " · as of " + m.usageAt.Format("15:04"))
 	}
 	return s
 }

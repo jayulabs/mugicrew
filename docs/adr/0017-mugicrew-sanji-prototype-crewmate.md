@@ -9,6 +9,9 @@ forked from a skill), and the crewmate Chart's settled frame (Sanji = HITL, and
 "not every crewmate needs a rich interface"). Records the input to the
 Spec for the Sanji (prototype) crewmate.
 
+> **Amended by ADR 0147:** the `git` package is no longer local-only in
+> principle: the `gitlab` land strategy is the first remote seam (a stub for now).
+
 ## Context
 
 Sanji owns `prototype` — a defog bead resolved by a high-fidelity throwaway that

@@ -7,9 +7,16 @@ Review bead: {{.ReviewID}}  (read it with: bd show {{.ReviewID}})
 Checkpoint under review: {{.CheckpointID}}
 {{if .SpecID -}}
 Spec this Checkpoint implements: {{.SpecID}}
-{{- else if .SurgeryID -}}
-Surgery this Checkpoint carries out: {{.SurgeryID}}  (no Spec: the Surgery is the intent)
-{{- else -}}
+{{- end}}
+{{- if and .SpecID .Surgeries}}
+{{end}}
+{{- if .Surgeries -}}
+Surgeries on this Checkpoint{{if not .SpecID}} (no Spec: the Surgeries are the intent){{end}}:
+{{- range .Surgeries}}
+- {{.ID}}: {{.Title}}
+{{- end}}
+{{- end}}
+{{- if not (or .SpecID .Surgeries) -}}
 No Spec: this Checkpoint is headless, so the Spec axis reports "no spec available".
 {{- end}}
 
@@ -32,19 +39,43 @@ findings→beads protocol below instead of a report.
 The Spec axis's source is {{.SpecID}}: read its body with `bd show {{.SpecID}}`.
 Read crew doc checkpoint-rules.md: judge the **effective** Spec (its AMENDMENT
 rule), and file Critiques and pivots as it says, with the commands below.
-{{- else if .SurgeryID -}}
-The Spec axis's source is the Surgery {{.SurgeryID}}: read its description and
-comments with `bd show {{.SurgeryID}}` as the human's intent, and run the axis's
-Surgery check: report only a stated change that is missing or partial, or one
-implemented wrong — no scope-creep check. If you think the intent itself is
-wrong, file that as a Critique; the human settles it at Approval. Read crew doc
-checkpoint-rules.md and file Critiques as it says, with the command below.
+{{- if .Surgeries}}
+
+For commits trailered `Surgery: <id>` run the Surgery check (missing/partial and
+wrong only) against that Surgery bead (`bd show <id>`) instead, and exclude those
+commits from scope-creep (b).
+{{- end}}
+{{- else if .Surgeries -}}
+The Spec axis's source is the Surgeries: read each with `bd show <id>` as the
+human's intent, and run the axis's Surgery check once per Surgery over its own
+commits (trailered `Surgery: <id>`): report only a stated change that is missing
+or partial, or one implemented wrong — no scope-creep check. A Surgery with no
+trailered commits (an abandoned one) gets no check. If you think the intent
+itself is wrong, file that as a Critique; the human settles it at Approval. Read
+crew doc checkpoint-rules.md and file Critiques as it says, with the command
+below.
 {{- else -}}
 No Spec id was given: the Spec axis reports "no spec available" and files
 nothing. Read crew doc checkpoint-rules.md and file Critiques as it says, with
 the command below.
 {{- end}}
 
+{{if .OutOfScope -}}
+## Changes outside the {{.Context}} context
+
+This Checkpoint targets the {{printf "%q" .Context}} context ({{.Subtree}}/). These changed paths fall
+outside it (glossaries, ADRs and .mugicrew/config.toml are already excluded):
+{{range .OutOfScope}}
+- {{.}}
+{{- end}}
+
+Judge each as part of the Spec axis. A crossing that neither the Spec nor the work
+justifies is scope creep: file a blocking Critique for it. For the
+justified ones, add ONE comment on this Review listing each path and why:
+
+    bd comments add {{.ReviewID}} "<path>: <why it had to change>; ..."
+
+{{end -}}
 ## Every bead you file is a Draft
 
 {{.Draft}}
@@ -62,6 +93,8 @@ matter of taste.
 
       bd create --type task --labels kind:critique,drafted-by:{{.ReviewID}} -s deferred --no-inherit-labels --parent {{.CheckpointID}} \
         --title "<what's wrong>" --description "<the defect, where it is, and how to fix it>"
+
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 - **Nits & smells** (naming, minor duplication, style, non-blocking smells) do NOT
   each get their own bead. Instead, file **exactly ONE aggregate "nits & smells"
@@ -100,11 +133,9 @@ Critiques — they wait behind the pivot's gate.
 
 Work in the external world that you find mid-run (outside the bead graph and
 the code: a repo to create, a token to mint, a console to click through) is an
-offshoot Signal, never a Task, so intake gates it like any other work:
-
-    bd create --type task --labels kind:signal,drafted-by:{{.ReviewID}} -s deferred --no-inherit-labels \
-      --deps discovered-from:{{.ReviewID}} \
-      --title "<the external work>" --description "<what is needed and why>"
+offshoot Signal, never a Task, so intake gates it like any other work. Read crew
+doc signal-filing.md and file it in its offshoot form,
+discovered-from {{.ReviewID}}; the description holds what is needed and why.
 
 ## Roll forward, don't duplicate
 

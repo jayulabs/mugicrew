@@ -2,11 +2,14 @@ package zoro
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
@@ -35,7 +38,7 @@ func (h *recordingHarness) LaunchCommand(inv contract.Invocation) (contract.Laun
 	return contract.AgentCommand{}, nil
 }
 
-func (h *recordingHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *recordingHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -163,7 +166,7 @@ func TestLaunchPivotComposesSession(t *testing.T) {
 		"git worktree remove", // ...cleaned up after it lands
 		"a fast-laned Spec has none — nothing is superseded",       // escalate on a fast-laned Spec
 		"cuts its `chart/` branch",                                 // escalate: the fresh Chart's branch
-		"fresh `Spec:` anchor on main",                             // confirm: a fast-laned Spec's lineage
+		"fresh `Anchor:` pin on the Spec bead",                             // confirm: a fast-laned Spec's lineage
 		"The loop slices",                                          // confirm: the new Spec is sliced
 		"already in the body",                                      // why the lead pivot still sweeps
 		"folded into the FR it names", "starts with no Amendments", // confirm: the corrected body (FR39)
@@ -374,7 +377,7 @@ func TestReconcileSpecHeadlessCutsFromSpecAnchor(t *testing.T) {
 // branch) — never a rev-parse main fallback.
 func TestReconcileSpecMissingAnchorHardFailsCutsNothing(t *testing.T) {
 	r := &specSeamRec{}
-	stubSpecSeams(t, r, "", false, errors.New("no landed commit for trailer"))
+	stubSpecSeams(t, r, "", false, git.ErrNotLanded)
 
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a missing anchor must hard-fail")
@@ -384,6 +387,20 @@ func TestReconcileSpecMissingAnchorHardFailsCutsNothing(t *testing.T) {
 	}
 	if len(r.cuts) != 0 {
 		t.Errorf("a missing anchor must cut no branch, got %v", r.cuts)
+	}
+}
+
+// A foreign land of the base trailer is a refusal: the error surfaces, nothing is cut (ADR 0187 §4).
+func TestReconcileSpecForeignLandRefusesCutsNothing(t *testing.T) {
+	r := &specSeamRec{}
+	stubSpecSeams(t, r, "ws-chart", true, &git.ForeignLanding{Trailer: "Chart: ws-chart", Ours: "a", Theirs: "b", Sha: "f00d"})
+
+	var fe *git.ForeignLanding
+	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); !errors.As(err, &fe) {
+		t.Fatalf("err = %v, want *ForeignLanding", err)
+	}
+	if len(r.spawned)+len(r.cuts) != 0 {
+		t.Errorf("a foreign land must spawn %v and cut %v nothing", r.spawned, r.cuts)
 	}
 }
 
@@ -642,5 +659,224 @@ func TestZoroPromptsSkillFree(t *testing.T) {
 		if strings.Contains(slicing, dup) {
 			t.Errorf("slicing prompt repeats preamble text %q", dup)
 		}
+	}
+}
+
+// stubInitiative stands in for bd.InitiativeOf: a bead parented under ws-init is
+// in an unclosed Initiative; any other parent (none, or a closed one) yields none.
+func stubInitiative(t *testing.T) {
+	t.Helper()
+	o := initiativeOf
+	t.Cleanup(func() { initiativeOf = o })
+	initiativeOf = func(b bd.Bead) (string, error) {
+		if b.Parent == "ws-init" {
+			return "ws-init", nil
+		}
+		return "", nil
+	}
+}
+
+// Spec D2, FR11: the Checkpoint a Spec cuts is born inside the Spec's
+// Initiative, and outside one when the Spec has none.
+func TestReconcileSpecCheckpointJoinsTheSpecsInitiative(t *testing.T) {
+	for _, tc := range []struct{ parent, want string }{{"ws-init", "ws-init"}, {"ws-closed-init", ""}, {"", ""}} {
+		t.Run(tc.parent, func(t *testing.T) {
+			r := &specSeamRec{builds: 1}
+			stubSpecSeams(t, r, "ws-chart", true, nil)
+			stubInitiative(t)
+			spec := openSpec()
+			spec.Parent = tc.parent
+			if err := reconcileSpec(stubCtx{&recordingHarness{}}, spec); err != nil {
+				t.Fatalf("reconcileSpec: %v", err)
+			}
+			if len(r.spawned) != 1 || r.spawned[0].Parent != tc.want {
+				t.Errorf("spawned %+v, want one Checkpoint with Parent %q", r.spawned, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckpointSuccessorCopiesTheSpecsContext(t *testing.T) {
+	if s := checkpointSuccessor(bd.Bead{ID: "ws-spec", Labels: []string{"context:apps-x"}}); s.Context != "apps-x" {
+		t.Errorf("Checkpoint Context = %q, want apps-x", s.Context)
+	}
+	if s := checkpointSuccessor(bd.Bead{ID: "ws-spec", Labels: []string{"context:apps-x", "repo:vendor/x"}}); s.Repo != "vendor/x" {
+		t.Errorf("Checkpoint Repo = %q, want vendor/x", s.Repo)
+	}
+	if s := checkpointSuccessor(bd.Bead{ID: "ws-spec"}); s.Context != "" {
+		t.Errorf("unlabelled Spec yields Context %q, want none", s.Context)
+	}
+}
+
+// Pivot's focus line is the labelled Checkpoint's alone, appended to the old prompt.
+func TestLaunchPivotFocus(t *testing.T) {
+	stubPivotSeams(t, "ws-cp", "ws-sp")
+	launch := func(label string, noShow bool) string {
+		oShow := showBead
+		t.Cleanup(func() { showBead = oShow })
+		showBead = func(id string) (bd.Bead, error) {
+			if noShow {
+				t.Fatal("bd show on a no-context Workspace")
+			}
+			return bd.Bead{ID: id, Labels: []string{label}}, nil
+		}
+		h := &recordingHarness{}
+		if _, err := (Zoro{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-pv", Kind: contract.KindPivot}); err != nil {
+			t.Fatal(err)
+		}
+		return h.launched.Prompt
+	}
+	repo := func(cfg string) {
+		d := t.TempDir()
+		exec.Command("git", "init", "-q", d).Run()
+		os.MkdirAll(d+"/.mugicrew", 0o755)
+		os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+		t.Chdir(d)
+	}
+	repo("")
+	plain := launch("context:a", true)
+	repo("[context.a]\npath = \"apps/a\"\n")
+	if got := launch("kind:checkpoint", false); got != plain {
+		t.Error("unlabelled container changed the prompt")
+	}
+	if got := launch("context:a", false); got != plain+"\n\n"+contexts.FocusLine(map[string]string{"a": "apps/a"}, bd.Bead{Labels: []string{"context:a"}}) {
+		t.Errorf("labelled prompt is not old + focus line")
+	}
+}
+
+// ADR 0157: the slicing prompt is the old render with no [context] table or an
+// unlabelled Spec, and the old render plus exactly the focus line under a labelled one.
+func TestSlicingFocusLineByteIdentity(t *testing.T) {
+	run := func(label string) string {
+		r := &specSeamRec{}
+		stubSpecSeams(t, r, "ws-chart", true, nil)
+		h := &recordingHarness{lay: func() { r.builds = 1 }}
+		spec := openSpec()
+		spec.Labels = []string{label}
+		if err := reconcileSpec(stubCtx{h}, spec); err != nil {
+			t.Fatal(err)
+		}
+		return h.invs[0].Prompt
+	}
+	repo := func(cfg string) {
+		d := t.TempDir()
+		exec.Command("git", "init", "-q", d).Run()
+		os.MkdirAll(d+"/.mugicrew", 0o755)
+		os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+		t.Chdir(d)
+	}
+	repo("")
+	plain := run("context:a")
+	repo("[context.a]\npath = \"apps/a\"\n")
+	if got := run("kind:spec"); got != plain {
+		t.Error("unlabelled container changed the prompt")
+	}
+	if got := run("context:a"); got != plain+"\n\n"+contexts.FocusLine(map[string]string{"a": "apps/a"}, bd.Bead{Labels: []string{"context:a"}}) {
+		t.Error("labelled prompt is not old + focus line")
+	}
+}
+
+// A nested Spec's base is read from the child (never the Workspace's main) and its
+// checkpoint branch is cut in the child; a trailer the child lacks is a hard error
+// that cuts nothing (Spec FR11, D2, D3).
+func TestReconcileSpecNestedReadsAndCutsInTheChild(t *testing.T) {
+	r := &specSeamRec{}
+	stubSpecSeams(t, r, "", false, nil)
+	var reads, cuts []string
+	var missing error
+	oOf, oLand, oCut := repoOf, repoLanded, repoCut
+	t.Cleanup(func() { repoOf, repoLanded, repoCut = oOf, oLand, oCut })
+	repoOf = func(bd.Bead) git.Repo { return "/ws/child" }
+	repoLanded = func(c git.Repo, tr string) (string, error) {
+		reads = append(reads, string(c)+" "+tr)
+		return "childsha", missing
+	}
+	repoCut = func(c git.Repo, name, base string) (bool, error) {
+		cuts = append(cuts, string(c)+" "+name+" "+base)
+		return true, nil
+	}
+
+	missing = git.ErrNotLanded
+	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
+		t.Fatal("a missing child trailer must hard-fail")
+	}
+	if len(cuts) != 0 || len(r.cuts) != 0 || len(r.trailers) != 0 {
+		t.Errorf("missing trailer cut %v / %v or fell back to the Workspace read %v", cuts, r.cuts, r.trailers)
+	}
+
+	missing = nil
+	var stamped []string
+	oStamp := stampCut
+	t.Cleanup(func() { stampCut = oStamp })
+	stampCut = func(_ bd.Bead, id string, _ git.Repo, _ string) error {
+		stamped = append(stamped, id)
+		return nil
+	}
+	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if len(stamped) != 1 || stamped[0] == "" {
+		t.Errorf("stamped = %v, want one stamp of the created Checkpoint", stamped)
+	}
+	if want := "/ws/child Spec: ws-spec"; reads[len(reads)-1] != want {
+		t.Errorf("reads = %v, want last %q", reads, want)
+	}
+	if len(cuts) != 1 || !strings.HasSuffix(cuts[0], " childsha") || len(r.cuts) != 0 {
+		t.Errorf("child cuts = %v, workspace cuts = %v, want one child cut from childsha", cuts, r.cuts)
+	}
+}
+
+// A direct Spec cuts at its Anchor: pin under either strategy; with no pin it
+// falls back to the legacy Spec: trailer under both; with neither it is a hard
+// error naming the Spec and the triage.fastlane anchor attr.
+func TestCheckpointBaseDirectSpec(t *testing.T) {
+	for _, strat := range []string{git.LandStrategyLocal, git.LandStrategyGitlab} {
+		t.Run(strat, func(t *testing.T) {
+			swap(t, &landStrategy, func() (string, error) { return strat, nil })
+			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "", false, nil })
+			swap(t, &repoOf, func(bd.Bead) git.Repo { return "" })
+			var trailer error
+			swap(t, &landedBase, func(string) (string, error) { return "trailersha", trailer })
+			if got, err := checkpointBase(bd.Bead{ID: "ws-s", Description: "body\nAnchor: pinsha\n"}); err != nil || got != "pinsha" {
+				t.Errorf("pinned: checkpointBase = %q, %v; want pinsha", got, err)
+			}
+			if got, err := checkpointBase(bd.Bead{ID: "ws-s", Description: "body"}); err != nil || got != "trailersha" {
+				t.Errorf("legacy: checkpointBase = %q, %v; want trailersha", got, err)
+			}
+			trailer = git.ErrNotLanded
+			_, err := checkpointBase(bd.Bead{ID: "ws-s", Description: "body"})
+			if err == nil || !strings.Contains(err.Error(), "ws-s") || !strings.Contains(err.Error(), "triage.fastlane") {
+				t.Errorf("no pin, no trailer: err = %v; want one naming the Spec and triage.fastlane", err)
+			}
+		})
+	}
+}
+
+// A pinned nested Spec cuts at the pin with no fetch under local, one under gitlab.
+func TestCheckpointBaseNestedPinnedFetchesOnlyUnderGitlab(t *testing.T) {
+	for strat, want := range map[string]int{git.LandStrategyLocal: 0, git.LandStrategyGitlab: 1} {
+		t.Run(strat, func(t *testing.T) {
+			swap(t, &landStrategy, func() (string, error) { return strat, nil })
+			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "", false, nil })
+			swap(t, &repoOf, func(bd.Bead) git.Repo { return "kid" })
+			swap(t, &repoLanded, func(git.Repo, string) (string, error) { t.Fatal("trailer read"); return "", nil })
+			fetched := 0
+			swap(t, &repoFetch, func(git.Repo) (string, error) { fetched++; return "tip", nil })
+			if got, err := checkpointBase(bd.Bead{ID: "k-s", Description: "body\nAnchor: pinsha\n"}); err != nil || got != "pinsha" || fetched != want {
+				t.Errorf("checkpointBase = %q, %v, fetched %d; want pinsha, %d fetches", got, err, fetched, want)
+			}
+		})
+	}
+}
+
+func TestCheckpointBaseNestedChartGitlabFetchesFirst(t *testing.T) {
+	swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "k-c", true, nil })
+	swap(t, &repoOf, func(bd.Bead) git.Repo { return "kid" })
+	var order []string
+	swap(t, &repoFetch, func(git.Repo) (string, error) { order = append(order, "fetch"); return "tip", nil })
+	swap(t, &repoLanded, func(_ git.Repo, tr string) (string, error) { order = append(order, tr); return "chartsha", nil })
+	if got, err := checkpointBase(bd.Bead{ID: "k-s"}); err != nil || got != "chartsha" || len(order) != 2 || order[0] != "fetch" {
+		t.Errorf("checkpointBase = %q, %v, order %v", got, err, order)
 	}
 }

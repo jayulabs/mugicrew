@@ -1,0 +1,11 @@
+{
+  "name": "@jayulabs/mugicrew-darwin-x64",
+  "version": "0.1.0",
+  "description": "mugicrew binary for darwin x64",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/jayulabs/mugicrew.git" },
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/mugicrew"],
+  "publishConfig": { "access": "public" }
+}

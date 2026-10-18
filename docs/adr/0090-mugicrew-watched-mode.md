@@ -42,6 +42,10 @@ build, `vcs.revision` has no path, and `MUGICREW_SRC` is ambient.
    `watch: true`. `--watch` without the source stamp is an error. Only a
    watched loop runs the ADR 0062 restart lifecycle. To pick up a new build,
    an unwatched loop is stopped and started again.
+   > **Amended (2026-10-17):** `--watch` opts into *automatic* restart only.
+   > Any from-source loop restarts on demand with `loop restart`; ADR 0289
+   > (mugicrew-loop-restart-asks-by-sigusr2…). An unwatched loop no longer
+   > needs a stop and start to change builds.
 5. **The watch reads the source's local mainline.** The source repo's
    mainline is found the same way as the Workspace's: `origin/HEAD` names
    the branch, falling back to `main`. The watch reads that branch's local
@@ -58,6 +62,13 @@ build, `vcs.revision` has no path, and `MUGICREW_SRC` is ambient.
    - Watched: `loop status` adds a line `watching <source repo> <mainline>`.
      The tab bar is unchanged. The stale and restarting displays (ADR 0063)
      apply only to watched loops.
+   > **Amended (2026-10-17):** ADR 0288 (mugicrew-the-tab-bar-shows-a-loop-
+   > state-word…) §1–§2 shows restarting and stale on every from-source loop,
+   > watched or not. An unwatched loop is stale only after an asked-for build
+   > failed, never for main moving.
+   > **Amended (2026-10-18, ADR 0295 (mugicrew-loop-status-prints-labelled-fields…)):** `loop status` prints the build as `main: <short rev>` and `store: <path>`
+   > (the store path also for an installed loop), and a watched loop adds
+   > `watching: <source repo> <mainline>` in its own watch section.
 8. **Testing loop changes (amends ADR 0060 §2's recipe).** Make a clone with
    your branch checked out as its mainline and use it as the *source*. Run
    its dev `mugicrew` with `-C <scratch Workspace>`. A NenOE clone used as

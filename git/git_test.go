@@ -164,8 +164,8 @@ func TestSquashArgs(t *testing.T) {
 	if got := softResetArgs("deadbeef"); len(got) != 3 || got[0] != "reset" || got[1] != "--soft" || got[2] != "deadbeef" {
 		t.Errorf("softResetArgs = %v, want [reset --soft deadbeef]", got)
 	}
-	commit := squashCommitArgs("chart/mc-x", "abc", "Chart: mc-x")
-	if commit[len(commit)-1] != "Tip: abc\nChart: mc-x" {
+	commit := squashCommitArgs("chart/mc-x", "abc", "Chart: mc-x", "g1", "")
+	if commit[len(commit)-1] != "Tip: abc\nChart: mc-x\nGraph: g1" {
 		t.Errorf("squashCommitArgs must carry the landed tip, then the trailer, last: %v", commit)
 	}
 	// --allow-empty so a fog-only Chart still stamps its anchor (ADR 0014 §2).
@@ -176,7 +176,7 @@ func TestSquashArgs(t *testing.T) {
 	// refuses a branch checked out in another worktree). It is a
 	// compare-and-swap: the expected old base is the 4th positional, so a
 	// concurrent land that moved mainline makes the swap fail.
-	ff := ffMainlineArgs("chart/mc-x", "oldbase")
+	ff := ffMainlineArgs(Mainline(), "chart/mc-x", "oldbase")
 	want := []string{"update-ref", "refs/heads/" + Mainline(), "chart/mc-x", "oldbase"}
 	if len(ff) != len(want) {
 		t.Fatalf("ffMainlineArgs = %v, want %v", ff, want)
@@ -241,16 +241,6 @@ func TestMergeFFOnlyArgs(t *testing.T) {
 	}
 }
 
-// Anchor's commit is a plumbing commit-tree over base's own tree with base as
-// sole parent — empty, and touching no index, worktree or HEAD.
-func TestAnchorCommitArgs(t *testing.T) {
-	got := anchorCommitArgs("deadbeef", "Spec: mc-x")
-	want := []string{"commit-tree", "deadbeef^{tree}", "-p", "deadbeef", "-m", "anchor Spec: mc-x", "-m", "Spec: mc-x"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("anchorCommitArgs = %v, want %v", got, want)
-	}
-}
-
 // The footgun: cutting a branch must NOT switch HEAD, so it is `git branch`,
 // never `checkout -b`.
 func TestCutBranchArgsDoNotSwitchHead(t *testing.T) {
@@ -276,7 +266,7 @@ func TestLandRebaseArgsRebaseOntoBase(t *testing.T) {
 // against the whole trailer line, with the id escaped so it can't be
 // read as a regex.
 func TestLandedBaseArgsGrepMainlineConst(t *testing.T) {
-	args := landedBaseArgs("Chart: mc-x.1")
+	args := trailerLogArgs(Mainline(), "Chart: mc-x.1")
 	has := func(want string) bool {
 		for _, a := range args {
 			if a == want {
@@ -286,13 +276,13 @@ func TestLandedBaseArgsGrepMainlineConst(t *testing.T) {
 		return false
 	}
 	if !has(Mainline()) {
-		t.Errorf("landedBaseArgs must scope to mainline %q: %v", Mainline(), args)
+		t.Errorf("trailerLogArgs must scope to mainline %q: %v", Mainline(), args)
 	}
 	if !has("--extended-regexp") {
-		t.Errorf("landedBaseArgs must grep an ERE: %v", args)
+		t.Errorf("trailerLogArgs must grep an ERE: %v", args)
 	}
 	if !has(`--grep=^Chart: mc-x\.1$`) {
-		t.Errorf("landedBaseArgs must grep the escaped whole trailer line: %v", args)
+		t.Errorf("trailerLogArgs must grep the escaped whole trailer line: %v", args)
 	}
 }
 
@@ -389,7 +379,7 @@ func TestLandRoundTrip(t *testing.T) {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "an artifact")
 
-	sha, err := Land("chart/x", "Chart: x")
+	sha, err := Land("chart/x", "Chart: x", LandLocal)
 	if err != nil {
 		t.Fatalf("Land: %v", err)
 	}
@@ -415,7 +405,7 @@ func TestLandRoundTrip(t *testing.T) {
 	}
 
 	// Idempotent no-op: a second Land still returns the SHA and adds no commit.
-	sha2, err := Land("chart/x", "Chart: x")
+	sha2, err := Land("chart/x", "Chart: x", LandLocal)
 	if err != nil || sha2 != sha {
 		t.Errorf("idempotent Land = (%s, %v), want (%s, nil)", sha2, err, sha)
 	}
@@ -451,7 +441,7 @@ func TestLandEmptyChartStampsAnchor(t *testing.T) {
 	}
 	// No checkout, no artifact commit — the branch sits exactly at base.
 
-	sha, err := Land("chart/empty", "Chart: empty")
+	sha, err := Land("chart/empty", "Chart: empty", LandLocal)
 	if err != nil {
 		t.Fatalf("Land empty chart: %v", err)
 	}
@@ -466,85 +456,12 @@ func TestLandEmptyChartStampsAnchor(t *testing.T) {
 		t.Errorf("LandedBase = (%s, %v), want (%s, nil)", lb, err, sha)
 	}
 	// Idempotent: a second Land no-ops on the trailer and adds no commit.
-	sha2, err := Land("chart/empty", "Chart: empty")
+	sha2, err := Land("chart/empty", "Chart: empty", LandLocal)
 	if err != nil || sha2 != sha {
 		t.Errorf("idempotent Land = (%s, %v), want (%s, nil)", sha2, err, sha)
 	}
 	if n := mustGit(t, "rev-list", "--count", Mainline()); n != "2" {
 		t.Errorf("idempotent Land added a commit: count = %s, want 2", n)
-	}
-}
-
-// The direct-Spec anchor (ADR 0035 §4): Anchor writes one empty commit on mainline
-// carrying the trailer, LandedBase re-derives it, and the checked-out main
-// worktree's index and tree stay in sync (no phantom staged diff).
-func TestAnchorWritesEmptyTrailerCommit(t *testing.T) {
-	newRepo(t)
-	root := mustGit(t, "rev-parse", Mainline())
-
-	sha, err := Anchor("Spec: x")
-	if err != nil {
-		t.Fatalf("Anchor: %v", err)
-	}
-	if head := mustGit(t, "rev-parse", Mainline()); head != sha {
-		t.Errorf("Anchor sha %s != mainline HEAD %s", sha, head)
-	}
-	if parent := mustGit(t, "rev-parse", sha+"^"); parent != root {
-		t.Errorf("anchor parent = %s, want the prior mainline %s", parent, root)
-	}
-	if d := mustGit(t, "diff", "--name-only", root, sha); d != "" {
-		t.Errorf("anchor must be empty, changed: %s", d)
-	}
-	if lb, err := LandedBase("Spec: x"); err != nil || lb != sha {
-		t.Errorf("LandedBase = (%s, %v), want (%s, nil)", lb, err, sha)
-	}
-	if st := mustGit(t, "status", "--porcelain"); st != "" {
-		t.Errorf("main worktree left dirty after Anchor:\n%s", st)
-	}
-}
-
-// Anchor run from a linked worktree (the effort's cwd) while Mainline is checked
-// out in the primary tree: that worktree's HEAD and index move with the ref,
-// exactly as TestLandUpdatesMainlineWorktree proves for Land.
-func TestAnchorUpdatesMainlineWorktree(t *testing.T) {
-	newRepo(t)
-	mainWT := mustGit(t, "rev-parse", "--show-toplevel")
-	mustGit(t, "branch", "effort")
-	effortWT := t.TempDir()
-	mustGit(t, "worktree", "add", effortWT, "effort")
-	t.Chdir(effortWT)
-
-	sha, err := Anchor("Spec: x")
-	if err != nil {
-		t.Fatalf("Anchor: %v", err)
-	}
-	if head := mustGit(t, "-C", mainWT, "rev-parse", "HEAD"); head != sha {
-		t.Errorf("mainline worktree HEAD = %s, want the anchor %s", head, sha)
-	}
-	if st := mustGit(t, "-C", mainWT, "status", "--porcelain"); st != "" {
-		t.Errorf("mainline worktree left dirty (stranded index): %q", st)
-	}
-}
-
-// The mainline CAS for Anchor: an anchor written off base0 must not clobber a mainline a
-// concurrent land already advanced. Tested at the ff step (as
-// TestFfMainlineIsCompareAndSwap does), with Mainline checked out so the
-// through-worktree merge --ff-only path is the one that refuses.
-func TestAnchorRacedMainlineFailsLoudly(t *testing.T) {
-	newRepo(t)
-	base0 := mustGit(t, "rev-parse", Mainline())
-	anchor := mustGit(t, anchorCommitArgs(base0, "Spec: x")...)
-
-	writeFile(t, "winner.txt", "winner")
-	mustGit(t, "add", ".")
-	mustGit(t, "commit", "-m", "a concurrent land")
-	winnerTip := mustGit(t, "rev-parse", Mainline())
-
-	if err := ffMainline(anchor, base0); err == nil {
-		t.Fatal("anchor ff onto a raced mainline must fail")
-	}
-	if head := mustGit(t, "rev-parse", Mainline()); head != winnerTip {
-		t.Errorf("raced anchor clobbered mainline: %s != winner %s", head, winnerTip)
 	}
 }
 
@@ -569,7 +486,7 @@ func TestLandUpdatesMainlineWorktree(t *testing.T) {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "an artifact")
 
-	if _, err := Land("chart/x", "Chart: x"); err != nil {
+	if _, err := Land("chart/x", "Chart: x", LandLocal); err != nil {
 		t.Fatalf("Land: %v", err)
 	}
 
@@ -670,7 +587,7 @@ func TestLandFromLinkedWorktree(t *testing.T) {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "an artifact")
 
-	sha, err := Land("chart/x", "Chart: x")
+	sha, err := Land("chart/x", "Chart: x", LandLocal)
 	if err != nil {
 		t.Fatalf("Land from linked worktree: %v", err) // `branch -f main` would fail here
 	}
@@ -701,7 +618,7 @@ func TestFfMainlineIsCompareAndSwap(t *testing.T) {
 	mustGit(t, "checkout", Mainline())
 
 	// Winner lands: swap succeeds because mainline is still base0.
-	if _, err := run(ffMainlineArgs("winner", base0)...); err != nil {
+	if _, err := run(ffMainlineArgs(Mainline(), "winner", base0)...); err != nil {
 		t.Fatalf("winner ff: %v", err)
 	}
 	winnerTip := mustGit(t, "rev-parse", "winner")
@@ -710,7 +627,7 @@ func TestFfMainlineIsCompareAndSwap(t *testing.T) {
 	}
 
 	// Loser still expects base0 — the swap must fail, not overwrite the winner.
-	if _, err := run(ffMainlineArgs("loser", base0)...); err == nil {
+	if _, err := run(ffMainlineArgs(Mainline(), "loser", base0)...); err == nil {
 		t.Fatal("stale ff must fail once mainline moved off the expected base")
 	}
 	if head := mustGit(t, "rev-parse", Mainline()); head != winnerTip {
@@ -734,7 +651,7 @@ func TestLandRebaseConflict(t *testing.T) {
 	mustGit(t, "commit", "-m", "mainline edit")
 	baseBefore := mustGit(t, "rev-parse", Mainline())
 
-	_, err := Land("chart/y", "Chart: y")
+	_, err := Land("chart/y", "Chart: y", LandLocal)
 	if err == nil {
 		t.Fatal("Land onto a conflicting mainline must fail")
 	}
@@ -754,6 +671,56 @@ func TestLandRebaseConflict(t *testing.T) {
 	// Mainline is untouched by a conflicting land.
 	if after := mustGit(t, "rev-parse", Mainline()); after != baseBefore {
 		t.Errorf("mainline moved on a conflict: %s != %s", after, baseBefore)
+	}
+}
+
+// A linked tree stopped mid-rebase on effort/<id> has a detached HEAD, so
+// WorktreeOn misses it; RebasingOn finds it by its rebase state's head-name
+// (either backend), and AbortRebase on its dir puts it back on the branch.
+func TestRebasingOnFindsAStoppedRebase(t *testing.T) {
+	for _, backend := range []string{"--merge", "--apply"} {
+		t.Run(backend, func(t *testing.T) {
+			newRepo(t)
+			mustGit(t, "branch", "effort/mc-a")
+			wt := filepath.Join(t.TempDir(), "wt")
+			mustGit(t, worktreeAddArgs(wt, "effort/mc-a")...)
+			writeFile(t, "clash.txt", "from main\n")
+			mustGit(t, "add", ".")
+			mustGit(t, "commit", "-m", "main edit")
+			writeFile(t, filepath.Join(wt, "clash.txt"), "from the effort\n")
+			mustGit(t, "-C", wt, "add", ".")
+			mustGit(t, "-C", wt, "commit", "-m", "effort edit")
+			if _, err := run("-C", wt, "rebase", backend, "main"); err == nil {
+				t.Fatal("rebase must stop on the conflict")
+			}
+
+			if _, ok, err := WorktreeOn("effort/mc-a"); ok || err != nil {
+				t.Fatalf("WorktreeOn found the detached tree (%v), the premise is gone", err)
+			}
+			h, ok, err := RebasingOn("effort/mc-a")
+			if err != nil || !ok || h.Path != wt {
+				t.Fatalf("RebasingOn = %+v, %v, %v; want %s", h, ok, err, wt)
+			}
+			if _, ok, _ := RebasingOn("effort/mc-b"); ok {
+				t.Error("RebasingOn matched another branch")
+			}
+			if r, err := Rebasing(); err != nil || len(r) != 1 || r[wt] != "effort/mc-a" {
+				t.Errorf("Rebasing = %v, %v; want %s → effort/mc-a", r, err, wt)
+			}
+			if ws, err := Worktrees(); err != nil || len(ws) != 2 || ws[0].Branch != Mainline() || ws[1] != (Worktree{Path: wt}) {
+				t.Errorf("Worktrees = %+v, %v; want the main checkout on %s, then %s detached", ws, err, Mainline(), wt)
+			}
+
+			if err := AbortRebase(h.Path); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, _ := RebasingOn("effort/mc-a"); ok {
+				t.Error("rebase still found after the abort")
+			}
+			if h, ok, _ := WorktreeOn("effort/mc-a"); !ok || h.Path != wt {
+				t.Errorf("after the abort WorktreeOn = %+v, %v; want %s back on the branch", h, ok, wt)
+			}
+		})
 	}
 }
 
@@ -781,7 +748,7 @@ func TestLandCleanRebaseFailureNotConflict(t *testing.T) {
 	mustGit(t, "checkout", "chart/z")
 	writeFile(t, "README", "uncommitted edit\n")
 
-	_, err := Land("chart/z", "Chart: z")
+	_, err := Land("chart/z", "Chart: z", LandLocal)
 	if err == nil {
 		t.Fatal("Land must fail when rebase can't start")
 	}
@@ -813,7 +780,7 @@ func addADR(t *testing.T, name string) {
 }
 
 // Land's in-lock clash check (ADR 0030 §1, ADR 0069) flags only numbers the branch
-// ADDS that the locked base already holds under another filename: *ADRClash, for
+// ADDS that the locked base already holds under another filename: *NumberClash, for
 // a Chart and a Checkpoint branch alike, with main and the branch untouched.
 func TestLandADRNumberClashes(t *testing.T) {
 	for _, kind := range []string{"chart", "checkpoint"} {
@@ -828,10 +795,10 @@ func TestLandADRNumberClashes(t *testing.T) {
 			addADR(t, "0002-main-side.md")
 			head := mustGit(t, "rev-parse", Mainline())
 
-			_, err := Land(branch, trailer)
-			var clash *ADRClash
+			_, err := Land(branch, trailer, LandLocal)
+			var clash *NumberClash
 			if !errors.As(err, &clash) {
-				t.Fatalf("Land = %v, want *ADRClash", err)
+				t.Fatalf("Land = %v, want *NumberClash", err)
 			}
 			if len(clash.Clashes) != 1 || !strings.Contains(clash.Clashes[0], "docs/adr/0002-branch-side.md") || !strings.Contains(clash.Clashes[0], "docs/adr/0002-main-side.md") {
 				t.Errorf("clashes = %v, want the one 0002 pair", clash.Clashes)
@@ -854,12 +821,12 @@ func TestLandADRNumberClashes(t *testing.T) {
 		mustGit(t, "checkout", Mainline())
 		addADR(t, "0002-main-side.md")
 
-		sha, err := Land("chart/x", "Chart: x")
+		sha, err := Land("chart/x", "Chart: x", LandLocal)
 		if err != nil {
 			t.Fatalf("Land: %v", err)
 		}
 		// Re-run (crash roll-forward) sees the Chart's own file on main, not a clash.
-		if again, err := Land("chart/x", "Chart: x"); err != nil || again != sha {
+		if again, err := Land("chart/x", "Chart: x", LandLocal); err != nil || again != sha {
 			t.Errorf("re-Land = (%s, %v), want (%s, nil)", again, err, sha)
 		}
 	})
@@ -871,7 +838,7 @@ func TestLandADRNumberClashes(t *testing.T) {
 		addADR(t, "0003-fresh.md")
 		mustGit(t, "checkout", Mainline())
 
-		if _, err := Land("chart/x", "Chart: x"); err != nil {
+		if _, err := Land("chart/x", "Chart: x", LandLocal); err != nil {
 			t.Errorf("Land: %v", err)
 		}
 	})
@@ -890,14 +857,14 @@ func TestLandADRNumberClashes(t *testing.T) {
 		addADR(t, "apps/other/docs/adr/0001-main.md")
 		addADR(t, "apps/mugicrew/docs/adr/sub/0030-other.md")
 
-		var clash *ADRClash
-		if _, err := Land("chart/x", "Chart: x"); !errors.As(err, &clash) {
-			t.Fatalf("Land = %v, want *ADRClash", err)
+		var clash *NumberClash
+		if _, err := Land("chart/x", "Chart: x", LandLocal); !errors.As(err, &clash) {
+			t.Fatalf("Land = %v, want *NumberClash", err)
 		}
 		want := []string{
-			"apps/mugicrew/docs/adr/0030-clash.md (vs mainline apps/mugicrew/docs/adr/0030-base.md)",
-			"apps/other/docs/adr/0001-fresh.md (vs mainline apps/other/docs/adr/0001-main.md)",
-			"docs/adr/0029-root.md (vs mainline docs/adr/0029-mugicrew-tombstone.md)",
+			"apps/mugicrew/docs/adr/0030-clash.md (rule **/docs/adr/{n:4}-*.md) (vs mainline apps/mugicrew/docs/adr/0030-base.md)",
+			"apps/other/docs/adr/0001-fresh.md (rule **/docs/adr/{n:4}-*.md) (vs mainline apps/other/docs/adr/0001-main.md)",
+			"docs/adr/0029-root.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0029-mugicrew-tombstone.md)",
 		}
 		if !slices.Equal(clash.Clashes, want) {
 			t.Errorf("clashes = %q, want %q", clash.Clashes, want)
@@ -912,9 +879,9 @@ func TestLandADRNumberClashes(t *testing.T) {
 		mustGit(t, "checkout", Mainline())
 		addADR(t, "0002-main-side.md")
 
-		var clash *ADRClash
-		if _, err := Land("chart/x", "Chart: x"); !errors.As(err, &clash) || len(clash.Clashes) != 1 {
-			t.Errorf("Land = %v, want *ADRClash on the renamed 0002", err)
+		var clash *NumberClash
+		if _, err := Land("chart/x", "Chart: x", LandLocal); !errors.As(err, &clash) || len(clash.Clashes) != 1 {
+			t.Errorf("Land = %v, want *NumberClash on the renamed 0002", err)
 		}
 	})
 }
@@ -958,7 +925,7 @@ func preCommitHook(t *testing.T, sh string) {
 // ever checks the container out.
 func TestLandRunsDetachedAndNeverWritesContainer(t *testing.T) {
 	pre := landRepo(t)
-	sha, err := Land("checkpoint/x", "Checkpoint: x")
+	sha, err := Land("checkpoint/x", "Checkpoint: x", LandLocal)
 	if err != nil {
 		t.Fatalf("Land: %v", err)
 	}
@@ -991,7 +958,7 @@ func TestLandRefusesWhenContainerMovesOffPin(t *testing.T) {
 	moved := mustGit(t, "commit-tree", pre+"^{tree}", "-p", pre, "-m", "a human commit mid-land")
 	preCommitHook(t, "git update-ref refs/heads/checkpoint/x "+moved)
 
-	if _, err := Land("checkpoint/x", "Checkpoint: x"); err == nil || !strings.Contains(err.Error(), "moved off") {
+	if _, err := Land("checkpoint/x", "Checkpoint: x", LandLocal); err == nil || !strings.Contains(err.Error(), "moved off") {
 		t.Fatalf("Land = %v, want the moved-off-pin refusal", err)
 	}
 	if after := mustGit(t, "rev-parse", Mainline()); after != head {
@@ -1002,7 +969,7 @@ func TestLandRefusesWhenContainerMovesOffPin(t *testing.T) {
 	}
 
 	mustGit(t, "config", "--unset", "core.hooksPath")
-	if _, err := Land("checkpoint/x", "Checkpoint: x"); err != nil {
+	if _, err := Land("checkpoint/x", "Checkpoint: x", LandLocal); err != nil {
 		t.Fatalf("re-Land: %v", err)
 	}
 	if tip := mustGit(t, "rev-parse", "checkpoint/x"); tip != moved {
@@ -1018,7 +985,7 @@ func TestLandFailureAfterRebaseLeavesContainer(t *testing.T) {
 	head := mustGit(t, "rev-parse", Mainline())
 	preCommitHook(t, "exit 1")
 
-	if _, err := Land("checkpoint/x", "Checkpoint: x"); err == nil || !strings.Contains(err.Error(), "git commit") {
+	if _, err := Land("checkpoint/x", "Checkpoint: x", LandLocal); err == nil || !strings.Contains(err.Error(), "git commit") {
 		t.Fatalf("Land = %v, want the refused squash commit's error", err)
 	}
 	if !ApprovedAtHead(CommitPin(pre), "checkpoint/x") {
@@ -1029,27 +996,93 @@ func TestLandFailureAfterRebaseLeavesContainer(t *testing.T) {
 	}
 
 	mustGit(t, "config", "--unset", "core.hooksPath")
-	if _, err := Land("checkpoint/x", "Checkpoint: x"); err != nil {
+	if _, err := Land("checkpoint/x", "Checkpoint: x", LandLocal); err != nil {
 		t.Fatalf("re-Land after the cause is gone: %v", err)
 	}
 }
 
-func TestADRNumber(t *testing.T) {
-	for path, want := range map[string]string{
-		"docs/adr/0030-guard.md":               "docs/adr/ 0030",
-		"apps/mugicrew/docs/adr/0030-guard.md": "apps/mugicrew/docs/adr/ 0030",
-		"apps/other/docs/adr/0001-x.md":        "apps/other/docs/adr/ 0001",
-		"docs/adr/README.md":                   " ",
-		"docs/adr/0030-guard.txt":              " ",
-		"docs/adr/sub/0030-x.md":               " ",
-		"apps/mugicrew/docs/adr/sub/0030-x.md": " ",
-		"other/0030-guard.md":                  " ",
-		"docs/adr/003a-guard.md":               " ",
-		"apps/mugicrewdocs/adr/0030-guard.md":  " ",
-	} {
-		if dir, num := adrParts(path); dir+" "+num != want {
-			t.Errorf("adrParts(%q) = %q %q, want %q", path, dir, num, want)
-		}
+// Compose produces the squash LandLocal would land and moves neither main nor
+// the container.
+func TestComposeMovesNothingAndMatchesLandLocal(t *testing.T) {
+	pre := landRepo(t)
+	base := mustGit(t, "rev-parse", Mainline())
+
+	composed, gotBase, gotPin, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	if gotBase != base || gotPin != pre {
+		t.Errorf("Compose (base, pin) = (%s, %s), want (%s, %s)", gotBase, gotPin, base, pre)
+	}
+	if main := mustGit(t, "rev-parse", Mainline()); main != base {
+		t.Errorf("Compose moved main to %s", main)
+	}
+	if tip := mustGit(t, "rev-parse", "checkpoint/x"); tip != pre {
+		t.Errorf("Compose moved the container to %s", tip)
+	}
+	wantTree := mustGit(t, "rev-parse", composed+"^{tree}")
+
+	local, err := Land("checkpoint/x", "Checkpoint: x", LandLocal)
+	if err != nil {
+		t.Fatalf("LandLocal: %v", err)
+	}
+	if tree := mustGit(t, "rev-parse", local+"^{tree}"); tree != wantTree {
+		t.Errorf("LandLocal tree %s != composed tree %s", tree, wantTree)
+	}
+}
+
+func TestSameBaseLandFastForwardsToComposed(t *testing.T) {
+	pre := landRepo(t)
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := Land("checkpoint/x", "Checkpoint: x", LandSameBase(composed, base, pre))
+	if err != nil {
+		t.Fatalf("Land same-base: %v", err)
+	}
+	if sha != composed {
+		t.Errorf("landed %s, want the composed %s", sha, composed)
+	}
+	if main := mustGit(t, "rev-parse", Mainline()); main != composed {
+		t.Errorf("main = %s, want the composed %s", main, composed)
+	}
+}
+
+func TestSameBaseLandRefusesMovedBase(t *testing.T) {
+	pre := landRepo(t)
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := mustGit(t, "commit-tree", base+"^{tree}", "-p", base, "-m", "main moved")
+	mustGit(t, "update-ref", "refs/heads/"+Mainline(), moved)
+
+	_, err = Land("checkpoint/x", "Checkpoint: x", LandSameBase(composed, base, pre))
+	var bm *BaseMoved
+	if !errors.As(err, &bm) {
+		t.Fatalf("Land = %v, want *BaseMoved", err)
+	}
+	if main := mustGit(t, "rev-parse", Mainline()); main != moved {
+		t.Errorf("main = %s, want untouched at %s", main, moved)
+	}
+}
+
+func TestSameBaseLandRefusesMovedContainer(t *testing.T) {
+	pre := landRepo(t)
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "update-ref", "refs/heads/checkpoint/x", mustGit(t, "commit-tree", pre+"^{tree}", "-p", pre, "-m", "moved"))
+
+	_, err = Land("checkpoint/x", "Checkpoint: x", LandSameBase(composed, base, pre))
+	var pm *PinMoved
+	if !errors.As(err, &pm) {
+		t.Fatalf("Land = %v, want *PinMoved", err)
+	}
+	if main := mustGit(t, "rev-parse", Mainline()); main != base {
+		t.Errorf("main moved on a refused land: %s", main)
 	}
 }
 
@@ -1063,7 +1096,7 @@ func TestLandedBaseMatchesWholeTrailerLine(t *testing.T) {
 		if _, err := CutBranch("chart/"+id, Mainline()); err != nil {
 			t.Fatalf("CutBranch chart/%s: %v", id, err)
 		}
-		if _, err := Land("chart/"+id, "Chart: "+id); err != nil {
+		if _, err := Land("chart/"+id, "Chart: "+id, LandLocal); err != nil {
 			t.Fatalf("Land chart/%s: %v", id, err)
 		}
 	}
@@ -1077,7 +1110,7 @@ func TestLandedBaseMatchesWholeTrailerLine(t *testing.T) {
 	if _, err := CutBranch("chart/x", Mainline()); err != nil {
 		t.Fatalf("CutBranch chart/x: %v", err)
 	}
-	sha, err := Land("chart/x", "Chart: x")
+	sha, err := Land("chart/x", "Chart: x", LandLocal)
 	if err != nil {
 		t.Fatalf("Land chart/x: %v", err)
 	}
@@ -1104,7 +1137,7 @@ func TestRevertArgs(t *testing.T) {
 	if got, want := revertTreeArgs("base", "sq"), []string{"merge-tree", "--write-tree", "--name-only", "--merge-base=sq", "base", "sq^"}; !slices.Equal(got, want) {
 		t.Errorf("revertTreeArgs = %v, want %v", got, want)
 	}
-	if got, want := revertCommitArgs("tree", "base", "sq", "Reverts-Checkpoint: x"), []string{"commit-tree", "tree", "-p", "base", "-m", "revert sq", "-m", "Reverts-Checkpoint: x"}; !slices.Equal(got, want) {
+	if got, want := revertCommitArgs("tree", "base", "sq", "Reverts-Checkpoint: x", "g1"), []string{"commit-tree", "tree", "-p", "base", "-m", "revert sq", "-m", "Reverts-Checkpoint: x\nGraph: g1"}; !slices.Equal(got, want) {
 		t.Errorf("revertCommitArgs = %v, want %v", got, want)
 	}
 }
@@ -1118,7 +1151,7 @@ func landCheckpoint(t *testing.T, id, file string) string {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", id)
 	mustGit(t, "checkout", Mainline())
-	sha, err := Land("checkpoint/"+id, "Checkpoint: "+id)
+	sha, err := Land("checkpoint/"+id, "Checkpoint: "+id, LandLocal)
 	if err != nil {
 		t.Fatalf("Land %s: %v", id, err)
 	}
@@ -1168,17 +1201,19 @@ func TestRevertForwardAndIdempotent(t *testing.T) {
 }
 
 // MainlineLog reads first-parent mainline newest first with each commit's land and
-// revert trailer ids: a land, a Spec anchor, a plain commit, a revert, and a merge
+// revert trailer ids: a land, a legacy Spec anchor, a plain commit, a revert, and a merge
 // whose second parent's trailer must not surface.
 func TestMainlineLog(t *testing.T) {
 	newRepo(t)
 	land := landCheckpoint(t, "a", "a.txt")
-	anchor, err := Anchor("Spec: s")
-	if err != nil {
-		t.Fatalf("Anchor: %v", err)
-	}
+	mustGit(t, "commit", "--allow-empty", "-m", "anchor Spec: s", "-m", "Spec: s\nGraph: g")
+	anchor := mustGit(t, "rev-parse", "HEAD")
 	commitFile(t, "p.txt", "plain\n")
 	plain := mustGit(t, "rev-parse", "HEAD")
+	mustGit(t, "commit", "--allow-empty", "-m", "land chart", "-m", "Chart: c")
+	chart := mustGit(t, "rev-parse", "HEAD")
+	mustGit(t, "commit", "--allow-empty", "-m", "stray", "-m", "Spec: x\n\nTip: t\nCheckpoint: z\nGraph: g")
+	stray := mustGit(t, "rev-parse", "HEAD")
 	rev, err := Revert(land, RevertsTrailer("checkpoint", "a"))
 	if err != nil {
 		t.Fatalf("Revert: %v", err)
@@ -1191,21 +1226,30 @@ func TestMainlineLog(t *testing.T) {
 	mustGit(t, "merge", "--no-ff", "-m", "merge side", "side")
 	merge := mustGit(t, "rev-parse", "HEAD")
 
-	got, err := MainlineLog("checkpoint", 200)
+	got, err := MainlineLog(200)
 	if err != nil {
 		t.Fatalf("MainlineLog: %v", err)
 	}
-	want := []MainlineCommit{{SHA: merge}, {SHA: rev, Reverts: "a"}, {SHA: plain}, {SHA: anchor}, {SHA: land, Lands: "a"}, {SHA: mustGit(t, "rev-parse", land+"^")}}
+	want := []MainlineCommit{
+		{SHA: merge, Subject: "merge side"},
+		{SHA: rev, Reverts: "a"},
+		{SHA: stray, Kind: "checkpoint", Lands: "z", Subject: "stray"},
+		{SHA: chart, Kind: "chart", Lands: "c", Subject: "land chart"},
+		{SHA: plain, Subject: "edit p.txt"},
+		{SHA: anchor, Kind: "spec", Lands: "s"},
+		{SHA: land, Kind: "checkpoint", Lands: "a"},
+		{SHA: mustGit(t, "rev-parse", land+"^")},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("MainlineLog = %d commits, want %d: %+v", len(got), len(want), got)
 	}
 	for i, w := range want {
 		g := got[i]
-		if g.SHA != w.SHA || g.Lands != w.Lands || g.Reverts != w.Reverts || g.Time.IsZero() {
+		if g.SHA != w.SHA || g.Kind != w.Kind || g.Lands != w.Lands || g.Reverts != w.Reverts || g.Time.IsZero() || (w.Subject != "" && g.Subject != w.Subject) {
 			t.Errorf("commit %d = %+v, want %+v (with a time)", i, g, w)
 		}
 	}
-	if got, _ := MainlineLog("checkpoint", 2); len(got) != 2 || got[0].SHA != merge {
+	if got, _ := MainlineLog(2); len(got) != 2 || got[0].SHA != merge {
 		t.Errorf("MainlineLog(n=2) = %+v, want the newest 2", got)
 	}
 }
@@ -1222,7 +1266,7 @@ func TestRevertConflictReportsPathsAndWritesNothing(t *testing.T) {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "b")
 	mustGit(t, "checkout", Mainline())
-	if _, err := Land("checkpoint/b", "Checkpoint: b"); err != nil {
+	if _, err := Land("checkpoint/b", "Checkpoint: b", LandLocal); err != nil {
 		t.Fatalf("Land b: %v", err)
 	}
 	mustGit(t, "checkout", Mainline())
@@ -1372,7 +1416,7 @@ func TestConcurrentMovesOfMainAllLandClean(t *testing.T) {
 	var squashes []string
 	for i := range n {
 		commitOn(fmt.Sprintf("checkpoint/r%d", i), fmt.Sprintf("r%d.txt", i))
-		sha, err := Land(fmt.Sprintf("checkpoint/r%d", i), fmt.Sprintf("Checkpoint: r%d", i))
+		sha, err := Land(fmt.Sprintf("checkpoint/r%d", i), fmt.Sprintf("Checkpoint: r%d", i), LandLocal)
 		if err != nil {
 			t.Fatalf("pre-land r%d: %v", i, err)
 		}
@@ -1387,13 +1431,12 @@ func TestConcurrentMovesOfMainAllLandClean(t *testing.T) {
 	var moves []func() (string, error)
 	var trailers []string
 	for i := range n {
-		landTr, spec, rev := fmt.Sprintf("Chart: c%d", i), fmt.Sprintf("Spec: s%d", i), fmt.Sprintf("Reverts-Checkpoint: r%d", i)
+		landTr, rev := fmt.Sprintf("Chart: c%d", i), fmt.Sprintf("Reverts-Checkpoint: r%d", i)
 		branch, squash := fmt.Sprintf("chart/c%d", i), squashes[i]
 		moves = append(moves,
-			func() (string, error) { return Land(branch, landTr) },
-			func() (string, error) { return AnchorIfAbsent(spec, LandedBase, Anchor) },
+			func() (string, error) { return Land(branch, landTr, LandLocal) },
 			func() (string, error) { return Revert(squash, rev) })
-		trailers = append(trailers, landTr, spec, rev)
+		trailers = append(trailers, landTr, rev)
 	}
 	errs := make(chan error, len(moves))
 	for _, m := range moves {
@@ -1434,7 +1477,7 @@ func TestLandLockTimeoutIsUntyped(t *testing.T) {
 	defer close(release)
 	before := mustGit(t, "rev-parse", Mainline())
 
-	_, err := AnchorIfAbsent("Spec: x", LandedBase, Anchor)
+	_, err := Revert("deadbeef", "Reverts-Checkpoint: x")
 	var dirty *MainDirty
 	var rebase *RebaseConflict
 	var revert *RevertConflict
@@ -1447,13 +1490,13 @@ func TestLandLockTimeoutIsUntyped(t *testing.T) {
 }
 
 // A dirty main worktree (a tracked change, or a non-ignored untracked file) refuses
-// Land, the anchor and Revert with *MainDirty and touches neither the branch nor
+// Land and Revert with *MainDirty and touches neither the branch nor
 // main. Already-landed trailers still return their SHA over the dirt (write leg
 // only), and Reapply, which never moves main, ignores it.
 func TestDirtyMainRefusesEveryMoveOfMain(t *testing.T) {
-	for name, dirty := range map[string]func(t *testing.T, mainWT string){
-		"tracked":   func(t *testing.T, mainWT string) { writeFile(t, filepath.Join(mainWT, "README"), "edit\n") },
-		"untracked": func(t *testing.T, mainWT string) { writeFile(t, filepath.Join(mainWT, "stray.txt"), "x\n") },
+	for name, c := range map[string]struct{ path string }{
+		"tracked":   {"README"},
+		"untracked": {"stray.txt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			newRepo(t)
@@ -1475,17 +1518,18 @@ func TestDirtyMainRefusesEveryMoveOfMain(t *testing.T) {
 			mustGit(t, "add", ".")
 			mustGit(t, "commit", "-m", "x")
 
-			dirty(t, mainWT)
+			writeFile(t, filepath.Join(mainWT, c.path), "edit\n")
 			mainTip, tip := mustGit(t, "rev-parse", Mainline()), mustGit(t, "rev-parse", "chart/x")
 
 			for op, move := range map[string]func() (string, error){
-				"Land":   func() (string, error) { return Land("chart/x", "Chart: x") },
-				"Anchor": func() (string, error) { return AnchorIfAbsent("Spec: s", LandedBase, Anchor) },
+				"Land":   func() (string, error) { return Land("chart/x", "Chart: x", LandLocal) },
 				"Revert": func() (string, error) { return Revert(squashB, "Reverts-Checkpoint: b") },
 			} {
 				var md *MainDirty
 				if _, err := move(); !errors.As(err, &md) || md.Path != mainWT {
 					t.Errorf("%s over a dirty main = %v, want *MainDirty for %s", op, err, mainWT)
+				} else if !slices.Contains(md.Files, c.path) || !strings.Contains(err.Error(), c.path) {
+					t.Errorf("%s over a dirty main: Files = %v, err = %q, want %s named", op, md.Files, err, c.path)
 				}
 			}
 			if got := mustGit(t, "rev-parse", Mainline()); got != mainTip {
@@ -1495,7 +1539,7 @@ func TestDirtyMainRefusesEveryMoveOfMain(t *testing.T) {
 				t.Errorf("chart/x moved %s → %s over a dirty main", tip, got)
 			}
 
-			if sha, err := Land("checkpoint/a", "Checkpoint: a"); err != nil || sha != squashA {
+			if sha, err := Land("checkpoint/a", "Checkpoint: a", LandLocal); err != nil || sha != squashA {
 				t.Errorf("landed Land over dirt = (%s, %v), want (%s, nil)", sha, err, squashA)
 			}
 			if sha, err := Revert(squashA, "Reverts-Checkpoint: a"); err != nil || sha != rv {
@@ -1505,6 +1549,23 @@ func TestDirtyMainRefusesEveryMoveOfMain(t *testing.T) {
 				t.Errorf("Reapply over dirt = (%s, %v), want a seed commit", sha, err)
 			}
 		})
+	}
+}
+
+// More than 5 dirty paths: the message names the first 5, then " +N more".
+func TestMainDirtyCapsListedFiles(t *testing.T) {
+	newRepo(t)
+	mainWT := mustGit(t, "rev-parse", "--show-toplevel")
+	for i := 1; i <= 7; i++ {
+		writeFile(t, filepath.Join(mainWT, fmt.Sprintf("f%d.txt", i)), "x\n")
+	}
+	err := mainClean()
+	var md *MainDirty
+	if !errors.As(err, &md) || len(md.Files) != 7 {
+		t.Fatalf("mainClean = %v, want *MainDirty with 7 files", err)
+	}
+	if want := "(f1.txt, f2.txt, f3.txt, f4.txt, f5.txt, … +2 more)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("msg %q lacks %q", err, want)
 	}
 }
 
@@ -1618,7 +1679,7 @@ func TestCheckResolved(t *testing.T) {
 		base = mustGit(t, "rev-parse", "HEAD")
 		mustGit(t, "checkout", "chart/x")
 		mustGit(t, "rebase", base)
-		wantCheckFailure(t, CheckResolved(base, tip), 2, "docs/adr/0001-chart.md (vs mainline docs/adr/0001-main.md)")
+		wantCheckFailure(t, CheckResolved(base, tip), 2, "docs/adr/0001-chart.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0001-main.md)")
 	})
 	t.Run("a mainline-only path modified fails assertion 3", func(t *testing.T) {
 		base, tip := resolveRepo(t)
@@ -1806,7 +1867,7 @@ func TestMainlineDetectedFromOriginHEAD(t *testing.T) {
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "a")
 	mustGit(t, "checkout", "trunk") // land through the mainline worktree
-	sha, err := Land("checkpoint/x", "Checkpoint: x")
+	sha, err := Land("checkpoint/x", "Checkpoint: x", LandLocal)
 	if err != nil {
 		t.Fatalf("Land onto trunk: %v", err)
 	}
@@ -1822,7 +1883,7 @@ func TestMainlineDetectedFromOriginHEAD(t *testing.T) {
 	if at, err := MainlineAt(gitDir); err != nil || at != sha {
 		t.Errorf("MainlineAt = (%s, %v), want (%s, nil)", at, err, sha)
 	}
-	if log, err := MainlineLog("checkpoint", 5); err != nil || len(log) != 2 || log[0].Lands != "x" {
+	if log, err := MainlineLog(5); err != nil || len(log) != 2 || log[0].Lands != "x" {
 		t.Errorf("MainlineLog = (%+v, %v), want trunk's land then root", log, err)
 	}
 }
@@ -1844,6 +1905,41 @@ func TestCommitsAheadCountsSinceMergeBase(t *testing.T) {
 	}
 	if _, err := CommitsAhead("main", "checkpoint/ws-none"); err == nil {
 		t.Error("a missing branch must error, not read as zero commits")
+	}
+}
+
+// CommitsByTrailer counts one trailer's squashes, whole-line: s1 doesn't match
+// s1.1 (Spec D8).
+func TestCommitsByTrailerIsWholeLine(t *testing.T) {
+	newRepo(t)
+	mustGit(t, "branch", "checkpoint/cp")
+	mustGit(t, "checkout", "-q", "checkpoint/cp")
+	for _, tr := range []string{"Build: b1", "Surgery: s1", "Surgery: s1.1", "Surgery: s1"} {
+		writeFile(t, "f", tr)
+		mustGit(t, "add", "-A")
+		mustGit(t, "commit", "-m", "squash\n\n"+tr)
+	}
+	for tr, want := range map[string]int{"Surgery: s1": 2, "Surgery: s1.1": 1, "Surgery: s2": 0} {
+		if n, err := CommitsByTrailer("main", "checkpoint/cp", tr); err != nil || n != want {
+			t.Errorf("%s = %d, %v; want %d", tr, n, err, want)
+		}
+	}
+}
+
+func TestNewestByTrailerIsWholeLineAndNewest(t *testing.T) {
+	newRepo(t)
+	mustGit(t, "checkout", "-q", "-b", "checkpoint/cp")
+	var shas []string
+	for _, tr := range []string{"Critique: c1", "Critique: c1.1", "Critique: c1", "Build: b1"} {
+		writeFile(t, "f", tr+fmt.Sprint(len(shas)))
+		mustGit(t, "add", "-A")
+		mustGit(t, "commit", "-m", "squash\n\n"+tr)
+		shas = append(shas, mustGit(t, "rev-parse", "HEAD"))
+	}
+	for tr, want := range map[string]string{"Critique: c1": shas[2], "Critique: c1.1": shas[1], "Critique: c2": ""} {
+		if got, err := NewestByTrailer("checkpoint/cp", tr); err != nil || got != want {
+			t.Errorf("%s = %q, %v; want %q", tr, got, err, want)
+		}
 	}
 }
 
@@ -2017,8 +2113,481 @@ func TestLandedTrailersReadThroughALineageCommit(t *testing.T) {
 	if lb, err := LandedBase("Checkpoint: a"); err != nil || lb != squash {
 		t.Errorf("LandedBase = (%s, %v), want (%s, nil)", lb, err, squash)
 	}
-	log, err := MainlineLog("checkpoint", 5)
+	log, err := MainlineLog(5)
 	if err != nil || len(log) < 2 || log[0].SHA != lin || log[0].Lands != "" || log[1].Lands != "a" {
 		t.Errorf("MainlineLog = (%+v, %v), want the lineage commit (no land) then a's land", log, err)
+	}
+}
+
+// Land never runs the strategy when the trailer is already on mainline.
+func TestLandSkipsStrategyWhenLanded(t *testing.T) {
+	newRepo(t)
+	CutBranch("chart/x", Mainline())
+	mustGit(t, "checkout", "chart/x")
+	writeFile(t, "a.txt", "a\n")
+	mustGit(t, "add", ".")
+	mustGit(t, "commit", "-m", "a")
+	sha, err := Land("chart/x", "Chart: x", LandLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Land("chart/x", "Chart: x", func(string, string) (string, error) {
+		t.Fatal("strategy ran for an already-landed trailer")
+		return "", nil
+	})
+	if err != nil || again != sha {
+		t.Fatalf("Land again = (%q, %v), want (%q, nil)", again, err, sha)
+	}
+}
+
+// The strategy runs under the land lock, and its result and ErrLandPending pass through.
+func TestLandStrategyRunsUnderLock(t *testing.T) {
+	newRepo(t)
+	old := landLockTimeout
+	landLockTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { landLockTimeout = old })
+	var branch, trailer string
+	_, err := Land("chart/p", "Chart: p", func(b, tr string) (string, error) {
+		branch, trailer = b, tr
+		if _, lerr := withLandLock(func() (string, error) { return "", nil }); lerr == nil {
+			t.Error("land lock was free inside the strategy")
+		}
+		return "", ErrLandPending
+	})
+	if !errors.Is(err, ErrLandPending) || branch != "chart/p" || trailer != "Chart: p" {
+		t.Fatalf("err = %v, strategy saw (%q, %q)", err, branch, trailer)
+	}
+}
+
+func TestLandStrategyByName(t *testing.T) {
+	for _, name := range []string{"local", "gitlab"} {
+		if s, err := LandStrategyByName(name); err != nil || s == nil {
+			t.Errorf("LandStrategyByName(%q) = (%v, %v)", name, s != nil, err)
+		}
+	}
+	if _, err := LandStrategyByName("svn"); err == nil || !strings.Contains(err.Error(), `"svn"`) {
+		t.Errorf("unknown name err = %v, want one naming svn", err)
+	}
+}
+
+// ChangedPaths is cut from the merge-base with base, so mainline's later commits
+// stay out of it, including after the branch is rebased onto a newer mainline.
+func TestChangedPathsFromMergeBase(t *testing.T) {
+	newRepo(t)
+	mustGit(t, "checkout", "-b", "feat")
+	writeFile(t, "a.txt", "a\n")
+	mustGit(t, "add", ".")
+	mustGit(t, "commit", "-m", "a")
+	mustGit(t, "checkout", "main")
+	writeFile(t, "m.txt", "m\n")
+	mustGit(t, "add", ".")
+	mustGit(t, "commit", "-m", "m")
+
+	got, err := ChangedPaths("main", "feat")
+	if err != nil || !slices.Equal(got, []string{"a.txt"}) {
+		t.Fatalf("ChangedPaths = %v, %v; want [a.txt]", got, err)
+	}
+	mustGit(t, "checkout", "feat")
+	mustGit(t, "rebase", "main")
+	writeFile(t, "m2.txt", "m2\n")
+	mustGit(t, "add", ".")
+	mustGit(t, "commit", "-m", "m2")
+	mustGit(t, "checkout", "main")
+	if got, err = ChangedPaths("main", "feat"); err != nil || !slices.Equal(got, []string{"a.txt", "m2.txt"}) {
+		t.Fatalf("after rebase ChangedPaths = %v, %v; want [a.txt m2.txt]", got, err)
+	}
+	if got, err = ChangedPaths("main", "main"); err != nil || len(got) != 0 {
+		t.Fatalf("no change = %v, %v; want empty", got, err)
+	}
+}
+
+// An empty packet is today's squash argv; a packet is the middle paragraph, the
+// Tip:/trailer paragraph stays last, and the cleanup keeps markdown headings.
+func TestSquashCommitArgsDecisionPacket(t *testing.T) {
+	want := []string{"commit", "--allow-empty", "-m", "land chart/c", "-m", "Tip: abc\nChart: c\nGraph: g1"}
+	if got := squashCommitArgs("chart/c", "abc", "Chart: c", "g1", ""); !slices.Equal(got, want) {
+		t.Errorf("empty packet argv = %v, want %v", got, want)
+	}
+	want = []string{"commit", "--allow-empty", "--cleanup=whitespace", "-m", "land checkpoint/c", "-m", "## Background\nwhy", "-m", "Tip: abc\nCheckpoint: c\nGraph: g1"}
+	if got := squashCommitArgs("checkpoint/c", "abc", "Checkpoint: c", "g1", "## Background\nwhy"); !slices.Equal(got, want) {
+		t.Errorf("packet argv = %v, want %v", got, want)
+	}
+}
+
+func TestDecisionPacket(t *testing.T) {
+	for body, want := range map[string]string{
+		"Commit: abc":                           "",
+		"Commit: abc\n\n":                       "",
+		"Commit: abc\n\n## Background\n\nwhy\n": "## Background\n\nwhy",
+		// a pre-packet Approval: the spawn text, pin on the second line
+		"Clean review pass over the built Checkpoint slice at the pinned commit.\n" + CommitPin("abc"): "",
+		"Clean pass.\nCommit: cafef00d": "",
+	} {
+		if got := DecisionPacket(body); got != want {
+			t.Errorf("DecisionPacket(%q) = %q, want %q", body, got, want)
+		}
+	}
+}
+
+// A multi-section markdown packet survives a real land: headings and table in git
+// log, and LandedBase / LandedTip still read the trailer and tip.
+func TestLandCarriesDecisionPacket(t *testing.T) {
+	pre := landRepo(t)
+	packet := "## Background\n\nWhy it shipped.\n\nTip: not-the-pin prose\n\n## Summary\n\n| change | where |\n|---|---|\n| a | b.go |\n\n# Top heading"
+	sha, err := Land("checkpoint/x", "Checkpoint: x", func(branch, trailer string) (string, error) {
+		composed, base, pin, err := Compose(branch, trailer, packet)
+		if err != nil {
+			return "", err
+		}
+		return LandSameBase(composed, base, pin)(branch, trailer)
+	})
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	msg := mustGit(t, "log", "-1", "--format=%B", sha)
+	for _, w := range []string{"land checkpoint/x\n\n## Background", "| change | where |\n|---|---|", "\n# Top heading\n\nTip: " + pre + "\nCheckpoint: x"} {
+		if !strings.Contains(msg, w) {
+			t.Errorf("message missing %q:\n%s", w, msg)
+		}
+	}
+	if tip, ok := LandedTip(sha); !ok || tip != pre {
+		t.Errorf("LandedTip = (%q, %v), want %q", tip, ok, pre)
+	}
+	if got, err := LandedBase("Checkpoint: x"); err != nil || got != sha {
+		t.Errorf("LandedBase = (%q, %v), want %q", got, err, sha)
+	}
+}
+
+func TestTrailerBlock(t *testing.T) {
+	for _, c := range []struct{ tip, trailer, want string }{
+		{"abc", "Chart: c", "Tip: abc\nChart: c\nGraph: g1"},
+		{"", "Spec: s", "Spec: s\nGraph: g1"},
+	} {
+		if got := TrailerBlock(c.tip, c.trailer, "g1"); got != c.want {
+			t.Errorf("TrailerBlock(%q, %q) = %q, want %q", c.tip, c.trailer, got, c.want)
+		}
+	}
+}
+
+func TestParseGraph(t *testing.T) {
+	for _, c := range []struct {
+		msg, want string
+		ok        bool
+	}{
+		{"land x\n\nTip: a\nChart: c\nGraph: g1", "g1", true},
+		{"anchor Spec: s\n\nSpec: s\nGraph: g1\n", "g1", true},
+		{"land x\n\nChart: c", "", false},
+		{"land x\n\nChart: c\r\nGraph: g1\r\n", "", false},
+		{"prose Graph: g1 inline", "", false},
+	} {
+		if got, ok := ParseGraph(c.msg); got != c.want || ok != c.ok {
+			t.Errorf("ParseGraph(%q) = %q, %v; want %q, %v", c.msg, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestGraphIDCachesAndErrorsLoudly(t *testing.T) {
+	defer SetGraphID("")()
+	old := readGraphRoot
+	defer func() { readGraphRoot = old }()
+	calls := 0
+	readGraphRoot = func() (string, error) { calls++; return "", errors.New("bd down") }
+	if _, err := GraphID(); err == nil {
+		t.Fatal("GraphID with bd down = nil error, want loud failure")
+	}
+	readGraphRoot = func() (string, error) { calls++; return "root1", nil }
+	for range 2 {
+		if id, err := GraphID(); id != "root1" || err != nil {
+			t.Fatalf("GraphID = %q, %v", id, err)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("readGraphRoot calls = %d, want 2 (one failed, one cached)", calls)
+	}
+}
+
+// TestMain pins the Graph id so the real-repo tests never ask a live bd.
+func TestMain(m *testing.M) {
+	SetGraphID("testgraphroot")
+	os.Exit(m.Run())
+}
+
+// Under local, a land squash and a Rollback revert each carry the
+// block's Graph: line, and LandedBase still re-derives each by its trailer.
+func TestEveryLandWritesGraphLine(t *testing.T) {
+	newRepo(t)
+	squash := landCheckpoint(t, "a", "a.txt")
+	revert, err := Revert(squash, "Reverts-Checkpoint: a")
+	if err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	for name, sha := range map[string]string{"squash": squash, "revert": revert} {
+		if g, ok := ParseGraph(mustGit(t, "log", "-1", "--format=%B", sha)); !ok || g != "testgraphroot" {
+			t.Errorf("%s Graph = %q, %v; want testgraphroot", name, g, ok)
+		}
+	}
+	if lb, err := LandedBase("Checkpoint: a"); err != nil || lb != squash {
+		t.Errorf("LandedBase = (%s, %v), want %s", lb, err, squash)
+	}
+	if tip, ok := LandedTip(squash); !ok || tip == "" {
+		t.Errorf("LandedTip(squash) = %q, %v; want the pinned tip", tip, ok)
+	}
+}
+
+// forgeFixture is a Workspace (cwd) cloned from a bare Forge, plus a second clone
+// that pushes to the Forge. Returns the Forge's path and a push-a-commit helper.
+func forgeFixture(t *testing.T) (forge string, push func() string) {
+	t.Helper()
+	forge = filepath.Join(t.TempDir(), "forge.git")
+	if out, err := exec.Command("git", "init", "-q", "--bare", "-b", "main", forge).CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	newRepo(t)
+	mustGit(t, "remote", "add", "origin", forge)
+	mustGit(t, "push", "-q", "origin", "main")
+	other := t.TempDir()
+	for _, a := range [][]string{{"clone", "-q", forge, other}, {"-C", other, "config", "user.email", "o@e.com"}, {"-C", other, "config", "user.name", "o"}} {
+		if out, err := exec.Command("git", a...).CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+	}
+	return forge, func() string {
+		for _, a := range [][]string{{"commit", "--allow-empty", "-q", "-m", "forge"}, {"push", "-q", "origin", "main"}, {"rev-parse", "HEAD"}} {
+			out, err := exec.Command("git", append([]string{"-C", other}, a...)...).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a[0] == "rev-parse" {
+				return strings.TrimSpace(string(out))
+			}
+		}
+		return ""
+	}
+}
+
+// FetchMainline fast-forwards local main to the Forge's, with main checked out (its
+// tree moves too) and not; equal is a no-op.
+func TestFetchMainlineFastForwards(t *testing.T) {
+	for _, checkedOut := range []bool{true, false} {
+		_, push := forgeFixture(t)
+		want := push()
+		if !checkedOut {
+			mustGit(t, "checkout", "-q", "--detach")
+		}
+		got, err := FetchMainline(ForgeRemote())
+		if err != nil || got != want {
+			t.Fatalf("checkedOut=%v: FetchMainline = %q, %v; want %q", checkedOut, got, err, want)
+		}
+		if h := mustGit(t, "rev-parse", "main"); h != want {
+			t.Errorf("checkedOut=%v: main = %s, want %s", checkedOut, h, want)
+		}
+		if got, err := FetchMainline("origin"); err != nil || got != want {
+			t.Errorf("equal fetch = %q, %v; want no-op at %q", got, err, want)
+		}
+	}
+}
+
+// A local main with a commit the Forge lacks (and the Forge one local lacks) is *MainDiverged.
+func TestFetchMainlineDiverged(t *testing.T) {
+	_, push := forgeFixture(t)
+	forge := push()
+	mustGit(t, "commit", "--allow-empty", "-q", "-m", "local")
+	local := mustGit(t, "rev-parse", "main")
+	_, err := FetchMainline("origin")
+	var d *MainDiverged
+	if !errors.As(err, &d) || d.Local != local || d.Forge != forge {
+		t.Fatalf("err = %v, want *MainDiverged{%s, %s}", err, local, forge)
+	}
+	if h := mustGit(t, "rev-parse", "main"); h != local {
+		t.Error("diverged fetch moved main")
+	}
+}
+
+// A local main strictly ahead of the Forge is *MainAhead (not diverged), listing the
+// unpushed subjects and naming both fixes; main is unmoved.
+func TestFetchMainlineAhead(t *testing.T) {
+	forgeFixture(t)
+	mustGit(t, "commit", "--allow-empty", "-q", "-m", "unpushed work")
+	local := mustGit(t, "rev-parse", "main")
+	_, err := FetchMainline("origin")
+	var a *MainAhead
+	if !errors.As(err, &a) || !slices.Equal(a.Commits, []string{"unpushed work"}) {
+		t.Fatalf("err = %v, want *MainAhead{unpushed work}", err)
+	}
+	var d *MainDiverged
+	if errors.As(err, &d) {
+		t.Error("ahead is also *MainDiverged")
+	}
+	for _, want := range []string{"1 commit(s)", "unpushed work", "push", "reset --hard origin/main"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q lacks %q", err, want)
+		}
+	}
+	if h := mustGit(t, "rev-parse", "main"); h != local {
+		t.Error("ahead fetch moved main")
+	}
+}
+
+// branch.main.remote wins over origin; absent, origin.
+func TestForgeRemote(t *testing.T) {
+	newRepo(t)
+	if got := ForgeRemote(); got != "origin" {
+		t.Errorf("default = %q", got)
+	}
+	mustGit(t, "config", "branch.main.remote", "forge")
+	if got := ForgeRemote(); got != "forge" {
+		t.Errorf("configured = %q", got)
+	}
+}
+
+// commitTrailer lands an empty mainline commit carrying msg, standing in for
+// another graph's (or a legacy) land.
+func commitTrailer(t *testing.T, msg string) string {
+	t.Helper()
+	mustGit(t, "commit", "--allow-empty", "-m", "land x", "-m", msg)
+	return mustGit(t, "rev-parse", "HEAD")
+}
+
+// Under gitlab LandedBase counts a trailer with our Graph: or none as landed (the
+// newest ours wins over a newer foreign one) and refuses one carrying only another
+// graph's id as *ForeignLanding, never ErrNotLanded (Spec FR 40, ADR 0187 §2).
+func TestLandedBaseGitlabGraph(t *testing.T) {
+	newRepo(t)
+	defer SetGraphID("me")()
+	defer func(f func() (string, error)) { LandStrategyName = f }(LandStrategyName)
+	LandStrategyName = func() (string, error) { return LandStrategyGitlab, nil }
+
+	ours := commitTrailer(t, "Checkpoint: a\nGraph: me")
+	legacy := commitTrailer(t, "Checkpoint: b")
+	foreign := commitTrailer(t, "Checkpoint: c\nGraph: them")
+	commitTrailer(t, "Checkpoint: d\nGraph: them")
+	d2 := commitTrailer(t, "Checkpoint: d\nGraph: them2")
+	mixedOurs := commitTrailer(t, "Checkpoint: e\nGraph: me")
+	commitTrailer(t, "Checkpoint: e\nGraph: them")
+	// a squash reachable only as a merge's second parent
+	mustGit(t, "checkout", "-b", "side", Mainline())
+	side := commitTrailer(t, "Checkpoint: f\nGraph: me")
+	mustGit(t, "checkout", Mainline())
+	mustGit(t, "merge", "--no-ff", "-m", "merge side", "side")
+
+	for trailer, want := range map[string]string{"Checkpoint: a": ours, "Checkpoint: b": legacy, "Checkpoint: e": mixedOurs, "Checkpoint: f": side} {
+		if got, err := LandedBase(trailer); err != nil || got != want {
+			t.Errorf("LandedBase(%q) = (%s, %v), want (%s, nil)", trailer, got, err, want)
+		}
+	}
+	_, err := LandedBase("Checkpoint: c")
+	var fe *ForeignLanding
+	if !errors.As(err, &fe) || errors.Is(err, ErrNotLanded) {
+		t.Fatalf("LandedBase(c) err = %v, want *ForeignLanding", err)
+	}
+	if want := (ForeignLanding{Trailer: "Checkpoint: c", Ours: "me", Theirs: "them", Sha: foreign}); *fe != want {
+		t.Errorf("ForeignLanding = %+v, want %+v", *fe, want)
+	}
+	if _, err := LandedBase("Checkpoint: d"); !errors.As(err, &fe) || fe.Sha != d2 {
+		t.Errorf("LandedBase(d) err = %v, want the newest foreign match %s", err, d2)
+	}
+	if _, err := LandedBase("Checkpoint: zzz"); !errors.Is(err, ErrNotLanded) {
+		t.Errorf("LandedBase(absent) err = %v, want ErrNotLanded", err)
+	}
+}
+
+// Under local Graph: is never read: a foreign Graph: trailer still reads as landed (FR 2).
+func TestLandedBaseLocalIgnoresGraph(t *testing.T) {
+	newRepo(t)
+	defer SetGraphID("me")()
+	sha := commitTrailer(t, "Checkpoint: c\nGraph: them")
+	if got, err := LandedBase("Checkpoint: c"); err != nil || got != sha {
+		t.Errorf("LandedBase = (%s, %v), want (%s, nil)", got, err, sha)
+	}
+}
+
+// The conflict probe (Spec FR 3-5, 12) reports what a Landing would hit — *NumberClash
+// first, then *RebaseConflict, else nil — and leaves the branch ref, mainline ref and
+// worktree byte-for-byte as they were.
+func TestProbeConflict(t *testing.T) {
+	snapshot := func(t *testing.T, branch string) string {
+		return mustGit(t, "rev-parse", branch, Mainline()) + mustGit(t, "status", "--porcelain")
+	}
+	probe := func(t *testing.T, branch string) (string, error) {
+		before := snapshot(t, branch)
+		base, err := ResolveProbeBase()
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = ProbeConflict(branch, base)
+		if after := snapshot(t, branch); after != before {
+			t.Errorf("probe moved state:\n%s\n!=\n%s", after, before)
+		}
+		return base, err
+	}
+	t.Run("clean branch is nil", func(t *testing.T) {
+		newRepo(t)
+		mustGit(t, "checkout", "-b", "checkpoint/x")
+		commitFile(t, "a.txt", "a\n")
+		mustGit(t, "checkout", "main")
+		commitFile(t, "b.txt", "b\n")
+		if _, err := probe(t, "checkpoint/x"); err != nil {
+			t.Errorf("probe = %v, want nil", err)
+		}
+	})
+	t.Run("up to date with base is nil", func(t *testing.T) {
+		newRepo(t)
+		mustGit(t, "checkout", "-b", "checkpoint/x")
+		commitFile(t, "a.txt", "a\n")
+		mustGit(t, "checkout", "main")
+		if _, err := probe(t, "checkpoint/x"); err != nil {
+			t.Errorf("probe = %v, want nil", err)
+		}
+	})
+	t.Run("textual conflict is *RebaseConflict with the base", func(t *testing.T) {
+		newRepo(t)
+		commitFile(t, "shared.txt", "root\n")
+		mustGit(t, "checkout", "-b", "checkpoint/x")
+		commitFile(t, "shared.txt", "branch\n")
+		mustGit(t, "checkout", "main")
+		commitFile(t, "shared.txt", "main\n")
+		base, err := probe(t, "checkpoint/x")
+		var rc *RebaseConflict
+		if !errors.As(err, &rc) || rc.Base != base || base != mustGit(t, "rev-parse", "main") {
+			t.Errorf("probe = %v (base %s), want *RebaseConflict on main's tip", err, base)
+		}
+	})
+	t.Run("ADR-number clash is *NumberClash with the base", func(t *testing.T) {
+		newRepo(t)
+		addADR(t, "0001-base.md")
+		mustGit(t, "checkout", "-b", "checkpoint/x")
+		addADR(t, "0002-branch-side.md")
+		mustGit(t, "checkout", "main")
+		addADR(t, "0002-main-side.md")
+		base, err := probe(t, "checkpoint/x")
+		var clash *NumberClash
+		if !errors.As(err, &clash) || clash.Base != base || len(clash.Clashes) != 1 {
+			t.Errorf("probe = %v, want *NumberClash with one clash on %s", err, base)
+		}
+	})
+	t.Run("a git failure is a plain error, never a collision", func(t *testing.T) {
+		newRepo(t)
+		err := ProbeConflict("checkpoint/missing", mustGit(t, "rev-parse", "main"))
+		var rc *RebaseConflict
+		var clash *NumberClash
+		if err == nil || errors.As(err, &rc) || errors.As(err, &clash) {
+			t.Errorf("probe = %v, want a plain error", err)
+		}
+	})
+}
+
+func TestCommonDirFollowsCwd(t *testing.T) {
+	newRepo(t)
+	a, err := CommonDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := CommonDir(); again != a {
+		t.Fatalf("second call = %q, want %q", again, a)
+	}
+	newRepo(t) // another repo, another cwd: the memo must not carry over
+	b, err := CommonDir()
+	if err != nil || b == a {
+		t.Fatalf("CommonDir in a second repo = %q, %v; want a path other than %q", b, err, a)
 	}
 }

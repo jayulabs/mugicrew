@@ -1,0 +1,40 @@
+Sessions                                                                  Plan usage
+all time · by none                                                        5h 62% (resets 14:00) · wk 40%
+KEY   SESSIONS FAILED AGENT API  COST AVG_COST AVG_API FAIL% TOKENS       100┤░░░░
+TOTAL        4      1    0s  0s $0.00    $0.00      0s   25%      0          │░░░░
+                                                                             │░░░░                  ▂▃▄▅
+                                                                           50┤░░░░            ▁▂▄▅▇█████
+                                                                             │░░░░      ▁▃▄▅▆███████████
+                                                                            0┤░░░░▁▂▄▅▇█████████████████┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+                                                                             └┴───────┬───────┬────────▲───────┬───────┤
+                                                                              0h      1h      2h       3h      4h     5h
+                                                                              ▲ 3h0m in · 2h0m left · resets Fri 14:00
+
+                                                                          (distribution hidden: too short)
+=====
+Plan usage
+5h 62% (resets 14:00) · wk 40%
+100┤░░░░░░░░                                                                    
+   │░░░░░░░░                                                                    
+   │░░░░░░░░                                ▁▂▃▃▄▅                              
+ 50┤░░░░░░░░                      ▁▂▃▄▄▅▆▇▇███████                              
+   │░░░░░░░░          ▁▁▂▃▄▄▄▅▆▇██████████████████                              
+  0┤░░░░░░░░▁▂▂▃▄▅▆▆▇█████████████████████████████┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+   └┴──────────────┬──────────────┬──────────────▲──────────────┬──────────────┤
+    0h             1h             2h             3h             4h            5h
+    ▲ 3h0m in · 2h0m left · resets Fri 14:00
+
+Sessions
+all time · by none
+KEY    SESSIONS  FAILED  AGENT  API   COST  AVG_COST  AVG_API  FAIL%  TOKENS
+TOTAL         4       1     0s   0s  $0.00     $0.00       0s    25%       0
+
+Distribution
+agent time · 4 sessions · d session cost
+<1m    ███████████████████████████████████████████████████████████████ 4
+1–2m                                                                   0
+2–5m                                                                   0
+5–10m                                                                  0
+10–30m                                                                 0
+30m–1h                                                                 0
+1h+                                                                    0

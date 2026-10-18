@@ -1,6 +1,6 @@
 # ADR 0070: mugicrew one bd write rule: every bd mutation is a single commutative or CAS-guarded store call, or a read-then-write that names its serializer; pauses become additive labels and the Cap may overshoot by one
 
-Status: Accepted; §1 serializer list and §2 amended by ADR 0103
+Status: Accepted; §1 serializer list and §2 amended by ADR 0103; Context premise and CAS-call retries amended by ADR 0153 (server mode)
 Date: 2026-10-06
 
 ## Context

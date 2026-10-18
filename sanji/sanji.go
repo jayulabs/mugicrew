@@ -12,9 +12,14 @@ import (
 	_ "embed"
 	"fmt"
 
+	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 )
+
+// showBead is the bd read behind the focus line, swapped by tests.
+var showBead = bd.Show
 
 // Sanji is the concrete prototyping crewmate. It carries no state; the harness
 // arrives on the ctx (spec §4), mirroring Nami and Zoro.
@@ -40,7 +45,7 @@ func (Sanji) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchComman
 	if bead.Kind != contract.KindPrototype {
 		return nil, fmt.Errorf("sanji.Launch: kind %q is not a launchable HITL kind", bead.Kind)
 	}
-	inv, err := contract.NewInvocation(bead.ID, prototypePrompt(bead.ID, git.TempWorktreePath(bead.ID)))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusUnder(prototypePrompt(bead.ID, git.TempWorktreePath(bead.ID)), bead.ID, showBead))
 	if err != nil {
 		return nil, err
 	}

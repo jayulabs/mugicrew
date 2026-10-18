@@ -1,6 +1,6 @@
 # ADR 0023: Responsive mugicrew TUI — patch the hand-rolled rendering, do not adopt bubbles/viewport
 
-Status: Accepted — single-pane breakpoint raised from 60 to 84 cols by ADR 0072
+Status: Accepted — single-pane breakpoint raised from 60 to 84 cols by ADR 0072; does not bind the v2 TUI, which uses bubbles (ADR 0141)
 Date: 2026-09-25
 
 Chart: Responsive mugicrew TUI layout. Settles the bug-vs-model spike so the Spec can state HOW responsive rendering is implemented.

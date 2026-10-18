@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 )
@@ -23,8 +25,25 @@ type Edge = contract.Edge
 type Closing struct{ ID, Reason string }
 
 // runBatch pipes a script into one `bd batch` — one transaction, rolled back
-// whole on any failing line. A var so a test can fake it.
+// whole on any failing line — replaying a clean conflict under the shared retry
+// policy (Spec D2, ADR 0153). A failed batch commits nothing, so the same script
+// is re-piped byte for byte. A var so a test can fake it.
 var runBatch = func(script string) error {
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err = runBatchOnce(script); err == nil {
+			return nil
+		}
+		if attempt == maxAttempts-1 || !retryable(err) {
+			break
+		}
+		sleep(backoff(attempt))
+	}
+	return err
+}
+
+// runBatchOnce is one bd batch exec; a var so a test fakes the process under the retry.
+var runBatchOnce = func(script string) error {
 	cmd := exec.Command("bd", "batch")
 	cmd.Stdin = strings.NewReader(script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // as run: a loop's Ctrl-C must not kill the write (ADR 0050)
@@ -121,6 +140,26 @@ func DeleteDrafts(creator string) ([]string, []BranchOutcome, error) {
 	return ids, deleteDraftBranches(drafts), nil
 }
 
+// draftRepo is the child repo d's context: label names, "" for none or a subtree.
+// ponytail: bd can't import contexts (it imports bd), so this reads the repo = table directly.
+var draftRepo = func(d Bead) git.Repo {
+	name := ContextOf(d)
+	if name == "" {
+		return ""
+	}
+	if len(cfglayer.Repos(".")) == 0 { // config first: a subtree-only Workspace pays no git call
+		return ""
+	}
+	root, err := git.RepoRoot()
+	if err != nil {
+		return ""
+	}
+	if dir, ok := cfglayer.Repos(root)[name]; ok {
+		return git.Repo(filepath.Join(root, dir))
+	}
+	return ""
+}
+
 // deleteDraftBranches deletes each Chart or Checkpoint Draft's branch whose tip
 // is on mainline (as CutBranch left it); force is safe behind that gate. A
 // branch never cut is skipped silently; one with work, or one git refuses (a
@@ -131,12 +170,16 @@ func deleteDraftBranches(drafts []Bead) (outs []BranchOutcome) {
 			continue
 		}
 		branch := git.BranchName(string(d.Kind), d.ID)
-		if _, err := git.Head("refs/heads/" + branch); err != nil {
+		head, isAncestor, mainline, del := git.Head, git.IsAncestor, git.Mainline, git.DeleteBranch
+		if r := draftRepo(d); r != "" { // a nested Draft's branch was cut in the child
+			head, isAncestor, mainline, del = r.Head, r.IsAncestor, r.Mainline, r.DeleteBranch
+		}
+		if _, err := head("refs/heads/" + branch); err != nil {
 			continue
 		}
 		err := errors.New("has work")
-		if git.IsAncestor("refs/heads/"+branch, git.Mainline()) {
-			err = git.DeleteBranch(branch)
+		if isAncestor("refs/heads/"+branch, mainline()) {
+			err = del(branch)
 		}
 		outs = append(outs, BranchOutcome{branch, err})
 	}

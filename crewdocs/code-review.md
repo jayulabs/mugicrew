@@ -63,12 +63,17 @@ partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c)
 requirements that look implemented but where the implementation looks wrong.
 Quote the Spec line for each finding. Under 400 words.
 
-With no Spec but a **Surgery** (a human-dictated change on its own Checkpoint),
-the Surgery bead's description and comments are the intent source instead. Run
-the Surgery check: report only (a) a stated change that is missing or partial
-and (c) a stated change that is implemented wrong, quoting the Surgery line;
-there is no scope-creep check, since the human dictated the diff. With neither
-a Spec nor a Surgery, skip this axis and report "no spec available".
+A **Surgery** is a human-dictated change on a Checkpoint: its bead's
+description and comments are the intent for the commits trailered
+`Surgery: <id>`. Run the Surgery check: report only (a) a stated change that is
+missing or partial and (c) a stated change that is implemented wrong, quoting
+the Surgery line; there is no scope-creep check, since the human dictated the
+diff. On a Spec'd Checkpoint run the Spec axis against the Spec, run the Surgery
+check for the commits trailered `Surgery: <id>` against that Surgery bead, and
+exclude those commits from scope-creep (b). On a Spec-less Checkpoint run one
+Surgery check per Surgery over its own trailered commits; a Surgery that
+committed nothing has no trailered commits, so it gets no check. With neither a
+Spec nor a Surgery, skip this axis and report "no spec available".
 
 ## Keep the axes apart
 

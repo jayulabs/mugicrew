@@ -118,3 +118,5 @@ and refused by run-now (ADR 0081).
 §2 gains `paused:abandoned`: written by the loop force stop and the confirmed
 TUI quit for each abandoned effort's bead. It **never** clears itself, and
 only the human lifts it (Chopper may later, ADR 0082 §4).
+
+> **Amended by ADR 0158:** `paused:context` is a further cause, written on a container whose `context:` label names an undeclared context and lifted by the loop once the label or config is fixed.

@@ -71,6 +71,37 @@ func TestRunArgsModelPassThrough(t *testing.T) {
 	}
 }
 
+// A profile's Run (ADR 0125): --model in argv, and the profile env
+// in the child's environment on top of the inherited one, never in argv.
+func TestRunCarriesProfileModelAndEnv(t *testing.T) {
+	t.Setenv("MC_INHERITED", "kept")
+	var argv []string
+	orig := execCommand
+	execCommand = func(_ string, args ...string) *exec.Cmd {
+		argv = args
+		return exec.Command("sh", "-c", `printf '{"result":"%s|%s|%s"}' "$ANTHROPIC_BASE_URL" "$ANTHROPIC_AUTH_TOKEN" "$MC_INHERITED"`)
+	}
+	t.Cleanup(func() { execCommand = orig })
+
+	b := &Backend{Model: "deepseek-chat", Env: map[string]string{
+		"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-secret"}}
+	res, err := b.Run(nil, contract.Invocation{Prompt: "p", BeadID: "mc-9"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := "https://api.deepseek.com/anthropic|sk-secret|kept"; res.Output != want {
+		t.Errorf("child env read %q, want %q", res.Output, want)
+	}
+	if i := slices.Index(argv, "--model"); i < 0 || argv[i+1] != "deepseek-chat" {
+		t.Errorf("argv must carry --model deepseek-chat; got %v", argv)
+	}
+	for _, a := range argv {
+		if strings.Contains(a, "sk-secret") || strings.Contains(a, "api.deepseek.com") {
+			t.Errorf("profile env leaked into argv: %v", argv)
+		}
+	}
+}
+
 // .result → Output, .session_id → SessionID (spec §5.3).
 func TestParseResultMapsFields(t *testing.T) {
 	got, err := parseResult([]byte(`{"result":"the answer","session_id":"sess-abc","type":"result"}`), false)
@@ -276,6 +307,21 @@ func TestLaunchCommandArgv(t *testing.T) {
 	}
 }
 
+// ReadOnly drops the edit tools from launch argv (ADR 0191); without it the flag is absent.
+func TestLaunchCommandReadOnly(t *testing.T) {
+	for _, ro := range []bool{true, false} {
+		lc, err := New("").LaunchCommand(contract.Invocation{Prompt: "p", BeadID: "mc-7", ReadOnly: ro})
+		if err != nil {
+			t.Fatal(err)
+		}
+		argv := lc.(contract.AgentCommand).Argv
+		i := slices.Index(argv, "--disallowedTools")
+		if ro && (i < 0 || argv[i+1] != "Edit,Write,NotebookEdit") || !ro && i >= 0 {
+			t.Errorf("ReadOnly=%v: argv %v", ro, argv)
+		}
+	}
+}
+
 func TestLaunchCommandHonoursSessionIDAndModel(t *testing.T) {
 	lc, err := New("claude-opus-4-8").LaunchCommand(contract.Invocation{Prompt: "p", BeadID: "mc-7", SessionID: "given-id"})
 	ac, ok := lc.(contract.AgentCommand)
@@ -379,7 +425,7 @@ func TestResumeCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
-	if _, err := New("m").ResumeCommand("sess-1"); err == nil || !strings.Contains(err.Error(), "sess-1") {
+	if _, err := New("m").ResumeCommand("sess-1", false); err == nil || !strings.Contains(err.Error(), "sess-1") {
 		t.Errorf("missing transcript: err = %v, want an error naming the session", err)
 	}
 	proj := home + "/.claude/projects/-tmp-wt"
@@ -389,15 +435,77 @@ func TestResumeCommand(t *testing.T) {
 	if err := os.WriteFile(proj+"/sess-1.jsonl", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ac, err := New("m").ResumeCommand("sess-1")
+	ac, err := New("").ResumeCommand("sess-1", false)
 	if err != nil {
 		t.Fatalf("ResumeCommand: %v", err)
 	}
 	if !slices.Equal(withoutWaitingHooks(t, ac.Argv, ""), []string{"claude", "--resume", "sess-1", "--add-dir", crewDocsParent(t)}) || ac.SessionID != "sess-1" {
 		t.Errorf("ResumeCommand = %+v, want claude --resume sess-1 --add-dir <crewdocs> --settings <hooks>", ac)
 	}
-	if _, err := New("").ResumeCommand(""); err == nil {
+	if _, err := New("").ResumeCommand("", false); err == nil {
 		t.Error("an empty session id must be an error, not a glob over every transcript")
+	}
+}
+
+// A read-only resume keeps the edit tools off, as launch does (ADR 0191).
+func TestResumeCommandReadOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	proj := home + "/.claude/projects/-tmp-wt"
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proj+"/sess-1.jsonl", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, ro := range []bool{true, false} {
+		ac, err := New("").ResumeCommand("sess-1", ro)
+		if err != nil {
+			t.Fatalf("ResumeCommand: %v", err)
+		}
+		if got := slices.Contains(ac.Argv, "Edit,Write,NotebookEdit") && slices.Contains(ac.Argv, "--disallowedTools"); got != ro {
+			t.Errorf("readOnly=%v: argv %v", ro, ac.Argv)
+		}
+	}
+}
+
+// A profile's HITL launch and resume (ADR 0125): both carry
+// --model (resume again, since claude's --model binds only the session it
+// launched) and the profile Env on the command, never in argv or --settings.
+func TestLaunchAndResumeCarryProfileModelAndEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	proj := home + "/.claude/projects/-tmp-wt"
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proj+"/sess-1.jsonl", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-secret"}
+	b := &Backend{Model: "deepseek-chat", Env: env}
+	lc, err := b.LaunchCommand(contract.Invocation{Prompt: "p", BeadID: "mc-7"})
+	if err != nil {
+		t.Fatalf("LaunchCommand: %v", err)
+	}
+	rc, err := b.ResumeCommand("sess-1", false)
+	if err != nil {
+		t.Fatalf("ResumeCommand: %v", err)
+	}
+	for name, ac := range map[string]contract.AgentCommand{"launch": lc.(contract.AgentCommand), "resume": rc} {
+		if i := slices.Index(ac.Argv, "--model"); i < 0 || ac.Argv[i+1] != "deepseek-chat" {
+			t.Errorf("%s argv must carry --model deepseek-chat; got %v", name, ac.Argv)
+		}
+		if !reflect.DeepEqual(ac.Env, env) {
+			t.Errorf("%s Env = %v, want the profile env %v", name, ac.Env, env)
+		}
+		for _, a := range ac.Argv { // the --settings JSON is an argv word too
+			if strings.Contains(a, "sk-secret") || strings.Contains(a, "api.deepseek.com") {
+				t.Errorf("%s: profile env leaked into argv: %q", name, a)
+			}
+		}
 	}
 }
 
@@ -426,7 +534,10 @@ func TestMeterCost(t *testing.T) {
 		{"resume records the delta", []string{cs1, user}, []string{cs1, user, cs2},
 			contract.Cost{Known: true, USD: 0.5, APIms: 1000, Models: map[string]contract.ModelCost{
 				"claude-opus-5-5": {USD: 0.5, In: 5, Out: 100, CacheRead: 1000, CacheWrite: 100}}}},
+		{"handoff duplicate cost-state is the source's spend", nil, []string{cs1, cs1, `{"type":"continued-in","timestamp":"t","sessionId":"sess-1","continuedInSessionId":"dest-9"}`},
+			contract.Cost{Known: true, USD: 1.5, APIms: 3000, Models: map[string]contract.ModelCost{"claude-opus-5-5": opus1, "claude-haiku-4-5": haiku}}},
 		{"resume with no new record", []string{cs1}, []string{cs1, user}, contract.Cost{}},
+		{"unknown-shaped baseline", []string{shape}, []string{shape, cs1}, contract.Cost{}},
 		{"no file", nil, nil, contract.Cost{}},
 		{"garbage", nil, []string{"not json", `{"type":"cost-state",`}, contract.Cost{}},
 		{"changed shape", nil, []string{shape}, contract.Cost{}},
@@ -451,7 +562,8 @@ func TestMeterCost(t *testing.T) {
 			write(tc.before)
 			read := MeterCost("sess-1")
 			write(tc.after)
-			got := read()
+			m := read()
+			got := m.Cost
 			if got.Known != tc.want.Known || math.Abs(got.USD-tc.want.USD) > 1e-9 || got.APIms != tc.want.APIms || got.Unpriced != tc.want.Unpriced {
 				t.Errorf("cost = %+v, want %+v", got, tc.want)
 			}
@@ -463,6 +575,66 @@ func TestMeterCost(t *testing.T) {
 				if math.Abs(g.USD-w.USD) > 1e-9 || g.In != w.In || g.Out != w.Out || g.CacheRead != w.CacheRead || g.CacheWrite != w.CacheWrite {
 					t.Errorf("models[%s] = %+v, want %+v", id, g, w)
 				}
+			}
+		})
+	}
+}
+
+// A handoff writes a duplicate of the first cost-state: the source's spend is the
+// first one (the baseline predates it), and the transcript's continued-in record
+// names the destination (Spec mc-11b8 D1, D2).
+func TestMeterCostHandoff(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	path := dir + "/projects/-tmp-wt/sess-1.jsonl"
+	if err := os.MkdirAll(dir+"/projects/-tmp-wt", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	read := MeterCost("sess-1")
+	cs := `{"type":"cost-state","totalCostUSD":1.5,"totalAPIDuration":3000}`
+	ci := `{"type":"continued-in","timestamp":"t","sessionId":"sess-1","continuedInSessionId":"dest-9"}`
+	if err := os.WriteFile(path, []byte(cs+"\n"+cs+"\n"+ci+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := read()
+	if !m.Known || m.USD != 1.5 || m.APIms != 3000 || m.ContinuedIn != "dest-9" || m.Last.USD != 1.5 {
+		t.Errorf("metered = %+v, want 1.5 USD, 3000 ms, dest-9, last 1.5", m)
+	}
+}
+
+// A resumed run's transcript still holds the earlier run's continued-in; only a
+// continued-in this run wrote (a new cost-state, then the record last) counts.
+func TestMeterCostResumeIgnoresOldHandoff(t *testing.T) {
+	cs1 := `{"type":"cost-state","totalCostUSD":1.5,"totalAPIDuration":3000}`
+	cs2 := `{"type":"cost-state","totalCostUSD":2,"totalAPIDuration":4000}`
+	ci := `{"type":"continued-in","timestamp":"t","sessionId":"sess-1","continuedInSessionId":"dest-9"}`
+	user := `{"type":"user","message":{"content":"hi"}}`
+	for _, tc := range []struct {
+		name  string
+		after []string
+		known bool
+		usd   float64
+	}{
+		{"resumed and ended", []string{cs1, cs1, ci, user, cs2}, true, 0.5},
+		{"resume killed", []string{cs1, cs1, ci}, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", dir)
+			path := dir + "/projects/-tmp-wt/sess-1.jsonl"
+			if err := os.MkdirAll(dir+"/projects/-tmp-wt", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(strings.Join([]string{cs1, cs1, ci}, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			read := MeterCost("sess-1")
+			if err := os.WriteFile(path, []byte(strings.Join(tc.after, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			m := read()
+			if m.ContinuedIn != "" || m.Known != tc.known || math.Abs(m.USD-tc.usd) > 1e-9 {
+				t.Errorf("metered = %+v, want no continued-in, known=%v usd=%v", m, tc.known, tc.usd)
 			}
 		})
 	}

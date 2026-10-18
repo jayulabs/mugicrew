@@ -54,7 +54,7 @@ func TestHitlRunExitMapping(t *testing.T) {
 			removeWorktree = func(wt string) error { removed = wt; return tc.rmErr }
 
 			rc := HitlRun([]string{"--bead=grl.1", "--parent=chart1", "--crewmate=nami", "--session=sess-1",
-				"--worktree=" + tc.worktree, "--", "claude", "--session-id", "sess-1"}, meter(t))
+				"--worktree=" + tc.worktree, argvArg(t, "claude", "--session-id", "sess-1")}, meter(t))
 			if rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
 			}
@@ -87,7 +87,7 @@ func TestHitlRunExitMapping(t *testing.T) {
 
 // meter is the claudecode Session cost meter over an empty temp CLAUDE_CONFIG_DIR,
 // so a run finds no transcript unless the test's agent writes one there.
-func meter(t *testing.T) func(string) func() contract.Cost {
+func meter(t *testing.T) func(string) func() contract.Metered {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	return claudecode.MeterCost
 }
@@ -121,7 +121,7 @@ func TestHitlRunRecordsCost(t *testing.T) {
 				}
 				return exec.Command("sh", "-c", tc.exit).Run()
 			}
-			HitlRun([]string{"--bead=g", "--session=sess-1", "--worktree=/tmp/mugicrew-wt-x/wt", "--", "claude"}, m)
+			HitlRun([]string{"--bead=g", "--session=sess-1", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, m)
 			evs := *capt
 			end := evs[len(evs)-1]
 			if end.Name != tc.ev {
@@ -151,15 +151,19 @@ func TestHitlRunRecordsCost(t *testing.T) {
 // <pane>") instead of touching tmux.
 func stubDrafts(t *testing.T, err error) *[]string {
 	origPub, origDel, origGrace, origRet := publish, deleteDrafts, hupGrace, returnViewers
-	origShow, origSucc, origMark := showBead, successorOf, markClosing
+	origShow, origSucc, origMark, origList := showBead, successorOf, markClosing, listDrafts
+	origEnd := endSession
 	t.Cleanup(func() {
 		publish, deleteDrafts, hupGrace, returnViewers = origPub, origDel, origGrace, origRet
-		showBead, successorOf, markClosing = origShow, origSucc, origMark
+		showBead, successorOf, markClosing, listDrafts = origShow, origSucc, origMark, origList
+		endSession = origEnd
 	})
+	listDrafts = func(string) ([]bd.Bead, error) { return nil, nil }
 	hupGrace = 50 * time.Millisecond
 	calls := &[]string{}
 	markClosing = func(tmuxEnv, pane string) { *calls = append(*calls, "closing "+tmuxEnv+" "+pane) }
 	returnViewers = func(tmuxEnv, pane string) { *calls = append(*calls, "return "+tmuxEnv+" "+pane) }
+	endSession = func(string, string) {} // never kill a real session; TestHitlRunEndsSessionOnCleanFinish records
 	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Kind: contract.KindGrilling}, nil }
 	successorOf = func(string, contract.Kind) (string, bool, error) { return "", false, nil }
 	publish = func(creator string, edges []bd.Edge, closing *bd.Closing) ([]string, error) {
@@ -213,7 +217,7 @@ func TestHitlRunPublishesDrafts(t *testing.T) {
 			t.Setenv("TMUX_PANE", "%7")
 			runAgent = tc.agent
 			removeWorktree = func(string) error { *steps = append(*steps, "remove"); return nil }
-			if rc := HitlRun([]string{"--bead=grl.1", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", "--", "claude"}, meter(t)); rc != tc.rc {
+			if rc := HitlRun([]string{"--bead=grl.1", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, meter(t)); rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
 			}
 			if !slices.Equal(*steps, tc.steps) {
@@ -233,8 +237,93 @@ func TestHitlRunPublishesDrafts(t *testing.T) {
 	}
 }
 
+// A clean finish kills its own session as its last act, after hitl.exited is
+// recorded; a failed publish, settle or teardown, a drop, a non-zero exit and an
+// empty pane kill nothing. A failed kill is TestHitlRunSurvivesKillError's.
+func TestHitlRunEndsSessionOnCleanFinish(t *testing.T) {
+	origRun, origRemove, origEnd, origRelease := runAgent, removeWorktree, endSession, releaseClaim
+	defer func() { runAgent, removeWorktree, endSession, releaseClaim = origRun, origRemove, origEnd, origRelease }()
+	ok := func([]string, <-chan struct{}) error { return nil }
+	for _, tc := range []struct {
+		name      string
+		agent     func([]string, <-chan struct{}) error
+		pane      string
+		pubErr    error
+		removeErr error
+		settleErr error
+		wantRC    int
+		wantEnd   bool
+	}{
+		{"clean exit", ok, "%7", nil, nil, nil, 0, true},
+		{"failed publish", ok, "%7", errors.New("locked"), nil, nil, 1, false},
+		{"failed settle", ok, "%7", nil, nil, errors.New("bd: locked"), 1, false},
+		{"failed teardown", ok, "%7", nil, errors.New("busy"), nil, 1, false},
+		{"drop", func([]string, <-chan struct{}) error { return syscall.Kill(os.Getpid(), syscall.SIGHUP) }, "%7", nil, nil, nil, 0, false},
+		{"non-zero exit", func([]string, <-chan struct{}) error { return exec.Command("sh", "-c", "exit 3").Run() }, "%7", nil, nil, nil, 3, false},
+		{"empty pane", ok, "", nil, nil, nil, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capt := eventlogtest.Capture(t)
+			stubDrafts(t, tc.pubErr)
+			t.Setenv("TMUX", "/s,1,2")
+			t.Setenv("TMUX_PANE", tc.pane)
+			runAgent = tc.agent
+			removeWorktree = func(string) error { return tc.removeErr }
+			showBead = func(id string) (bd.Bead, error) {
+				return bd.Bead{ID: id, Kind: contract.KindGrilling, Status: "in_progress"}, nil
+			}
+			releaseClaim = func(string) error { return tc.settleErr }
+			var ended []string
+			endSession = func(tmuxEnv, pane string) {
+				ended = append(ended, tmuxEnv+" "+pane+" after "+eventlogtest.Names(*capt)[len(*capt)-1])
+			}
+			if rc := HitlRun([]string{"--bead=grl.1", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, meter(t)); rc != tc.wantRC {
+				t.Errorf("rc = %d, want %d", rc, tc.wantRC)
+			}
+			var want []string
+			if tc.wantEnd {
+				want = []string{"/s,1,2 %7 after hitl.exited"}
+			}
+			if !slices.Equal(ended, want) {
+				t.Errorf("endSession calls = %q, want %q", ended, want)
+			}
+		})
+	}
+}
+
+// endSession returns nothing, so a failed kill cannot reach HitlRun's return
+// code or events by construction; this runs the real one against a dead socket
+// and holds that: rc 0, hitl.exited last and clean, and a hitl.ended warning after it.
+func TestHitlRunSurvivesKillError(t *testing.T) {
+	origRun, origRemove := runAgent, removeWorktree
+	defer func() { runAgent, removeWorktree = origRun, origRemove }()
+	capt := eventlogtest.Capture(t)
+	origEnd := endSession
+	stubDrafts(t, nil)
+	endSession = origEnd // the real kill, aimed at a socket that does not exist
+	t.Setenv("TMUX", filepath.Join(t.TempDir(), "no-such-socket")+",1,2")
+	t.Setenv("TMUX_PANE", "%7")
+	runAgent = func([]string, <-chan struct{}) error { return nil }
+	removeWorktree = func(string) error { return nil }
+	if rc := HitlRun([]string{"--bead=grl.1", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, meter(t)); rc != 0 {
+		t.Errorf("rc = %d, want 0", rc)
+	}
+	// the warning is logged after hitl.exited, which stays the clean close event
+	if got, want := eventlogtest.Names(*capt), []string{"hitl.launched", "draft.published", "hitl.exited", "hitl.ended"}; !slices.Equal(got, want) {
+		t.Errorf("events = %v, want %v", got, want)
+	}
+}
+
+// The kill targets the pane id (so its own session), never =<name>.
+func TestKillSessionArgvTargetsPane(t *testing.T) {
+	if got := killSessionArgv("%7"); !slices.Equal(got, []string{"kill-session", "-t", "%7"}) {
+		t.Errorf("argv = %q, want kill-session -t %%7", got)
+	}
+}
+
 // A clean exit closes the session's Signal in its publish batch only when the
-// graph shows a caused-by Chart or Spec successor (ADR 0096; Spec D2).
+// graph shows a caused-by Chart, Spec or Initiative successor (ADR 0096; Spec D2,
+// and D3 for the Initiative).
 // Any other bead, or a Signal with none, gets no close; a failed graph read fails
 // the publish, keeping the session for a resume or drop.
 func TestHitlRunClosesChartedSignalOnPublish(t *testing.T) {
@@ -252,6 +341,8 @@ func TestHitlRunClosesChartedSignalOnPublish(t *testing.T) {
 		{"Signal with a Chart closes", contract.KindSignal, contract.KindChart, nil, 0,
 			[]string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish sig close sig", "remove"}, []string{"hitl.launched", "draft.published", "hitl.exited"}},
 		{"Signal with a Spec closes", contract.KindSignal, contract.KindSpec, nil, 0,
+			[]string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish sig close sig", "remove"}, []string{"hitl.launched", "draft.published", "hitl.exited"}},
+		{"Signal with an Initiative closes", contract.KindSignal, contract.KindInitiative, nil, 0,
 			[]string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish sig close sig", "remove"}, []string{"hitl.launched", "draft.published", "hitl.exited"}},
 		{"undecided Signal closes nothing", contract.KindSignal, "", nil, 0,
 			[]string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish sig", "remove"}, []string{"hitl.launched", "draft.published", "hitl.exited"}},
@@ -274,7 +365,7 @@ func TestHitlRunClosesChartedSignalOnPublish(t *testing.T) {
 			}
 			runAgent = func([]string, <-chan struct{}) error { return nil }
 			removeWorktree = func(string) error { *steps = append(*steps, "remove"); return nil }
-			if rc := HitlRun([]string{"--bead=sig", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", "--", "claude"}, meter(t)); rc != tc.rc {
+			if rc := HitlRun([]string{"--bead=sig", "--session=s", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, meter(t)); rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
 			}
 			if !slices.Equal(*steps, tc.steps) {
@@ -282,6 +373,197 @@ func TestHitlRunClosesChartedSignalOnPublish(t *testing.T) {
 			}
 			if got := eventlogtest.Names(*capt); !slices.Equal(got, tc.events) {
 				t.Errorf("events = %v, want %v", got, tc.events)
+			}
+		})
+	}
+}
+
+// A Survey session's clean exit closes the Survey in its publish batch when its
+// parent Chart is closed (push-back) or its Drafts include a child of the Chart
+// (fog seeded); otherwise it leaves it for settle to release back to the Inbox
+// (Spec mc-r832 D8, FR 15–17). A failed graph read fails the publish.
+func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
+	origRun, origRelease, origDelete := runAgent, releaseClaim, deleteBranch
+	defer func() { runAgent, releaseClaim, deleteBranch = origRun, origRelease, origDelete }()
+	pre := []string{"closing /s,1,2 %7", "return /s,1,2 %7"}
+	for _, tc := range []struct {
+		name    string
+		chart   string   // the parent Chart's status
+		parents []string // the Survey's Drafts' parents
+		readErr error
+		rc      int
+		steps   []string
+	}{
+		{"pushed-back Chart closes the Survey", "closed", nil, nil, 0, append(slices.Clip(pre), "publish s1 close s1", "delete chart/ch1")},
+		{"seeded fog closes the Survey", "open", []string{"", "ch1"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
+		{"no fog leaves the Survey for settle", "open", []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1", "release s1")},
+		{"failed Chart read keeps the session", "open", nil, errors.New("bd: locked"), 1, pre},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventlogtest.Capture(t)
+			steps := stubDrafts(t, nil)
+			t.Setenv("TMUX", "/s,1,2")
+			t.Setenv("TMUX_PANE", "%7")
+			status, pub := "in_progress", publish
+			publish = func(creator string, edges []bd.Edge, closing *bd.Closing) ([]string, error) {
+				if closing != nil {
+					status = "closed"
+				}
+				return pub(creator, edges, closing)
+			}
+			showBead = func(id string) (bd.Bead, error) {
+				if id == "ch1" {
+					return bd.Bead{ID: id, Kind: contract.KindChart, Status: tc.chart}, tc.readErr
+				}
+				return bd.Bead{ID: id, Kind: contract.KindSurvey, Status: status, Parent: "ch1"}, nil
+			}
+			listDrafts = func(string) ([]bd.Bead, error) {
+				var ds []bd.Bead
+				for _, p := range tc.parents {
+					ds = append(ds, bd.Bead{Parent: p})
+				}
+				return ds, nil
+			}
+			releaseClaim = func(id string) error { *steps = append(*steps, "release "+id); return nil }
+			deleteBranch = func(name string) error { *steps = append(*steps, "delete "+name); return nil }
+			runAgent = func([]string, <-chan struct{}) error { return nil }
+			if rc := HitlRun([]string{"--bead=s1", "--session=s", argvArg(t, "claude")}, meter(t)); rc != tc.rc {
+				t.Errorf("rc = %d, want %d", rc, tc.rc)
+			}
+			if !slices.Equal(*steps, tc.steps) {
+				t.Errorf("steps = %q, want %q", *steps, tc.steps)
+			}
+		})
+	}
+}
+
+// A Survey session's clean exit settles its pushed-back Chart's branch (Spec
+// mc-r832 D9, ADR 0130 §6 re-keyed): a closed Survey whose parent Chart is closed
+// with no caused-by Spec successor deletes chart/<parent> after the teardown, on
+// an effort tree only once the backstop has integrated onto it. A Chart with a
+// Spec, or still open, keeps its branch.
+func TestHitlRunSettlesChartOnCleanExit(t *testing.T) {
+	origRun, origRemove := runAgent, removeWorktree
+	defer func() { runAgent, removeWorktree = origRun, origRemove }()
+	pub := []string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish s1 close s1"}
+	for _, tc := range []struct {
+		name  string
+		chart string // the parent Chart's status
+		spec  bool   // a caused-by Spec succeeds the Chart
+		tree  bool   // the session runs on its effort tree
+		steps []string
+	}{
+		{"Chart closed without a Spec loses its branch", "closed", false, false, append(slices.Clip(pub), "delete chart/ch1")},
+		{"Chart closed with a Spec keeps its branch", "closed", true, false, pub},
+		{"open Chart keeps its branch", "open", false, false, []string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish s1"}},
+		{"closed Chart on the Survey's effort tree loses it after the backstop", "closed", false, true,
+			append(slices.Clip(pub), "integrate", "remove", "delete effort/s1", "delete chart/ch1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventlogtest.Capture(t)
+			steps := stubDrafts(t, nil)
+			stubBackstop(t, steps, 0, false, "closed", "open", "")
+			t.Setenv("TMUX", "/s,1,2")
+			t.Setenv("TMUX_PANE", "%7")
+			showBead = func(id string) (bd.Bead, error) {
+				if id == "ch1" {
+					return bd.Bead{ID: id, Kind: contract.KindChart, Status: tc.chart}, nil
+				}
+				return bd.Bead{ID: id, Kind: contract.KindSurvey, Status: "closed", Parent: "ch1"}, nil
+			}
+			successorOf = func(id string, want contract.Kind) (string, bool, error) {
+				return id + ".succ", tc.spec && id == "ch1" && want == contract.KindSpec, nil
+			}
+			deleteBranch = func(name string) error { *steps = append(*steps, "delete "+name); return nil }
+			runAgent = func([]string, <-chan struct{}) error { return nil }
+			removeWorktree = func(string) error { *steps = append(*steps, "remove"); return nil }
+			args := []string{"--bead=s1", "--session=s", argvArg(t, "claude")}
+			if tc.tree {
+				args = append([]string{"--worktree=/tmp/mugicrew-wt-x/wt"}, args...)
+			}
+			if rc := HitlRun(args, meter(t)); rc != 0 {
+				t.Errorf("rc = %d, want 0", rc)
+			}
+			if !slices.Equal(*steps, tc.steps) {
+				t.Errorf("steps = %q, want %q", *steps, tc.steps)
+			}
+		})
+	}
+}
+
+// A clean exit releases the session's bead if it is still in_progress after the
+// publish, so a premature quit (a double Ctrl+C mid-triage) strands no claim
+// (Spec mc-rjvx FR 1–2): every kind but Task (it stays claimed and idle for l),
+// Surgery (claimed at filing) and Discussion (left claimed for a rejoin). An
+// Initiative is released here too (FR 5–7). A bead the
+// session closed keeps its status (FR 3). A Chart is never a session bead, so a
+// closed one deletes nothing here (Spec mc-r832 D9). A non-clean exit or a drop's
+// hangup releases nothing (FR 9–10); a failed release fails the session (FR 11).
+func TestHitlRunSettlesOnCleanExit(t *testing.T) {
+	origRun, origRemove, origRelease := runAgent, removeWorktree, releaseClaim
+	defer func() { runAgent, removeWorktree, releaseClaim = origRun, origRemove, origRelease }()
+	pub := []string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish c1"}
+	for _, tc := range []struct {
+		name   string
+		kind   contract.Kind
+		status string
+		spec   bool  // a caused-by Spec succeeds the bead
+		tree   bool  // the session runs on its effort tree
+		relErr error // the release's failure
+		rc     int   // the agent's exit; -1 is a drop's hangup
+		want   int   // HitlRun's exit
+		steps  []string
+	}{
+		{"closed Chart deletes nothing", contract.KindChart, "closed", false, false, nil, 0, 0, pub},
+		{"in_progress Signal is released", contract.KindSignal, "in_progress", false, false, nil, 0, 0, append(slices.Clip(pub), "release c1")},
+		{"in_progress grilling bead is released", contract.KindGrilling, "in_progress", false, false, nil, 0, 0, append(slices.Clip(pub), "release c1")},
+		{"closed Signal is not released", contract.KindSignal, "closed", false, false, nil, 0, 0, pub},
+		{"closed grilling bead keeps its chart", contract.KindGrilling, "closed", false, false, nil, 0, 0, pub},
+		{"in_progress Task keeps its claim", contract.KindTask, "in_progress", false, false, nil, 0, 0, pub},
+		{"in_progress Surgery keeps its claim", contract.KindSurgery, "in_progress", false, false, nil, 0, 0, pub},
+		{"in_progress Discussion keeps its claim", contract.KindDiscussion, "in_progress", false, false, nil, 0, 0, pub},
+		{"in_progress Checkup keeps its claim", contract.KindCheckup, "in_progress", false, false, nil, 0, 0, pub},
+		{"closed Checkup publishes and returns", contract.KindCheckup, "closed", false, false, nil, 0, 0, pub},
+		{"closed Discussion publishes and returns", contract.KindDiscussion, "closed", false, false, nil, 0, 0, pub},
+		{"in_progress Initiative is released", contract.KindInitiative, "in_progress", false, false, nil, 0, 0,
+			append(slices.Clip(pub), "release c1")},
+		{"failed release fails the session", contract.KindSignal, "in_progress", false, false, errors.New("bd: locked"), 0, 1,
+			append(slices.Clip(pub), "release c1")},
+		{"non-clean exit does nothing", contract.KindChart, "closed", false, false, nil, 3, 3, nil},
+		{"non-clean exit keeps a Signal's claim", contract.KindSignal, "in_progress", false, false, nil, 3, 3, nil},
+		{"hangup (drop) keeps a Signal's claim", contract.KindSignal, "in_progress", false, false, nil, -1, 0, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eventlogtest.Capture(t)
+			steps := stubDrafts(t, nil)
+			stubBackstop(t, steps, 0, false, tc.status, "open", "")
+			t.Setenv("TMUX", "/s,1,2")
+			t.Setenv("TMUX_PANE", "%7")
+			showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Kind: tc.kind, Status: tc.status}, nil }
+			successorOf = func(id string, want contract.Kind) (string, bool, error) {
+				return id + ".succ", tc.spec && want == contract.KindSpec, nil
+			}
+			releaseClaim = func(id string) error { *steps = append(*steps, "release "+id); return tc.relErr }
+			deleteBranch = func(name string) error { *steps = append(*steps, "delete "+name); return nil }
+			runAgent = func([]string, <-chan struct{}) error {
+				switch tc.rc {
+				case 0:
+					return nil
+				case -1:
+					return syscall.Kill(os.Getpid(), syscall.SIGHUP)
+				}
+				return exec.Command("sh", "-c", "exit 3").Run()
+			}
+			removeWorktree = func(string) error { *steps = append(*steps, "remove"); return nil }
+			args := []string{"--bead=c1", "--session=s", argvArg(t, "claude")}
+			if tc.tree {
+				args = append([]string{"--worktree=/tmp/mugicrew-wt-x/wt"}, args...)
+			}
+			if rc := HitlRun(args, meter(t)); rc != tc.want {
+				t.Errorf("rc = %d, want %d", rc, tc.want)
+			}
+			if !slices.Equal(*steps, tc.steps) {
+				t.Errorf("steps = %q, want %q", *steps, tc.steps)
 			}
 		})
 	}
@@ -306,7 +588,7 @@ func TestHitlRunRealAgent(t *testing.T) {
 			eventlogtest.Capture(t)
 			removed := false
 			removeWorktree = func(string) error { removed = true; return nil }
-			if rc := HitlRun([]string{"--bead=g", "--worktree=/tmp/mugicrew-wt-x/wt", "--", "sh", "-c", tc.script}, meter(t)); rc != tc.rc {
+			if rc := HitlRun([]string{"--bead=g", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "sh", "-c", tc.script)}, meter(t)); rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
 			}
 			if removed != tc.removed {
@@ -321,12 +603,12 @@ func TestHitlRunRealAgent(t *testing.T) {
 // three @ tags, the HITL bar and key table, and the wrapper by its
 // absolute path. A trailing ; in an argv word is escaped so tmux doesn't split.
 func TestStartArgs(t *testing.T) {
-	t1 := sessionTags{bd.Bead{ID: "mc-a.2", Parent: "mc-a", Kind: contract.KindGrilling, Title: "Grill #1"}, "s1", "/wt"}
-	args := launchArgs(tmuxName(t1.bead.ID), "/wt", "/run/env;", paneArgs("/abs/mugicrew", t1, []string{"claude", "end;"}), t1)
+	t1 := sessionTags{bd.Bead{ID: "mc-a.2", Parent: "mc-a", Kind: contract.KindGrilling, Title: "Grill #1"}, "s1", "/wt", "deepseek"}
+	args := launchArgs(tmuxName(t1.bead.ID), "/wt", paneArgs("/abs/mugicrew", t1, "/run/argv;", "/run/env;"), t1)
 	joined := strings.Join(args, " ")
 	assertEnvArg(t, args)
 	// The tags follow new-session in the same tmux command.
-	if want := strings.Join(preamble(), " ") + " ; new-session -d -s mc-a_2 -c /wt -e MUGICREW_ENV_FILE=/run/env\\; -- /abs/mugicrew hitl-run --bead=mc-a.2 --parent=mc-a --crewmate=nami --session=s1 --worktree=/wt -- claude end\\; ; set-option -t =mc-a_2: @bead mc-a.2"; !strings.HasPrefix(joined, want) {
+	if want := strings.Join(preamble(), " ") + " ; new-session -d -s mc-a_2 -c /wt -- /abs/mugicrew hitl-run --bead=mc-a.2 --parent=mc-a --crewmate=nami --kind=grilling --session=s1 --worktree=/wt --profile=deepseek --argv-file=/run/argv\\; --env-file=/run/env\\; ; set-option -t =mc-a_2: @bead mc-a.2"; !strings.HasPrefix(joined, want) {
 		t.Errorf("launch argv =\n%s\nwant prefix\n%s", joined, want)
 	}
 
@@ -334,15 +616,16 @@ func TestStartArgs(t *testing.T) {
 		"set-option -t =mc-a_2: @bead mc-a.2",
 		"set-option -t =mc-a_2: @session s1",
 		"set-option -t =mc-a_2: @worktree /wt",
+		"set-option -t =mc-a_2: @profile deepseek",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv missing %q:\n%s", want, joined)
 		}
 	}
-	assertBar(t, args, "mc-a.2 · Grill ##1")
+	assertBar(t, args, "○ GRILLING P0 · Grill ##1 · mc-a.2")
 	assertUnmarks(t, args)
 	// -c is a tmux format too: a # in the cwd is escaped, in launch and respawn alike.
-	for _, a := range [][]string{launchArgs("s", "/w#t", "/e", nil, t1), respawnArgs("s", "/w#t", "/e", nil, t1.bead)} {
+	for _, a := range [][]string{launchArgs("s", "/w#t", nil, t1), respawnArgs("s", "/w#t", nil, t1.bead)} {
 		if i := slices.Index(a, "-c"); i < 0 || a[i+1] != "/w##t" {
 			t.Errorf("-c not escaped in %v", a)
 		}
@@ -359,7 +642,7 @@ func TestTUIArgs(t *testing.T) {
 		t.Errorf("preamble = %q, want server start and remain-on-exit failed", pre)
 	}
 	// F12 is bound only in the HITL key table, never in root (ADR 0065 §5).
-	if strings.Contains(pre, "-n F12") || strings.Contains(pre, "-T root") || !strings.Contains(pre, "bind-key -T mchitl F12 ") {
+	if strings.Contains(pre, "-n F12") || strings.Contains(pre, "bind-key -T root") || !strings.Contains(pre, "bind-key -T mchitl F12 ") {
 		t.Errorf("preamble binds F12 outside the HITL table: %q", pre)
 	}
 	// F11 cancels an Auto-exit tmux-side (Spec D5): it unsets the pressing
@@ -367,9 +650,16 @@ func TestTUIArgs(t *testing.T) {
 	if !strings.Contains(pre, " ; bind-key -T mchitl F11 set-option -u @autofinish") || strings.Contains(pre, "-n F11") {
 		t.Errorf("preamble lacks the HITL table's F11 cancel: %q", pre)
 	}
-	t1 := sessionTags{bd.Bead{ID: "g"}, "s", ""}
+	// F10 opens the session's bead pane, in the HITL table only.
+	if !strings.Contains(pre, " ; bind-key -T mchitl F10 ") || strings.Contains(pre, "-n F10") {
+		t.Errorf("preamble lacks the HITL table's F10 bead pane: %q", pre)
+	}
+	if !strings.Contains(pre, "bead-detail") || strings.Contains(pre, "bd show") || !strings.Contains(pre, "@beadpane") || !strings.Contains(pre, "less -R") || !strings.Contains(pre, "2>&1") {
+		t.Errorf("F10 binding does not run bead-detail into less -R: %q", pre)
+	}
+	t1 := sessionTags{bd.Bead{ID: "g"}, "s", "", ""}
 	tui := strings.Join(tuiArgs("tui-7", "/r#", tuiPane("/abs/mugicrew", "/c/tui.out", "/run/env")), " ")
-	for _, a := range []string{strings.Join(launchArgs("g", "/r", "/e", nil, t1), " "), tui} {
+	for _, a := range []string{strings.Join(launchArgs("g", "/r", nil, t1), " "), tui} {
 		if !strings.HasPrefix(a, pre+" ; new-session -d -s ") {
 			t.Errorf("argv does not open with the preamble:\n%s", a)
 		}
@@ -429,7 +719,7 @@ func TestApplyTUIEnv(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	t.Setenv("FOO", "fresh")
 	os.Unsetenv("TMUX")
-	path, err := writeEnvFile()
+	path, err := writeEnvFile(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,13 +737,70 @@ func TestApplyTUIEnv(t *testing.T) {
 	}
 }
 
-// assertEnvArg: a launch or resume argv passes exactly one -e, the env file
-// (FR5), and no TMUX/TMUX_PANE anywhere.
+// A handoff file that is gone is no handoff for the TUI (a session from an older
+// mugicrew carries the stale variable); one that exists but can't be read is still an error.
+func TestApplyTUIEnvMissingOrUnreadable(t *testing.T) {
+	t.Setenv("FOO", "kept")
+	t.Setenv(envFileVar, filepath.Join(t.TempDir(), "gone"))
+	if err := ApplyTUIEnv(); err != nil {
+		t.Fatalf("missing file: %v", err)
+	}
+	if got := os.Getenv("FOO"); got != "kept" {
+		t.Errorf("FOO = %q, env was not left as is", got)
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	p := filepath.Join(t.TempDir(), "env")
+	if err := os.WriteFile(p, []byte("FOO=x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envFileVar, p)
+	if err := ApplyTUIEnv(); err == nil {
+		t.Error("unreadable file: want an error")
+	}
+}
+
+// An AgentCommand's profile Env (ADR 0125) rides the 0600 env
+// file on top of the launcher's env, so hitl-run hands it to the agent at launch
+// and resume alike, and the built-in pane's hitl-run gets no --profile.
+func TestEnvFileCarriesProfileEnv(t *testing.T) {
+	saved := os.Environ()
+	t.Cleanup(func() {
+		os.Clearenv()
+		for _, kv := range saved {
+			k, v, _ := strings.Cut(kv, "=")
+			os.Setenv(k, v)
+		}
+	})
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("ANTHROPIC_BASE_URL", "https://launcher.example")
+	path, err := writeEnvFile(map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("env file %s: %v %v, want 0600", path, fi, err)
+	}
+	if err := applyEnvFile(path); err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "sk-secret"} {
+		if got := os.Getenv(k); got != want {
+			t.Errorf("%s = %q, want the profile's %q", k, got, want)
+		}
+	}
+	if pane := strings.Join(paneArgs("/abs/mugicrew", sessionTags{bd.Bead{ID: "g"}, "s", "", ""}, "/run/argv", "/run/env"), " "); strings.Contains(pane, "--profile") {
+		t.Errorf("built-in pane carries a profile attr: %s", pane)
+	}
+}
+
+// assertEnvArg: a launch or resume argv passes no -e (the env file rides the pane
+// command, so it never sticks to the session), and no TMUX/TMUX_PANE anywhere.
 func assertEnvArg(t *testing.T, args []string) {
 	t.Helper()
-	i := slices.Index(args, "-e")
-	if i < 0 || slices.Index(args[i+1:], "-e") >= 0 || !strings.HasPrefix(args[i+1], envFileVar+"=") {
-		t.Errorf("want exactly one -e %s=..., got %v", envFileVar, args)
+	if slices.Index(args, "-e") >= 0 {
+		t.Errorf("want no -e, got %v", args)
 	}
 	if j := strings.Join(args, " "); strings.Contains(j, "TMUX") {
 		t.Errorf("TMUX leaked into %s", j)
@@ -486,7 +833,7 @@ func TestEnvFileHandoff(t *testing.T) {
 	t.Setenv("TMUX_PANE", "%3")
 	t.Setenv("FOO", "fresh\nline2")
 	t.Setenv("TERM", "xterm-256color")
-	path, err := writeEnvFile()
+	path, err := writeEnvFile(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +847,6 @@ func TestEnvFileHandoff(t *testing.T) {
 	// The pane: the server's stale env, tmux's TERM, the file's path.
 	t.Setenv("FOO", "stale")
 	t.Setenv("TERM", "tmux-256color")
-	t.Setenv(envFileVar, path)
 	got := map[string]string{}
 	runAgent = func([]string, <-chan struct{}) error {
 		for _, k := range []string{"FOO", "TERM", "XDG_RUNTIME_DIR", "TMUX", envFileVar} {
@@ -510,7 +856,7 @@ func TestEnvFileHandoff(t *testing.T) {
 		}
 		return nil
 	}
-	if rc := HitlRun([]string{"--bead=g", "--", "claude"}, meter(t)); rc != 0 {
+	if rc := HitlRun([]string{"--bead=g", argvArg(t, "claude"), "--env-file=" + path}, meter(t)); rc != 0 {
 		t.Fatalf("rc = %d", rc)
 	}
 	if want := map[string]string{"FOO": "fresh\nline2", "TERM": "tmux-256color", "XDG_RUNTIME_DIR": run}; !maps.Equal(got, want) {
@@ -521,15 +867,87 @@ func TestEnvFileHandoff(t *testing.T) {
 	}
 
 	// The file is gone now: a second run must refuse, never run the agent.
-	os.Setenv(envFileVar, path)
 	*capt = nil
 	ran := false
 	runAgent = func([]string, <-chan struct{}) error { ran = true; return nil }
-	if rc := HitlRun([]string{"--bead=g", "--", "claude"}, meter(t)); rc == 0 || ran {
+	if rc := HitlRun([]string{"--bead=g", argvArg(t, "claude"), "--env-file=" + path}, meter(t)); rc == 0 || ran {
 		t.Errorf("missing env file: rc = %d, ran = %v; want a refusal", rc, ran)
 	}
 	if got := eventlogtest.Names(*capt); !slices.Equal(got, []string{"hitl.launched", "hitl.failed"}) {
 		t.Errorf("events = %v, want [hitl.launched hitl.failed]", got)
+	}
+}
+
+// argvArg is the --argv-file flag handing argv to a test's HitlRun.
+func argvArg(t *testing.T, argv ...string) string {
+	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	path, err := writeArgvFile(argv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "--argv-file=" + path
+}
+
+// The agent argv rides a 0600 file, not the tmux command: a prompt over tmux's
+// 16 KiB cap, with newlines, quotes and non-ASCII text, reaches the agent
+// unchanged, and hitl-run deletes the file once read.
+func TestArgvFileRoundTrip(t *testing.T) {
+	origRun := runAgent
+	defer func() { runAgent = origRun }()
+	stubDrafts(t, nil)
+	prompt := strings.Repeat("line \"one\"\n'two' ünï 日本語\n", 1500)
+	want := []string{"claude", "--settings", `{"a":"b"}`, prompt, "end;"}
+	run := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", run)
+	path, err := writeArgvFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 || filepath.Dir(path) != run {
+		t.Fatalf("argv file %s: %v %v, want 0600 under %s", path, fi, err, run)
+	}
+	var got []string
+	runAgent = func(argv []string, _ <-chan struct{}) error { got = argv; return nil }
+	if rc := HitlRun([]string{"--bead=g", "--argv-file=" + path}, meter(t)); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("agent argv differs from the written argv (%d vs %d args)", len(got), len(want))
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("argv file not deleted: %v", err)
+	}
+}
+
+// A missing, empty or absent --argv-file never runs the agent: the first two
+// record hitl.failed, the last is a usage error.
+func TestHitlRunArgvFileFailure(t *testing.T) {
+	origRun := runAgent
+	defer func() { runAgent = origRun }()
+	stubDrafts(t, nil)
+	empty := filepath.Join(t.TempDir(), "empty")
+	os.WriteFile(empty, nil, 0o600)
+	for name, tc := range map[string]struct {
+		arg    string
+		rc     int
+		events []string
+	}{
+		"missing": {"--argv-file=" + filepath.Join(t.TempDir(), "gone"), 1, []string{"hitl.launched", "hitl.failed"}},
+		"empty":   {"--argv-file=" + empty, 1, []string{"hitl.launched", "hitl.failed"}},
+		"absent":  {"--session=s", 2, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			capt := eventlogtest.Capture(t)
+			ran := false
+			runAgent = func([]string, <-chan struct{}) error { ran = true; return nil }
+			if rc := HitlRun([]string{"--bead=g", tc.arg}, meter(t)); rc != tc.rc || ran {
+				t.Errorf("rc = %d, ran = %v; want %d and no agent", rc, ran, tc.rc)
+			}
+			if got := eventlogtest.Names(*capt); !slices.Equal(got, tc.events) {
+				t.Errorf("events = %v, want %v", got, tc.events)
+			}
+		})
 	}
 }
 
@@ -621,6 +1039,9 @@ func TestSessionsNoServer(t *testing.T) {
 	if _, err := Sessions(); err == nil {
 		t.Error("an unreadable socket must be an error, not an empty table")
 	}
+	if _, err := TUIAlive(""); err == nil {
+		t.Error("TUIAlive: an unreadable socket must be an error, not no TUI")
+	}
 }
 
 // With tmux off PATH, Start refuses before placing anything (ADR 0036 §6).
@@ -660,23 +1081,84 @@ func TestStartDeletesGoneSessionDrafts(t *testing.T) {
 	}
 }
 
+type okResume struct{ failResume }
+
+func (okResume) ResumeCommand(string, bool) (contract.AgentCommand, error) {
+	return contract.AgentCommand{SessionID: "s1", Argv: []string{"claude", "--resume", "s1"}}, nil
+}
+
+// readOnlyResume records the readOnly bit Resume asks its harness for.
+type readOnlyResume struct {
+	failResume
+	got *bool
+}
+
+func (r readOnlyResume) ResumeCommand(_ string, ro bool) (contract.AgentCommand, error) {
+	*r.got = ro
+	return contract.AgentCommand{}, errors.New("stop")
+}
+
+// Resume takes read-only from the bead kind's registry row: a discussion asks
+// for a read-only resume, another kind does not.
+func TestResumeReadOnlyFollowsKind(t *testing.T) {
+	stubServer(t)
+	for kind, want := range map[contract.Kind]bool{contract.KindDiscussion: true, contract.KindSignal: false} {
+		var got bool
+		Resume(bd.Bead{ID: "g", Kind: kind}, Info{Session: "s1"}, readOnlyResume{got: &got})
+		if got != want {
+			t.Errorf("%s: readOnly = %v, want %v", kind, got, want)
+		}
+	}
+}
+
+// A failed tmux call leaves neither the env nor the argv handoff behind, at
+// launch and at resume alike: no pane took them.
+func TestTmuxFailureLeavesNoHandoffFiles(t *testing.T) {
+	stubServer(t)
+	bin := t.TempDir()
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", run)
+	stubDrafts(t, nil)
+	origRoot := git.RepoRoot
+	defer func() { git.RepoRoot = origRoot }()
+	git.RepoRoot = func() (string, error) { return "/repo/root", nil }
+	b := bd.Bead{ID: "ws-sig", Kind: contract.KindSignal}
+	if err := Start(b, contract.AgentCommand{Argv: []string{"claude"}}); err == nil {
+		t.Error("Start: want tmux's error")
+	}
+	if left, _ := os.ReadDir(run); len(left) != 0 {
+		t.Errorf("Start left handoff files: %v", left)
+	}
+	if err := Resume(b, Info{Session: "s1"}, okResume{}); err == nil {
+		t.Error("Resume: want tmux's error")
+	}
+	if left, _ := os.ReadDir(run); len(left) != 0 {
+		t.Errorf("Resume left handoff files: %v", left)
+	}
+}
+
 // parseList reads list-sessions -F listFormat rows: a live pane is alive, a dead
 // one carries its exit status or the signal that killed it (the pane, or the agent
 // under hitl-run, which exits 128+n for it), and an untagged
 // session is skipped (ADR 0036 §1).
 func TestParseList(t *testing.T) {
-	out := "ws-1.2\tsid-a\t/wt/a\t0\t\t\t\t\t\n" +
-		"ws-3\tsid-b\t\t1\t2\t\t\t\t\n" +
-		"ws-4\tsid-c\t\t1\t\t9\t\t\t\n" +
-		"ws-5\tsid-d\t\t1\t143\t\t\t\t\n" +
-		"ws-6\tsid-e\t\t1\t255\t\t\t\t\n" +
-		"ws-7\tsid-f\t\t0\t\t\tturn\t\t\n" +
-		"ws-8\tsid-g\t\t0\t\t\task\t\t\n" +
-		"ws-9\tsid-h\t\t0\t\t\tbogus\t\t\n" +
-		"ws-10\tsid-i\t\t0\t\t\tturn\t1\t\n" +
-		"ws-11\tsid-j\t\t1\t1\t\t\t1\t\n" +
-		"ws-12\tsid-k\t\t0\t\t\tturn\t\t1760000000\n" +
-		"\t\t\t0\t\t\t\t\t\n"
+	out := "ws-1.2\tsid-a\t/wt/a\t0\t\t\t\t\t\t\n" +
+		"ws-3\tsid-b\t\t1\t2\t\t\t\t\t\n" +
+		"ws-4\tsid-c\t\t1\t\t9\t\t\t\t\n" +
+		"ws-5\tsid-d\t\t1\t143\t\t\t\t\t\n" +
+		"ws-6\tsid-e\t\t1\t255\t\t\t\t\t\n" +
+		"ws-7\tsid-f\t\t0\t\t\tturn\t\t\t\n" +
+		"ws-8\tsid-g\t\t0\t\t\task\t\t\t\n" +
+		"ws-9\tsid-h\t\t0\t\t\tbogus\t\t\t\n" +
+		"ws-10\tsid-i\t\t0\t\t\tturn\t1\t\t\n" +
+		"ws-11\tsid-j\t\t1\t1\t\t\t1\t\t\n" +
+		"ws-12\tsid-k\t\t0\t\t\tturn\t\t1760000000\t\n" +
+		"ws-13\tsid-l\t\t1\t1\t\t\t\t\tdeepseek\n" +
+		"\t\t\t0\t\t\t\t\t\t\n"
 	got := parseList(out)
 	want := map[string]Info{
 		"ws-1.2": {Session: "sid-a", Worktree: "/wt/a", State: Alive},
@@ -695,12 +1177,14 @@ func TestParseList(t *testing.T) {
 		"ws-11": {Session: "sid-j", State: Exited, RC: 1},
 		// Auto-exit (ADR 0111): @autofinish's unix-seconds deadline; empty is disarmed.
 		"ws-12": {Session: "sid-k", State: Alive, Waiting: WaitTurn, AutoExit: time.Unix(1760000000, 0)},
+		// The Agent Profile the session runs on, @profile (ADR 0122 §6); empty is the built-in.
+		"ws-13": {Session: "sid-l", State: Exited, RC: 1, Profile: "deepseek"},
 	}
 	if !maps.Equal(got, want) {
 		t.Errorf("parseList = %+v, want %+v", got, want)
 	}
 	// A live TUI session carries no @bead: not listed, not counted (ADR 0065 §3).
-	if n := Live(parseList(out + "\t\t\t0\t\t\t\t\t\n")); n != 6 {
+	if n := Live(parseList(out + "\t\t\t0\t\t\t\t\t\t\n")); n != 6 {
 		t.Errorf("Live = %d, want 6: an untagged session must not count", n)
 	}
 	if len(parseList("")) != 0 {
@@ -743,6 +1227,61 @@ func TestMarkClosingRealTmux(t *testing.T) {
 	}
 }
 
+// TUIAlive reads the repo's private server (ADR 0127 §2): any tui-* session but
+// the caller's own is a TUI alive; bead sessions don't count, and no server is none.
+func TestTUIAliveRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	sock := stubServer(t)
+	t.Cleanup(func() { tmuxCmd(sock, "kill-server").Run() })
+	alive := func(exclude string) bool {
+		t.Helper()
+		ok, err := TUIAlive(exclude)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if alive("") {
+		t.Error("no server reads as a TUI alive")
+	}
+	if out, err := tmuxCmd(sock, "-f", "/dev/null", "new-session", "-d", "-s", "mc-a_1").CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v: %s", err, out)
+	}
+	if alive("") {
+		t.Error("a bead session reads as a TUI alive")
+	}
+	if out, err := tmuxCmd(sock, "new-session", "-d", "-s", "tui-7").CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v: %s", err, out)
+	}
+	if !alive("") || !alive("tui-8") {
+		t.Error("tui-7 present does not read as a TUI alive")
+	}
+	if alive("tui-7") {
+		t.Error("the caller's own tui-7 counts as a TUI alive")
+	}
+
+	// OwnSession names the TUI's own session from $TMUX_PANE; outside a pane, none.
+	pane, err := tmuxCmd(sock, "display-message", "-p", "-t", "=tui-7:", "#{pane_id}").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMUX_PANE", strings.TrimSpace(string(pane)))
+	t.Setenv("TMUX", "/elsewhere,1,0")
+	if s, err := OwnSession(); err != nil || s != "" {
+		t.Errorf("OwnSession in another server's pane = %q, %v; want none", s, err)
+	}
+	t.Setenv("TMUX", sock+",1,0")
+	if s, err := OwnSession(); err != nil || s != "tui-7" {
+		t.Errorf("OwnSession = %q, %v; want tui-7", s, err)
+	}
+	t.Setenv("TMUX_PANE", "")
+	if s, err := OwnSession(); err != nil || s != "" {
+		t.Errorf("OwnSession outside a pane = %q, %v; want none", s, err)
+	}
+}
+
 // A resume (ADR 0037 §4, ADR 0039 §1): hitl-run started with --resume records
 // hitl.resumed instead of hitl.launched, then ends as at launch; the tmux argv
 // respawns the exited session's dead pane (no -k, so a live one is refused) in
@@ -757,7 +1296,7 @@ func TestResume(t *testing.T) {
 	publish = func(string, []bd.Edge, *bd.Closing) ([]string, error) { return nil, nil }
 	t.Setenv("TMUX_PANE", "") // no viewers to return on the test's own tmux
 	capt := eventlogtest.Capture(t)
-	if rc := HitlRun([]string{"--resume", "--bead=g", "--session=s1", "--worktree=/wt", "--", "claude", "--resume", "s1"}, meter(t)); rc != 0 {
+	if rc := HitlRun([]string{"--resume", "--bead=g", "--session=s1", "--worktree=/wt", argvArg(t, "claude", "--resume", "s1")}, meter(t)); rc != 0 {
 		t.Errorf("rc = %d", rc)
 	}
 	if got := eventlogtest.Names(*capt); !slices.Equal(got, []string{"hitl.resumed", "hitl.exited"}) {
@@ -767,15 +1306,15 @@ func TestResume(t *testing.T) {
 		t.Errorf("resumed attrs %v, removed %q", (*capt)[0].Attrs, removed)
 	}
 
-	pane := resumePane(paneArgs("/abs/mugicrew", sessionTags{bd.Bead{ID: "g"}, "s1", "/wt"}, []string{"claude", "--resume", "s1"}))
-	args := respawnArgs(tmuxName("mc-a.2"), "/wt", "/run/env", pane, bd.Bead{ID: "mc-a.2", Title: "Grill #1"})
+	pane := resumePane(paneArgs("/abs/mugicrew", sessionTags{bd.Bead{ID: "g"}, "s1", "/wt", ""}, "/run/argv", "/run/env"))
+	args := respawnArgs(tmuxName("mc-a.2"), "/wt", pane, bd.Bead{ID: "mc-a.2", Title: "Grill #1"})
 	assertEnvArg(t, args)
 	got := strings.Join(args, " ")
-	if want := "respawn-pane -t =mc-a_2: -c /wt -e MUGICREW_ENV_FILE=/run/env -- /abs/mugicrew hitl-run --resume --bead=g --parent= --crewmate= --session=s1 --worktree=/wt -- claude --resume s1 ; "; !strings.HasPrefix(got, want) {
+	if want := "respawn-pane -t =mc-a_2: -c /wt -- /abs/mugicrew hitl-run --resume --bead=g --parent= --crewmate= --kind= --session=s1 --worktree=/wt --argv-file=/run/argv --env-file=/run/env ; "; !strings.HasPrefix(got, want) {
 		t.Errorf("respawn argv =\n%s\nwant prefix\n%s", got, want)
 	}
 	// A resumed session gets the same bar and key table as a launch (ADR 0066 §3).
-	assertBar(t, args, "mc-a.2 · Grill ##1")
+	assertBar(t, args, "○ — P0 · Grill ##1 · mc-a.2")
 	assertUnmarks(t, args) // a stale bit doesn't follow it into the new pane (ADR 0099 §6, ADR 0108 §2)
 	if strings.Contains(got, "@session") {
 		t.Errorf("respawn re-tags @session: %s", got)
@@ -809,7 +1348,7 @@ func (failResume) Run(contract.Ctx, contract.Invocation) (contract.Result, error
 	return contract.Result{}, nil
 }
 func (failResume) LaunchCommand(contract.Invocation) (contract.LaunchCommand, error) { return nil, nil }
-func (f failResume) ResumeCommand(string) (contract.AgentCommand, error) {
+func (f failResume) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, f.err
 }
 
@@ -922,6 +1461,9 @@ func TestOrphan(t *testing.T) {
 func TestDropOrphan(t *testing.T) {
 	origRemove, origPrune := gitRemoveWorktree, pruneWorktrees
 	defer func() { gitRemoveWorktree, pruneWorktrees = origRemove, origPrune }()
+	origDecl := declaredRepos
+	defer func() { declaredRepos = origDecl }()
+	declaredRepos = func(string) map[string]string { return nil } // a no-context Workspace: no child step
 	var steps []string
 	gitRemoveWorktree = func(wt string) error { steps = append(steps, "remove"); return errors.New("not a working tree") }
 	pruneWorktrees = func() error { steps = append(steps, "prune"); return nil }
@@ -978,7 +1520,7 @@ func assertBar(t *testing.T, args []string, left string) {
 	}
 	for name, want := range map[string]string{
 		"status-left": left, "status-left-length": "200",
-		"status-right": "F12 back to TUI · /exit to finish", "key-table": "mchitl",
+		"status-right": "F10 bead · F12 back to TUI · /exit to finish", "key-table": "mchitl",
 		"window-status-format": "", "window-status-current-format": "",
 	} {
 		if got := opt(name); got != want {
@@ -1002,16 +1544,21 @@ func assertUnmarks(t *testing.T, args []string) {
 	}
 }
 
-// An armed session's bar is hitl-run's countdown (Spec D4): barsArgs
-// skips it and still sets the unarmed ones; all armed is no call at all.
+// An armed session's status-right is hitl-run's countdown (Spec D4): barsArgs
+// skips that but still sets its status-left, and the unarmed ones' both; a
+// discussion keeps its Robin form via the text the TUI hands in.
 func TestBarsArgsSkipsArmed(t *testing.T) {
 	armed := map[string]Info{"mc-b.1": {State: Alive, AutoExit: time.Unix(1760000000, 0)}, "mc-a": {State: Alive}}
-	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, armed), " ")
-	if want := "set-option -t =mc-a: status-right F12 back to TUI · /exit to finish"; got != want {
+	left := map[string]string{"mc-b.1": "◐ TASK P2 · B #1 · mc-b.1", "mc-a": "Why? · Robin discussion"}
+	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, left, armed), " ")
+	want := "set-option -t =mc-a: status-left Why? · Robin discussion ; " +
+		"set-option -t =mc-a: status-right F10 bead · F12 back to TUI · /exit to finish ; " +
+		"set-option -t =mc-b_1: status-left ◐ TASK P2 · B ##1 · mc-b.1"
+	if got != want {
 		t.Errorf("barsArgs =\n %q\nwant\n %q", got, want)
 	}
-	if got := barsArgs(map[string]bool{"mc-b.1": true}, armed); len(got) != 0 {
-		t.Errorf("barsArgs all armed = %q, want none", got)
+	if got := barsArgs(map[string]bool{"mc-b.1": false}, nil, armed); got != nil { // armed, no left text: nothing to set
+		t.Errorf("barsArgs = %q, want nil", got)
 	}
 }
 
@@ -1033,9 +1580,9 @@ func TestAutoExitBar(t *testing.T) {
 // The done flip's argv (ADR 0066 §4): an open bead's session gets the normal right
 // bar, a closed one's the loud green/reversed ✓ line; one ;-joined call, id order.
 func TestBarsArgs(t *testing.T) {
-	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, nil), " ")
-	want := "set-option -t =mc-a: status-right F12 back to TUI · /exit to finish ; " +
-		"set-option -t =mc-b_1: status-right #[fg=green,reverse] ✓ mc-b.1 closed — /exit to finish · F12 back to TUI "
+	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, nil, nil), " ")
+	want := "set-option -t =mc-a: status-right F10 bead · F12 back to TUI · /exit to finish ; " +
+		"set-option -t =mc-b_1: status-right #[fg=green,reverse] ✓ mc-b.1 closed — /exit to finish · F10 bead · F12 back to TUI "
 	if got != want {
 		t.Errorf("barsArgs =\n %q\nwant\n %q", got, want)
 	}
@@ -1096,10 +1643,11 @@ func TestDropDraftsRecordsBranches(t *testing.T) {
 // deleted; a conflict keeps both for the human (the orphan confirm relaunches it,
 // FR 40) and the wrapper still exits clean; a transient keeps the branch only;
 // hitl.exited says which (stranded, kept). A grilling's effort integrates like any
-// leaf; a land step's detached tree never integrates; a failed run keeps all.
+// leaf, released first as still in_progress; a land step's detached tree never
+// integrates; a failed run keeps all.
 func TestHitlRunBackstopsEffortTree(t *testing.T) {
-	origRun, origRemove := runAgent, removeWorktree
-	defer func() { runAgent, removeWorktree = origRun, origRemove }()
+	origRun, origRemove, origRelease := runAgent, removeWorktree, releaseClaim
+	defer func() { runAgent, removeWorktree, releaseClaim = origRun, origRemove, origRelease }()
 	for _, tc := range []struct {
 		name  string
 		kind  contract.Kind
@@ -1117,9 +1665,9 @@ func TestHitlRunBackstopsEffortTree(t *testing.T) {
 		{"transient keeps the branch", contract.KindSurgery, func([]string, <-chan struct{}) error { return nil }, 1, 0, false, true,
 			[]string{"publish sg", "integrate", "abort /tmp/mugicrew-wt-x/wt", "remove"}},
 		{"grilling integrates onto its chart", contract.KindGrilling, func([]string, <-chan struct{}) error { return nil }, 0, 0, false, false,
-			[]string{"publish sg", "integrate", "remove", "delete effort/sg"}},
+			[]string{"publish sg", "release sg", "integrate", "remove", "delete effort/sg"}},
 		{"land step's detached tree never integrates", contract.KindCheckpoint, func([]string, <-chan struct{}) error { return nil }, 0, 0, false, false,
-			[]string{"publish sg", "remove"}},
+			[]string{"publish sg", "release sg", "remove"}},
 		{"failed run keeps everything", contract.KindSurgery, func([]string, <-chan struct{}) error { return exec.Command("sh", "-c", "exit 3").Run() }, 0, 3, false, false,
 			nil},
 	} {
@@ -1132,9 +1680,10 @@ func TestHitlRunBackstopsEffortTree(t *testing.T) {
 			showBead = func(id string) (bd.Bead, error) {
 				return bd.Bead{ID: id, Kind: tc.kind, Status: "in_progress", Parent: "cp"}, nil
 			}
+			releaseClaim = func(id string) error { *steps = append(*steps, "release "+id); return nil }
 			runAgent = tc.agent
 			removeWorktree = func(string) error { did = append(did, "remove"); return nil }
-			if rc := HitlRun([]string{"--bead=sg", "--worktree=/tmp/mugicrew-wt-x/wt", "--", "claude"}, meter(t)); rc != tc.rc {
+			if rc := HitlRun([]string{"--bead=sg", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, meter(t)); rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
 			}
 			if got := append(slices.Clone(*steps), did...); !slices.Equal(got, tc.want) {
@@ -1197,5 +1746,211 @@ func TestDropKeepsEffortBranch(t *testing.T) {
 	}
 	if err := exec.Command("git", "rev-parse", "--verify", "--quiet", "effort/cf").Run(); err != nil {
 		t.Error("effort/cf is a replace-mode effort, want it kept")
+	}
+}
+
+// Watch focuses the pane already tagged with the bead, else respawns a pane tagged for
+// another bead, else splits -h 40%; exe and bead ride single-quoted (nested per level).
+func TestWatchArgs(t *testing.T) {
+	got := watchArgs("%3", "/opt/mu'gi/mugicrew", "mc-1")
+	mine := "#{P:#{?#{==:#{@watchrun},mc-1},#{pane_id},}}"
+	any := "#{P:#{?#{@watchrun},#{pane_id},}}"
+	if len(got) != 7 || strings.Join(got[:5], " ") != "if-shell -F -t %3 "+mine {
+		t.Fatalf("watchArgs = %q", got)
+	}
+	if want := "run-shell -t %3 -C 'select-pane -t " + mine + "'"; got[5] != want {
+		t.Errorf("focus:\n got %s\nwant %s", got[5], want)
+	}
+	verb := "-e MUGICREW_WATCH_PANE=1 " + tmuxQuote("/opt/mu'gi/mugicrew") + " transcript 'mc-1'"
+	respawn := "respawn-pane -k -t " + any + " " + verb + " ; set-option -p -t " + any + " @watchrun 'mc-1' ; select-pane -t " + any
+	split := "split-window -h -l 40% -t %3 " + verb + " ; set-option -p @watchrun 'mc-1'"
+	want := "if-shell -F -t %3 " + tmuxQuote(any) + " " + tmuxQuote("run-shell -t %3 -C "+tmuxQuote(respawn)) + " " + tmuxQuote(split)
+	if got[6] != want {
+		t.Errorf("reuse/split:\n got %s\nwant %s", got[6], want)
+	}
+	if q := tmuxQuote("a'b"); q != `'a'\''b'` {
+		t.Errorf("tmuxQuote = %s", q)
+	}
+}
+
+func TestWatchRefusesUnsafeIDs(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%1")
+	if err := Watch("x'; kill-server #"); err == nil {
+		t.Error("an id with tmux metacharacters was accepted")
+	}
+}
+
+// A pane id is only trusted when $TMUX names this repo's private server.
+func TestOwnPane(t *testing.T) {
+	t.Setenv("TMUX_PANE", "%4")
+	t.Setenv("TMUX", "/tmp/foreign,1,0")
+	if got := ownPane("/tmp/mine"); got != "" {
+		t.Errorf("foreign server's pane = %q, want none", got)
+	}
+	t.Setenv("TMUX", "/tmp/mine,1,0")
+	if got := ownPane("/tmp/mine"); got != "%4" {
+		t.Errorf("own pane = %q, want %%4", got)
+	}
+}
+
+// DropOrphan on a nested effort removes the child worktree before the host, then
+// prunes the Workspace and each declared child (Spec FR 53).
+func TestDropOrphanNested(t *testing.T) {
+	origRemove, origPrune, origDecl := gitRemoveWorktree, pruneWorktrees, declaredRepos
+	origChild, origPruneChild, origRoot := removeChildWorktree, pruneChild, repoRoot
+	defer func() {
+		gitRemoveWorktree, pruneWorktrees, declaredRepos = origRemove, origPrune, origDecl
+		removeChildWorktree, pruneChild, repoRoot = origChild, origPruneChild, origRoot
+	}()
+	root := t.TempDir()
+	repoRoot = func() (string, error) { return root, nil }
+	wt := filepath.Join(t.TempDir(), "mugicrew-wt-1", "wt")
+	for dir, git := range map[string]string{"sub": "gitdir: x", "plain": ""} {
+		if err := os.MkdirAll(filepath.Join(wt, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if git != "" {
+			os.WriteFile(filepath.Join(wt, dir, ".git"), []byte(git), 0o644)
+		}
+	}
+	var steps []string
+	declaredRepos = func(string) map[string]string { return map[string]string{"a": "plain", "b": "sub"} }
+	removeChildWorktree = func(r git.Repo, p string) error {
+		steps = append(steps, "remove child "+string(r)+" "+p)
+		return nil
+	}
+	gitRemoveWorktree = func(string) error { steps = append(steps, "remove host"); return nil }
+	pruneWorktrees = func() error { steps = append(steps, "prune host"); return nil }
+	pruneChild = func(r git.Repo) { steps = append(steps, "prune "+string(r)) }
+	if err := DropOrphan(wt); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"remove child " + filepath.Join(root, "sub") + " " + filepath.Join(wt, "sub"), "remove host", "prune host",
+		"prune " + filepath.Join(root, "plain"), "prune " + filepath.Join(root, "sub")}
+	if !slices.Equal(steps, want) {
+		t.Errorf("steps = %q\nwant    %q", steps, want)
+	}
+}
+
+// A child remove that fails, or a root that cannot be found, stops DropOrphan
+// before the host tree is removed.
+func TestDropOrphanNestedStopsOnError(t *testing.T) {
+	origRemove, origDecl, origChild, origRoot := gitRemoveWorktree, declaredRepos, removeChildWorktree, repoRoot
+	defer func() {
+		gitRemoveWorktree, declaredRepos, removeChildWorktree, repoRoot = origRemove, origDecl, origChild, origRoot
+	}()
+	wt := filepath.Join(t.TempDir(), "mugicrew-wt-1", "wt")
+	if err := os.MkdirAll(filepath.Join(wt, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "sub", ".git"), []byte("gitdir: x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	declaredRepos = func(string) map[string]string { return map[string]string{"b": "sub"} }
+	removed := false
+	gitRemoveWorktree = func(string) error { removed = true; return nil }
+	repoRoot = func() (string, error) { return "", errors.New("no root") }
+	if err := DropOrphan(wt); err == nil {
+		t.Error("root failure: want error")
+	}
+	repoRoot = func() (string, error) { return t.TempDir(), nil }
+	removeChildWorktree = func(git.Repo, string) error { return errors.New("busy") }
+	if err := DropOrphan(wt); err == nil {
+		t.Error("child remove failure: want error")
+	}
+	if removed {
+		t.Error("host removed despite the failure")
+	}
+}
+
+// A discussion's bar reads its title and Robin, not its id (ADR 0194 §2).
+func TestDiscussionBar(t *testing.T) {
+	for _, kv := range bar(bd.Bead{ID: "mc-d", Kind: contract.KindDiscussion, Title: "Why Franky?"}) {
+		if kv[0] == "status-left" && kv[1] != "Why Franky? · Robin discussion" {
+			t.Errorf("status-left = %q", kv[1])
+		}
+	}
+}
+
+func TestCheckupBar(t *testing.T) {
+	for _, kv := range bar(bd.Bead{ID: "mc-c", Kind: contract.KindCheckup, Title: "Fix edge"}) {
+		if kv[0] == "status-left" && kv[1] != "Fix edge · Chopper checkup" {
+			t.Errorf("status-left = %q", kv[1])
+		}
+	}
+}
+
+// The launch-time bar is the launched bead's plain SBRN, no dot slot, its own
+// status glyph.
+func TestLaunchBarIsPlainSBRN(t *testing.T) {
+	got := plainSBRN(bd.Bead{ID: "mc-a.2", Kind: contract.KindTask, Title: "Fix it", Status: "in_progress", Priority: 1})
+	if want := "◐ TASK P1 · Fix it · mc-a.2"; got != want {
+		t.Errorf("plainSBRN = %q, want %q", got, want)
+	}
+}
+
+// The bead pane names the executable by absolute path as one quoted word, whatever
+// shell or tmux metacharacters it holds, and takes its width inside the pane.
+func TestBeadSplitQuotesExe(t *testing.T) {
+	got := beadSplit(`/a b/it's $x"y\z/mugicrew`)
+	want := `"'/a b/it'\\''s \$x\"y\\z/mugicrew' bead-detail `
+	if !strings.Contains(got, want) {
+		t.Errorf("beadSplit = %q, want it to contain %q", got, want)
+	}
+	for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("beadSplit lacks %q: %q", w, got)
+		}
+	}
+}
+
+// hitl.exited carries continued_in only when the source transcript ends in a
+// continued-in record, and the source's own spend (Spec mc-11b8 D3, FR4).
+// It needs a git checkout: the follower's event log path comes from eventlog.Resolve.
+func TestHitlRunRecordsContinuedIn(t *testing.T) {
+	origRun, origRemove, origStart := runAgent, removeWorktree, startFollower
+	defer func() { runAgent, removeWorktree, startFollower = origRun, origRemove, origStart }()
+	var spawned [][]string
+	startFollower = func(_ string, args []string) error { spawned = append(spawned, args); return nil }
+	stubDrafts(t, nil)
+	removeWorktree = func(string) error { return nil }
+	// Handoff resolves the event log from the cwd's repo; the nix sandbox has none.
+	t.Chdir(t.TempDir())
+	if out, err := exec.Command("git", "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	cs := `{"type":"cost-state","totalCostUSD":1.5,"totalAPIDuration":3000}` + "\n"
+	ci := `{"type":"continued-in","timestamp":"t","sessionId":"sess-1","continuedInSessionId":"dest-9"}` + "\n"
+	for name, body := range map[string]string{"handoff": cs + cs + ci, "no handoff": cs} {
+		t.Run(name, func(t *testing.T) {
+			capt := eventlogtest.Capture(t)
+			m := meter(t)
+			dir := os.Getenv("CLAUDE_CONFIG_DIR") + "/projects/-wt"
+			runAgent = func([]string, <-chan struct{}) error {
+				os.MkdirAll(dir, 0o755)
+				return os.WriteFile(dir+"/sess-1.jsonl", []byte(body), 0o644)
+			}
+			spawned = nil
+			HitlRun([]string{"--bead=g", "--session=sess-1", "--worktree=/tmp/mugicrew-wt-x/wt", argvArg(t, "claude")}, m)
+			evs := *capt
+			a := evs[len(evs)-1].Attrs
+			if (len(spawned) == 1) != (name == "handoff") || len(spawned) > 1 {
+				t.Fatalf("follower spawns = %v", spawned)
+			}
+			if name == "handoff" {
+				got := strings.Join(spawned[0], " ")
+				for _, want := range []string{"hitl-follow", "--bead=g", "--session=sess-1", "--continued_in=dest-9", `--baseline={"Known":true,"USD":1.5`, "--exited_at=", "--events=/"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("follower argv %q lacks %q", got, want)
+					}
+				}
+			}
+			if a["cost_usd"] != 1.5 {
+				t.Errorf("cost_usd = %v, want 1.5", a["cost_usd"])
+			}
+			if got, _ := a["continued_in"].(string); (got == "dest-9") != (name == "handoff") || (name == "handoff" && got == "") {
+				t.Errorf("continued_in = %v", a["continued_in"])
+			}
+		})
 	}
 }

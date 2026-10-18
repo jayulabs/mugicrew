@@ -1,6 +1,7 @@
 # ADR 0046: mugicrew pivot triage session shape
 
 Status: Accepted
+Amended by: ADR 0140 (§5: escalate's fresh Chart gets a Survey and no longer skips charting)
 Date: 2026-10-04
 
 Amends: ADR 0005 §3 (how triage outcomes execute), ADR 0045 §3 (how "one Inbox

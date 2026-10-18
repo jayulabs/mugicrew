@@ -60,6 +60,10 @@ neither `apps/mugicrew/GLOSSARY.md` nor mugicrew's ADRs.
 5. **No mugicrew glossary ships.** The prompts and crew docs define the
    process terms they use where they use them. The only ontology pointer is
    the conditional domain pointer to the Workspace's own glossary.
+
+   > **Amended by ADR 0202:** a `vocabulary.md` crew doc now ships a verbatim,
+   > ADR-citation-stripped subset of GLOSSARY.md for the cross-cutting terms.
+
 6. **ADR citations leave the prompt text.** "ADR NNNN" rationale moves into a
    comment in the prompt file header or in the Go code. A one-line *why* stays
    inline only where the session needs it to make a judgment call. The same

@@ -1,6 +1,6 @@
 # ADR 0115: mugicrew Brook — a new crewmate for the external world owns Task; its session is human-started and guide-closed
 
-Status: Accepted
+Status: Accepted (amended by ADR 0222 §7: Brook owns `kind:latch`, a free-standing leaf)
 Date: 2026-10-09
 
 Amends: ADR 0013 §3 (the reserved `task` kind gets an owner). Reuses the name

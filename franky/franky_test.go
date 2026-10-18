@@ -2,6 +2,8 @@ package franky
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"slices"
@@ -9,7 +11,10 @@ import (
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
+	"jayulabs.org/mugicrew/contexts/contextstest"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
 )
 
@@ -29,7 +34,7 @@ func (h *recordingHarness) LaunchCommand(contract.Invocation) (contract.LaunchCo
 	return nil, nil
 }
 
-func (h *recordingHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *recordingHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -40,22 +45,22 @@ func (c stubCtx) Harness() contract.Harness { return c.h }
 // frankySeamRec captures the bd legs so the tests can assert the close and the
 // pivot hand-off without live bd/git.
 type frankySeamRec struct {
-	closed  []string  // closed directly (closeBead)
-	reasons []string  // close reasons, parallel to closed
-	pivots  []bd.Bead // the Checkpoint's open pivots (OpenPivots)
-	raised  []bd.Bead // open pivots discovered-from the bead (PivotsDiscoveredFrom)
-	raises  []string  // raisePivot calls: "<bead> <spec> <pivot ids>"
-	spec    string    // the Checkpoint's Spec via SpecOf ("" = none)
-	surgery string    // the Checkpoint's Surgery via SurgeryOf ("" = none)
+	closed    []string  // closed directly (closeBead)
+	reasons   []string  // close reasons, parallel to closed
+	pivots    []bd.Bead // the Checkpoint's open pivots (OpenPivots)
+	raised    []bd.Bead // open pivots discovered-from the bead (PivotsDiscoveredFrom)
+	raises    []string  // raisePivot calls: "<bead> <spec> <pivot ids>"
+	spec      string    // the Checkpoint's Spec via SpecOf ("" = none)
+	surgeries []bd.Bead // the Checkpoint's Surgeries via SurgeriesOf
 }
 
 func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 	t.Helper()
 	oShow, oClose := showBead, closeBead
-	oPivots, oRaised, oRaise, oSpec, oSurgery := openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeryOf
+	oPivots, oRaised, oRaise, oSpec, oSurgery := openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf
 	t.Cleanup(func() {
 		showBead, closeBead = oShow, oClose
-		openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeryOf = oPivots, oRaised, oRaise, oSpec, oSurgery
+		openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf = oPivots, oRaised, oRaise, oSpec, oSurgery
 	})
 	closeBead = func(id, reason string) error {
 		r.closed = append(r.closed, id)
@@ -71,7 +76,7 @@ func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 		return nil
 	}
 	specOf = func(string) (string, bool, error) { return r.spec, r.spec != "", nil }
-	surgeryOf = func(string) (string, bool, error) { return r.surgery, r.surgery != "", nil }
+	surgeriesOf = func(string) ([]bd.Bead, error) { return r.surgeries, nil }
 }
 
 func openBuild() bd.Bead {
@@ -100,6 +105,14 @@ func (h *launchHarness) LaunchCommand(inv contract.Invocation) (contract.LaunchC
 
 // Spec D4: l on a Surgery launches a session over the surgery prompt.
 func TestLaunchSurgeryComposesSession(t *testing.T) {
+	r := &frankySeamRec{}
+	stubFrankySeams(t, r)
+	showBead = func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Title: "t-" + id, Parent: "ws-cp"}, nil
+	}
+	oKids := childrenOfKind
+	t.Cleanup(func() { childrenOfKind = oKids })
+	childrenOfKind = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
 	h := &launchHarness{}
 	lc, err := Franky{}.Launch(stubCtx{h}, contract.Bead{ID: "ws-surg", Kind: contract.KindSurgery})
 	if err != nil {
@@ -116,7 +129,7 @@ func TestLaunchSurgeryComposesSession(t *testing.T) {
 // The surgery prompt carries the idle line verbatim, the end verb with the id
 // filled in, and no pivot section (Spec D4).
 func TestSurgeryPromptRenders(t *testing.T) {
-	p := surgeryPrompt("ws-surg")
+	p := surgeryPrompt(surgeryArgs{ID: "ws-surg", Checkpoint: "ws-cp", CheckpointTitle: "Cp title"})
 	for _, want := range []string{
 		"⏸ Surgery idle — /exit; l on its row resumes it.",
 		"mugicrew surgery end ws-surg",
@@ -124,9 +137,9 @@ func TestSurgeryPromptRenders(t *testing.T) {
 		"bd comments add ws-surg",
 		"Ending: N commits → review",
 		"CONTRIBUTING.md",
-		"merge-base",
+		"--grep='^Surgery: ws-surg$'",
 		contract.DraftInstruction("ws-surg"),
-		"kind:signal," + contract.DraftedBy("ws-surg") + " -s deferred",
+		"signal-filing.md",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("surgery prompt missing %q", want)
@@ -140,10 +153,81 @@ func TestSurgeryPromptRenders(t *testing.T) {
 	promptguard.Check(t, "surgery", p)
 }
 
+// A fresh-Checkpoint Surgery carries the opener and no context block; a joined
+// one renders every block; no case has a pivot section.
+func TestSurgeryPromptContextBlocks(t *testing.T) {
+	fresh := surgeryPrompt(surgeryArgs{ID: "ws-surg", Checkpoint: "ws-cp", CheckpointTitle: "Cp title"})
+	if !strings.Contains(fresh, "for Checkpoint ws-cp — Cp title") {
+		t.Error("fresh prompt lacks the opener")
+	}
+	for _, absent := range []string{"as background", "Earlier Surgeries", "Open Builds", "Open Critiques"} {
+		if strings.Contains(fresh, absent) {
+			t.Errorf("fresh prompt must not render %q", absent)
+		}
+	}
+	if !strings.Contains(fresh, "bd show ws-surg)\n\nA surgery spans") {
+		t.Error("an empty context must leave the template's spacing untouched")
+	}
+	bead := func(id string) bd.Bead { return bd.Bead{ID: id, Title: "title " + id} }
+	joined := surgeryPrompt(surgeryArgs{
+		ID: "ws-surg", Checkpoint: "ws-cp", CheckpointTitle: "Cp title", SpecID: "ws-spec", SpecTitle: "Spec title",
+		Earlier: []bd.Bead{bead("ws-s1"), bead("ws-s2")}, Builds: []bd.Bead{bead("ws-b1")}, Critiques: []bd.Bead{bead("ws-c1")},
+	})
+	for _, want := range []string{
+		"bd show ws-spec", "Spec title", "never raise a pivot",
+		"- ws-s1: title ws-s1\n- ws-s2: title ws-s2", "bd comments <id>",
+		"- ws-b1: title ws-b1", "may need a rebase",
+		"- ws-c1: title ws-c1", "never claim or close",
+		"bd children <checkpoint-id>",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("joined prompt missing %q", want)
+		}
+	}
+	for _, p := range []string{fresh, joined} {
+		if strings.Contains(strings.ReplaceAll(p, "never raise a pivot", ""), "pivot") {
+			t.Error("surgery prompt must carry no pivot section")
+		}
+	}
+}
+
+// surgeryContext reads the Checkpoint, its Spec, closed sibling Surgeries and
+// open Builds and Critiques; the Surgery itself and closed Builds are left out.
+func TestSurgeryContextFromBd(t *testing.T) {
+	r := &frankySeamRec{spec: "ws-spec", surgeries: []bd.Bead{
+		{ID: "ws-s0", Status: "closed"}, {ID: "ws-surg", Status: "in_progress"}, {ID: "ws-s2", Status: "in_progress"},
+	}}
+	stubFrankySeams(t, r)
+	oKids := childrenOfKind
+	t.Cleanup(func() { childrenOfKind = oKids })
+	showBead = func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Title: "t-" + id, Parent: "ws-cp"}, nil
+	}
+	childrenOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "open-" + string(k), Status: "open"}, {ID: "done-" + string(k), Status: "closed"}}, nil
+	}
+	a, err := surgeryContext("ws-surg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Checkpoint != "ws-cp" || a.CheckpointTitle != "t-ws-cp" || a.SpecID != "ws-spec" || a.SpecTitle != "t-ws-spec" {
+		t.Errorf("checkpoint/spec = %+v", a)
+	}
+	if got := bd.IDs(a.Earlier); !slices.Equal(got, []string{"ws-s0"}) {
+		t.Errorf("Earlier = %v", got)
+	}
+	if got := bd.IDs(a.Builds); !slices.Equal(got, []string{"open-build"}) {
+		t.Errorf("Builds = %v", got)
+	}
+	if got := bd.IDs(a.Critiques); !slices.Equal(got, []string{"open-critique"}) {
+		t.Errorf("Critiques = %v", got)
+	}
+}
+
 // Spec D6 over both rendered prompts: no skill call, no ADR citation,
 // every crew-doc reference resolves. Build carries implement's four steps inline
 // and reads tdd.md and code-review.md; conflict carries the merge-conflict steps
-// inline and reads adr-renumber.md; both read checkpoint-rules.md.
+// inline and reads sequence-renumber.md; both read checkpoint-rules.md.
 func TestFrankyPromptsSkillFree(t *testing.T) {
 	b := implementPrompt(promptArgs{BeadID: "mc-x", SpecID: "ws-spec"})
 	c := conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef", SpecID: "ws-spec"})
@@ -154,7 +238,7 @@ func TestFrankyPromptsSkillFree(t *testing.T) {
 		docs []string
 	}{
 		"build":    {b, []string{"tdd.md", "code-review.md", "checkpoint-rules.md"}},
-		"conflict": {c, []string{"adr-renumber.md", "checkpoint-rules.md"}},
+		"conflict": {c, []string{"sequence-renumber.md", "checkpoint-rules.md"}},
 	} {
 		refs := promptguard.CrewDocRefs(tc.p)
 		for _, d := range tc.docs {
@@ -187,7 +271,7 @@ func TestBuildPromptIntegratesEffortBranch(t *testing.T) {
 	if !promptguard.IntegratesBeforeClose(b) {
 		t.Error("build prompt must name mugicrew integrate before bd close")
 	}
-	for _, want := range []string{"effort/mc-x", "git log --oneline checkpoint/ws-cp..HEAD", "git rebase --continue", "git rebase --abort"} {
+	for _, want := range []string{"effort/mc-x", "git log --oneline checkpoint/ws-cp..HEAD", "git rebase --continue", "git rebase --abort", `bd comments add mc-x "Not built: <why>"`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("build prompt lacks %q", want)
 		}
@@ -252,7 +336,7 @@ func TestAFKPromptsFileExternalWorkAsSignal(t *testing.T) {
 		"mc-x": implementPrompt(promptArgs{BeadID: "mc-x", SpecID: "ws-spec"}),
 		"mc-y": conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef"}),
 	} {
-		for _, want := range []string{"offshoot Signal, never a Task", "kind:signal," + contract.DraftedBy(id), "discovered-from:" + id} {
+		for _, want := range []string{"offshoot Signal, never a Task", "signal-filing.md", "discovered-from " + id} {
 			if !strings.Contains(p, want) {
 				t.Errorf("prompt for %s missing %q", id, want)
 			}
@@ -408,6 +492,44 @@ func TestRunConflictReadsBasePin(t *testing.T) {
 	}
 }
 
+// A Critique carrying a Base: pin (the failed-gate-build Critique) rebases onto
+// that pinned base before the test-first fix, in the one session.
+func TestRunCritiqueBasePinRebasesThenFixes(t *testing.T) {
+	r := &frankySeamRec{spec: "ws-spec"}
+	stubFrankySeams(t, r)
+	crit := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\ngate failed: TestX"}
+	showBead = func(id string) (bd.Bead, error) { return crit, nil }
+	h := &recordingHarness{}
+
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-crit", Kind: contract.KindCritique}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(h.invs) != 1 {
+		t.Fatalf("want one session, got %v", h.invs)
+	}
+	p := h.invs[0].Prompt
+	rebase, fix := strings.Index(p, "git rebase cafef00d"), strings.Index(p, "Test-first")
+	if rebase < 0 || fix < 0 || rebase > fix {
+		t.Errorf("prompt must rebase onto the pin, then fix test-first; got %q", p)
+	}
+}
+
+// A Critique with no Base: pin (Usopp's finding) keeps the plain implement leg.
+func TestRunCritiqueWithoutBasePinSkipsRebase(t *testing.T) {
+	r := &frankySeamRec{spec: "ws-spec"}
+	stubFrankySeams(t, r)
+	crit := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "a review finding"}
+	showBead = func(id string) (bd.Bead, error) { return crit, nil }
+	h := &recordingHarness{}
+
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-crit", Kind: contract.KindCritique}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(h.invs) != 1 || strings.Contains(h.invs[0].Prompt, "Rebase first") {
+		t.Errorf("an unpinned Critique must not rebase, got %v", h.invs)
+	}
+}
+
 // A conflict bead with no Base: pin is malformed — fail loud, fork nothing.
 func TestRunConflictNoBasePinFailsLoud(t *testing.T) {
 	r := &frankySeamRec{}
@@ -465,6 +587,8 @@ func TestRunOverSweepClosedBeadIsNoOp(t *testing.T) {
 type surgeryEndRec struct {
 	beads   map[string]bd.Bead
 	commits int
+	mine    int    // this Surgery's own trailered squashes among commits
+	kids    int    // the Checkpoint's children, closed included
 	effort  int    // commits on effort/<id> only, that integrate moves onto the branch
 	intErr  error  // integrate's failure
 	branch  string // the branch counted
@@ -475,12 +599,25 @@ type surgeryEndRec struct {
 func stubSurgeryEnd(t *testing.T, r *surgeryEndRec) {
 	t.Helper()
 	r.reasons = map[string]string{}
-	oShow, oClose, oAhead, oInt := showBead, closeBead, commitsAhead, integrateSurgery
-	t.Cleanup(func() { showBead, closeBead, commitsAhead, integrateSurgery = oShow, oClose, oAhead, oInt })
-	integrateSurgery = func(sg bd.Bead) error {
+	oShow, oClose, oAhead, oInt, oMine, oKids := showBead, closeBead, commitsAhead, integrateSurgery, commitsByTrailer, checkpointChildCount
+	t.Cleanup(func() {
+		showBead, closeBead, commitsAhead, integrateSurgery, commitsByTrailer, checkpointChildCount = oShow, oClose, oAhead, oInt, oMine, oKids
+	})
+	if r.kids == 0 {
+		r.kids = 1
+	}
+	commitsByTrailer = func(_ git.Repo, base, branch, trailer string) (int, error) {
+		r.branch = branch
+		if trailer != "Surgery: ws-sg" {
+			t.Errorf("trailer = %q", trailer)
+		}
+		return r.mine, nil
+	}
+	checkpointChildCount = func(string) (int, error) { return r.kids, nil }
+	integrateSurgery = func(sg bd.Bead, _ git.Repo) error {
 		r.events = append(r.events, "integrate "+sg.ID)
 		if r.intErr == nil {
-			r.commits, r.effort = r.commits+r.effort, 0
+			r.commits, r.mine, r.effort = r.commits+r.effort, r.mine+r.effort, 0
 		}
 		return r.intErr
 	}
@@ -496,8 +633,7 @@ func stubSurgeryEnd(t *testing.T, r *surgeryEndRec) {
 		r.reasons[id] = reason
 		return nil
 	}
-	commitsAhead = func(base, branch string) (int, error) {
-		r.branch = branch
+	commitsAhead = func(_ git.Repo, base, branch string) (int, error) {
 		return r.commits, nil
 	}
 }
@@ -512,7 +648,7 @@ func surgeryBeads() map[string]bd.Bead {
 // N > 0: the Surgery only closes, spawning no Review — Jinbe spawns it once the
 // Checkpoint drains (Spec D8) — and the Checkpoint stays open.
 func TestEndSurgeryWithCommitsOnlyCloses(t *testing.T) {
-	r := &surgeryEndRec{beads: surgeryBeads(), commits: 3}
+	r := &surgeryEndRec{beads: surgeryBeads(), commits: 3, mine: 3}
 	stubSurgeryEnd(t, r)
 
 	if err := EndSurgery("ws-sg"); err != nil {
@@ -542,6 +678,24 @@ func TestEndSurgeryWithNoCommitsClosesBoth(t *testing.T) {
 	}
 	if !strings.HasPrefix(r.reasons["ws-sg"], "abandoned") {
 		t.Errorf("Surgery close reason = %q, want abandoned", r.reasons["ws-sg"])
+	}
+}
+
+// A joined zero-commit Surgery closes only itself: Builds' commits ahead, or
+// other children (a stacked surgery Checkpoint's earlier Surgery), keep the
+// Checkpoint open (Spec D8).
+func TestEndSurgeryZeroCommitsKeepsSharedCheckpoint(t *testing.T) {
+	for name, r := range map[string]*surgeryEndRec{
+		"builds ahead":    {beads: surgeryBeads(), commits: 2, kids: 3},
+		"earlier sibling": {beads: surgeryBeads(), kids: 2},
+	} {
+		stubSurgeryEnd(t, r)
+		if err := EndSurgery("ws-sg"); err != nil {
+			t.Fatalf("%s: EndSurgery: %v", name, err)
+		}
+		if want := []string{"integrate ws-sg", "close ws-sg"}; !slices.Equal(r.events, want) {
+			t.Errorf("%s: events = %v, want %v", name, r.events, want)
+		}
 	}
 }
 
@@ -585,7 +739,7 @@ func TestEndSurgeryRefusesBadBeads(t *testing.T) {
 	} {
 		beads := surgeryBeads()
 		edit(beads)
-		r := &surgeryEndRec{beads: beads, commits: 1}
+		r := &surgeryEndRec{beads: beads, commits: 1, mine: 1}
 		stubSurgeryEnd(t, r)
 		if err := EndSurgery("ws-sg"); err == nil {
 			t.Errorf("%s: EndSurgery = nil, want a refusal", name)
@@ -615,7 +769,7 @@ func TestConflictPromptIntegratesEffortBranch(t *testing.T) {
 // surgery end; on a conflict it can't resolve it asks the human before aborting
 // (Spec D14, FR 12, 56).
 func TestSurgeryPromptIntegratesEffortBranch(t *testing.T) {
-	p := surgeryPrompt("ws-sg")
+	p := surgeryPrompt(surgeryArgs{ID: "ws-sg"})
 	if !promptguard.IntegratesBeforeClose(p) {
 		t.Error("surgery prompt must name mugicrew integrate before bd close")
 	}
@@ -629,58 +783,239 @@ func TestSurgeryPromptIntegratesEffortBranch(t *testing.T) {
 	}
 }
 
-// Spec D6 over the build and conflict prompts in their three cases: a
-// Spec'd Checkpoint keeps the Spec and the pivot section; a surgery Checkpoint
-// carries its Surgery as context in place of the Spec; a headless one says it
-// has no Spec. Neither Spec-less render carries a pivot or an empty `bd show `.
+// Spec D1/D6 over the build and conflict prompts: the Spec and the Surgeries
+// render independently, each only when present; the pivot section keys on the
+// Spec alone. No render carries an empty `bd show `.
 func TestPromptsIntentSource(t *testing.T) {
-	b := promptArgs{BeadID: "mc-x", Base: "deadbeef"}
-	specd, surgery, headless := b, b, b
-	specd.SpecID, surgery.SurgeryID = "ws-spec", "ws-surg"
+	sg := func(id, title string) bd.Bead { return bd.Bead{ID: id, Title: title} }
+	one := []bd.Bead{sg("ws-s1", "tweak colour")}
+	many := []bd.Bead{sg("ws-s1", "tweak colour"), sg("ws-s2", "abandoned idea"), sg("ws-s3", "fix gap")}
 	type tc struct {
-		p         string
+		args      promptArgs
 		want, bad []string
 	}
-	cases := map[string]tc{}
-	for kind, render := range map[string]func(promptArgs) string{"build": implementPrompt, "conflict": conflictPrompt} {
-		cases[kind+"/spec'd"] = tc{render(specd), []string{"bd show ws-spec", "kind:pivot,drafted-by:mc-x"}, []string{"Surgery", "no Spec"}}
-		cases[kind+"/surgery"] = tc{render(surgery), []string{"bd show ws-surg", "Surgery", "as a Critique"}, []string{"pivot", "headless"}}
-		cases[kind+"/headless"] = tc{render(headless), []string{"headless: there is no Spec", "as a Critique"}, []string{"pivot", "Surgery"}}
+	base := promptArgs{BeadID: "mc-x", Base: "deadbeef"}
+	with := func(spec string, sgs []bd.Bead) promptArgs { a := base; a.SpecID, a.Surgeries = spec, sgs; return a }
+	cases := map[string]tc{
+		"spec only":      {with("ws-spec", nil), []string{"bd show ws-spec", "kind:pivot,drafted-by:mc-x"}, []string{"Surgeries", "no Spec"}},
+		"one surgery":    {with("", one), []string{"Surgeries on this Checkpoint", "- ws-s1: tweak colour", "as a Critique"}, []string{"pivot", "headless", "Spec this"}},
+		"spec+surgery":   {with("ws-spec", one), []string{"Spec this Checkpoint implements: ws-spec", "context for work touching their commits", "- ws-s1: tweak colour", "kind:pivot,drafted-by:mc-x"}, []string{"headless"}},
+		"many surgeries": {with("", many), []string{"- ws-s1: tweak colour", "- ws-s2: abandoned idea", "- ws-s3: fix gap"}, []string{"pivot", "headless"}},
+		"headless":       {with("", nil), []string{"headless: there is no Spec", "as a Critique"}, []string{"pivot", "Surgeries"}},
 	}
-	for name, c := range cases {
-		for _, w := range c.want {
-			if !strings.Contains(c.p, w) {
-				t.Errorf("%s prompt missing %q", name, w)
+	for kind, render := range map[string]func(promptArgs) string{"build": implementPrompt, "conflict": conflictPrompt} {
+		for name, c := range cases {
+			p, name := render(c.args), kind+"/"+name
+			for _, w := range c.want {
+				if !strings.Contains(p, w) {
+					t.Errorf("%s prompt missing %q", name, w)
+				}
 			}
-		}
-		for _, bad := range append(c.bad, "%!", "<no value>") {
-			if strings.Contains(c.p, bad) {
-				t.Errorf("%s prompt must not carry %q", name, bad)
+			for _, bad := range append(c.bad, "%!", "<no value>") {
+				if strings.Contains(p, bad) {
+					t.Errorf("%s prompt must not carry %q", name, bad)
+				}
 			}
+			if emptyShow.MatchString(p) {
+				t.Errorf("%s prompt renders an empty bd show", name)
+			}
+			promptguard.Check(t, name, p)
 		}
-		if emptyShow.MatchString(c.p) {
-			t.Errorf("%s prompt renders an empty bd show", name)
+	}
+}
+
+// The conflict prompt keeps commit messages and their trailers, since review and
+// the end rule attribute commits by trailer.
+func TestConflictPromptPreservesTrailers(t *testing.T) {
+	p := conflictPrompt(promptArgs{BeadID: "mc-x", Base: "deadbeef"})
+	for _, w := range []string{"`Surgery: <id>`", "`Build: <id>`", "trailers"} {
+		if !strings.Contains(p, w) {
+			t.Errorf("conflict prompt missing %q", w)
 		}
-		promptguard.Check(t, name, c.p)
 	}
 }
 
 var emptyShow = regexp.MustCompile("bd show [^a-z<]")
 
 // A Build on a Spec-less Checkpoint with a Surgery member gets the Surgery as its
-// context (Spec D6), resolved through bd.SurgeryOf.
+// context (Spec D6), resolved through bd.SurgeriesOf.
 func TestRunImplementResolvesSurgeryWhenNoSpec(t *testing.T) {
-	if reflect.ValueOf(surgeryOf).Pointer() != reflect.ValueOf(bd.SurgeryOf).Pointer() {
-		t.Error("franky's Surgery seam must default to bd.SurgeryOf")
+	if reflect.ValueOf(surgeriesOf).Pointer() != reflect.ValueOf(bd.SurgeriesOf).Pointer() {
+		t.Error("franky's Surgeries seam must default to bd.SurgeriesOf")
 	}
-	r := &frankySeamRec{surgery: "ws-surg"}
+	r := &frankySeamRec{surgeries: []bd.Bead{{ID: "ws-surg", Title: "t"}}}
 	stubFrankySeams(t, r)
 	showBead = func(string) (bd.Bead, error) { return openBuild(), nil }
 	h := &recordingHarness{}
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "bd show ws-surg") || strings.Contains(h.invs[0].Prompt, "kind:pivot") {
+	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "- ws-surg: t") || strings.Contains(h.invs[0].Prompt, "kind:pivot") {
 		t.Errorf("the build prompt must carry the Surgery and no pivot, got %v", h.invs)
+	}
+}
+
+// ctxRepo makes a git repo with the given .mugicrew/config.toml and chdirs into it.
+func ctxRepo(t *testing.T, cfg string) {
+	t.Helper()
+	d := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", d).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	os.MkdirAll(d+"/.mugicrew", 0o755)
+	os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+	t.Chdir(d)
+}
+
+const ctxCfg = "[context.mugicrew]\npath = \"apps/mugicrew\"\n"
+
+var ctxFocus = "\n\n" + contexts.FocusLine(map[string]string{"mugicrew": "apps/mugicrew"}, bd.Bead{Labels: []string{"context:mugicrew"}})
+
+// ADR 0157: build, conflict and surgery prompts are the old render, plus exactly the
+// focus line under a labelled container; no table or an unlabelled one changes nothing.
+func TestFrankyFocusLine(t *testing.T) {
+	run := func(label string, noShow bool) []string {
+		r := &frankySeamRec{spec: "ws-spec"}
+		stubFrankySeams(t, r)
+		oKids := childrenOfKind
+		t.Cleanup(func() { childrenOfKind = oKids })
+		childrenOfKind = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
+		// The Surgery launch reads its Checkpoint for its own packet
+		// (surgeryContext), so only the build run guards the container read.
+		launching := false
+		showBead = func(id string) (bd.Bead, error) {
+			if noShow && !launching && id != "ws-build" {
+				t.Fatal("bd show for a container on a no-context Workspace")
+			}
+			if id == "ws-cp" {
+				return bd.Bead{ID: id, Labels: []string{label}}, nil
+			}
+			b := openBuild()
+			if id == "ws-surg" {
+				b.ID = "ws-surg"
+			}
+			return b, nil
+		}
+		h := &recordingHarness{}
+		if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
+			t.Fatal(err)
+		}
+		launching = true
+		lh := &launchHarness{}
+		if _, err := (Franky{}).Launch(stubCtx{lh}, contract.Bead{ID: "ws-surg", Kind: contract.KindSurgery}); err != nil {
+			t.Fatal(err)
+		}
+		return []string{h.invs[0].Prompt, lh.inv.Prompt}
+	}
+	ctxRepo(t, "")
+	base := run("", true)
+	ctxRepo(t, ctxCfg)
+	if got := run("kind:checkpoint", false); !slices.Equal(got, base) {
+		t.Error("unlabelled container changed a prompt")
+	}
+	got := run("context:mugicrew", false)
+	for i := range base {
+		if got[i] != base[i]+ctxFocus {
+			t.Errorf("prompt %d is not old + focus line", i)
+		}
+	}
+}
+
+// ADR 0157: critique and conflict runs are the old render, plus exactly the focus
+// line under a labelled container; no table or an unlabelled one changes nothing.
+func TestFrankyFocusLineCritiqueConflict(t *testing.T) {
+	beads := map[string]bd.Bead{
+		"ws-crit": {ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "a review finding"},
+		"ws-conf": {ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\n"},
+	}
+	run := func(label string, noShow bool) []string {
+		r := &frankySeamRec{spec: "ws-spec"}
+		stubFrankySeams(t, r)
+		showBead = func(id string) (bd.Bead, error) {
+			if id == "ws-cp" {
+				if noShow {
+					t.Fatal("bd show for a container on a no-context Workspace")
+				}
+				return bd.Bead{ID: id, Labels: []string{label}}, nil
+			}
+			return beads[id], nil
+		}
+		var out []string
+		for _, k := range []contract.Kind{contract.KindCritique, contract.KindConflict} {
+			h := &recordingHarness{}
+			id := map[contract.Kind]string{contract.KindCritique: "ws-crit", contract.KindConflict: "ws-conf"}[k]
+			if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: id, Kind: k}); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, h.invs[0].Prompt)
+		}
+		return out
+	}
+	ctxRepo(t, "")
+	base := run("", true)
+	ctxRepo(t, ctxCfg)
+	if got := run("kind:checkpoint", false); !slices.Equal(got, base) {
+		t.Error("unlabelled container changed a prompt")
+	}
+	got := run("context:mugicrew", false)
+	for i := range base {
+		if got[i] != base[i]+ctxFocus {
+			t.Errorf("prompt %d is not old + focus line", i)
+		}
+	}
+}
+
+// A dotted id's "." is escaped in the start-step grep, so mc-x.1 cannot match mc-xy1.
+func TestSurgeryPromptEscapesDottedID(t *testing.T) {
+	p := surgeryPrompt(surgeryArgs{ID: "mc-x.1", Checkpoint: "mc-x", CheckpointTitle: "t"})
+	if want := `--grep='^Surgery: mc-x\.1$'`; !strings.Contains(p, want) {
+		t.Errorf("surgery prompt missing %q", want)
+	}
+}
+
+// A Surgery joined to a nested Checkpoint is integrated and counted in the child
+// (Spec FR 25): the repo and trunk the reads take are the child's.
+func TestEndSurgeryReadsAndIntegratesInTheChild(t *testing.T) {
+	_, kid := contextstest.Workspace(t)
+	r := &surgeryEndRec{beads: surgeryBeads(), commits: 3, mine: 3}
+	cp := r.beads["ws-cp"]
+	cp.Labels = []string{contextstest.Label}
+	r.beads["ws-cp"] = cp
+	stubSurgeryEnd(t, r)
+	var got []git.Repo
+	oInt, oMine := integrateSurgery, commitsByTrailer
+	integrateSurgery = func(sg bd.Bead, repo git.Repo) error { got = append(got, repo); return oInt(sg, repo) }
+	commitsByTrailer = func(repo git.Repo, base, branch, trailer string) (int, error) {
+		got = append(got, repo)
+		if base != "main" {
+			t.Errorf("base = %q, want the child's trunk", base)
+		}
+		return oMine(repo, base, branch, trailer)
+	}
+	if err := EndSurgery("ws-sg"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []git.Repo{git.Repo(kid), git.Repo(kid)}; !slices.Equal(got, want) {
+		t.Errorf("repos = %v, want %v", got, want)
+	}
+}
+
+// A requested rebase has no failed Landing behind it: the conflict prompt carries
+// the requested arm and the shared close path closes it as for any conflict.
+func TestRunRequestedConflictClosesWithoutLanding(t *testing.T) {
+	r := &frankySeamRec{spec: "ws-spec"}
+	stubFrankySeams(t, r)
+	conf := bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp",
+		Description: "requested rebase\nBase: cafef00d\nTip: t1p\nvariant: requested"}
+	showBead = func(id string) (bd.Bead, error) { return conf, nil }
+	h := &recordingHarness{}
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-conf", Kind: contract.KindConflict}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "variant: requested") {
+		t.Fatalf("prompt lacks requested arm: %v", h.invs)
+	}
+	if len(r.closed) != 1 {
+		t.Errorf("want the conflict closed once, got %v", r.closed)
 	}
 }

@@ -1,11 +1,15 @@
 package sanji
 
 import (
+	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
@@ -23,7 +27,7 @@ func (h *stubHarness) LaunchCommand(inv contract.Invocation) (contract.LaunchCom
 	return contract.AgentCommand{Argv: []string{"claude", inv.Prompt}}, nil
 }
 
-func (h *stubHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *stubHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -162,5 +166,91 @@ func TestPrototypePromptIntegratesEffortBranch(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("prototype prompt lacks %q", want)
 		}
+	}
+}
+
+// ADR 0157: a labelled container appends exactly the focus line; no table or an
+// unlabelled container leaves the prompt as today's, with no bd read when no table.
+func TestLaunchPrototypeFocus(t *testing.T) {
+	old := showBead
+	t.Cleanup(func() { showBead = old })
+	launch := func() string {
+		h := &stubHarness{}
+		if _, err := (Sanji{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-proto", Kind: contract.KindPrototype}); err != nil {
+			t.Fatal(err)
+		}
+		return h.inv.Prompt
+	}
+	repoDir := func(cfg string) {
+		d := t.TempDir()
+		if out, err := exec.Command("git", "init", "-q", d).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		os.MkdirAll(d+"/.mugicrew", 0o755)
+		os.WriteFile(d+"/.mugicrew/config.toml", []byte(cfg), 0o644)
+		t.Chdir(d)
+	}
+	showBead = func(string) (bd.Bead, error) { t.Fatal("bd show on a no-context Workspace"); return bd.Bead{}, nil }
+	repoDir("")
+	base := launch()
+	label := ""
+	showBead = func(id string) (bd.Bead, error) {
+		if id == "ws-proto" {
+			return bd.Bead{ID: id, Parent: "ws-chart"}, nil
+		}
+		return bd.Bead{ID: id, Labels: []string{label}}, nil
+	}
+	repoDir("[context.mugicrew]\npath = \"apps/mugicrew\"\n")
+	label = "kind:chart"
+	if got := launch(); got != base {
+		t.Error("unlabelled container changed the prompt")
+	}
+	label = "context:mugicrew"
+	want := base + "\n\n" + contexts.FocusLine(map[string]string{"mugicrew": "apps/mugicrew"}, bd.Bead{Labels: []string{label}})
+	if got := launch(); got != want || got == base {
+		t.Errorf("labelled prompt = old + focus line wanted, got %q", got)
+	}
+}
+
+// Spec mc-16us: a UI prototype is handed over in a running tmux pane in the
+// throwaway tree, a logic prototype by its HTML path, and the hand-over happens
+// before the tree is removed.
+func TestPrototypePromptHandsOverUIInPane(t *testing.T) {
+	p := strings.Join(strings.Fields(prototypePrompt("ws-proto", "/tmp/scratch")), " ")
+	want := `tmux -S "${MUGICREW_HITL_PANE%%,*}" split-window -t "${MUGICREW_HITL_PANE#*,}" -h -c /tmp/scratch '<start command>'`
+	at := strings.Index(p, want)
+	if at < 0 {
+		t.Fatalf("prototype prompt lacks %q:\n%s", want, p)
+	}
+	if i := strings.Index(p, "only for the UI branch"); i < 0 || i > at {
+		t.Errorf("pane instruction must be scoped to UI prototypes:\n%s", p)
+	}
+	if strings.Contains(p, "inherits $TMUX") {
+		t.Error("prompt must not claim the pane inherits $TMUX")
+	}
+	if !strings.Contains(p, "If MUGICREW_HITL_PANE is empty or unset, run no tmux at all") {
+		t.Error("prompt must name the MUGICREW_HITL_PANE-unset fallback")
+	}
+	for _, w := range []string{
+		"Press Enter to open",
+		`in %s\n" "<target>" "$BROWSER"`,
+		"applies to both the LOGIC and the UI branch",
+		"plain absolute path of the HTML demo (not a file:// URL)",
+		"the URL the dev server reports once it is up",
+		"MUGICREW_HITL_PANE is set, $BROWSER is non-empty, and command -v succeeds on $BROWSER's first word",
+		"otherwise open no browser pane",
+		"In every case print the target in the chat",
+		"POSIX sh loop",
+		"$BROWSER unquoted",
+	} {
+		if !strings.Contains(p, w) {
+			t.Errorf("prototype prompt lacks %q:\n%s", w, p)
+		}
+	}
+	if strings.Contains(p, "open no pane") {
+		t.Error("LOGIC must no longer open no pane")
+	}
+	if !strings.Contains(p, "Open both panes below before the side-ref land and the tree removal") {
+		t.Error("prompt must order the browser pane before the tree is removed")
 	}
 }

@@ -34,7 +34,7 @@ the Checkpoint on the *Spec*, which fires later, by which time mainline has move
 (merges serialize, ADR 0003 cap-1) — so "`rev-parse main` at cut time" is wrong;
 it returns the latest trunk, not *this* Chart's landed base. Instead the `Chart:
 <chart-id>` trailer **is** the record. Zoro walks `Spec —caused-by→ Chart` and
-re-derives the SHA by trailer. Nothing is stored on a bead (the SHA is a derived,
+re-derives the SHA by trailer. Nothing is stored on a bead for a container's landed base (a direct Spec's anchor is a bead pin, ADR 0287) (the SHA is a derived,
 immutable git fact — duplicating it into bd buys nothing and matches ADR 0004's
 "git is the source of truth").
 

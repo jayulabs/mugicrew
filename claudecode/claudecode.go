@@ -23,10 +23,12 @@ import (
 
 // Backend is the claudecode Harness. Model is an optional --model pass-through
 // (empty = defer to Claude Code's native resolution: --model flag > ANTHROPIC_
-// MODEL > settings.json > default, spec §5.2). It carries no other config —
-// there is no mugicrew config framework.
+// MODEL > settings.json > default, spec §5.2). Env is its Agent Profile's
+// expanded env, which Run hands the child through its process environment,
+// never argv (ADR 0125).
 type Backend struct {
 	Model string
+	Env   map[string]string
 }
 
 var _ contract.Harness = (*Backend)(nil)
@@ -80,6 +82,12 @@ func (b *Backend) Run(_ contract.Ctx, inv contract.Invocation) (contract.Result,
 		inv.SessionID = contract.NewSessionID()
 	}
 	cmd := execCommand("claude", b.runArgs(inv)...)
+	if len(b.Env) > 0 { // on top of the inherited env: exec keeps a duplicate key's last value
+		cmd.Env = os.Environ()
+		for k, v := range b.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // a loop's Ctrl-C drains; it must not kill the session (ADR 0050)
 	// Own the stderr capture (the stdlib only keeps it on a non-zero exit), bounded
 	// to twice the tail so a chatty stderr can't grow without limit.
@@ -92,13 +100,16 @@ func (b *Backend) Run(_ contract.Ctx, inv contract.Invocation) (contract.Result,
 	res.Exit, res.Signal = eventlog.Exit(err) // -1 when it never started
 	switch {
 	case err != nil: // the stderr tail rides on the Result (its own event attr), not the error
-		return res, fmt.Errorf("claude -p: %w", err)
+		err = fmt.Errorf("claude -p: %w", err)
 	case perr != nil:
 		return res, perr
 	case res.Summary.IsError:
-		return res, fmt.Errorf("claude -p: is_error (%s): %s", cmp.Or(res.Summary.TerminalReason, res.Summary.Subtype), res.Summary.Result)
+		err = fmt.Errorf("claude -p: is_error (%s): %s", cmp.Or(res.Summary.TerminalReason, res.Summary.Subtype), res.Summary.Result)
 	}
-	return res, nil
+	if err != nil && isPlanLimit(res.Summary) { // a Plan usage limit hit, whatever the exit code
+		err = &contract.LimitError{Limit: resetTime(inv.SessionID, res.Summary), Err: err}
+	}
+	return res, err
 }
 
 // parseResult maps claude's --output-format json blob to a Result: .result →
@@ -172,9 +183,14 @@ func (w *tailWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// A ReadOnly invocation (a discussion, ADR 0191) drops the edit tools. Accepted
+// ceiling: this is a guardrail, not a sandbox. Bash, write-capable user MCP
+// tools and WebFetch can still write; the human approving Bash prompts is the
+// backstop. The flag rides argv, never the Agent Profile.
+//
 // LaunchCommand returns the agent command a human runs in their own terminal
 // (spec §5.3): `claude "<prompt>" --session-id <uuid> [--model X] [--name <bead>]
-// --add-dir <crewdocs> --settings <waiting hooks>`, default manual permissions, TTY supplied by the human's
+// --add-dir <crewdocs> --settings <waiting hooks>`, with the profile Env, default manual permissions, TTY supplied by the human's
 // shell. The session id
 // is pre-assigned (and returned) so the TUI can record it (research §4). The
 // prompt carries the workflow. It returns — it does not exec, write bd, or
@@ -196,7 +212,11 @@ func (b *Backend) LaunchCommand(inv contract.Invocation) (contract.LaunchCommand
 	if err != nil {
 		return nil, err
 	}
-	return contract.AgentCommand{Argv: append(argv, "--add-dir", dir, "--settings", hooks), SessionID: id}, nil
+	argv = append(argv, "--add-dir", dir, "--settings", hooks)
+	if inv.ReadOnly {
+		argv = append(argv, "--disallowedTools", "Edit,Write,NotebookEdit")
+	}
+	return contract.AgentCommand{Argv: argv, SessionID: id, Env: b.Env}, nil
 }
 
 // waitingHooks is the --settings JSON HITL launch and resume pass (ADR 0099,
@@ -247,12 +267,12 @@ func crewDocsDir() (string, error) {
 	return filepath.Dir(d), nil
 }
 
-// ResumeCommand returns `claude --resume <uuid> --add-dir <crewdocs> --settings
-// <waiting hooks>` for an
+// ResumeCommand returns `claude --resume <uuid> [--model X] --add-dir <crewdocs>
+// --settings <waiting hooks>`, with the profile Env, for an
 // exited session (ADR 0039 §1): the caller runs it in the session's kept
 // worktree through hitl-run. It errors when the transcript is gone — claude prunes ~/.claude/projects/*/
 // <uuid>.jsonl after about 30 days (§3) — so the path knowledge stays here.
-func (b *Backend) ResumeCommand(sessionID string) (contract.AgentCommand, error) {
+func (b *Backend) ResumeCommand(sessionID string, readOnly bool) (contract.AgentCommand, error) {
 	if sessionID == "" {
 		return contract.AgentCommand{}, errors.New("no claude session id to resume")
 	}
@@ -267,7 +287,15 @@ func (b *Backend) ResumeCommand(sessionID string) (contract.AgentCommand, error)
 	if err != nil {
 		return contract.AgentCommand{}, err
 	}
-	return contract.AgentCommand{Argv: []string{"claude", "--resume", sessionID, "--add-dir", dir, "--settings", hooks}, SessionID: sessionID}, nil
+	argv := []string{"claude", "--resume", sessionID}
+	if b.Model != "" { // --model binds only the session it launched, so resume passes it again
+		argv = append(argv, "--model", b.Model)
+	}
+	argv = append(argv, "--add-dir", dir, "--settings", hooks)
+	if readOnly { // a resumed discussion stays read-only, as at launch (ADR 0191)
+		argv = append(argv, "--disallowedTools", "Edit,Write,NotebookEdit")
+	}
+	return contract.AgentCommand{Argv: argv, SessionID: sessionID, Env: b.Env}, nil
 }
 
 // configDir is claude's config dir: $CLAUDE_CONFIG_DIR, else ~/.claude.
@@ -312,64 +340,84 @@ type costState struct {
 	Unpriced bool `json:"hasUnknownModelCost"`
 }
 
-// costStates is every cost-state line of the session's transcript, in order; none
-// when there is no transcript.
-// ponytail: reads the whole transcript twice per session; tail-scan if transcripts get large.
-func costStates(sessionID string) []costState {
+// costStates is every cost-state line of the session's transcript, in order, and
+// the continued-in destination (a /bg handoff) when that record comes after the
+// last cost-state, else ""; none when there is no transcript. An earlier run's
+// continued-in, followed by a later cost-state, is not this transcript's ending.
+func costStates(sessionID string) ([]costState, string) {
 	if sessionID == "" {
-		return nil
+		return nil, ""
 	}
 	path, err := transcript(sessionID)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	b, _ := os.ReadFile(path)
 	var out []costState
+	dest := ""
 	for _, line := range bytes.Split(b, []byte("\n")) {
-		if !bytes.Contains(line, []byte(`"cost-state"`)) {
-			continue
-		}
-		var s costState
-		if err := json.Unmarshal(line, &s); err != nil {
-			s.USD = nil // a mistyped cost-state is counted, but unknown; one that is not JSON is no cost-state
-		}
-		if s.Type == "cost-state" {
-			out = append(out, s)
+		switch {
+		case bytes.Contains(line, []byte(`"cost-state"`)):
+			var s costState
+			if err := json.Unmarshal(line, &s); err != nil {
+				s.USD = nil // a mistyped cost-state is counted, but unknown; one that is not JSON is no cost-state
+			}
+			if s.Type == "cost-state" {
+				out = append(out, s)
+				dest = ""
+			}
+		case bytes.Contains(line, []byte(`"continued-in"`)):
+			var r struct {
+				Type string `json:"type"`
+				To   string `json:"continuedInSessionId"`
+			}
+			if json.Unmarshal(line, &r) == nil && r.Type == "continued-in" {
+				dest = r.To
+			}
 		}
 	}
-	return out
+	return out, dest
+}
+
+// cumulative is s as a Cost holding its running totals, not a delta.
+func (s costState) cumulative() contract.Cost {
+	c := contract.Cost{Known: true, USD: *s.USD, APIms: int64(s.APIms), Unpriced: s.Unpriced,
+		Models: map[string]contract.ModelCost{}}
+	for id, m := range s.ModelUsage {
+		c.Models[id] = contract.ModelCost{USD: m.CostUSD, In: m.InputTokens, Out: m.OutputTokens,
+			CacheRead: m.CacheReadInputTokens, CacheWrite: m.CacheCreationInputTokens}
+	}
+	return c
 }
 
 // MeterCost reads the HITL session's Session cost from its transcript: call it
 // before the agent runs, and the func it returns after the agent exits. That is
-// the spend of this run, the last cost-state minus the one before it (a resume
-// adds to the totals), total and per model. No new cost-state since the call (no
-// transcript, a SIGKILL), or one of an unknown shape, is an unknown Cost: never 0,
-// never an error.
-func MeterCost(sessionID string) func() contract.Cost {
-	before := len(costStates(sessionID))
-	return func() contract.Cost {
-		s := costStates(sessionID)
-		if len(s) <= before || s[len(s)-1].USD == nil {
-			return contract.Cost{}
+// the spend of this run, the last cost-state minus the last one on disk at the
+// call (zero with none; a resume adds to the totals, and a /bg handoff writes a
+// duplicate of the first), total and per model. No new cost-state since the call
+// (no transcript, a SIGKILL), or one of an unknown shape, is an unknown Cost: never
+// 0, never an error. The result also names the continued-in destination and the
+// last cost-state (Spec mc-11b8 D1, D2).
+func MeterCost(sessionID string) func() contract.Metered {
+	s0, _ := costStates(sessionID)
+	before := len(s0)
+	base := costState{USD: new(float64)}
+	if before > 0 {
+		base = s0[before-1]
+	}
+	return func() contract.Metered {
+		s, dest := costStates(sessionID)
+		m := contract.Metered{}
+		if len(s) > before { // a handoff writes a fresh cost-state; an older run's record is not this run's
+			m.ContinuedIn = dest
 		}
-		last, prev := s[len(s)-1], costState{USD: new(float64)}
-		if len(s) > 1 {
-			if prev = s[len(s)-2]; prev.USD == nil {
-				return contract.Cost{}
-			}
+		if len(s) > 0 && s[len(s)-1].USD != nil {
+			m.Last = s[len(s)-1].cumulative()
 		}
-		c := contract.Cost{Known: true, USD: *last.USD - *prev.USD, APIms: int64(last.APIms - prev.APIms),
-			Models: map[string]contract.ModelCost{}, Unpriced: last.Unpriced} // cumulative: once unpriced, every resume says it may undercount
-		for id, m := range last.ModelUsage {
-			p := prev.ModelUsage[id]
-			d := contract.ModelCost{USD: m.CostUSD - p.CostUSD, In: m.InputTokens - p.InputTokens,
-				Out: m.OutputTokens - p.OutputTokens, CacheRead: m.CacheReadInputTokens - p.CacheReadInputTokens,
-				CacheWrite: m.CacheCreationInputTokens - p.CacheCreationInputTokens}
-			if d != (contract.ModelCost{}) { // a model this run never used is no entry
-				c.Models[id] = d
-			}
+		if len(s) <= before || s[len(s)-1].USD == nil || base.USD == nil {
+			return m
 		}
-		return c
+		m.Cost = Remainder(s[len(s)-1].cumulative(), base.cumulative())
+		return m
 	}
 }

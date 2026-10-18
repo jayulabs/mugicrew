@@ -42,6 +42,7 @@ func runPs(argv []string, w io.Writer) error {
 	if len(argv) > 0 && !asJSON {
 		return errors.New("usage: mugicrew ps [--json]")
 	}
+	inheritGraph()
 	all, err := inProgress()
 	if err != nil {
 		return err

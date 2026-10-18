@@ -11,6 +11,10 @@ the Spec for the Checkpoint lifecycle machinery and the Jinbe land step.
 > Reconstructed from bd notes (the original file was recorded as
 > written but never committed to its Chart branch). Content is the session's decisions verbatim.
 
+> **Amended by ADR 0147:** §1/§6 — there is now a dispatched land bead: Jinbe
+> owns a `landing` leaf, spawned at the land gate, and the Checkpoint reconcile
+> no longer calls `Land` itself.
+
 ## Context
 
 The Checkpoint (`checkpoint/<id>`) is the build branch that parents the
@@ -42,7 +46,8 @@ there is a closed Approval whose pinned SHA equals `rev-parse checkpoint/<id>`. 
 Checkpoint drains *structurally* (it has no `chart:defogged`-style label), so
 "0 open children" is too weak and opens a premature-drain hole. `approvedAtHead`
 is ADR 0004's "drained, approved" made computable; it fails safe — a stuck
-Checkpoint is visible and never lands unreviewed.
+Checkpoint is visible and never lands unreviewed. The gate counts only an
+approved close (ADR 0203 §5).
 
 **5. Approval is COMMIT-PINNED; the pin flows Review → Approval by succession.**
 Stored as a body line `Commit: <sha>` plus a parse helper (matching the

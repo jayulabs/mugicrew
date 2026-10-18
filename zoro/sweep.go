@@ -13,11 +13,11 @@ import (
 // Seams over the sweep's bd/git legs (the zoro test swaps them, like reconcileSpec's).
 var (
 	spawnDiscovered = bd.SpawnDiscoveredIfAbsent
-	writeAnchor     = git.Anchor
 	supersede       = bd.Supersede
 	openChildBeads  = bd.OpenChildBeads
 	forceClose      = bd.ForceClose
 	openPivots      = bd.OpenPivots
+	spawnSurvey     = bd.SpawnSurveyIfAbsent
 )
 
 // Confirm is the confirm sweep (`mugicrew pivot confirm`, FR39–42, ADR 0043 §8,
@@ -28,8 +28,9 @@ var (
 //  1. spawn the corrected Spec caused-by the old Spec's predecessor (its Chart,
 //     else its Signal) and discovered-from the pivot — the re-run key — as a
 //     Draft by the pivot, which the triage session's hitl-run publishes;
-//  2. a fast-laned (Chart-less) Spec: write its fresh "Spec: <new>" anchor on main,
-//     as Nami's fast lane does (ADR 0035), so its Checkpoint cuts from current main;
+//  2. a fast-laned (Chart-less) Spec: pin its fresh Anchor: <sha> on the Spec bead
+//     through bd.Anchor, as Luffy's fast lane does, under every land strategy (no
+//     commit lands on main), so its Checkpoint cuts from that tip;
 //  3. Supersede(old Spec, new Spec), then carry the Checkpoint's Ordering edges to
 //     the new Spec (ADR 0085), so its dependents wait for the corrected work;
 //  4. force-close every open member, then the frozen Checkpoint, obsolete;
@@ -42,7 +43,7 @@ func Confirm(pivotID, title, body string) error {
 	if err != nil || !open {
 		return err
 	}
-	newSpec, err := spawnCorrectedSpec(pivotID, oldSpec, title, body)
+	newSpec, err := spawnCorrectedSpec(pivotID, cp, oldSpec, title, body)
 	if err != nil {
 		return err
 	}
@@ -65,7 +66,8 @@ func Confirm(pivotID, title, body string) error {
 //  1. spawn a fresh container Chart caused-by the original Signal (which stays
 //     closed) and discovered-from the pivot — the re-run key — its body the
 //     evidence the session gathered, seeded as a wayfinder map (escalatedChartBody)
-//     — a Draft by the pivot, like Confirm's Spec;
+//     — a Draft by the pivot, like Confirm's Spec — and seed its Survey under it,
+//     also a Draft by the pivot (Spec mc-r832 D5);
 //  2. cut chart/<new> from main, as reconcileSignal does for a first Chart;
 //  3. a charted Spec: Supersede(old Chart, new Chart). A fast-laned Spec skips
 //     this — caused-by the Signal is the new Chart's only link (the recorded
@@ -75,7 +77,7 @@ func Confirm(pivotID, title, body string) error {
 //     4–5. the same Checkpoint, member and sibling-pivot close-out as Confirm;
 //  6. close the pivot 'escalated', last.
 //
-// Nami's loop reconcile then judges the seeded Chart (promote-or-stamp) as usual.
+// The Survey's charting session then maps the Chart with a human.
 func Escalate(pivotID, evidence string) error {
 	cp, oldSpec, open, err := openSweep("escalate", "evidence", pivotID, evidence)
 	if err != nil || !open {
@@ -100,15 +102,39 @@ func Escalate(pivotID, evidence string) error {
 	if err != nil {
 		return err
 	}
+	// The fresh Chart joins the chain's Initiative, read off its Checkpoint (the
+	// unclosed head adoption moves), never the closed original Signal (Spec D2).
+	head, err := showBead(cp)
+	if err != nil {
+		return err
+	}
+	parent, err := initiativeOf(head)
+	if err != nil {
+		return err
+	}
 	newChart, _, err := spawnDiscovered(pivotID, sigID, bd.Successor{
 		Kind: contract.KindChart, Container: true, Title: sig.Title,
 		Description: escalatedChartBody(oldSpec, pivotID, evidence),
 		DraftedBy:   pivotID, // published by the triage session's hitl-run, after chart/<new> is cut (Spec D11 row 14)
+		Parent:      parent,
+		Context:     bd.ContextOf(head),
+		Repo:        bd.RepoStampOf(head),
 	})
 	if err != nil {
 		return err
 	}
-	if _, err := cutBranch(git.BranchName(string(contract.KindChart), newChart), git.Mainline()); err != nil {
+	if _, _, err := spawnSurvey(newChart, sig.Title, pivotID); err != nil {
+		return err
+	}
+	chartBranch := git.BranchName(string(contract.KindChart), newChart)
+	if r := repoOf(head); r != "" {
+		if err = stampCut(head, newChart, r, chartBranch); err == nil {
+			_, err = repoCut(r, chartBranch, r.Mainline())
+		}
+	} else {
+		_, err = cutBranch(chartBranch, git.Mainline())
+	}
+	if err != nil {
 		return err
 	}
 	if charted {
@@ -192,10 +218,10 @@ func pivotTargets(pivotID string) (cp, spec string, err error) {
 }
 
 // spawnCorrectedSpec is legs 1–2: the new Spec caused-by the old one's
-// predecessor, anchored on main when that predecessor is a Signal (fast-laned).
+// predecessor, pinned (bd.Anchor) when that predecessor is a Signal (fast-laned).
 // The Spec is a Draft by the pivot, so the loop can't slice it before its anchor
-// lands; the triage session's hitl-run publishes it (Spec D11 rows 12–13).
-func spawnCorrectedSpec(pivotID, oldSpecID, title, body string) (string, error) {
+// pin is written; the triage session's hitl-run publishes it (Spec D11 rows 12–13).
+func spawnCorrectedSpec(pivotID, cp, oldSpecID, title, body string) (string, error) {
 	pred, charted, err := causedBy(oldSpecID, contract.KindChart)
 	if err != nil {
 		return "", err
@@ -215,11 +241,22 @@ func spawnCorrectedSpec(pivotID, oldSpecID, title, body string) (string, error) 
 		}
 		title = old.Title
 	}
-	id, _, err := spawnDiscovered(pivotID, pred, bd.Successor{Kind: contract.KindSpec, Title: title, Description: body, DraftedBy: pivotID})
+	// Like Escalate's Chart, the Spec joins the Initiative of the chain's unclosed
+	// head (the Checkpoint), never the closed Signal (Spec D2).
+	head, err := showBead(cp)
+	if err != nil {
+		return "", err
+	}
+	parent, err := initiativeOf(head)
+	if err != nil {
+		return "", err
+	}
+	id, _, err := spawnDiscovered(pivotID, pred, bd.Successor{Kind: contract.KindSpec, Title: title, Description: body, DraftedBy: pivotID, Parent: parent, Context: bd.ContextOf(head), Repo: bd.RepoStampOf(head)})
 	if err != nil || charted {
 		return id, err
 	}
-	_, err = git.AnchorIfAbsent(baseTrailer(contract.KindSpec, id), landedBase, writeAnchor)
+	trailer := baseTrailer(contract.KindSpec, id)
+	_, err = bd.Anchor(bd.AnchorSeams{Strategy: landStrategy, Show: showBead, Update: updateBody, Fetch: fetchForge, RepoFetch: repoFetch, Landed: repoLanded, Tip: repoTip}, repoOf(head), id, trailer)
 	return id, err
 }
 

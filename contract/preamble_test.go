@@ -83,12 +83,27 @@ func TestPreambleWorkspaceConventions(t *testing.T) {
 	if strings.Contains(flat, "don't invent glossary files") {
 		t.Error("preamble still forbids creating glossary files")
 	}
-	for _, want := range []string{"lazily", "GLOSSARY-FORMAT.md", "ADR-FORMAT.md", "your prompt wins", "Workspace's docs win"} {
+	for _, want := range []string{"lazily", "GLOSSARY-FORMAT.md", "ADR-FORMAT.md", "your prompt wins", "Workspace's docs win", "crew doc vocabulary.md", "once per session", "(domain-modeling.md, GLOSSARY-FORMAT.md, ADR-FORMAT.md)", "build/test commands they give"} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("preamble lacks %q", want)
 		}
 	}
 	if c, r := strings.Index(flat, "CONTRIBUTING.md"), strings.Index(flat, "README.md"); c < 0 || r < c {
 		t.Error("preamble must name CONTRIBUTING.md, then README.md")
+	}
+	for _, want := range []string{".mugicrew/CREW.md", "human-authored", "file a Signal"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("preamble lacks %q", want)
+		}
+	}
+}
+
+// Spec FR1-FR3: ADRs are cited in bead text by number plus slug, or by path.
+func TestPreambleCitesADRBySlugOrPath(t *testing.T) {
+	flat := strings.Join(strings.Fields(preamble), " ")
+	for _, want := range []string{"Cite an ADR in bead text", "(<slug>)", "by repo path", "never by bare number", "filename stem after NNNN-", "cut short with …"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("preamble lacks %q", want)
+		}
 	}
 }

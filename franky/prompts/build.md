@@ -9,15 +9,28 @@ close, reopen, or reject your own bead.
 Bead to implement: {{.BeadID}}  (read it with: bd show {{.BeadID}})
 {{template "intent" .}}
 
+{{- if .Base}}
+
+## Rebase first
+
+This Critique failed on a pinned tree. Rebase the branch onto that base, not
+current main, resolving any textual conflict by judgment (preserve both intents;
+never `git rebase --abort`), then `git rebase --continue` to a clean tree:
+
+    git rebase {{.Base}}
+
+The bead body describes the failure; the slice below fixes it on that tree.
+{{- end}}
+
 ## Implement the slice
 
 Read the bead's "What to build" and acceptance criteria, and ground the work in
 the code the bead touches. {{if .SpecID -}}
 Read crew doc checkpoint-rules.md: build to the
 **effective** Spec (`bd show {{.SpecID}}` prints the body and its AMENDMENT comments).
-{{- else if .SurgeryID -}}
-Build to the human's intent in the Surgery
-(`bd show {{.SurgeryID}}` prints its description and comments).
+{{- else if .Surgeries -}}
+Build to the human's intent in the Surgeries above
+(`bd show <id>` prints a description and comments).
 {{- end}}
 Then, in order:
 
@@ -28,12 +41,16 @@ Then, in order:
 3. **Full suite.** Run the full test suite once at the end, and fix what it
    breaks.
 4. **Self-review.** Read crew doc code-review.md and run it over your change
-   (fixed point: the branch HEAD before your work; {{if .SpecID}}Spec source: {{.SpecID}}{{else if .SurgeryID}}intent source: the Surgery {{.SurgeryID}}{{else}}no Spec source{{end}}), then
+   (fixed point: the branch HEAD before your work; {{if .SpecID}}Spec source: {{.SpecID}}{{else if .Surgeries}}intent source: the Surgeries above{{else}}no Spec source{{end}}), then
    fix what it finds in this slice. This self-pass is your churn-reducer, not
    optional.
 
 Implement ONLY this bead's slice. It is one vertical unit; the sibling Builds are
 other beads Franky runs separately.
+
+If you cannot build the slice, instead of implementing it run
+`bd comments add {{.BeadID}} "Not built: <why>"` and return, committing nothing.
+Franky's backstop pauses the bead for a human with your reason.
 
 ## Commit to your effort branch — only if dirty — then integrate
 
@@ -83,6 +100,8 @@ your bead filled in:
 
       bd create --type task --labels kind:critique,drafted-by:{{.BeadID}} -s deferred --no-inherit-labels --parent <checkpointID> \
         --title "<what's wrong>" --description "<the defect + where>"
+
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 {{if .SpecID}}
 - The **Spec itself is wrong** (the slice cannot be built as specified): read
   the two lists below, then merge only into a pivot those lists show on the same

@@ -14,7 +14,11 @@
 package session
 
 import (
+	"path/filepath"
+
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/route"
 )
@@ -48,10 +52,73 @@ func placeTree(b bd.Bead) (cwd, worktree string, teardown func(), err error) {
 // CutTree cuts bead id's tree at its routed d, the one cut both launch paths
 // share: a route.Worktree effort/<id>, cut at its container's tip or reused to
 // roll forward (Spec D2), or a route.Detached land step's tree at its
-// container, which it never checks out (ADR 0102 §8).
+// container, which it never checks out (ADR 0102 §8). Under a repo = container the
+// effort tree is a Workspace host with only the child materialized in it (Spec D4).
 func CutTree(id string, d route.Destination) (path string, teardown func(), err error) {
+	// the declared-repo gate comes first: a no-context launch reads one config pair
+	// and no bead (ADR 0157)
+	repos := declaredRepos(".")
 	if d.Placement == route.Detached {
+		if len(repos) > 0 {
+			_, cid := git.ParseBranchName(d.Branch)
+			c, err := showBead(cid)
+			if err != nil {
+				return "", nil, err
+			}
+			if r, dir := contexts.RepoDirOf(c); r != "" {
+				return cutNestedLand(d.Branch, r, dir)
+			}
+		}
 		return git.NewDetachedWorktree(d.Branch)
 	}
+	if len(repos) > 0 && d.Container != "" {
+		_, cid := git.ParseBranchName(d.Container)
+		c, err := showBead(cid)
+		if err != nil {
+			return "", nil, err
+		}
+		if r, dir := contexts.RepoDirOf(c); r != "" {
+			return cutNested(id, d, r, dir)
+		}
+	}
 	return git.NewEffortWorktree(id, d.Container, d.Tip)
+}
+
+// declaredRepos is the repo = table, a seam so a test counts who reads config.
+var declaredRepos = cfglayer.Repos
+
+// cutNestedLand is the land tree of a repo = container (Spec D4): the host detached at
+// Workspace mainline, plus the child detached at branch's tip at <host>/<dir>, where
+// Compose runs. Teardown is child first, host second.
+// It skips RequireIgnored: the child was already cut and ignored when the effort began.
+func cutNestedLand(branch string, r git.Repo, dir string) (string, func(), error) {
+	host, hostDown, err := git.NewDetachedWorktree(git.Mainline())
+	if err != nil {
+		return "", nil, err
+	}
+	childDown, err := r.MaterializeDetached(filepath.Join(host, dir), branch)
+	if err != nil {
+		hostDown()
+		return "", nil, err
+	}
+	return host, func() { childDown(); hostDown() }, nil
+}
+
+// cutNested is CutTree under a repo = container: the host detached at Workspace
+// mainline, then the child materialized at <host>/<dir>. Teardown is child first,
+// host second; a failed materialize brings the host down.
+func cutNested(id string, d route.Destination, r git.Repo, dir string) (string, func(), error) {
+	if err := git.RequireIgnored(dir); err != nil {
+		return "", nil, err
+	}
+	host, hostDown, err := git.NewDetachedWorktree(git.Mainline())
+	if err != nil {
+		return "", nil, err
+	}
+	childDown, err := r.Materialize(filepath.Join(host, dir), id, d.Container, d.Tip)
+	if err != nil {
+		hostDown()
+		return "", nil, err
+	}
+	return host, func() { childDown(); hostDown() }, nil
 }

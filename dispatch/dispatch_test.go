@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"jayulabs.org/mugicrew/liveness"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,8 +15,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts/contextstest"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/git"
@@ -33,6 +36,7 @@ var chartDest, _ = route.Route(bd.Bead{ID: "chart1", Kind: contract.KindChart})
 
 func TestMain(m *testing.M) {
 	eventlogtest.Discard()
+	git.SetGraphID("testgraphroot") // Compose, Anchor and revert read the Graph id; never ask a live bd
 	backstop = func(_ bd.Bead, _ string, _ bool, teardown func(), _ io.Writer, _ ...any) (bool, bool) {
 		teardown()
 		return false, false
@@ -43,6 +47,7 @@ func TestMain(m *testing.M) {
 	sessions = func() (map[string]session.Info, error) { return nil, nil }
 	publish = func(string, []bd.Edge, *bd.Closing) ([]string, error) { return nil, nil }
 	deleteDrafts = func(string) ([]string, []bd.BranchOutcome, error) { return nil, nil, nil }
+	swept = func(string) bool { return false }
 	os.Exit(m.Run())
 }
 
@@ -87,7 +92,14 @@ func TestFailedEffortReleasesClaimGuarded(t *testing.T) {
 				evs := eventlogtest.Capture(t)
 				git.NewWorktree = x.nw
 				reconcileInWorktree = func(_, _, _ string, _ io.Writer) error { return x.re }
-				show = func(string) (bd.Bead, error) { return bd.Bead{Status: g.status}, g.showErr }
+				pre := x.name == "reconcile" || x.name == "crew.Run" // these exits first pass the pre-spawn re-read
+				show = func(string) (bd.Bead, error) {
+					if pre {
+						pre = false
+						return bd.Bead{}, nil
+					}
+					return bd.Bead{Status: g.status}, g.showErr
+				}
 				var unclaimed []string
 				unclaim = func(id string) error { unclaimed = append(unclaimed, id); return nil }
 
@@ -679,7 +691,7 @@ func (h *stubHarness) LaunchCommand(contract.Invocation) (contract.LaunchCommand
 	return nil, nil
 }
 
-func (h *stubHarness) ResumeCommand(string) (contract.AgentCommand, error) {
+func (h *stubHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
 	return contract.AgentCommand{}, nil
 }
 
@@ -745,6 +757,60 @@ func TestSessionSoftFailure(t *testing.T) {
 	}
 }
 
+// profileCtx is a Profiled Ctx: each kind's effort runs on its own harness and
+// profile name, as main's ctx assembly resolves them (ADR 0125).
+type profileCtx struct {
+	harnessCtx
+	profiles map[contract.Kind]string
+	h        contract.Harness
+}
+
+func (c profileCtx) ForKind(k contract.Kind) (contract.Ctx, string, error) {
+	return harnessCtx{c.h}, c.profiles[k], nil
+}
+
+// An effort runs on the harness its bead's profile assembles, and every session
+// event names a named profile; the built-in ("") leaves the attr absent. Both the
+// in-process route and the reconcile child's wrap assemble alike.
+func TestSessionEventsNameTheProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile string
+		run     func(contract.Ctx, bd.Bead) error
+	}{
+		{"dispatch, named", "deepseek", func(ctx contract.Ctx, b bd.Bead) error {
+			_, err := Dispatch(ctx, sessionCrew{}, b, io.Discard, NewEffortID(), nil)
+			return err
+		}},
+		{"dispatch, built-in", "", func(ctx contract.Ctx, b bd.Bead) error {
+			_, err := Dispatch(ctx, sessionCrew{}, b, io.Discard, NewEffortID(), nil)
+			return err
+		}},
+		{"reconcile, named", "opus", func(ctx contract.Ctx, b bd.Bead) error { return Reconcile(ctx, sessionCrew{}, b, "") }},
+		{"reconcile, built-in", "", func(ctx contract.Ctx, b bd.Bead) error { return Reconcile(ctx, sessionCrew{}, b, "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			loopH, profH := &stubHarness{}, &stubHarness{}
+			ctx := profileCtx{harnessCtx{loopH}, map[contract.Kind]string{contract.KindSpec: tc.profile}, profH}
+			if err := tc.run(ctx, bd.Bead{ID: "sp1", Kind: contract.KindSpec}); err != nil {
+				t.Fatal(err)
+			}
+			if profH.inv.BeadID != "sp1" || loopH.inv.BeadID != "" {
+				t.Errorf("the session must run on the profile's harness, not the caller's")
+			}
+			for _, e := range *evs {
+				if !strings.HasPrefix(e.Name, "session.") {
+					continue
+				}
+				if p, ok := e.Attrs["profile"]; (tc.profile != "") != ok || (ok && p != tc.profile) {
+					t.Errorf("%s profile attr = %v (present %v), want %q", e.Name, p, ok, tc.profile)
+				}
+			}
+		})
+	}
+}
+
 // A successful session records session.ended at Info.
 func TestSessionEnded(t *testing.T) {
 	evs := eventlogtest.Capture(t)
@@ -779,7 +845,7 @@ func TestSessionCostAttrs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			evs := eventlogtest.Capture(t)
-			ctx := Sessions(harnessCtx{&stubHarness{res: tc.res, err: tc.err}}, bd.Bead{ID: "sp1", Kind: contract.KindSpec})
+			ctx, _ := Sessions(harnessCtx{&stubHarness{res: tc.res, err: tc.err}}, bd.Bead{ID: "sp1", Kind: contract.KindSpec})
 			ctx.Harness().Run(ctx, contract.Invocation{Prompt: "p"})
 			e := (*evs)[1]
 			if e.Name != tc.want || e.Attrs["exit"] != tc.res.Exit || e.Attrs["dur_ms"] == nil {
@@ -808,7 +874,7 @@ func TestSessionCostAttrs(t *testing.T) {
 func TestSessionsWrapStampsBeadAttrs(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	h := &stubHarness{}
-	ctx := Sessions(harnessCtx{h}, bd.Bead{ID: "chart1", Kind: contract.KindChart, Parent: "p1"})
+	ctx, _ := Sessions(harnessCtx{h}, bd.Bead{ID: "chart1", Kind: contract.KindChart, Parent: "p1"})
 	ctx.Harness().Run(ctx, contract.Invocation{Prompt: "p"})
 	if !slices.Equal(eventlogtest.Names(*evs), []string{"session.started", "session.ended"}) {
 		t.Fatalf("events = %v", eventlogtest.Names(*evs))
@@ -821,15 +887,17 @@ func TestSessionsWrapStampsBeadAttrs(t *testing.T) {
 // Claim records claim.taken by the owning crewmate, and a bd failure as
 // claim.failed at Error with err.
 func TestClaimOpsAreEvents(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir())
 	evs := eventlogtest.Capture(t)
 	origC := claim
 	defer func() { claim = origC }()
 	var bdErr error
 	claim = func(string) error { return bdErr }
 	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Parent: "mc-c"}
-	Claim(b)
+	h, _ := Claim(b)
+	h.Release()
 	bdErr = errors.New("bd down")
-	if err := Claim(b); err != bdErr {
+	if _, err := Claim(b); err != bdErr {
 		t.Errorf("Claim err = %v, want the bd error", err)
 	}
 	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"claim.taken", "claim.failed"}) {
@@ -1046,7 +1114,7 @@ func landedRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(wt)
-	if _, err := git.Land("chart/c1", git.TrailerFor(string(contract.KindChart), "c1")); err != nil {
+	if _, err := git.Land("chart/c1", git.TrailerFor(string(contract.KindChart), "c1"), git.LandLocal); err != nil {
 		t.Fatal(err)
 	}
 	teardown() // an effort's tree is gone by now
@@ -1059,6 +1127,28 @@ func landedRepo(t *testing.T) {
 
 func refExists(ref string) bool {
 	return exec.Command("git", "rev-parse", "--verify", "--quiet", ref).Run() == nil
+}
+
+// A Landing effort deletes nothing: its container is still open, so chart/c1 stays
+// until the container's own closing effort deletes it (FR26 as amended).
+func TestLandingEffortKeepsOpenContainerBranch(t *testing.T) {
+	landedRepo(t)
+	origShow, origKind := show, route.ParentKind
+	defer func() { show, route.ParentKind = origShow, origKind }()
+	route.ParentKind = func(string) (contract.Kind, error) { return contract.KindChart, nil }
+	show = func(id string) (bd.Bead, error) {
+		if id == "c1" {
+			return bd.Bead{ID: "c1", Kind: contract.KindChart, Status: "open"}, nil
+		}
+		return bd.Bead{ID: id, Kind: contract.KindLanding, Status: "closed"}, nil
+	}
+	l := bd.Bead{ID: "l1", Kind: contract.KindLanding, Parent: "c1"}
+	if _, err := Dispatch(nil, &fakeCrew{}, l, io.Discard, NewEffortID(), nil); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if !refExists("refs/heads/chart/c1") {
+		t.Error("chart/c1 must survive its Landing effort while the container is open")
+	}
 }
 
 // After a successful effort, a landed and closed container's own branch is
@@ -1221,5 +1311,461 @@ func TestAbandonNamesEffortBranch(t *testing.T) {
 	Abandon([]Inflight{{ID: "e2", Bead: bd.Bead{ID: "cp", Kind: contract.KindCheckpoint}}}, func(string, string) error { return nil })
 	if len(*evs) != 1 || (*evs)[0].Attrs["branch"] != "" {
 		t.Fatalf("events = %+v, want one effort.abandoned with no branch", *evs)
+	}
+}
+
+// sweptSeams stubs the swept check (sw) and the Drafts read and obsolete close
+// (closeErr), on top of draftSeams' ops: the Drafts are a Critique, a pivot, a
+// Signal and one of a kind no crewmate knows yet.
+func sweptSeams(t *testing.T, sw bool, closeErr error) *[]string {
+	ops := draftSeams(t, nil)
+	origS, origD, origC := swept, drafts, closeDrafts
+	t.Cleanup(func() { swept, drafts, closeDrafts = origS, origD, origC })
+	swept = func(string) bool { return sw }
+	drafts = func(creator string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "k1", Kind: contract.KindCritique}, {ID: "p1", Kind: contract.KindPivot}, {ID: "s1", Kind: contract.KindSignal}, {ID: "x1", Kind: "future"}}, nil
+	}
+	closeDrafts = func(ids []string, reason string) error {
+		*ops = append(*ops, fmt.Sprintf("close %v %s", ids, reason))
+		return closeErr
+	}
+	return ops
+}
+
+// A swept member's tail (ADR 0124, Spec D2), from the repo root (a Usopp-shaped
+// intent) or a worktree (intent read from the child): the handed edges and close
+// are dropped, every Draft but its Signals is closed obsolete: in one call naming
+// the child and its container (an unknown kind included), the Signals publish,
+// draft.obsoleted and draft.published are recorded, and no Draft is deleted. A
+// member not swept publishes its handed intent as before.
+func TestSweptMemberRetiresNonSignalDrafts(t *testing.T) {
+	reason := bd.ObsoleteReason + " %[1]s of cp was retired"
+	for _, c := range []struct {
+		name  string
+		b     bd.Bead
+		swept bool
+		want  []string
+	}{
+		{"repo root", bd.Bead{ID: "rv1", Kind: contract.KindReview, Parent: "cp"}, true, []string{
+			"close [k1 p1 x1] " + fmt.Sprintf(reason, "rv1"), "publish rv1 [] <nil>", "unclaim rv1"}},
+		{"worktree", bd.Bead{ID: "b1", Kind: contract.KindBuild, Parent: "cp"}, true, []string{
+			"close [k1 p1 x1] " + fmt.Sprintf(reason, "b1"), "publish b1 [] <nil>", "unclaim b1"}},
+		{"chart child", bd.Bead{ID: "d1", Kind: contract.KindSurvey, Parent: "cp"}, true, []string{
+			"close [k1 p1 x1] " + fmt.Sprintf(reason, "d1"), "publish d1 [] <nil>", "unclaim d1"}},
+		{"not swept", bd.Bead{ID: "rv1", Kind: contract.KindReview, Parent: "cp"}, false, []string{
+			"publish rv1 [{d1 rv1 discovered-from}] &{ID:rv1 Reason:done}", "unclaim rv1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			ops := sweptSeams(t, c.swept, nil)
+			childReconcile(t, handCrew{}, c.b)
+			if _, err := Dispatch(nil, handCrew{}, c.b, io.Discard, NewEffortID(), nil); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(*ops, c.want) {
+				t.Errorf("ops = %q, want %q", *ops, c.want)
+			}
+			names := eventlogtest.Names(*evs)
+			if !slices.Contains(names, "draft.published") {
+				t.Errorf("events = %v, want draft.published", names)
+			}
+			i := slices.Index(names, "draft.obsoleted")
+			if !c.swept {
+				if i >= 0 {
+					t.Errorf("events = %v, a member not swept obsoletes nothing", names)
+				}
+				return
+			}
+			if i < 0 {
+				t.Fatalf("events = %v, want draft.obsoleted", names)
+			}
+			if o := (*evs)[i]; o.Attrs["creator"] != c.b.ID || o.Attrs["container"] != "cp" || fmt.Sprint(o.Attrs["ids"]) != "[k1 p1 x1]" || o.Attrs["effort"] == nil {
+				t.Errorf("draft.obsoleted = %v", o.Attrs)
+			}
+		})
+	}
+}
+
+// A failed obsolete close fails the effort through the existing failure path:
+// its Drafts are deleted and nothing is published.
+func TestSweptMemberFailedCloseFailsEffort(t *testing.T) {
+	boom := errors.New("boom")
+	ops := sweptSeams(t, true, boom)
+	b := bd.Bead{ID: "rv1", Kind: contract.KindReview, Parent: "cp"}
+	if _, err := Dispatch(nil, handCrew{}, b, io.Discard, NewEffortID(), nil); !errors.Is(err, boom) {
+		t.Fatalf("Dispatch err = %v, want boom", err)
+	}
+	if want := []string{(*ops)[0], "delete rv1", "unclaim rv1"}; !slices.Equal(*ops, want) || !strings.HasPrefix((*ops)[0], "close ") {
+		t.Errorf("ops = %q, want the close, then delete and release", *ops)
+	}
+}
+
+// A publish batch that fails once on 1213 is replayed inside bd, so the effort
+// sees a clean publish and never reaches fail / Draft deletion (Spec D2, ADR 0153).
+func TestPublishRetriesTransientBatchConflict(t *testing.T) {
+	dir := t.TempDir()
+	flag := filepath.Join(dir, "failed-once")
+	script := `case "$1" in
+list) echo '[{"id":"d1","title":"D","status":"deferred"}]' ;;
+batch) cat >/dev/null; if [ ! -e ` + flag + ` ]; then touch ` + flag + `; echo 'Error 1213 (40001): serialization failure' >&2; exit 1; fi ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "bd"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	evs := eventlogtest.Capture(t)
+	origP, origD := publish, deleteDrafts
+	defer func() { publish, deleteDrafts = origP, origD }()
+	publish = bd.Publish
+	deleteDrafts = func(string) ([]string, []bd.BranchOutcome, error) {
+		t.Error("a retried publish must not delete Drafts")
+		return nil, nil, nil
+	}
+	if err := (&effort{}).publish(bd.Bead{ID: "chart1", Kind: contract.KindChart}); err != nil {
+		t.Fatalf("publish = %v, want the retry to absorb the 1213", err)
+	}
+	if _, err := os.Stat(flag); err != nil {
+		t.Fatal("fake bd never failed the first batch")
+	}
+	if names := eventlogtest.Names(*evs); !slices.Contains(names, "draft.published") || slices.Contains(names, "draft.failed") {
+		t.Errorf("events = %v, want draft.published only", names)
+	}
+}
+
+// A bead paused by hand in the pre-cut window (abort found no child to signal) is
+// re-read just before the spawn on both routes (ADR 0155): the effort fails
+// without spawning a reconcile child or crew.Run, Drafts deleted, tree torn
+// down, claim released, Outcome Aborted. A failed re-read fails it the same way;
+// a pause that lands after the child still publishes (no re-read after it).
+func TestPreSpawnPauseReRead(t *testing.T) {
+	origNE, origRe, origBs, origShow, origUn, origDD, origPub := git.NewEffortWorktree, reconcileInWorktree, backstop, show, unclaim, deleteDrafts, publish
+	defer func() {
+		git.NewEffortWorktree, reconcileInWorktree, backstop, show, unclaim, deleteDrafts, publish = origNE, origRe, origBs, origShow, origUn, origDD, origPub
+	}()
+	boom := errors.New("boom")
+	paused := bd.Bead{Status: "in_progress", Labels: []string{"paused:manual"}}
+	routes := []struct {
+		name string
+		b    bd.Bead
+	}{
+		{"worktree", bd.Bead{ID: "b1", Kind: contract.KindBuild, Parent: "cp"}},
+		{"repo-root", bd.Bead{ID: "sp1", Kind: contract.KindSpec}},
+	}
+	cases := []struct {
+		name      string
+		pauseAt   int // show call that reports paused (1 = the pre-spawn re-read); 0 never
+		showErr   error
+		spawned   bool
+		published bool
+	}{
+		{"paused", 1, nil, false, false},
+		{"read error", 0, boom, false, false},
+		{"paused after child", 2, nil, true, true},
+	}
+	for _, r := range routes {
+		for _, c := range cases {
+			t.Run(r.name+"/"+c.name, func(t *testing.T) {
+				var spawned, torn, released, deleted, pub bool
+				calls := 0
+				git.NewEffortWorktree = func(string, string, string) (string, func(), error) {
+					return "/wt", func() { torn = true }, nil
+				}
+				reconcileInWorktree = func(_, _, _ string, _ io.Writer) error { spawned = true; return nil }
+				backstop = func(_ bd.Bead, _ string, _ bool, teardown func(), _ io.Writer, _ ...any) (bool, bool) {
+					teardown()
+					return false, false
+				}
+				show = func(string) (bd.Bead, error) {
+					calls++
+					if c.showErr != nil && calls == 1 {
+						return bd.Bead{}, c.showErr
+					}
+					if c.pauseAt > 0 && calls >= c.pauseAt { // a pause stays on the bead
+						return paused, nil
+					}
+					return bd.Bead{Status: "in_progress"}, nil
+				}
+				unclaim = func(string) error { released = true; return nil }
+				deleteDrafts = func(string) ([]string, []bd.BranchOutcome, error) { deleted = true; return nil, nil, nil }
+				publish = func(string, []bd.Edge, *bd.Closing) ([]string, error) { pub = true; return nil, nil }
+				crew := &fakeCrew{}
+				o, err := Dispatch(nil, crew, r.b, io.Discard, NewEffortID(), nil)
+				if got := spawned || len(crew.ran) > 0; got != c.spawned {
+					t.Errorf("spawned = %v, want %v", got, c.spawned)
+				}
+				if pub != c.published {
+					t.Errorf("published = %v, want %v", pub, c.published)
+				}
+				if c.spawned {
+					if err != nil {
+						t.Errorf("err = %v, want nil", err)
+					}
+					return
+				}
+				if err == nil || !deleted || !released {
+					t.Errorf("err %v, deleted %v, released %v; want a failed, cleaned, released effort", err, deleted, released)
+				}
+				if r.name == "worktree" && !torn {
+					t.Error("tree not torn down")
+				}
+				if wantAborted := c.pauseAt == 1; o.Aborted != wantAborted {
+					t.Errorf("Aborted = %v, want %v", o.Aborted, wantAborted)
+				}
+			})
+		}
+	}
+}
+
+// A claimed effort reads alive (liveness.Alive) in every dispatcher-only window
+// (ADR 0154): inside the worktree cut, the integrate backstop and the release's
+// unclaim on a worktree route, and inside the crewmate's Run on the repo-root
+// route; it reads dead once the caller releases the Inflight's hold.
+func TestClaimHoldSpansDispatcherWindows(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir())
+	origC, origNW, origRe, origBs, origShow, origUn := claim, git.NewWorktree, reconcileInWorktree, backstop, show, unclaim
+	defer func() {
+		claim, git.NewWorktree, reconcileInWorktree, backstop, show, unclaim = origC, origNW, origRe, origBs, origShow, origUn
+	}()
+	claim = func(string) error { return nil }
+	for _, b := range []bd.Bead{{ID: "chart1", Kind: contract.KindChart}, {ID: "sg1", Kind: contract.KindSignal}} {
+		t.Run(string(b.Kind), func(t *testing.T) {
+			var seen []string
+			probe := func(window string) {
+				if !liveness.Alive([]string{b.ID})[b.ID] {
+					t.Errorf("%s dead inside %s", b.ID, window)
+				}
+				seen = append(seen, window)
+			}
+			git.NewWorktree = func(string) (string, func(), error) { probe("cut"); return "/wt", func() {}, nil }
+			reconcileInWorktree = func(_, _, _ string, _ io.Writer) error { return nil }
+			backstop = func(_ bd.Bead, _ string, _ bool, teardown func(), _ io.Writer, _ ...any) (bool, bool) {
+				probe("backstop")
+				teardown()
+				return false, false
+			}
+			show = func(string) (bd.Bead, error) { return bd.Bead{Status: "in_progress"}, nil }
+			unclaim = func(string) error { probe("unclaim"); return nil }
+
+			hold, err := Claim(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			crew := crewFunc(func() { probe("Run") })
+			if _, err := Dispatch(nil, crew, b, io.Discard, NewEffortID(), nil); err != nil {
+				t.Fatalf("Dispatch: %v", err)
+			}
+			if len(seen) == 0 {
+				t.Fatal("no window probed")
+			}
+			if !liveness.Alive([]string{b.ID})[b.ID] {
+				t.Error("dead after Dispatch returned, before the caller released")
+			}
+			hold.Release()
+			if liveness.Alive([]string{b.ID})[b.ID] {
+				t.Error("alive after release")
+			}
+		})
+	}
+}
+
+// The hold also spans the success tail (ADR 0154): a swept member's retire, the
+// publish, and a landed container's deleteLanded on the Detached route read the
+// effort alive; and a busy cut returns with the hold still the caller's, dead
+// once the caller releases it.
+func TestClaimHoldSpansTailAndBusyCut(t *testing.T) {
+	t.Run("tail", func(t *testing.T) {
+		landedRepo(t)
+		t.Setenv("BEADS_DIR", t.TempDir())
+		sweptSeams(t, true, nil)
+		chart := bd.Bead{ID: "c1", Kind: contract.KindChart, Labels: []string{contract.LabelDefogged}}
+		var seen []string
+		probe := func(window string) {
+			if !liveness.Alive([]string{chart.ID})[chart.ID] {
+				t.Errorf("%s dead inside %s", chart.ID, window)
+			}
+			seen = append(seen, window)
+		}
+		drafts = func(string) ([]bd.Bead, error) { probe("retire"); return nil, nil }
+		publish = func(string, []bd.Edge, *bd.Closing) ([]string, error) { probe("publish"); return nil, nil }
+		show = func(string) (bd.Bead, error) { probe("deleteLanded"); return bd.Bead{Status: "closed"}, nil }
+		origC := claim
+		defer func() { claim = origC }()
+		claim = func(string) error { return nil }
+		hold, err := Claim(chart)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer hold.Release()
+		if _, err := Dispatch(nil, &fakeCrew{}, chart, io.Discard, NewEffortID(), nil); err != nil {
+			t.Fatalf("Dispatch: %v", err)
+		}
+		for _, w := range []string{"retire", "publish", "deleteLanded"} {
+			if !slices.Contains(seen, w) {
+				t.Errorf("window %s not probed (saw %v)", w, seen)
+			}
+		}
+	})
+	t.Run("busy cut", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", t.TempDir())
+		origNE, origUn, origH, origC := git.NewEffortWorktree, unclaim, git.WorktreeOn, claim
+		defer func() { git.NewEffortWorktree, unclaim, git.WorktreeOn, claim = origNE, origUn, origH, origC }()
+		git.WorktreeOn = heldBy("/tmp/mugicrew-wt-1/wt")
+		claim = func(string) error { return nil }
+		git.NewEffortWorktree = func(string, string, string) (string, func(), error) {
+			return "", nil, exec.Command("sh", "-c", "exit 128").Run()
+		}
+		b := bd.Bead{ID: "cc1", Kind: contract.KindChartConflict, Parent: "chart1"}
+		unclaim = func(string) error {
+			if !liveness.Alive([]string{b.ID})[b.ID] {
+				t.Error("dead inside the busy cut's unclaim")
+			}
+			return nil
+		}
+		hold, err := Claim(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		Dispatch(nil, &fakeCrew{}, b, io.Discard, NewEffortID(), nil)
+		if !liveness.Alive([]string{b.ID})[b.ID] {
+			t.Error("busy cut dropped the caller's hold")
+		}
+		hold.Release()
+		if liveness.Alive([]string{b.ID})[b.ID] {
+			t.Error("busy cut leaked the hold past the caller's release")
+		}
+	})
+}
+
+// crewFunc is a Crewmate whose Run calls f.
+type crewFunc func()
+
+func (f crewFunc) Run(contract.Ctx, contract.Bead) error { f(); return nil }
+func (f crewFunc) Launch(contract.Ctx, contract.Bead) (contract.LaunchCommand, error) {
+	return nil, nil
+}
+
+// A failed claim CAS releases the hold, and a bead another dispatcher holds is
+// never claimed (claim.failed).
+func TestClaimHoldFailureModes(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir())
+	origC := claim
+	defer func() { claim = origC }()
+	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch}
+
+	claim = func(string) error { return errors.New("bd down") }
+	if h, err := Claim(b); err == nil || h != nil {
+		t.Fatalf("Claim = %v, %v; want the CAS error and no hold", h, err)
+	}
+	if liveness.Alive([]string{b.ID})[b.ID] {
+		t.Error("failed CAS left the lock held")
+	}
+
+	claim = func(string) error { return nil }
+	held, err := Claim(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+	claimed := false
+	claim = func(string) error { claimed = true; return nil }
+	if _, err := Claim(b); err == nil || claimed {
+		t.Errorf("second dispatcher: err = %v, claimed = %v; want refused, no claim", err, claimed)
+	}
+}
+
+// A limited effort (the harness returned a LimitError) ends as effort.limited at
+// Warn instead of effort.failed, carries Outcome.Limit, and still deletes its
+// Drafts and releases its claim; the error is returned. On both placements; the
+// worktree child hands Limit across the failed run in its intent file.
+func TestLimitedEffort(t *testing.T) {
+	reset := time.Date(2026, 10, 16, 15, 44, 0, 0, time.UTC)
+	lerr := &contract.LimitError{Limit: contract.Limit{ResetsAt: reset, Source: "message"}, Err: errors.New("claude: exit 1")}
+	for _, b := range []bd.Bead{{ID: "chart1", Kind: contract.KindChart}, {ID: "sp1", Kind: contract.KindSpec}} {
+		t.Run(string(b.Kind), func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			ops := draftSeams(t, nil)
+			crew := errCrew{lerr}
+			childReconcile(t, crew, b)
+			o, err := Dispatch(nil, crew, b, io.Discard, NewEffortID(), nil)
+			if err == nil {
+				t.Fatal("want the error returned")
+			}
+			if o.Limit == nil || !o.Limit.ResetsAt.Equal(reset) || o.Limit.Source != "message" {
+				t.Errorf("Outcome.Limit = %+v", o.Limit)
+			}
+			got := eventlogtest.Names(*evs)
+			i := slices.Index(got, "effort.limited")
+			if i < 0 || slices.Contains(got, "effort.failed") {
+				t.Fatalf("events = %v, want effort.limited and no effort.failed", got)
+			}
+			l := (*evs)[i]
+			if l.Level != slog.LevelWarn || l.Attrs["resets_at"] != "2026-10-16T15:44:00Z" || l.Attrs["source"] != "message" {
+				t.Errorf("limited = %+v", l)
+			}
+			if want := []string{"delete " + b.ID, "unclaim " + b.ID}; !slices.Equal(*ops, want) {
+				t.Errorf("ops = %q, want %q", *ops, want)
+			}
+		})
+	}
+}
+
+// A nested bead's effort/<id> is looked for in the child (Spec FR 25, 29): its holder
+// is the child tree lifted to the host, which a live session accounts for; the
+// Workspace's own worktree list is never asked.
+func TestForeignHeldAndDeleteLandedConsultTheChild(t *testing.T) {
+	_, kid := contextstest.Workspace(t)
+	tmp, err := filepath.EvalSymlinks(t.TempDir()) // minted trees are resolved
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := filepath.Join(tmp, "mugicrew-wt-n", "wt")
+	contextstest.Git(t, kid, "worktree", "add", "-q", "-b", "effort/chart1", filepath.Join(host, "kid"))
+	origH, origS, origShow := git.WorktreeOn, sessions, show
+	t.Cleanup(func() { git.WorktreeOn, sessions, show = origH, origS, origShow })
+	git.WorktreeOn = func(string) (git.Holder, bool, error) {
+		t.Error("the Workspace's worktree list was read for a nested bead")
+		return git.Holder{}, false, nil
+	}
+	sessions = func() (map[string]session.Info, error) {
+		return map[string]session.Info{"g1": {Worktree: host, State: session.Alive}}, nil
+	}
+	b := bd.Bead{ID: "chart1", Kind: contract.KindChart, Labels: []string{contextstest.Label}}
+	if _, foreign, err := ForeignHeld(b, nil); err != nil || foreign {
+		t.Errorf("ForeignHeld = %v, %v; want own contention, not foreign", foreign, err)
+	}
+	sessions = func() (map[string]session.Info, error) { return nil, nil }
+	if _, foreign, err := ForeignHeld(b, nil); err != nil || !foreign {
+		t.Errorf("ForeignHeld with no session = %v, %v; want foreign", foreign, err)
+	}
+
+	// deleteLanded: landed in the child, so its branch goes from the child
+	contextstest.Git(t, kid, "branch", "chart/chart1")
+	trailer := git.TrailerFor(string(contract.KindChart), "chart1")
+	contextstest.Git(t, kid, "commit", "-q", "--allow-empty", "-m", "squash\n\n"+trailer+"\n\n"+git.TipPin(contextstest.Git(t, kid, "rev-parse", "chart/chart1")))
+	show = func(string) (bd.Bead, error) { return bd.Bead{Status: "closed"}, nil }
+	(&effort{}).deleteLanded(b, "chart/chart1")
+	if contextstest.Git(t, kid, "branch", "--list", "chart/chart1") != "" {
+		t.Error("the landed branch was not deleted from the child")
+	}
+}
+
+// A landed container whose branch head is not the landed Tip: (a stale pin merged
+// after the branch advanced) keeps its branch, so the unlanded commits survive; a
+// Tip: equal to head still deletes it (Spec FR 21).
+func TestDeleteLandedKeepsBranchPastLandedTip(t *testing.T) {
+	_, kid := contextstest.Workspace(t)
+	origShow := show
+	t.Cleanup(func() { show = origShow })
+	show = func(string) (bd.Bead, error) { return bd.Bead{Status: "closed"}, nil }
+	b := bd.Bead{ID: "chart1", Kind: contract.KindChart, Labels: []string{contextstest.Label}}
+	trailer := git.TrailerFor(string(contract.KindChart), "chart1")
+	contextstest.Git(t, kid, "branch", "chart/chart1")
+	contextstest.Git(t, kid, "commit", "-q", "--allow-empty", "-m", "squash\n\n"+trailer+"\n\n"+git.TipPin(contextstest.Git(t, kid, "rev-parse", "chart/chart1")))
+	// advance the branch past the pin
+	contextstest.Git(t, kid, "update-ref", "refs/heads/chart/chart1", contextstest.Git(t, kid, "commit-tree", "HEAD^{tree}", "-p", "chart/chart1", "-m", "later"))
+	(&effort{}).deleteLanded(b, "chart/chart1")
+	if contextstest.Git(t, kid, "branch", "--list", "chart/chart1") == "" {
+		t.Error("a branch past the landed Tip: was deleted")
 	}
 }

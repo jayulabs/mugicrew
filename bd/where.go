@@ -15,7 +15,7 @@ type NoGraphError struct {
 }
 
 func (e *NoGraphError) Error() string {
-	return fmt.Sprintf("no Bead Graph resolves from %s; run bd init (or bd init --stealth / --contributor)", e.Dir)
+	return fmt.Sprintf("no Bead Graph resolves from %s; run mugicrew init", e.Dir)
 }
 
 func (e *NoGraphError) Unwrap() error { return e.Err }

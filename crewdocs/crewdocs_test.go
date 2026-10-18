@@ -116,6 +116,44 @@ func TestMaterializeIdempotent(t *testing.T) {
 	}
 }
 
+// Spec FR5-FR6: sequence-renumber.md step 3 lets a slug or path citation settle
+// its referent, and a rewritten citation keeps its slug.
+func TestSequenceRenumberSlugSettlesReferent(t *testing.T) {
+	dir, err := materialize(t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "sequence-renumber.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Join(strings.Fields(string(b)), " ")
+	for _, want := range []string{"citing a file by slug or path has its referent settled by that slug or path", "takes the new number and keeps its slug"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("sequence-renumber.md lacks %q", want)
+		}
+	}
+}
+
+// Spec FR 19, 23-32: sequence-renumber.md names the reference forms, the
+// width rule and the Workspace-guidance precedence.
+func TestSequenceRenumberNamesFormsWidthAndPrecedence(t *testing.T) {
+	dir, err := materialize(t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "sequence-renumber.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Join(strings.Fields(string(b)), " ")
+	for _, want := range []string{"the name stem, the path, a `V{n}`-style token", "\"migration {n}\" prose", "`ADR NNNN`", "at the renamed file's own width", "CONTRIBUTING.md and README.md renumber guidance wins on how"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("sequence-renumber.md lacks %q", want)
+		}
+	}
+}
+
 // Spec slice 3: a crew doc's ref-naming git command carries the
 // Workspace's mainline; main renders the docs as they read before the token.
 func TestMaterializeFillsMainline(t *testing.T) {
@@ -124,12 +162,12 @@ func TestMaterializeFillsMainline(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := os.ReadFile(filepath.Join(dir, "adr-renumber.md"))
+		b, err := os.ReadFile(filepath.Join(dir, "sequence-renumber.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if want := "git ls-tree --name-only " + mainline + " <its-dir>"; !strings.Contains(string(b), want) {
-			t.Errorf("%s: adr-renumber.md lacks %q", mainline, want)
+			t.Errorf("%s: sequence-renumber.md lacks %q", mainline, want)
 		}
 		filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 			if b, _ := os.ReadFile(p); err == nil && !d.IsDir() && strings.Contains(string(b), "{{MAINLINE}}") {
@@ -167,6 +205,60 @@ func TestTaskBodyFormat(t *testing.T) {
 	for _, want := range []string{"## Steps", "Do:", "Check:", "[secret]", "[elevated]", "[irreversible]", "a Do with no command", "`Ask:` replaces `Check:` only when nothing is probeable", "safe to re-run", "never carries `after:` or `before:`"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("task-body.md missing %q", want)
+		}
+	}
+}
+
+// Spec FR11: approval-body.md is delivered, with the six sections in order.
+func TestApprovalBodyDelivered(t *testing.T) {
+	b, err := fs.ReadFile(docs, "approval-body.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, at := string(b), 0
+	for _, h := range []string{"## Background", "## Summary", "## Evidence", "## Merge Danger", "## Execution Notes", "## Approval History"} {
+		i := strings.Index(s[at:], h)
+		if i < 0 {
+			t.Fatalf("approval-body.md lacks %q after offset %d", h, at)
+		}
+		at += i
+	}
+	for _, want := range []string{"mattpocock/skills", "HEAD advanced since this was reviewed"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("approval-body.md missing %q", want)
+		}
+	}
+}
+
+// Spec mc-0eot: signal-filing.md keeps the rules that stop a misfiled Signal.
+func TestSignalFilingKeepsItsRules(t *testing.T) {
+	b, err := fs.ReadFile(docs, "signal-filing.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{"--no-inherit-labels", "mugicrew signal offshoot", "--parent", "If it fails with *already exists* or *1213*, re-run the same create"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("signal-filing.md missing %q", want)
+		}
+	}
+	// The retry rule is its own section, so the offshoot form reads it too.
+	const retry = "If it fails with *already exists* or *1213*"
+	h := strings.Index(s, "\n## Retry\n")
+	if h < 0 || strings.Index(s, retry) < h {
+		t.Errorf("signal-filing.md retry sentence is not under its own ## Retry section")
+	}
+}
+
+// Spec mc-aynx: the defog and chart-body docs defer offshoot filing to signal-filing.md.
+func TestOffshootFilersPointAtSignalFiling(t *testing.T) {
+	for _, name := range []string{"defog-session.md", "chart-body.md"} {
+		b, err := fs.ReadFile(docs, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(strings.Join(strings.Fields(string(b)), " "), "signal-filing.md's Offshoot form") {
+			t.Errorf("%s does not point at signal-filing.md's Offshoot form", name)
 		}
 	}
 }

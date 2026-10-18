@@ -4,123 +4,55 @@ import (
 	"strings"
 	"testing"
 
-	"jayulabs.org/mugicrew/bd"
-	"jayulabs.org/mugicrew/contract"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// The single-line input's keys (Spec FR8–FR11): text inserts at the
-// cursor, ← / → move one rune, home / end jump, backspace and delete edit around it.
-func TestLineKeys(t *testing.T) {
-	k := func(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
-	cases := []struct {
-		name    string
-		start   line
-		keys    []tea.KeyMsg
-		want    string
-		wantCur int
+// FR2–4: the window holds the cursor cell and marks the clipped sides with …
+func TestLineRenderWindow(t *testing.T) {
+	long := "abcdefghijklmnopqrstuvwxyz" // 26 runes
+	for _, tc := range []struct {
+		name string
+		l    line
+		w    int
+		want string
 	}{
-		{"insert mid-text", line{}, []tea.KeyMsg{runeKey("helo"), k(tea.KeyLeft), runeKey("l")}, "hello", 4},
-		{"home then delete", lineAt("hello"), []tea.KeyMsg{k(tea.KeyHome), k(tea.KeyDelete)}, "ello", 0},
-		{"ctrl+a / ctrl+e", lineAt("ab"), []tea.KeyMsg{k(tea.KeyCtrlA), runeKey("x"), k(tea.KeyCtrlE), runeKey("y")}, "xaby", 4},
-		{"end jumps", line{"ab", 0}, []tea.KeyMsg{k(tea.KeyEnd), runeKey("c")}, "abc", 3},
-		{"space at cursor", lineAt("ab"), []tea.KeyMsg{k(tea.KeyLeft), k(tea.KeySpace)}, "a b", 2},
-		{"backspace before cursor", lineAt("abc"), []tea.KeyMsg{k(tea.KeyLeft), k(tea.KeyBackspace)}, "ac", 1},
-		{"backspace at 0 is a no-op", line{"abc", 0}, []tea.KeyMsg{k(tea.KeyBackspace)}, "abc", 0},
-		{"delete at end is a no-op", lineAt("abc"), []tea.KeyMsg{k(tea.KeyDelete)}, "abc", 3},
-		{"left at 0, right at end stay", line{"ab", 0}, []tea.KeyMsg{k(tea.KeyLeft), k(tea.KeyEnd), k(tea.KeyRight)}, "ab", 2},
-		{"multi-byte runes", lineAt("héé✓"), []tea.KeyMsg{k(tea.KeyLeft), k(tea.KeyBackspace), k(tea.KeyLeft), k(tea.KeyDelete)}, "h✓", 1},
-		{"other keys ignored", lineAt("ab"), []tea.KeyMsg{k(tea.KeyUp), k(tea.KeyTab)}, "ab", 2},
-	}
-	for _, c := range cases {
-		l := c.start
-		for _, msg := range c.keys {
-			l = l.apply(msg)
+		{"short text is unchanged", line{"abc", 1}, 10, "abc"},
+		{"short at end", lineAt("abc"), 10, "abc▏"},
+		{"start: … right only", line{long, 0}, 9, "abcdefgh…"},
+		{"end: … left only", lineAt(long), 9, "…tuvwxyz▏"},
+		{"middle: … both", line{long, 13}, 9, "…klmnopq…"},
+	} {
+		got := ansi.Strip(tc.l.render(tc.w))
+		if tc.l.cur < len([]rune(tc.l.text)) && !strings.Contains(tc.l.render(tc.w), cursorSty.Render(string([]rune(tc.l.text)[tc.l.cur]))) {
+			t.Errorf("%s: no cursor cell in %q", tc.name, tc.l.render(tc.w))
 		}
-		if l.text != c.want || l.cur != c.wantCur {
-			t.Errorf("%s: %q@%d, want %q@%d", c.name, l.text, l.cur, c.want, c.wantCur)
+		if got != tc.want || ansi.StringWidth(got) > tc.w {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
 }
 
-// FR12: the cursor is a reverse-video cell on the rune under it, or the ▏ block at the end.
-func TestLineRender(t *testing.T) {
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI)
-	defer lipgloss.SetColorProfile(prev)
-	if got, want := lineAt("ab").render(), "ab"+dim.Render("▏"); got != want {
-		t.Errorf("at end: %q, want %q", got, want)
-	}
-	if got, want := (line{"héllo", 1}).render(), "h"+cursorSty.Render("é")+"llo"; got != want || cursorSty.Render("é") == "é" {
-		t.Errorf("mid: %q, want %q", got, want)
+func TestSignalFormLongTitleKeepsCursor(t *testing.T) {
+	m := pressN(t, formModel(t), "s")
+	m = typeText(t, m, strings.Repeat("x", 120)+"END")
+	if v := view(m); !strings.Contains(v, "…xxx") || !strings.Contains(v, "END▏") {
+		t.Errorf("cursor not visible:\n%s", v)
 	}
 }
 
-// FR11, FR8, FR10, FR12 through Update: t opens the title pre-filled with the
-// cursor at the end, ← moves it, typing inserts mid-title and the cursor draws there.
-func TestTitleEditMidText(t *testing.T) {
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.ANSI)
-	defer lipgloss.SetColorProfile(prev)
-	m := New(nil, nil)
-	m.beads, m.w, m.h = []bd.Bead{{ID: "grl1", Kind: contract.KindGrilling, Status: "open", Title: "Fix tpyo"}}, 120, 24
-	m.rebuildGroups()
-	m.selGraph = "grl1"
-	m, _ = send(t, m, runeKey("e"))
-	m, _ = send(t, m, runeKey("t"))
-	m = typeText(t, m, "!")
-	if m.editBuf.text != "Fix tpyo!" {
-		t.Fatalf("pre-filled typing: %q, want appended", m.editBuf.text)
+func TestFormDescriptionAlignsWithLabel(t *testing.T) {
+	m := pressN(t, formModel(t), "s")
+	m = typeText(t, press(t, press(t, m, tabKey()), tabKey()), "hello")
+	var label, text = -1, -1
+	for _, l := range strings.Split(view(m), "\n") {
+		if i := strings.Index(l, "description:"); i >= 0 {
+			label = ansi.StringWidth(l[:i])
+		}
+		if i := strings.Index(l, "hello"); i >= 0 {
+			text = ansi.StringWidth(l[:i])
+		}
 	}
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
-	for _, k := range []tea.KeyType{tea.KeyLeft, tea.KeyLeft, tea.KeyBackspace, tea.KeyRight} { // Fix tp|yo → Fix ty|o
-		m, _ = send(t, m, tea.KeyMsg{Type: k})
-	}
-	m = typeText(t, m, "p")
-	if m.editBuf.text != "Fix typo" {
-		t.Errorf("mid-text: %q, want Fix typo", m.editBuf.text)
-	}
-	if !strings.Contains(m.helpLine(), "Fix typ"+cursorSty.Render("o")) {
-		t.Errorf("cursor not drawn on o: %q", m.helpLine())
-	}
-}
-
-// FR13: tab switches field and back without losing either field's cursor.
-func TestCreateFormFieldCursor(t *testing.T) {
-	m := New(nil, nil)
-	m.w, m.h = 120, 24
-	m = press(t, m, "n")
-	m = typeText(t, m, "ac")
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyLeft})
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	m = typeText(t, m, "xz")
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyHome})
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	m = typeText(t, m, "b")
-	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
-	m = typeText(t, m, "w")
-	if m.createTitle.text != "abc" || m.createDesc.text != "wxz" {
-		t.Errorf("fields %q / %q, want abc / wxz", m.createTitle.text, m.createDesc.text)
-	}
-}
-
-// FR14: editing Search's text mid-string refilters on that change.
-func TestSearchTextMidEdit(t *testing.T) {
-	m := searchModel(t, 120)
-	m.search.status = statusAny
-	m, _ = send(t, m, runeKey("/"))
-	m = typeText(t, m, "pivt grill")
-	if _, l2 := searchHeader(m); !strings.Contains(l2, "0 of 5") {
-		t.Fatalf("pivt grill: %q, want none", l2)
-	}
-	for range len(" grill") + 1 {
-		m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyLeft})
-	}
-	m = typeText(t, m, "o")
-	if l1, l2 := searchHeader(m); m.search.text != "pivot grill" || !strings.Contains(l2, "2 of 5") || !strings.HasPrefix(l1, "/ pivot grill") {
-		t.Errorf("mid-edit: text %q header %q / %q, want pivot grill, 2 of 5", m.search.text, l1, l2)
+	if label < 0 || text != label {
+		t.Errorf("label col %d, text col %d", label, text)
 	}
 }

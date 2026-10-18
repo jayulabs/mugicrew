@@ -1,0 +1,6 @@
+this derivation will be built:
+  /nix/store/3vfrmhv0kq0mhfmfm2wkpi8ggrhcr517-fod.drv
+
+error: hash mismatch in fixed-output derivation '/nix/store/3vfrmhv0kq0mhfmfm2wkpi8ggrhcr517-fod.drv':
+         specified: sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+            got:    sha256-mOpuTyFvL7S2n/+bOkSELDhobKaF8/VdxIxdP7EQe+Q=

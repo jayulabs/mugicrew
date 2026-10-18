@@ -9,7 +9,8 @@ Chart-conflict under way: %[1]s (read it with: bd show %[1]s)
 
 The bead body is the payload: the Chart **branch**, the mainline **Base:** SHA,
 the **Tip:** SHA (the Chart tip the failed land saw), the **variant** —
-`rebase-conflict` or `adr-number-clash` — and, for a clash, the clashing ADRs.
+`rebase-conflict`, `requested` or `number-clash` (legacy: `adr-number-clash`, handled the
+same) — and, for a clash, the clashing numbered files with their templates.
 The bead's parent is the Chart.
 
 ## Work in the tree you were given
@@ -25,11 +26,11 @@ Chart branch out anywhere.
 An earlier run may have resolved this already (a crash between Go's check and
 its close). Before changing anything, inspect the branch: is Base an ancestor of
 HEAD (`git merge-base --is-ancestor <base> HEAD`), is no rebase in progress, is
-the tree clean, does no ADR number the Chart adds under any `docs/adr/` collide
-with one in that same `docs/adr/` on Base, and is every path outside the Chart's own diff
+the tree clean, does no numbered file the Chart adds share a number with another file in
+its own number space on Base (each matched directory numbers its own files), and is every path outside the Chart's own diff
 (`git diff --name-only $(git merge-base <base> <tip>) <tip>`) identical to Base
-in HEAD — the only allowed paths outside it being the Chart's own ADRs
-renumbered (same directory and `NNNN-<slug>.md` slug, new number) and a path
+in HEAD — the only allowed paths outside it being the Chart's own numbered
+files renumbered (same directory, prefix and rest of name, new number at the same width) and a path
 Base renamed, after that merge-base, from a path in the Chart's diff
 (`git diff --name-status -M $(git merge-base <base> <tip>) <base>`) — and is every closed grilling blocker's answer (below) applied? If all
 hold, commit nothing and end with:
@@ -56,12 +57,18 @@ Rebase the Chart branch onto the carried base:
 
 Resolve each GLOSSARY.md / ADR collision yourself — keep both sides' intent,
 never drop mainline's content — then `git rebase --continue` until done. If the
-resolution leaves two ADRs sharing a number, also renumber as below.
+resolution leaves two numbered files sharing a number, also renumber as below.
 
-## Variant: adr-number-clash
+## Variant: requested
 
-The Chart adds ADRs whose numbers already exist on mainline. Read crew doc
-adr-renumber.md and follow it on the Chart branch. The Chart's own beads, for
+A human asked for this rebase; no land failed. Rebase the Chart branch onto the
+carried base exactly as for `rebase-conflict` and resolve any conflicts. A clean
+rebase with nothing to resolve is a complete result: end with `Resolved:`.
+
+## Variant: number-clash (or legacy adr-number-clash)
+
+The Chart adds numbered files whose numbers already exist on mainline. Read crew doc
+sequence-renumber.md and follow it on the Chart branch. The Chart's own beads, for
 its reference sweep, are the Chart body and its defog beads (`bd show <chart>`,
 `bd children <chart>`).
 
@@ -72,7 +79,7 @@ lines whose referent is clear. Escalate only when a wrong guess would silently
 change meaning:
 - a conflicted hunk whose two sides make contradictory claims (one GLOSSARY.md
   term with incompatible definitions, two ADRs that decide opposite things), or
-- an in-scope `ADR NNNN` line whose referent (the Chart's ADR or mainline's)
+- an in-scope numbered reference (`ADR NNNN`, a path, a `V{n}` token, "migration {n}") whose referent (the Chart's file or mainline's)
   can't be told apart by reading it.
 
 Re-escalate on any new unsure item (there is no cap), but never on one a closed

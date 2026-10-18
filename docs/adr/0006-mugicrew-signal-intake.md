@@ -1,6 +1,7 @@
 # ADR 0006: mugicrew signal intake — origin, activation, triage, dedup
 
 Status: Accepted
+Amended by: ADR 0129
 Date: 2026-09-19
 
 ## Context

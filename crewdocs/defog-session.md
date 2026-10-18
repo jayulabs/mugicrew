@@ -63,7 +63,7 @@ Out-of-scope; drop takes the line exactly as the body has it.
   Not-yet-specified (mugicrew chart drop).
 - **Rule out-of-scope.** If the answer reveals work beyond the Spec, add a
   one-line Out-of-scope note on the Chart (mugicrew chart append). Separable
-  new work splits as an offshoot Signal discovered-from your bead, never a
+  new work splits as an offshoot Signal (signal-filing.md's Offshoot form), never a
   second Spec on this Chart.
 - **Obsolete the stale.** If the decision invalidates other defog beads, close
   or supersede them rather than leaving them on the frontier.

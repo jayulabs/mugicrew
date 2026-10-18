@@ -53,6 +53,9 @@ that it is pinned. They were decided in grilling.
    running.
    - `loop status` prints `on (pid N, main <short-rev>, <store path>)`. When
      draining it prints the same build fields, then the in-flight beads.
+     > **Amended (2026-10-18, ADR 0295 (mugicrew-loop-status-prints-labelled-fields…)):** `loop status` prints `main: <short rev>` and `store: <path>` as
+     >      separate labelled fields in a build section, and a drain's in-flight
+     >      beads are a count (`in flight: N`).
    - The TUI tab bar shows only the rev: `loop on @<short-rev>`,
      `loop draining N @<short-rev>`.
    - An off loop, or a holder that has not yet written its body, looks the same

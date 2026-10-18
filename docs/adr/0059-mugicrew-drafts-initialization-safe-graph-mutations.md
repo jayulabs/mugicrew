@@ -1,6 +1,7 @@
 # ADR 0059: mugicrew drafts — every flow that creates beads creates them as Drafts, and the creator's wrapper publishes them in one step on a clean exit
 
 Status: Accepted
+Amended by: ADR 0129 (§7: one read-side guard returns, the Unmapped Chart test)
 Date: 2026-10-04
 
 ## Context

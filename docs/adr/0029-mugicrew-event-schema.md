@@ -60,17 +60,22 @@ failed-session stderr-tail research §5).
    | `effort.held` | Warn | `branch`, `holder`, `prunable` (ADR 0054 foreign hold) |
    | `effort.paused` | Warn | `branch`, `holder`, `skips` (loop wrote `paused:foreign-hold`, ADR 0055) |
    | `effort.resumed` | Info | `branch` (`paused:foreign-hold` removed, ADR 0055) |
+   | `effort.stale-base` | Warn | `branch`, `cut`, `container_tip` (a reused effort branch with its own commits sits on a base other than the container tip; `bead` names the id) |
    | `session.started` / `.ended` | Info | `session`; payload on end |
    | `session.failed` | Error | full payload (§4) |
 | (cost attrs) | — | `cost_usd`, `api_ms`, `models{…}`, `cost_unpriced` on `session.ended`/`.failed` and `hitl.exited`/`.failed` (amendment) |
    | `hitl.launched` / `.exited` | Info | `session`; `exit` on exited |
    | `hitl.resumed` | Info | `session` |
    | `hitl.failed` | Error | `session`, `exit`, `signal`, `dur_ms`, `err` |
+   | `hitl.continued` | Info | `session` (join to its `hitl.exited`), `continued_in`, `tail_ms`; `cost_known=true` + remainder `cost_usd`/`api_ms`/`models`, or `cost_known=false` + `reason` (`timeout`/`not_found`); written late by the detached `hitl-follow` (ADR 0254), never a session end |
    | `hitl.dropped` | Info | `session`, `state` (`alive`/`exited`), `err` |
    | `claim.taken` / `.released` | Info | `by` |
    | `claim.failed` | Error | `by`, `err` |
    | `draft.published` / `.deleted` | Info | `creator`, `ids` (ADR 0059 publish / cleanup) |
+   | `draft.obsoleted` | Info | `creator` (the retired child), `container`, `ids` (its non-Signal Drafts closed `obsolete:`, ADR 0124) |
+   | `effort.stranded` | Warn | (common attrs); `branch`, `signal`, `container`, `landed`, `range` (a landed-refused child's commits carried as an offshoot Signal, ADR 0102) |
    | `draft.failed` | Error | `creator`, `ids`, `err` |
+   | `sweep.straggler` | Warn | `checkpoint`, `ids` (loop-tick backstop force-closed a swept Checkpoint's late children, or superseded a live pivot whose every gate target is closed, ADR 0124) |
    | `reconcile.done` | Info | `branch` |
    | `reconcile.failed` | Error | `branch`, `err` |
    | `land.done` | Info | `branch`, `into`, `sha` |
@@ -86,6 +91,8 @@ failed-session stderr-tail research §5).
    | `carry.failed` | Error | `successor`, `moved` (landed before the failure), `skipped`, `err` |
    | `triage.fastlane` | Info | `spec`, `anchor` |
    | `triage.failed` | Error | `spec`, `err` |
+   | `initiative.new` | Info | `kind` (`initiative`; a human started an Initiative from the Initiatives tab, ADR 0190) |
+   | `adoption.skipped` | Warn | `source` (the discovered-from bead whose climb failed; absent when the Signal itself failed to read), `err` (Luffy's best-effort Adoption offer lookup failed; `bead` is the Signal) |
    | `loop.no_owner` | Warn | |
    | `loop.tick_failed` | Error | `err` |
    | `loop.started` | Info | `detached` (re-exec'd by `loop start`); `restarted=true` in a restart's new image (ADR 0062 §5) |
@@ -96,6 +103,9 @@ failed-session stderr-tail research §5).
    | `loop.failed` | Error | `err` (lock open / re-exec / fatal) |
    | `effort.abandoned` | Warn | (common attrs; claim not released, `proc` loop or tui); `paused` (did its `paused:abandoned` write land, ADR 0082), `error` when it didn't |
    | `effort.aborted` | Warn | (common attrs); `by` (cli or tui), `pids` (the liveness scan's matches, before the SIGTERM), `paused` (always true: logged only after the `paused:manual` write lands, ADR 0083) |
+   | `recover.done` | Info | (common attrs); `verdict` (`dead`, `ambiguous-resolved` or `forced`), `rebase_aborted` (it aborted a rebase stopped in the tree), `tree` (the dropped effort tree, "" none), `discarded` (it held uncommitted files), `drafts` (Draft ids deleted), `unclaimed`, `lifted` (pause causes lifted), `remaining` (pause causes left: manual, integrate-conflict) (ADR 0127 §10) |
+   | `recover.refused` | Warn | (common attrs); `reason` (the refusal and its way out) |
+   | `recover.failed` | Error | (common attrs); `step` (check, fence, re-check, abort rebase, drop tree, delete Drafts, unclaim, lift <cause>), `error`; `paused:recovering` stays |
    | `build.started` | Info | `rev` (ADR 0062 §8) |
    | `build.done` | Info | `rev`, `store_path`, `dur_ms` |
    | `build.failed` | Error | `rev`, `dur_ms`, `err` (nix stderr, last 4 KiB at a line boundary; a failed eval too) |

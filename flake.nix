@@ -35,16 +35,24 @@
               ./package.json
               ./flake.nix
               ./flake.lock
+              (pkgs.lib.fileset.maybeMissing ./npm)
+              (pkgs.lib.fileset.maybeMissing ./.github)
             ]);
           };
           # Bump flake.lock by hand when this changes; no guard keeps it in
           # step with a host OE's lock.
-          vendorHash = "sha256-gvkb5aCMbac4KYvrFmFjqiZ4rXW+lTb6YO7MeJ+0LFo=";
+          # proxyVendor vendors whole modules, so vendorHash depends only on
+          # go.mod/go.sum, not on which packages are imported. The stamp is the
+          # sha256 of the go.sum vendorHash was computed against; they move
+          # together, and vendorstamp_test.go fails when go.sum drifts from it.
+          proxyVendor = true;
+          vendorHash = "sha256-7KM9hm0tC27/duTAyV/fQKibDholul50SCXM1FhpOVs=";
+          # go.sum sha256: 4ae2c0b4472af3e6c976ce202b0d90f4b9f3d813d8b769cd38e95d0b3f3d0ae8
           env.CGO_ENABLED = "0";
           # The git package's tests shell out to a real `git`; without it in the
           # check sandbox `go test ./...` fails and the build never produces a
-          # binary.
-          nativeCheckInputs = [ pkgs.git ];
+          # binary. forge's process-group test reads its pgid with `ps`.
+          nativeCheckInputs = [ pkgs.git pkgs.procps ];
           # contract.NewInvocation materializes the Crew docs under
           # os.UserCacheDir(); the sandbox HOME (/homeless-shelter) is unwritable.
           preCheck = ''export HOME="$TMPDIR"'';

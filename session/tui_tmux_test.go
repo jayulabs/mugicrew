@@ -310,6 +310,68 @@ func TestReturnViewersRealTmux(t *testing.T) {
 	waitFor("the hand-attached viewer detached", "tui-1")
 }
 
+// A TUI running in a split pane of a bead-tagged session (a TUI prototype in a HITL
+// window) records nothing, so the real TUI keeps its @tty and F12 still returns
+// the terminal to it.
+func TestRecordClientSkipsBeadSessionRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	dir := t.TempDir()
+	in, out := filepath.Join(dir, "in.sock"), filepath.Join(dir, "out.sock")
+	tm := func(sock string, args ...string) string {
+		t.Helper()
+		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	t.Cleanup(func() {
+		tmuxCmd(in, "kill-server").Run()
+		tmuxCmd(out, "kill-server").Run()
+	})
+	tm(in, append(preamble(), ";", "new-session", "-d", "-s", "tui-1")...)
+	tm(in, "new-session", "-d", "-s", "mc-a_1")
+	tm(in, setArgs("mc-a_1", [][2]string{{"@bead", "mc-a.1"}, {"key-table", hitlTable}})...)
+	tm(out, "new-session", "-d", "-s", "term", "-x", "80", "-y", "24",
+		"env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-S", in, "attach-session", "-t", "=tui-1")
+	clients := func() string { return tm(in, "list-clients", "-F", "#{session_name}") }
+	waitFor := func(what, want string) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); clients() != want; time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s: clients %q", what, clients())
+			}
+		}
+	}
+	waitFor("the terminal on tui-1", "tui-1")
+	tui := tm(in, "display-message", "-p", "-t", "=tui-1:", "#{pane_id}")
+	if err := recordClient(in, tui); err != nil {
+		t.Fatal(err)
+	}
+	tty := tm(in, "show-options", "-v", "-t", "=tui-1:", ttyOption)
+	if tty == "" {
+		t.Fatal("@tty not recorded on tui-1")
+	}
+	if err := switchClient(in, tui, "mc-a_1"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor("the terminal on the HITL session", "mc-a_1")
+	side := tm(in, "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=mc-a_1:")
+	if err := recordClient(in, side); err != nil {
+		t.Fatal(err)
+	}
+	if got := tm(in, "show-options", "-v", "-t", "=tui-1:", ttyOption); got != tty {
+		t.Errorf("tui-1 @tty = %q, want %q kept", got, tty)
+	}
+	if got := tm(in, "display-message", "-p", "-t", "=mc-a_1:", "#{"+ttyOption+"}"); got != "" {
+		t.Errorf("HITL session @tty = %q, want none", got)
+	}
+	tm(out, "send-keys", "-t", "=term:", "F12")
+	waitFor("F12 back on tui-1", "tui-1")
+}
+
 // F11 against real tmux (Spec D5): pressed in an attached HITL session it
 // unsets that session's @autofinish, leaves another armed session's alone, keeps
 // the session alive, and on an unarmed session is a harmless no-op.
@@ -360,5 +422,149 @@ func TestF11RealTmux(t *testing.T) {
 	}
 	if got := tm(in, "list-clients", "-F", "#{session_name}"); got != "mc-a_1" {
 		t.Errorf("clients %q after F11, want still on mc-a_1", got)
+	}
+}
+
+// F10 against real tmux: in a HITL-tabled session tagged with a @bead, F10 splits
+// a bead pane running bd show (a stub on PATH) in less; a second F10 focuses it
+// without another split; q closes it.
+func TestF10BeadPaneRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	if _, err := exec.LookPath("less"); err != nil {
+		t.Skip("less not on PATH")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// the stub sits in a directory with a space and a quote: the pane must still run it as one word
+	stubDir := filepath.Join(dir, "it's a dir")
+	if err := os.Mkdir(stubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(stubDir, "mugicrew")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho \"stub $* colour=$CLICOLOR_FORCE\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := beadExe
+	beadExe = func() string { return stub }
+	t.Cleanup(func() { beadExe = old })
+	sock := filepath.Join(dir, "s.sock")
+	tm := func(args ...string) string {
+		t.Helper()
+		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	out := filepath.Join(dir, "out.sock")
+	t.Cleanup(func() {
+		tmuxCmd(sock, "kill-server").Run()
+		tmuxCmd(out, "kill-server").Run()
+	})
+	tm(append(preamble(), ";", "new-session", "-d", "-s", "mc-a_1", "-x", "100", "-y", "30")...)
+	// a terminal (an outer pane) attached to the session, whose keys go through its key table
+	if b, err := tmuxCmd(out, "-f", "/dev/null", "new-session", "-d", "-s", "term", "-x", "100", "-y", "30",
+		"env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-S", sock, "attach-session", "-t", "=mc-a_1").CombinedOutput(); err != nil {
+		t.Fatalf("outer tmux: %v: %s", err, b)
+	}
+	for deadline := time.Now().Add(10 * time.Second); tm("list-clients") == ""; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("terminal never attached")
+		}
+	}
+	tm(setArgs("mc-a_1", [][2]string{{"@bead", "mc-a.1"}, {"key-table", hitlTable}})...)
+	count := func() int { return len(strings.Fields(tm("list-panes", "-t", "=mc-a_1:", "-F", "#{pane_id}"))) }
+	waitPanes := func(what string, n int) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); count() != n; time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s: %d panes, want %d", what, count(), n)
+			}
+		}
+	}
+	press := func(k string) { tmuxCmd(out, "send-keys", "-t", "=term:", k).Run() }
+	active := func() string { return tm("display-message", "-p", "-t", "=mc-a_1:", "#{pane_id}") }
+	first := active()
+
+	press("F10")
+	waitPanes("F10 to open the bead pane", 2)
+	bead := active()
+	if bead == first {
+		t.Fatal("the bead pane is not active")
+	}
+	if got := tm("display-message", "-p", "-t", bead, "#{pane_width}"); got != "39" && got != "40" && got != "41" {
+		t.Errorf("bead pane width = %s, want about 40 of 100", got)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(tm("capture-pane", "-p", "-t", bead), "stub bead-detail mc-a.1 "+tm("display-message", "-p", "-t", bead, "#{pane_width}")+" colour="); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("bead pane never showed bead-detail: %q", tm("capture-pane", "-p", "-t", bead))
+		}
+	}
+
+	tm("select-pane", "-t", first)
+	press("F10")
+	for deadline := time.Now().Add(10 * time.Second); active() != bead; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("second F10 never focused the bead pane")
+		}
+	}
+	if n := count(); n != 2 {
+		t.Errorf("second F10 left %d panes, want 2", n)
+	}
+	if got := active(); got != bead {
+		t.Errorf("second F10 left pane %s active, want bead pane %s", got, bead)
+	}
+
+	tm("send-keys", "-t", bead, "q")
+	waitPanes("q to close the bead pane", 1)
+}
+
+// The preamble copies root's mouse bindings (by key name) into the HITL table.
+func TestPreambleCopiesRootMouseRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	sock := filepath.Join(t.TempDir(), "s.sock")
+	tm := func(args ...string) string {
+		t.Helper()
+		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	t.Cleanup(func() { tmuxCmd(sock, "kill-server").Run() })
+	tm("new-session", "-d", "-s", "x")
+	tm("bind-key", "-n", "WheelUpPane", "display-message", "custom-wheel")
+	tm("bind-key", "-n", "M-x", "display-message", "MouseInCommand")
+	tm(append(preamble(), ";", "new-session", "-d", "-s", "y")...)
+	cmd := func(table, key string) string {
+		for _, l := range strings.Split(tm("list-keys", "-T", table), "\n") {
+			if f := strings.Fields(l); len(f) > 4 && f[3] == key {
+				return strings.Join(f[4:], " ")
+			}
+		}
+		return ""
+	}
+	for _, k := range []string{"MouseDown1Pane", "MouseDrag1Border", "WheelUpPane"} {
+		if got, want := cmd(hitlTable, k), cmd("root", k); got == "" || got != want {
+			t.Errorf("%s in %s = %q, root = %q", k, hitlTable, got, want)
+		}
+	}
+	if got := cmd(hitlTable, "WheelUpPane"); !strings.Contains(got, "custom-wheel") {
+		t.Errorf("WheelUpPane = %q, want the custom binding", got)
+	}
+	if got := cmd(hitlTable, "M-x"); got != "" {
+		t.Errorf("non-mouse M-x copied: %q", got)
+	}
+	for _, k := range []string{"F10", "F11", "F12"} {
+		if cmd(hitlTable, k) == "" {
+			t.Errorf("%s unbound in %s", k, hitlTable)
+		}
 	}
 }

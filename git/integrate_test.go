@@ -676,7 +676,7 @@ func TestRaceHelper(t *testing.T) {
 		for start := mustGit(t, "rev-parse", "HEAD"); mustGit(t, "rev-parse", integCP) == start; {
 			time.Sleep(5 * time.Millisecond)
 		}
-		sha, err = Land(integCP, "Checkpoint: cp")
+		sha, err = Land(integCP, "Checkpoint: cp", LandLocal)
 	} else {
 		sha, _, err = Integrate(integCP, who, "Build: "+who)
 	}
@@ -762,5 +762,244 @@ func TestSiblingIntegratesRaceALand(t *testing.T) {
 	}
 	if h, ok, _ := WorktreeOn(integCP); ok {
 		t.Errorf("the container is checked out in %s", h.Path)
+	}
+}
+
+// Under a TMPDIR that runs through a symlink (macOS /var, /tmp), a tree is minted in
+// the resolved spelling, so it equals what git's porcelain reports for its branch,
+// and TempWorktreePath names the same resolved parent.
+func TestTempTreesAreBornSymlinkResolved(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRepo(t)
+	t.Setenv("TMPDIR", link)
+	mustGit(t, "branch", integCP)
+
+	wt, teardown, err := NewEffortWorktree("sym", integCP, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+	h, ok, err := WorktreeOn(EffortBranch("sym"))
+	if err != nil || !ok || h.Path != wt {
+		t.Errorf("git lists %q (ok %v, err %v), NewEffortWorktree returned %q", h.Path, ok, err, wt)
+	}
+	if got := filepath.Dir(filepath.Dir(TempWorktreePath("k"))); got != resolved {
+		t.Errorf("TempWorktreePath under %q, want the resolved %q", got, resolved)
+	}
+}
+
+// ---- cut-point replay (ADR 0264): squash integrate replays from the cut ref ----
+
+// cutRepo is integrateRepo with the container holding one commit a.txt="old" and
+// the effort cut by NewEffortWorktree, so refs/mugicrew/cut/b1 exists; cwd is its tree.
+func cutRepo(t *testing.T) (oldA string) {
+	oldA, _, _ = cutRepoAt(t)
+	return oldA
+}
+
+// cutRepoAt is cutRepo that also returns the main tree and the effort tree.
+func cutRepoAt(t *testing.T) (oldA, root, wt string) {
+	t.Helper()
+	newRepo(t)
+	root, _ = os.Getwd()
+	mustGit(t, "branch", integCP)
+	siblingMoves(t, "a.txt", "old\n")
+	oldA = mustGit(t, "rev-parse", integCP)
+	wt, teardown, err := NewEffortWorktree("b1", integCP, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(teardown)
+	t.Chdir(wt)
+	return oldA, root, wt
+}
+
+// rewriteContainer replaces the container's top commit with one rewriting a.txt to
+// content ("" drops it), as an IntegrateReplace publish would.
+func rewriteContainer(t *testing.T, content string) {
+	t.Helper()
+	old := mustGit(t, "rev-parse", integCP)
+	parent := mustGit(t, "rev-parse", old+"^")
+	if content == "" {
+		mustGit(t, "update-ref", "refs/heads/"+integCP, parent, old)
+		return
+	}
+	sib := filepath.Join(t.TempDir(), "rw")
+	mustGit(t, "worktree", "add", "--detach", sib, parent)
+	if err := os.WriteFile(filepath.Join(sib, "a.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "-C", sib, "add", ".")
+	mustGit(t, "-C", sib, "commit", "-m", "rewritten a")
+	mustGit(t, "update-ref", "refs/heads/"+integCP, mustGit(t, "-C", sib, "rev-parse", "HEAD"), old)
+}
+
+func TestCutRefWrittenAtTheCutAndKeptOnReuse(t *testing.T) {
+	oldA, root, wt := cutRepoAt(t)
+	if got := mustGit(t, "rev-parse", cutRefPrefix+"b1"); got != oldA {
+		t.Fatalf("cut ref %s, want the container tip %s", got, oldA)
+	}
+	commitFile(t, "own.txt", "own\n") // own work keeps the branch, and its cut ref, as is
+	t.Chdir(root)
+	mustGit(t, "worktree", "remove", "--force", wt)
+	siblingMoves(t, "s.txt", "s\n")
+	_, teardown, err := NewEffortWorktree("b1", integCP, "") // reuses the branch
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+	if got := mustGit(t, "rev-parse", cutRefPrefix+"b1"); got != oldA {
+		t.Errorf("reused branch's cut ref %s, want it kept at %s", got, oldA)
+	}
+}
+
+func TestIntegrateAfterContainerRewriteIgnoresChangedOldCommit(t *testing.T) {
+	cutRepo(t)
+	commitFile(t, "w.txt", "w\n")
+	rewriteContainer(t, "new\n")
+
+	sha, _, err := integrateB1()
+	if err != nil || sha == "" {
+		t.Fatalf("Integrate = (%q, %v), want a clean squash", sha, err)
+	}
+	if got := mustGit(t, "show", integCP+":a.txt"); got != "new" {
+		t.Errorf("a.txt = %q, want the rewritten container's", got)
+	}
+	if got := mustGit(t, "show", integCP+":w.txt"); got != "w" {
+		t.Errorf("w.txt = %q, want the effort's work", got)
+	}
+}
+
+func TestIntegrateAfterContainerRewriteKeepsADroppedCommitDropped(t *testing.T) {
+	cutRepo(t)
+	commitFile(t, "w.txt", "w\n")
+	rewriteContainer(t, "")
+
+	if sha, _, err := integrateB1(); err != nil || sha == "" {
+		t.Fatalf("Integrate = (%q, %v), want a squash", sha, err)
+	}
+	if _, err := run("cat-file", "-e", integCP+":a.txt"); err == nil {
+		t.Error("dropped commit's a.txt came back on the container")
+	}
+}
+
+func TestIntegrateTwiceReplaysOnlyNewCommitsAndMovesTheCutRef(t *testing.T) {
+	cutRepo(t)
+	commitFile(t, "w.txt", "one\n")
+	if sha, _, err := integrateB1(); err != nil || sha == "" {
+		t.Fatalf("first Integrate = (%q, %v)", sha, err)
+	}
+	if got, head := mustGit(t, "rev-parse", cutRefPrefix+"b1"), mustGit(t, "rev-parse", "HEAD"); got != head {
+		t.Errorf("cut ref %s, want the integrated HEAD %s", got, head)
+	}
+	if sha, _, err := integrateB1(); err != nil || sha != "" {
+		t.Fatalf("re-run = (%q, %v), want nothing", sha, err)
+	}
+	commitFile(t, "w.txt", "two\n")
+	commitFile(t, "v.txt", "v\n")
+	if sha, _, err := integrateB1(); err != nil || sha == "" {
+		t.Fatalf("second Integrate = (%q, %v)", sha, err)
+	}
+	if got := mustGit(t, "show", integCP+":w.txt"); got != "two" {
+		t.Errorf("w.txt = %q, want two", got)
+	}
+	if sha, _, err := integrateB1(); err != nil || sha != "" {
+		t.Fatalf("final re-run = (%q, %v), want nothing", sha, err)
+	}
+}
+
+func TestLostCASLeavesTheCutRefUnmoved(t *testing.T) {
+	oldA := cutRepo(t)
+	commitFile(t, "w.txt", "w\n")
+	siblingMoves(t, "s.txt", "s\n") // so the rebase rewrites and the hook fires
+	postRewriteHook(t, false)
+
+	if _, _, err := integrateB1(); !errors.Is(err, ErrContended) {
+		t.Fatalf("Integrate err = %v, want ErrContended", err)
+	}
+	if got := mustGit(t, "rev-parse", cutRefPrefix+"b1"); got != oldA {
+		t.Errorf("cut ref moved to %s on a lost CAS, want %s", got, oldA)
+	}
+}
+
+// An attempt that rebased but did not publish (here a held refusal) leaves the
+// effort where it was, so a later integrate replays only its own work and not the
+// container commits the first rebase already carried.
+func TestIntegrateAfterAnUnpublishedAttemptReplaysOnlyTheEffortsWork(t *testing.T) {
+	cutRepo(t)
+	commitFile(t, "w.txt", "w\n")
+	siblingMoves(t, "a.txt", "x\n")
+	hand := filepath.Join(t.TempDir(), "hand")
+	mustGit(t, "worktree", "add", hand, integCP)
+	_, _, err := integrateB1()
+	wantIntegrateConflict(t, err, "held")
+	mustGit(t, "worktree", "remove", "--force", hand)
+	siblingMoves(t, "a.txt", "y\n")
+
+	sha, _, err := integrateB1()
+	if err != nil || sha == "" {
+		t.Fatalf("re-Integrate = (%q, %v), want a clean squash", sha, err)
+	}
+	if got := mustGit(t, "show", integCP+":a.txt"); got != "y" {
+		t.Errorf("container a.txt = %q, want the sibling's y kept", got)
+	}
+	if got := mustGit(t, "show", integCP+":w.txt"); got != "w" {
+		t.Errorf("container w.txt = %q, want the effort's", got)
+	}
+}
+
+func TestDeleteBranchDeletesTheCutRef(t *testing.T) {
+	_, root, wt := cutRepoAt(t)
+	t.Chdir(root)
+	mustGit(t, "worktree", "remove", "--force", wt)
+	if err := DeleteBranch(EffortBranch("b1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("rev-parse", "--verify", "--quiet", cutRefPrefix+"b1"); err == nil {
+		t.Error("cut ref outlived its branch")
+	}
+}
+
+func TestIntegrateWithoutCutRefFallsBackToForkPoint(t *testing.T) {
+	cutRepo(t)
+	mustGit(t, "update-ref", "-d", cutRefPrefix+"b1") // a branch cut before cut refs
+	commitFile(t, "w.txt", "w\n")
+	siblingMoves(t, "s.txt", "s\n")
+
+	sha, _, err := integrateB1()
+	if err != nil || sha == "" {
+		t.Fatalf("Integrate = (%q, %v), want a squash via --fork-point", sha, err)
+	}
+	if got := mustGit(t, "show", integCP+":w.txt"); got != "w" {
+		t.Errorf("w.txt = %q, want the effort's work", got)
+	}
+	if _, err := run("rev-parse", "--verify", "--quiet", cutRefPrefix+"b1"); err != nil {
+		t.Error("fallback path left no cut ref after a won CAS")
+	}
+}
+
+func TestIntegrateWithoutCutRefAfterRewriteRefusesNoCutPoint(t *testing.T) {
+	cutRepo(t)
+	mustGit(t, "update-ref", "-d", cutRefPrefix+"b1")
+	commitFile(t, "w.txt", "w\n")
+	// an unrelated container history with its reflog gone: no fork point survives
+	orphan := mustGit(t, "commit-tree", mustGit(t, "hash-object", "-t", "tree", "/dev/null"), "-m", "rewritten")
+	mustGit(t, "update-ref", "refs/heads/"+integCP, orphan)
+	mustGit(t, "reflog", "expire", "--expire=now", "--all")
+
+	sha, _, err := integrateB1()
+	if !errors.Is(err, ErrNoCutPoint) || sha != "" {
+		t.Fatalf("Integrate = (%q, %v), want ErrNoCutPoint", sha, err)
+	}
+	if got := mustGit(t, "rev-parse", integCP); got != orphan {
+		t.Errorf("container moved to %s, want it untouched at %s", got, orphan)
 	}
 }

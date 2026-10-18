@@ -32,6 +32,9 @@ opened close-on-exec, so a plain exec drops the flock. Decided in grilling.
    rev. It logs `build.failed` and flags the build as stale (the display is
    decided in ADR 0063). A restarted loop forgets the failure, so a manual
    restart retries.
+   > **Amended (2026-10-17):** the manual restart is `loop restart` (ADR 0289
+   > (mugicrew-loop-restart-asks-by-sigusr2…)). It clears the in-memory failed
+   > rev and retries without an exec first.
 4. **No chasing main.** If main moves again while the build or the drain is
    running, the loop still drains and execs the build it made. The new image's
    first tick sees the newer rev and starts the next restart. An in-flight
@@ -47,9 +50,15 @@ opened close-on-exec, so a plain exec drops the flock. Decided in grilling.
    second stop forces, as in ADR 0050 §2. A stop drain never turns into a
    restart. A stop during a build that's still running cancels the `nix` child
    and doesn't wait for it (ADR 0064 §5).
+   > **Amended (2026-10-16):** the stop keeps the built restart, so cancelling
+   > that stop drain reverts it to the restart drain; ADR 0236
+   > (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain…).
 7. **Always on, no switch.** There is no flag or env var to turn off
    auto-restart. To hold a build, stop the loop. This follows ADR 0060 §2: a
    loop sitting on a stale build is the skew that ADR removed.
+   > **Amended (2026-10-17):** automatic restart is still always on for a
+   > watched loop, with no switch. `loop restart` adds on-demand restarts on
+   > any from-source loop and is not a switch.
 8. **Events (amends ADR 0029 §5):**
 
    | Event | Level | Extra attrs |

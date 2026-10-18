@@ -24,6 +24,8 @@ skipping its Claim step: the TUI claimed this bead when it launched you.
        bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:%[1]s \
          --parent <chartID> --no-inherit-labels --title "..." --description "..."
 
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
+
    A step the work will need in the external world (outside the bead graph and
    the code) may be drafted as a free-standing Task, never a Chart child (no
    --parent), its body in crew doc task-body.md's format, blocked on the Chart or

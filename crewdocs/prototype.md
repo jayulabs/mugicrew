@@ -4,7 +4,7 @@
 
 A prototype is **throwaway code that answers a question**. The question decides
 the shape. Everything it produces, the throwaway and any code folded from it,
-lands on the side ref your prompt names, never on a branch that merges.
+is pushed to the side ref your prompt names, never to a branch that merges.
 
 ## Pick a branch
 
@@ -47,7 +47,7 @@ assumption at the top of the prototype.
    (UI), print or render the full relevant state so the human can see what
    changed.
 6. **Capture it when done.** Commit the prototype, with any code folded from it,
-   in its throwaway tree and land it on the side ref as a **primary source**.
+   in its throwaway tree and push it to the side ref as a **primary source**.
    Record the answer (the verdict and the question it settled) on the bead. What
    merges is only the validated decision, written as a doc, never the code.
 
@@ -88,7 +88,7 @@ themselves, so it speaks their language, not the code's.
    that shouldn't be possible" or "huh, I assumed X": those are the bugs in the
    _idea_. Add actions or scenarios as they ask.
 5. **Capture the answer and the prototype.** Once it has answered its question,
-   record the answer, then land the whole prototype on the side ref as rule 6
+   record the answer, then push the whole prototype to the side ref as rule 6
    says: the HTML shell and the validated reducer / machine / function set
    together, the module lifted into the real module's place in that tree if the
    human wants it shaped for later. Being one file, it stays re-runnable there.
@@ -154,7 +154,7 @@ on its own is a vacuum where every variant looks fine.
    feedback is usually "the header from B with the sidebar from C": the design
    they actually want.
 6. **Capture the answer and clean up.** Once a variant has won, record which and
-   why, then land it all on the side ref as rule 6 says: fold the winner into
+   why, then push it all to the side ref as rule 6 says: fold the winner into
    the page (A) or promote it to a real route (B) in the throwaway tree, and keep
    the losing variants and the switcher beside it there, as the primary source.
    Nothing of it merges; the decision does, as a doc.

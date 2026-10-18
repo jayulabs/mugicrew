@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
@@ -63,6 +64,9 @@ type effort struct {
 type intent struct {
 	Edges []bd.Edge
 	Close *bd.Closing
+	// Limit is set on a failed run that hit the Plan usage limit (Spec D3): the
+	// child's only channel to the parent for it.
+	Limit *contract.Limit
 }
 
 func (in intent) empty() bool { return in.Close == nil && len(in.Edges) == 0 }
@@ -102,8 +106,12 @@ type Outcome struct {
 	Holder  git.Holder
 	Aborted bool
 	// Stranded says the integrate backstop hit a conflict and paused the bead
-	// integrate-conflict (Spec D6), so the loop's failure count is untouched.
+	// integrate-conflict (Spec D6), or found a closed Build's trailer missing from
+	// its Checkpoint and paused it not-built (ADR 0248), so the loop's failure count is untouched.
 	Stranded bool
+	// Limit is set when the effort ended on a Plan usage limit hit (a limited
+	// effort, Spec D3): the loop holds claude dispatch to its reset.
+	Limit *contract.Limit
 }
 
 // InflightFunc reads the beads of live efforts in OTHER processes (the TUI and
@@ -126,6 +134,9 @@ func NewEffortID() string {
 type Inflight struct {
 	ID   string
 	Bead bd.Bead
+	// Hold is the dispatcher's per-effort lock (ADR 0154), taken by Claim and
+	// released by the caller once its goroutine is done with the bead.
+	Hold *liveness.Hold
 }
 
 // AbandonTimeout bounds each paused:abandoned write, so a hung bd never traps a
@@ -171,25 +182,28 @@ func Beads(in []Inflight) []bd.Bead {
 // tui: refused with "nothing in flight" unless in_progress; else paused:manual
 // first — a failed write returns its error with nothing logged or signalled —
 // then effort.aborted, then SIGTERM to each live process's group. Returns the
-// pids signalled (none: paused only). A live host's failure path does the
+// pids signalled and whether a dispatcher holds the bead's liveness lock (ADR 0155):
+// none and not held is paused only; the dispatcher's group is never signalled and
+// the lock never refuses. A live host's failure path does the
 // cleanup; abort never unclaims, removes a tree or deletes Drafts.
 // ponytail: SIGTERM only; add SIGKILL escalation if aborted efforts survive.
-func Abort(id, by string) ([]int, error) {
+func Abort(id, by string) ([]int, bool, error) {
 	b, err := show(id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if b.Status != "in_progress" {
-		return nil, fmt.Errorf("%s: nothing in flight", id)
+		return nil, false, fmt.Errorf("%s: nothing in flight", id)
 	}
 	if err := abortPause(id, bd.PausedManual); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// The scan also matches this process when it is `mugicrew abort <id>`;
 	// signalling it would kill the caller's process group, not the effort.
 	self := os.Getpid()
 	pids := slices.DeleteFunc(abortPids(id), func(pid int) bool { return pid == self })
-	slog.Warn("effort.aborted", append(eventlog.BeadAttrs(b), "by", by, "pids", pids, "paused", true)...)
+	held := abortHeld(id)
+	slog.Warn("effort.aborted", append(eventlog.BeadAttrs(b), "by", by, "pids", pids, "held", held, "paused", true)...)
 	var signalled []int
 	var errs []error
 	for _, pid := range pids {
@@ -201,7 +215,16 @@ func Abort(id, by string) ([]int, error) {
 			signalled = append(signalled, pid)
 		}
 	}
-	return signalled, errors.Join(errs...)
+	return signalled, held, errors.Join(errs...)
+}
+
+// AbortNote is what abort tells the human when it signalled no pid: a dispatcher
+// holding the bead with no child stops or finishes at its next step (ADR 0155).
+func AbortNote(held bool) string {
+	if held {
+		return "dispatcher holds it with no child; paused, it stops or finishes at its next step"
+	}
+	return "no live process; paused only"
 }
 
 // FormatPids renders Abort's pids space-separated for the CLI and TUI ("" for none).
@@ -212,6 +235,7 @@ func FormatPids(pids []int) string { return strings.Trim(fmt.Sprint(pids), "[]")
 var (
 	abortPause = bd.Pause
 	abortPids  = liveness.Pids
+	abortHeld  = liveness.Held
 	killGroup  = func(pid int) error {
 		pgid, err := syscall.Getpgid(pid)
 		if err != nil {
@@ -236,6 +260,10 @@ func (e *effort) finish(err error) {
 	attrs := append(e.attrs, "dur_ms", time.Since(e.start).Milliseconds())
 	if e.child { // an in-process bd/git exit is not the effort's
 		attrs = append(attrs, eventlog.ExitAttrs(err)...)
+	}
+	if err != nil && e.out.Limit != nil { // a limited effort is not a failure (Spec D3)
+		slog.Warn("effort.limited", append(attrs, "err", err.Error(), "resets_at", e.out.Limit.ResetsAt.Format(time.RFC3339), "source", e.out.Limit.Source)...)
+		return
 	}
 	eventlog.Record("effort.ended", "effort.failed", err, attrs...)
 }
@@ -265,14 +293,30 @@ func Dispatch(ctx contract.Ctx, crew contract.Crewmate, b bd.Bead, out io.Writer
 		busy, err = worktreeRun(b, d, e, out)
 	} else {
 		e.started()
-		err = crew.Run(publishCtx{sessionCtx{ctx, e.attrs}, b.ID, &e.intent}, contract.Bead{ID: b.ID, Kind: b.Kind})
+		var sctx contract.Ctx
+		if err = preSpawn(b.ID); err == nil {
+			sctx, err = assemble(ctx, b, e.attrs)
+		}
+		if err == nil {
+			err = crew.Run(publishCtx{sctx, b.ID, &e.intent}, contract.Bead{ID: b.ID, Kind: b.Kind})
+			var le *contract.LimitError
+			if errors.As(err, &le) {
+				e.out.Limit = &le.Limit
+			}
+		}
 	}
 	if busy { // nothing ran, so no started to leave dangling and no Drafts to touch; worktreeRun logged the skip
 		return e.out, err
 	}
 	if err == nil {
-		if err = e.publish(b); err != nil {
-			e.child = false // a failed publish's bd exit is not the child's
+		if swept(b.ID) { // every placement (ADR 0124)
+			err = e.retire(b)
+		}
+		if err == nil {
+			err = e.publish(b)
+		}
+		if err != nil {
+			e.child = false // a failed retire or publish's bd exit is not the child's
 		}
 	}
 	if err != nil {
@@ -308,8 +352,39 @@ func (e *effort) publish(b bd.Bead) error {
 	return eventlog.RecordDrafts("draft.published", b.ID, ids, err, e.attrs...)
 }
 
-// publish and deleteDrafts are bd's, vars so tests observe them without a live bd.
-var publish, deleteDrafts = bd.Publish, bd.DeleteDrafts
+// retire readies a swept member's publish (ADR 0124, Spec D2): its handed edges
+// and close are dropped (the sweep closed it, and its Checkpoint is retired),
+// and every Draft but a kind:signal one is closed obsolete: in one bd call,
+// recorded as draft.obsoleted, so the publish opens only its Signals. A failed
+// read or close is the effort's error, so e.fail deletes and nothing publishes.
+// ponytail: a Draft born between this read and the publish batch goes live, at
+// most one tick until the loop's straggler backstop closes it (Spec D5); a bd
+// batch status guard is the upgrade path.
+func (e *effort) retire(b bd.Bead) error {
+	e.intent = intent{}
+	ds, err := drafts(b.ID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for _, d := range ds {
+		if d.Kind != contract.KindSignal { // a whitelist, so a new kind is closed
+			ids = append(ids, d.ID)
+		}
+	}
+	if len(ids) > 0 {
+		err = closeDrafts(ids, fmt.Sprintf("%s %s of %s was retired", bd.ObsoleteReason, b.ID, b.Parent))
+	}
+	return eventlog.RecordDrafts("draft.obsoleted", b.ID, ids, err, append(e.attrs, "container", b.Parent)...)
+}
+
+// publish and deleteDrafts are bd's, vars so tests observe them without a live
+// bd; so are swept and the swept tail's Drafts read and close.
+var (
+	publish, deleteDrafts = bd.Publish, bd.DeleteDrafts
+	swept                 = session.Swept
+	drafts, closeDrafts   = bd.Drafts, bd.ForceCloseAll
+)
 
 // deleteLanded deletes a container's own branch once it is landed and closed
 // (Spec FR30–32): the bead re-reads closed, and the branch tip is the tip
@@ -323,15 +398,19 @@ func (e *effort) deleteLanded(b bd.Bead, branch string) {
 	if cur, err := show(b.ID); err != nil || cur.Status != "closed" {
 		return
 	}
-	landed, err := git.LandedBase(git.TrailerFor(string(b.Kind), b.ID))
+	landedBase, landedTip, head, del := git.LandedBase, git.LandedTip, git.Head, git.DeleteBranch
+	if r := contexts.RepoOf(b); r != "" { // a nested container lands and keeps its branch in the child
+		landedBase, landedTip, head, del = r.LandedBase, r.LandedTip, r.Head, r.DeleteBranch
+	}
+	landed, err := landedBase(git.TrailerFor(string(b.Kind), b.ID))
 	if err != nil {
 		return
 	}
-	pinned, ok := git.LandedTip(landed)
-	if tip, err := git.Head("refs/heads/" + branch); err != nil || !ok || tip != pinned {
+	pinned, ok := landedTip(landed)
+	if tip, err := head("refs/heads/" + branch); err != nil || !ok || tip != pinned {
 		return
 	}
-	eventlog.RecordBranches([]bd.BranchOutcome{{Branch: branch, Err: git.DeleteBranch(branch)}}, e.attrs...)
+	eventlog.RecordBranches([]bd.BranchOutcome{{Branch: branch, Err: del(branch)}}, e.attrs...)
 }
 
 // release hands the caller's claim back once the effort has ended, failed or not,
@@ -378,7 +457,7 @@ var worktreeRun = func(b bd.Bead, d route.Destination, e *effort, out io.Writer)
 		// retries once the holder's worktree is torn down — which needs the
 		// caller's claim released, or bd ready never offers it again and the bead
 		// strands in_progress with no process (reads dead in the TUI).
-		if h, busy := git.Busy(err, branch); busy {
+		if h, busy := contexts.Busy(contexts.Owner(b, d.Container), err, branch); busy {
 			err = eventlog.RecordClaim(b, "claim.released", unclaim(b.ID), "effort", e.id)
 			e.out.Holder = h
 			if ownContention(b, branch, h, e.inflight) {
@@ -400,12 +479,19 @@ var worktreeRun = func(b bd.Bead, d route.Destination, e *effort, out io.Writer)
 	cut.Store(wt, true)
 	defer cut.Delete(wt)
 	e.started()
+	if err := preSpawn(b.ID); err != nil { // nothing spawned; an effort tree still needs the backstop's teardown
+		if effortTree {
+			backstop(b, wt, true, teardown, out, e.attrs...)
+		}
+		return false, err
+	}
 	e.child = true
 	defer os.Remove(intentPath(e.id))
 	err = reconcileInWorktree(wt, b.ID, e.id, out)
-	if err == nil {
-		err = readIntent(intentPath(e.id), &e.intent)
+	if rerr := readIntent(intentPath(e.id), &e.intent); err == nil { // a failed child may still hand over its Limit
+		err = rerr
 	}
+	e.out.Limit = e.intent.Limit
 	if effortTree { // the backstop owns an effort tree's teardown (Spec D6)
 		var kept bool
 		e.out.Stranded, kept = backstop(b, wt, err != nil, teardown, out, e.attrs...)
@@ -414,6 +500,23 @@ var worktreeRun = func(b bd.Bead, d route.Destination, e *effort, out io.Writer)
 		}
 	}
 	return false, err
+}
+
+// errAborted is a pre-spawn re-read that found the bead paused by hand.
+var errAborted = errors.New("aborted before spawn: paused:manual")
+
+// preSpawn re-reads bead id just before its effort spawns (ADR 0155): a human's
+// abort in the pre-cut window wrote paused:manual with no child yet to signal.
+// A failed read errs too: never spawn on a guess. No re-read follows the child.
+func preSpawn(id string) error {
+	cur, err := show(id)
+	if err != nil {
+		return err
+	}
+	if bd.PausedBy(cur, bd.PausedManual) {
+		return errAborted
+	}
+	return nil
 }
 
 // backstop is session.Backstop, a var so the cut-and-backstop wiring is testable
@@ -486,7 +589,7 @@ func ForeignHeld(b bd.Bead, inflight InflightFunc) (branch string, foreign bool,
 	if !ok {
 		return "", false, err
 	}
-	h, ok, err := git.WorktreeOn(d.Branch)
+	h, ok, err := contexts.WorktreeOn(contexts.Owner(b, d.Container), d.Branch)
 	if err != nil || !ok {
 		return d.Branch, false, err
 	}
@@ -501,21 +604,43 @@ var claim, unclaim, show = bd.Claim, bd.Unclaim, bd.Show
 
 // Claim takes b's in_progress claim for its owning crewmate and records
 // claim.taken, or claim.failed at Error (ADR 0029 §5). bd stays event-blind: the
-// loop and the TUI run-now claim through here.
-func Claim(b bd.Bead) error { return eventlog.RecordClaim(b, "claim.taken", claim(b.ID)) }
+// loop and the TUI run-now claim through here. It takes the bead's per-effort
+// hold first (ADR 0154) so the effort reads alive from claim to release; on
+// success the caller owns the hold and releases it when done with the bead. A
+// hold that can't be acquired means another dispatcher has the bead: claim.failed,
+// no claim. A failed claim releases the hold.
+func Claim(b bd.Bead) (*liveness.Hold, error) {
+	h, err := liveness.Acquire(b.ID)
+	if err != nil {
+		return nil, eventlog.RecordClaim(b, "claim.taken", err)
+	}
+	if err := eventlog.RecordClaim(b, "claim.taken", claim(b.ID)); err != nil {
+		h.Release()
+		return nil, err
+	}
+	return h, nil
+}
 
 // Reconcile is the reconcile verb: crew's Run over b with session logging, recorded
 // as reconcile.done, or reconcile.failed at Error, naming b's routed branch. As a
 // dispatch child (path, PublishEnv's file, set) its Ctx carries the Publisher, and
 // what the flow hands over is written to path for the parent's publish.
 func Reconcile(ctx contract.Ctx, crew contract.Crewmate, b bd.Bead, path string) error {
-	ctx = Sessions(ctx, b)
+	ctx, err := Sessions(ctx, b)
 	var in intent
 	if path != "" {
 		ctx = publishCtx{ctx, b.ID, &in}
 	}
-	err := crew.Run(ctx, contract.Bead{ID: b.ID, Kind: b.Kind})
-	if err == nil && path != "" && !in.empty() {
+	if err == nil {
+		err = crew.Run(ctx, contract.Bead{ID: b.ID, Kind: b.Kind})
+	}
+	var le *contract.LimitError
+	if errors.As(err, &le) && path != "" { // handed over even though the run failed: Limit only
+		in = intent{Limit: &le.Limit}
+		if werr := writeIntent(path, in); werr != nil {
+			err = errors.Join(err, werr)
+		}
+	} else if err == nil && path != "" && !in.empty() {
 		err = writeIntent(path, in)
 	}
 	d, _ := route.Route(b) // a route error leaves branch "": the event still records the outcome
@@ -560,9 +685,72 @@ func writeIntent(path string, in intent) error {
 // Sessions wraps ctx so every Harness.Run a crewmate makes records session.*
 // events stamped with b's common attrs — the reconcile child's wrap, where the
 // effort id arrives via MUGICREW_EFFORT and the emitter stamps it (ADR 0029 §1-2).
-// Dispatch's in-process route wraps the same way with the effort's attrs.
-func Sessions(ctx contract.Ctx, b bd.Bead) contract.Ctx {
-	return sessionCtx{ctx, slices.Clip(eventlog.BeadAttrs(b))}
+// Dispatch's in-process route wraps the same way with the effort's attrs. A
+// Profiled ctx is first assembled for b's Agent Profile; an unrunnable one is the
+// error.
+func Sessions(ctx contract.Ctx, b bd.Bead) (contract.Ctx, error) {
+	return assemble(ctx, b, eventlog.BeadAttrs(b))
+}
+
+// Profiled is a Ctx that assembles each effort's ctx for its bead's kind (ADR
+// 0125): main's resolves the kind's Agent Profile and builds a
+// harness for it, returning the profile name ("" = the built-in), named beside
+// the error too when it can't run. A Ctx that isn't one runs every effort on its
+// own harness.
+type Profiled interface {
+	ForKind(kind contract.Kind) (ctx contract.Ctx, profile string, err error)
+}
+
+// Unrunnable resolves b's Agent Profile when ctx is Profiled: the profile name
+// and, when it can't run, why (ADR 0123 §1). Any other ctx is always runnable.
+func Unrunnable(ctx contract.Ctx, b bd.Bead) (profile string, reason error) {
+	p, ok := ctx.(Profiled)
+	if !ok {
+		return "", nil
+	}
+	_, profile, reason = p.ForKind(b.Kind)
+	return profile, reason
+}
+
+// Admit is the profile gate the loop and TUI run-now pass before claiming b or
+// cutting its tree (ADR 0123 §3): an unrunnable profile logs profile.unusable at
+// Warn {profile, reason, launch afk}, pauses b paused:profile through pause and
+// logs effort.paused {cause profile}. refused is "profile <name>: <reason>", nil
+// to go on; err is a failed pause write, which leaves b a candidate to retry.
+func Admit(ctx contract.Ctx, b bd.Bead, pause func(id, cause string) error) (refused, err error) {
+	profile, reason := Unrunnable(ctx, b)
+	if reason == nil {
+		return nil, nil
+	}
+	attrs := slices.Clip(append(eventlog.BeadAttrs(b), "profile", profile)) // clipped: each event's append copies
+	slog.Warn("profile.unusable", append(attrs, "reason", reason.Error(), "launch", "afk")...)
+	refused = fmt.Errorf("profile %s: %w", profile, reason)
+	if err = pause(b.ID, bd.PausedProfile); err != nil {
+		return refused, err
+	}
+	slog.Warn("effort.paused", append(attrs, "cause", bd.PausedProfile)...)
+	return refused, nil
+}
+
+// assemble is Sessions with the caller's attrs, plus profile when one is named,
+// so it rides on every session.* event.
+// ponytail: this resolves the profile a second time after Admit; a catalog or
+// config edit in between (seconds on the worktree route, where the reconcile
+// child re-resolves) fails the effort here as "agent profile: ..." and counts
+// toward paused:failing instead of Admit's paused:profile refusal. Route this
+// error through Admit's pause path if that window ever bites.
+func assemble(ctx contract.Ctx, b bd.Bead, attrs []any) (contract.Ctx, error) {
+	if p, ok := ctx.(Profiled); ok {
+		pctx, name, err := p.ForKind(b.Kind)
+		if err != nil {
+			return ctx, fmt.Errorf("agent profile: %w", err)
+		}
+		ctx = pctx
+		if name != "" {
+			attrs = append(attrs, "profile", name)
+		}
+	}
+	return sessionCtx{ctx, slices.Clip(attrs)}, nil
 }
 
 // sessionCtx is the one place every Harness.Run caller routes through, so the

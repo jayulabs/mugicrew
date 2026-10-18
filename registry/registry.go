@@ -5,6 +5,8 @@ package registry
 
 import (
 	"fmt"
+	"slices"
+	"sync"
 
 	"jayulabs.org/mugicrew/contract"
 )
@@ -20,37 +22,45 @@ const (
 
 // Entry is the routing facts for a kind (spec §4.2).
 type Entry struct {
-	Owner     string // the crewmate that owns the kind
-	Mode      Mode   // afk → Run, hitl → surface + Launch
-	Container bool   // container kind (bd epic) vs leaf (bd task)
+	Owner      string // the crewmate that owns the kind
+	Mode       Mode   // afk → Run, hitl → surface + Launch
+	Container  bool   // container kind (bd epic) vs leaf (bd task)
+	ReadOnly   bool   // launch and resume drop the edit tools (ADR 0191); true only for discussion
+	Mechanical bool   // runs no harness session (Run/Launch never reach ctx.Harness); shown as a — row in Settings Kind profiles and can't be edited
 }
 
-// table IS the owner-from-kind function. Nami's, Zoro's, and the Checkpoint tail
-// (Jinbe/Sanji/Franky/Usopp/Luffy) kinds are wired; other crewmates' kinds stay
-// omitted (YAGNI). A tail kind's owner has no crew() entry yet, so the loop skips
+// table IS the owner-from-kind function. Luffy's intake Signal, Nami's, Zoro's,
+// and the Checkpoint tail (Jinbe/Sanji/Franky/Usopp/Luffy) kinds are wired; other
+// crewmates' kinds stay omitted (YAGNI). A tail kind's owner has no crew() entry yet, so the loop skips
 // it and the bead sits open until its package lands.
 var table = map[contract.Kind]Entry{
-	contract.KindSignal:        {Owner: "nami", Mode: HITL, Container: false},
+	contract.KindSignal:        {Owner: "luffy", Mode: HITL, Container: false}, // ADR 0129: Luffy triages; HITL, so the loop never dispatches a Signal (ADR 0006)
 	contract.KindGrilling:      {Owner: "nami", Mode: HITL, Container: false},
 	contract.KindResearch:      {Owner: "nami", Mode: AFK, Container: false},
 	contract.KindChart:         {Owner: "nami", Mode: AFK, Container: true},
+	contract.KindSurvey:        {Owner: "nami", Mode: HITL, Container: false}, // the Chart's charting leaf: a human launches it, never the loop
 	contract.KindChartConflict: {Owner: "nami", Mode: AFK, Container: false},  // ADR 0011/0030, 0079/0080: Chart-land conflict, resolved by Nami's AFK arm
 	contract.KindSpec:          {Owner: "zoro", Mode: AFK, Container: false},  // FR1: an open Spec is an AFK leaf Zoro reconciles to a Checkpoint skeleton
 	contract.KindPivot:         {Owner: "zoro", Mode: HITL, Container: false}, // ADR 0043 (amends ADR 0005 §6): Inbox-surfaced, never dispatched AFK (FR26)
 
 	// Checkpoint tail, landed ahead of the owning packages — the loop
 	// skips a kind whose owner has no crew() entry, so a laid tail bead sits open.
-	contract.KindCheckpoint: {Owner: "jinbe", Mode: AFK, Container: true},   // the Checkpoint handler (container)
-	contract.KindPrototype:  {Owner: "sanji", Mode: HITL, Container: false}, // Inbox HITL defog kind (§9.2)
+	contract.KindCheckpoint: {Owner: "jinbe", Mode: AFK, Container: true, Mechanical: true}, // the Checkpoint handler (container)
+	contract.KindPrototype:  {Owner: "sanji", Mode: HITL, Container: false},                 // Inbox HITL defog kind (§9.2)
 	contract.KindBuild:      {Owner: "franky", Mode: AFK, Container: false},
 	contract.KindCritique:   {Owner: "franky", Mode: AFK, Container: false},
 	contract.KindConflict:   {Owner: "franky", Mode: AFK, Container: false},
 	contract.KindReview:     {Owner: "usopp", Mode: AFK, Container: false},
 	contract.KindApproval:   {Owner: "luffy", Mode: HITL, Container: false},
 
-	contract.KindRollback: {Owner: "jinbe", Mode: AFK, Container: false},   // ADR 0047: human-filed, Jinbe's first leaf kind (amends ADR 0002)
-	contract.KindSurgery:  {Owner: "franky", Mode: HITL, Container: false}, // ADR 0092: HITL, so an open Surgery is never an AFK loop or run-now candidate
-	contract.KindTask:     {Owner: "brook", Mode: HITL, Container: false},  // ADR 0115: only a human launches a Task, so the loop never does
+	contract.KindRollback:   {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0047: human-filed, Jinbe's first leaf kind (amends ADR 0002)
+	contract.KindLanding:    {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0145/0147: lands its parent container; copies Rollback's row
+	contract.KindLatch:      {Owner: "brook", Mode: AFK, Container: false, Mechanical: true}, // Spec mc-8ymw.9 D1: Brook's in-process Jira check; copies Landing's row
+	contract.KindSurgery:    {Owner: "franky", Mode: HITL, Container: false},                 // ADR 0092: HITL, so an open Surgery is never an AFK loop or run-now candidate
+	contract.KindTask:       {Owner: "brook", Mode: HITL, Container: false},                  // ADR 0115: only a human launches a Task, so the loop never does
+	contract.KindDiscussion: {Owner: "robin", Mode: HITL, Container: false, ReadOnly: true},  // ADR 0194: a human-started Robin session, so the loop never dispatches it
+	contract.KindCheckup:    {Owner: "chopper", Mode: HITL, Container: false},                // ADR 0272: a human-started Chopper session (bd edits, so not ReadOnly), so the loop never dispatches it
+	contract.KindInitiative: {Owner: "luffy", Mode: HITL, Container: true},                   // ADR 0128/0135: branchless container with no effort, so never a loop candidate nor a pool slot
 }
 
 // Lookup resolves a kind to its routing entry. An unknown kind is a loud error
@@ -63,3 +73,30 @@ func Lookup(kind contract.Kind) (Entry, error) {
 	}
 	return e, nil
 }
+
+// SessionKinds is every non-Mechanical kind, sorted: the kinds whose sessions
+// launch a harness, so the Settings Kind profiles rows (ADR 0136). A new
+// registry row is listed unless it is deliberately marked Mechanical.
+// Computed once; the slice is shared, so callers must not modify it.
+var SessionKinds = sync.OnceValue(func() []contract.Kind {
+	var ks []contract.Kind
+	for k, e := range table {
+		if !e.Mechanical {
+			ks = append(ks, k)
+		}
+	}
+	slices.Sort(ks)
+	return ks
+})
+
+// AllKinds is every registry kind, sorted: the Settings Kind profiles section
+// draws a — row for each Mechanical one (ADR 0136 §1). Computed once; the slice
+// is shared, so callers must not modify it.
+var AllKinds = sync.OnceValue(func() []contract.Kind {
+	ks := make([]contract.Kind, 0, len(table))
+	for k := range table {
+		ks = append(ks, k)
+	}
+	slices.Sort(ks)
+	return ks
+})

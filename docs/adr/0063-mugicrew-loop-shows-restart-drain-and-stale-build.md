@@ -25,6 +25,9 @@ older than the loop whose lock body it reads. An unknown `state` falls to
    drain (ADR 0062 §6). There is no new state, so every existing reader keeps
    working, including `HeldError`, `loop stop`'s second-stop force and an old
    TUI.
+   > **Amended (2026-10-16):** cancelling a stop drain that a stop converted from
+   > a restart drain sets `restart_to` again, so the loop is back in the restart
+   > drain; ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain…).
 2. **Only a failed build is shown as stale.** On an `on` loop, `failed_rev` is
    the full SHA whose build or eval failed (ADR 0062 §3). It's cleared when an
    unchanged outPath rewrites `rev`, and it's dropped on a restart, along with
@@ -38,6 +41,11 @@ older than the loop whose lock body it reads. An unknown `state` falls to
      onto main def5678`, and then the beads in flight. The first word stays
      `draining`, because it's the body's state.
    - A restart drain that a stop converted prints as a plain drain.
+   > **Amended (2026-10-18, ADR 0295 (mugicrew-loop-status-prints-labelled-fields…)):** `loop status` prints these as labelled fields: `state: on (stale)` with a
+   > `stale: build of main def5678 failed (see build.failed in events)` line,
+   > and `state: draining` with `restarting onto: main def5678`. The in-flight
+   > beads are a count, not titles. A converted restart drain still prints as a
+   > plain drain.
 4. **TUI tab bar (amends ADR 0051 §4):**
    - Stale: `loop on @abc1234 stale` in the warn color.
    - Restart drain: `loop restarting N @abc1234→def5678` in the warn color.
@@ -48,6 +56,8 @@ older than the loop whose lock body it reads. An unknown `state` falls to
    says `loop off`, and `o` does a plain stop, which converts the drain to a
    stop drain. After that, `o` goes back to `force-stop` and its confirmation.
    This matches a CLI `loop stop`.
+   > **Amended (2026-10-16, ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain-by-signal-generation)):** after that, `o` opens the three-way
+   > dialog: `y` force, `k` keep on, `n`/esc back.
 
 ## Considered options
 

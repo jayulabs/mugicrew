@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func tempPath(t *testing.T) string {
@@ -391,5 +392,65 @@ func TestResolveFollowsAHeldLegacyLock(t *testing.T) {
 	t.Setenv("BEADS_DIR", graph)
 	if p, err := Resolve(common); err != nil || p != filepath.Join(graph, "mugicrew-loop.lock") {
 		t.Fatalf("legacy unheld: Resolve = %q, %v; want the graph's lock", p, err)
+	}
+}
+
+// A limited holder round-trips resets_at and limit_source, is live (Acquire reads
+// "already on"), and a draining write drops the limit fields (Spec D6).
+func TestLimitedRoundTripsAndReadsOn(t *testing.T) {
+	p := tempPath(t)
+	lk, err := Acquire(p, "0123456789abcdef", "/nix/store/x/bin/mugicrew", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Close()
+	w := Status{State: Limited, Rev: "0123456789abcdef", Inflight: []string{"Build: a"}, ResetsAt: time.Unix(1760000000, 0).UTC(), LimitSource: "message"}
+	if err := lk.Write(w); err != nil {
+		t.Fatal(err)
+	}
+	w.Pid, w.StorePath = os.Getpid(), "/nix/store/x/bin/mugicrew"
+	if st, err := Read(p); err != nil || !reflect.DeepEqual(st, w) {
+		t.Fatalf("Read = %+v, %v; want %+v", st, err, w)
+	}
+	_, err = Acquire(p, "", "", "")
+	var held *HeldError
+	if !errors.As(err, &held) || held.Status.State != Limited || !strings.Contains(err.Error(), "already on") {
+		t.Fatalf("Acquire = %v; want a HeldError reading already on", err)
+	}
+	lk.Write(Status{State: Draining})
+	if body, _ := os.ReadFile(p); strings.Contains(string(body), "resets_at") || strings.Contains(string(body), "limit_source") {
+		t.Fatalf("draining body %q; want the limit fields dropped", body)
+	}
+}
+
+func TestResetLabel(t *testing.T) {
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 15, 44, 0, 0, time.Local)
+	later := time.Date(now.Year()+1, time.January, 2, 15, 4, 0, 0, time.Local)
+	if got := (Status{ResetsAt: today}).ResetLabel(); got != "15:44" {
+		t.Errorf("today = %q; want 15:44", got)
+	}
+	if got := (Status{ResetsAt: later}).ResetLabel(); got != "Jan 2 15:04" {
+		t.Errorf("later = %q; want Jan 2 15:04", got)
+	}
+}
+
+// The ADR 0295 worked example: a watched loop that is limited and stale.
+func TestStatusTextWorkedExample(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "myrepo")
+	if out, err := exec.Command("git", "init", "-q", src).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", src, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main").CombinedOutput(); err != nil {
+		t.Fatalf("set origin/HEAD: %v: %s", err, out)
+	}
+	st := Status{State: Limited, Pid: 48213, Rev: "9f3c2e1aaaa", StorePath: "/nix/store/7q0k-mugicrew-9f3c2e1/bin/mugicrew",
+		Watch: true, Source: src + "/.git", Inflight: []string{"a", "b"}, FailedRev: "def5678bbbb",
+		ResetsAt: time.Now().Add(time.Hour), LimitSource: "usage"}
+	want := "state: limited (stale)\npid: 48213\n\nmain: 9f3c2e1\nstore: /nix/store/7q0k-mugicrew-9f3c2e1/bin/mugicrew\n\nin flight: 2\n\n" +
+		"held by usage limit until: " + st.ResetLabel() + "\nreset time from: usage\n\n" +
+		"stale: build of main def5678 failed (see build.failed in events)\n\nwatching: " + src + " main\n"
+	if got := st.Text(); got != want {
+		t.Errorf("Text = %q; want %q", got, want)
 	}
 }

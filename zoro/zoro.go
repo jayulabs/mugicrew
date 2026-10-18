@@ -9,9 +9,11 @@ package zoro
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
@@ -48,7 +50,7 @@ func (Zoro) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 	if err != nil {
 		return nil, fmt.Errorf("zoro.Launch: %w", err)
 	}
-	inv, err := contract.NewInvocation(bead.ID, pivotPrompt(bead.ID, cp, spec))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(pivotPrompt(bead.ID, cp, spec), cp, showBead))
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +116,8 @@ func checkpointSuccessor(spec bd.Bead) bd.Successor {
 		Container:   true,
 		Title:       spec.Title,
 		Description: "Checkpoint skeleton — Builds laid by the slicing session over the authored Spec (ADR 0015).",
+		Context:     bd.ContextOf(spec),
+		Repo:        bd.RepoStampOf(spec),
 	}
 }
 
@@ -124,6 +128,9 @@ func checkpointSuccessor(spec bd.Bead) bd.Successor {
 var (
 	causedBy       = bd.CausedBy
 	landedBase     = git.LandedBase
+	landStrategy   = git.LandStrategyName
+	updateBody     = bd.Update
+	fetchForge     = func() (string, error) { return git.FetchMainline(git.ForgeRemote()) }
 	cutBranch      = git.CutBranch
 	spawnSuccessor = bd.SpawnSuccessorIfAbsent
 	showBead       = bd.Show
@@ -131,9 +138,19 @@ var (
 	closeOnPublish = bd.CloseOnPublish
 	buildChildren  = bd.BuildChildren
 	carry          = bd.Carry
+	initiativeOf   = bd.InitiativeOf
 
 	pivotCheckpoint = bd.PivotCheckpoint
 	pivotSpec       = bd.PivotSpec
+
+	// The child-repo legs of a nested context's bead (Spec D2, D3); repoOf reads
+	// no config for an unlabelled bead.
+	repoOf     = contexts.RepoOf
+	stampCut   = contexts.StampCut
+	repoLanded = func(r git.Repo, trailer string) (string, error) { return r.LandedBase(trailer) }
+	repoCut    = func(r git.Repo, name, base string) (bool, error) { return r.CutBranch(name, base) }
+	repoTip    = func(r git.Repo) (string, error) { return r.ResolveProbeBase() }
+	repoFetch  = func(r git.Repo) (string, error) { return r.FetchMainline() }
 )
 
 // baseTrailer is the land trailer whose squash commit checkpoint/<id> is cut
@@ -147,18 +164,50 @@ func baseTrailer(kind contract.Kind, id string) string {
 // checkpointBase derives the commit checkpoint/<id> is cut from (§8.4, ADR
 // 0012/0014): walk the Spec —caused-by→ its Chart; a Chart-backed Spec cuts from
 // the Chart's landed base ("Chart: <chartID>"), a direct Spec from its own
-// anchor ("Spec: <specID>", written by Nami's fast-lane handler, ADR 0035). Both re-derive via the same LandedBase trailer
-// grep; a missing trailer is a hard error, NEVER a rev-parse main fallback.
-func checkpointBase(specID string) (string, error) {
-	chartID, found, err := causedBy(specID, contract.KindChart)
+// anchor. A direct Spec reads its Anchor: pin first, under local and gitlab alike;
+// with no pin it falls back to the legacy LandedBase "Spec: <specID>" trailer
+// under both strategies (pre-change Specs, Specs anchored before a strategy
+// flip); with neither it is a hard error, NEVER a rev-parse main fallback.
+func checkpointBase(spec bd.Bead) (string, error) {
+	chartID, found, err := causedBy(spec.ID, contract.KindChart)
 	if err != nil {
 		return "", err
 	}
-	kind, id := contract.KindSpec, specID
+	kind, id := contract.KindSpec, spec.ID
 	if found {
 		kind, id = contract.KindChart, chartID
 	}
-	return landedBase(baseTrailer(kind, id))
+	r := repoOf(spec)
+	if found && r == "" { // a Workspace Chart child skips the land-strategy read (ADR 0157)
+		return landedBase(baseTrailer(kind, id))
+	}
+	name, err := landStrategy()
+	if err != nil {
+		return "", err
+	}
+	gitlab := name == git.LandStrategyGitlab
+	pin, pinned := "", false
+	if !found {
+		pin, pinned = git.ParseAnchor(spec.Description)
+	}
+	if r != "" && gitlab { // the pinned sha / Chart base is read from the child's fetched mainline
+		if _, err := repoFetch(r); err != nil {
+			return "", err
+		}
+	}
+	if pinned {
+		return pin, nil
+	}
+	var sha string
+	if r != "" {
+		sha, err = repoLanded(r, baseTrailer(kind, id)) // the child's trailer, never the Workspace's main
+	} else {
+		sha, err = landedBase(baseTrailer(kind, id))
+	}
+	if !found && errors.Is(err, git.ErrNotLanded) {
+		return "", fmt.Errorf("zoro: Spec %s has neither an Anchor: pin nor a Spec: trailer; refusing to cut from main — restore the Anchor: line by hand from the triage.fastlane event's anchor attr", spec.ID)
+	}
+	return sha, err
 }
 
 // reconcileSpec is the Spec→Checkpoint-skeleton handler (§8.4). An open Spec
@@ -179,15 +228,26 @@ func checkpointBase(specID string) (string, error) {
 // closing, so either way the Spec stays open and the loop re-dispatches — the
 // same gate reconcileChart applies to the Spec-body-authored Chart close.
 func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
-	base, err := checkpointBase(spec.ID)
+	base, err := checkpointBase(spec)
 	if err != nil {
 		return err
 	}
-	checkpointID, _, err := spawnSuccessor(spec.ID, checkpointSuccessor(spec))
+	succ := checkpointSuccessor(spec)
+	if succ.Parent, err = initiativeOf(spec); err != nil {
+		return err
+	}
+	checkpointID, _, err := spawnSuccessor(spec.ID, succ)
 	if err != nil {
 		return err
 	}
-	if _, err := cutBranch(checkpointBranch(checkpointID), base); err != nil {
+	if r := repoOf(spec); r != "" {
+		if err = stampCut(spec, checkpointID, r, checkpointBranch(checkpointID)); err == nil {
+			_, err = repoCut(r, checkpointBranch(checkpointID), base)
+		}
+	} else {
+		_, err = cutBranch(checkpointBranch(checkpointID), base)
+	}
+	if err != nil {
 		return err
 	}
 	if spec.Open() {
@@ -201,7 +261,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			return err
 		}
 		if builds == 0 {
-			inv, err := contract.NewInvocation(spec.ID, slicingPrompt(spec.ID))
+			inv, err := contract.NewInvocation(spec.ID, contexts.Focus(slicingPrompt(spec.ID), spec))
 			if err != nil {
 				return err
 			}

@@ -19,6 +19,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
+
+	"jayulabs.org/mugicrew/git"
 )
 
 // Loop states (ADR 0050). Off is never written: it is what an unheld lock reads.
@@ -26,15 +29,19 @@ const (
 	Off      = "off"
 	On       = "on"
 	Draining = "draining"
+	Limited  = "limited" // polling, claude dispatch held until a Plan usage reset
 )
 
 // Status is a loop's state as read through the lock: Pid is set only when held.
 // Rev and StorePath name the pinned build the holder runs (ADR 0060 §5); an
-// installed loop has only StorePath, its own executable (ADR 0090 §7); both are
+// installed loop has only StorePath, its own executable (ADR 0295 §3); both are
 // empty for a holder that has not written its body. Watch marks a watched loop (ADR 0090
 // §4), and Source the git common dir it watches (§7). Inflight is a draining loop's
 // in-flight bead titles. RestartTo is the rev a restart drain will exec onto, and
 // FailedRev the main rev whose build failed (ADR 0063 §1–2); both empty otherwise.
+// A limited loop is live like an on one: it carries the in-flight titles too, and
+// ResetsAt (when the hold ends, before the resume's minute of slack) with LimitSource
+// (message, usage or fallback); a draining write drops both.
 type Status struct {
 	State     string   `json:"state"`
 	Pid       int      `json:"pid"`
@@ -45,9 +52,100 @@ type Status struct {
 	Inflight  []string `json:"inflight,omitempty"`
 	RestartTo string   `json:"restart_to,omitempty"`
 	FailedRev string   `json:"failed_rev,omitempty"`
+
+	ResetsAt    time.Time `json:"resets_at,omitzero"`
+	LimitSource string    `json:"limit_source,omitempty"`
 }
 
-// HeldError is Acquire's refusal: another process holds the lock.
+// StopDrain reports a drain a stop began, which a start can cancel; a restart
+// drain (RestartTo set) is not one.
+func (s Status) StopDrain() bool { return s.State == Draining && s.RestartTo == "" }
+
+// Section groups a status Line; Lines put a blank row between sections (ADR 0295 §1).
+type Section string
+
+// The closed set of sections, in print order.
+const (
+	SecState    Section = "state"
+	SecBuild    Section = "build"
+	SecInflight Section = "in flight"
+	SecLimit    Section = "limit"
+	SecStale    Section = "stale"
+	SecWatch    Section = "watch"
+)
+
+// Line is one labelled status field.
+type Line struct {
+	Section      Section
+	Label, Value string
+}
+
+// Lines is the `loop status` layout as structured lines (ADR 0295 §2–3), the single
+// formatter behind Text and the TUI loop menu (ADR 0288 §4). Off, or a lock held with
+// pid 0 (body not yet written), is just the state line; empty sections are omitted.
+func (st Status) Lines() []Line {
+	if st.State == Off || st.Pid == 0 {
+		return []Line{{SecState, "state", st.State}}
+	}
+	state := st.State
+	if st.FailedRev != "" {
+		state += " (stale)"
+	}
+	ls := []Line{{SecState, "state", state}}
+	if st.RestartTo != "" {
+		ls = append(ls, Line{SecState, "restarting onto", "main " + Short(st.RestartTo)})
+	}
+	ls = append(ls, Line{SecState, "pid", fmt.Sprint(st.Pid)})
+	if st.Rev != "" {
+		ls = append(ls, Line{SecBuild, "main", Short(st.Rev)})
+	}
+	if st.StorePath != "" {
+		ls = append(ls, Line{SecBuild, "store", st.StorePath})
+	}
+	ls = append(ls, Line{SecInflight, "in flight", fmt.Sprint(len(st.Inflight))})
+	if st.State == Limited {
+		src := st.LimitSource
+		if src == "fallback" {
+			src += " (1h, no reset time found)"
+		}
+		ls = append(ls, Line{SecLimit, "held by usage limit until", st.ResetLabel()}, Line{SecLimit, "reset time from", src})
+	}
+	if st.FailedRev != "" {
+		ls = append(ls, Line{SecStale, "stale", fmt.Sprintf("build of main %s failed (see build.failed in events)", Short(st.FailedRev))})
+	}
+	if st.Watch {
+		ls = append(ls, Line{SecWatch, "watching", strings.TrimSuffix(st.Source, "/.git") + " " + git.MainlineOf(st.Source)})
+	}
+	return ls
+}
+
+// Text is the plain `loop status` text: one `label: value` per line, a blank line
+// between sections (ADR 0295), shared with the TUI loop menu through Lines.
+func (st Status) Text() string {
+	var b strings.Builder
+	var prev Section
+	for i, l := range st.Lines() {
+		if i > 0 && l.Section != prev {
+			b.WriteByte('\n')
+		}
+		prev = l.Section
+		b.WriteString(l.Label + ": " + l.Value + "\n")
+	}
+	return b.String()
+}
+
+// ResetLabel is a limited loop's reset time as the status surfaces show it: local
+// 15:04, or Jan 2 15:04 when not today, with no zone.
+func (s Status) ResetLabel() string {
+	t := s.ResetsAt.Local()
+	if t.Format(time.DateOnly) != time.Now().Format(time.DateOnly) {
+		return t.Format("Jan 2 15:04")
+	}
+	return t.Format("15:04")
+}
+
+// HeldError is Acquire's refusal: another process holds the lock. `loop start`
+// cancels a stop drain before it gets here (ADR 0236); a restart drain is refused.
 type HeldError struct{ Status Status }
 
 func (e *HeldError) Error() string {
@@ -73,11 +171,15 @@ type Lock struct {
 // onto this image adopts the fd it handed on. The next stop and start moves the
 // loop onto the graph's lock.
 func Resolve(common string) (string, error) {
+	return ResolveIn(common, os.Getenv("BEADS_DIR"))
+}
+
+// ResolveIn is Resolve for a graph dir the caller already holds (dir "" is no graph).
+func ResolveIn(common, dir string) (string, error) {
 	legacy := filepath.Join(common, "mugicrew", "loop.lock")
 	if st, err := Read(legacy); err == nil && st.State != Off {
 		return legacy, nil
 	}
-	dir := os.Getenv("BEADS_DIR")
 	if dir == "" {
 		return "", errors.New("no Bead Graph: BEADS_DIR is unset")
 	}
@@ -220,3 +322,6 @@ func parse(f *os.File) Status {
 	json.Unmarshal(body, &st)
 	return st
 }
+
+// Short is r cut to seven characters, a rev as displayed.
+func Short(r string) string { return r[:min(7, len(r))] }

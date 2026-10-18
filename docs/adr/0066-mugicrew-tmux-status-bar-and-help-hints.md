@@ -1,6 +1,6 @@
 # ADR 0066: tmux status bar and help hints — a bare TUI, a HITL bar that flips when the bead closes
 
-Status: Accepted
+Status: Accepted — §2 superseded by ADR 0229 (…hints-bar-and-key-reference…)
 Date: 2026-10-05
 
 Amends: ADR 0038 §5 (the HITL status line), ADR 0058 §4 (the `?` key reference).

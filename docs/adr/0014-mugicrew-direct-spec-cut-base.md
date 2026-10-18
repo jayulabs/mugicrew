@@ -3,6 +3,13 @@
 Status: Accepted
 Date: 2026-09-23
 
+Superseded in part by: ADR 0287 (a-direct-spec-s-anchor-is-a-bead-pin-under-every-land-strategy) — §1 (the mechanism only; the
+exact-base-at-birth principle survives), §2 and §4. §3 is restated: a Spec with
+neither an `Anchor:` pin nor a `Spec:` trailer is a hard failure.
+
+> **Amended by ADR 0212:** under `land_strategy=gitlab` the anchor is a bead pin,
+> not a commit; ADR 0287 makes that the rule under every strategy.
+
 Amends: ADR 0010 (the landed-base seam now spans a headless direct Spec, not
 only a container-branch land) and ADR 0012 (a mugi-grill session gains a
 mandatory terminal anchor commit).
@@ -53,7 +60,8 @@ mainline, which is exactly what the exact-anchor cut needs. This mirrors the
 Chart path, where the land is always exactly one `Chart: <id>`-trailered commit.
 Invariant: **exactly one `Spec: <spec-id>` commit on mainline per direct Spec.**
 
-**3. A missing anchor is a hard failure, not a fallback.** If Zoro dispatches on
+**3. A missing anchor is a hard failure, not a fallback.** (Restated by ADR 0287: a
+Spec with neither an `Anchor:` pin nor a `Spec:` trailer.) If Zoro dispatches on
 a headless `kind:spec` and `LandedBase("Spec: "+id)` finds no trailer, it errors
 and does **not** cut. A silent `rev-parse main` fallback is the drift-prone path
 decision 1 rejects, wearing a disguise; a missing anchor means the producer

@@ -15,6 +15,8 @@ lockfile).
    tab. Its label tracks state: `o loop on` (off), `o loop off` (on),
    `o force-stop` (draining). A stray press is safe: start is harmless and
    stop only drains.
+   > **Amended (2026-10-16, ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain-by-signal-generation)):** on a stop drain `o` opens the
+   > force / keep-on dialog (§3); `o` start also cancels a drain.
 2. **The TUI shells out, never owns.** `o` runs `mugicrew loop start`,
    `mugicrew loop stop`, or `mugicrew loop stop --force`, exactly as the CLI
    does. The status line shows `starting loop…` / `stopping loop…` until the
@@ -23,7 +25,13 @@ lockfile).
 3. **Force confirms inline.** Force while draining reuses ADR 0026's
    blocked-launch confirm edit mode: status line `N efforts in flight will be
    abandoned: <title>…, <title>… +N — force stop?`, footer
-   `y force · n/esc cancel`. Only `y` forces. A draining loop always has an
+   `y force · n/esc cancel`. Only `y` forces.
+   > **Amended (2026-10-16, ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain-by-signal-generation)):** on a stop drain the dialog is
+   > `y force · k keep on · n/esc back`, the body drops the trailing "force stop?",
+   > and `k` runs `loop start` (`--watch` when watched) with status `resuming
+   > loop…`. The header keeps reading `loop draining N` until a lock read confirms
+   > the resume. A CLI error shows verbatim.
+   A draining loop always has an
    effort in flight, so every TUI force confirms (ADR 0050 §3).
 4. **State lives in the tab bar**, visible on every tab:
    `Graph Inbox(N) Logs  · N live · loop on|off|draining N`. Colour: dim off,

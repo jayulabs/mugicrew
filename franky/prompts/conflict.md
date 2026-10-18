@@ -15,8 +15,12 @@ Re-run the rebase to reproduce the conflict:
 
     git rebase {{.Base}}        # replay the branch's commits onto the base; the conflict resurfaces
 
-If the bead body names an **ADR-number clash** instead, the rebase is clean:
-rebase onto the base, then read crew doc adr-renumber.md and renumber as it
+If the bead body says `variant: requested`, a human asked for this rebase and no
+land failed: rebase onto the base and resolve any conflicts as below. A clean
+rebase with nothing to resolve is a complete result.
+
+If the bead body names a **numbered-file clash** instead, the rebase is clean:
+rebase onto the base, then read crew doc sequence-renumber.md and renumber as it
 says. A clean rebase alone does NOT resolve a clash.
 
 Resolve a content conflict in these steps:
@@ -28,7 +32,7 @@ Resolve a content conflict in these steps:
    behind them.
 3. **Resolve each hunk by judgment**, never by blindly taking one side.
    Preserve both intents where you can; where they are incompatible, pick the
-   one matching the {{if .SpecID}}effective Spec{{else if .SurgeryID}}Surgery's intent{{else}}bead's intent{{end}} and note the trade-off in the commit
+   one matching the {{if .SpecID}}effective Spec{{else if .Surgeries}}Surgeries' intent{{else}}bead's intent{{end}} and note the trade-off in the commit
    message. Do not invent new behaviour. Always resolve this rebase:
    never `git rebase --abort`.
 4. **Run the checks.** Discover the Workspace's automated checks (typically
@@ -39,17 +43,20 @@ Resolve a content conflict in these steps:
 
 Read crew doc checkpoint-rules.md: resolve toward the **effective** Spec
 (`bd show {{.SpecID}}` prints the body and its AMENDMENT comments).
-{{- else if .SurgeryID}}
+{{- else if .Surgeries}}
 
-Resolve toward the human's intent in the Surgery (`bd show {{.SurgeryID}}`
-prints its description and comments).
+Resolve toward the human's intent in the Surgeries above (`bd show <id>`
+prints a description and comments).
 {{- end}}
+
+Keep every commit message and its trailers (`Surgery: <id>`, `Build: <id>`)
+when resolving: review and the end rule attribute commits by trailer.
 
 ## Commit to your effort branch — only if dirty — then integrate
 
 Roll forward, don't double-resolve. Inspect the state FIRST: if the rebase reports
-nothing to do and the tree is clean (and, for a clash, no ADR the branch adds still
-shares a number with the base in its own `docs/adr/`), a prior run already resolved
+nothing to do and the tree is clean (and, for a clash, no file the branch adds still
+shares a number with the base in its own number space), a prior run already resolved
 this conflict — commit nothing, and go straight to the integrate below.
 
 Then, as your last step, run `mugicrew integrate` in this tree. It publishes your

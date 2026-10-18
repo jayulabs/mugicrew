@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"jayulabs.org/mugicrew/git"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +113,32 @@ func TestPsJSONEmpty(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) != "[]" {
 		t.Errorf("empty ps --json = %q, want []", out.String())
+	}
+}
+
+// A bare shell (no BEADS_DIR) still reads the lock dir the dispatcher took: ps and
+// abort resolve the Bead Graph themselves, so the liveness reads see it.
+func TestPsAndAbortResolveGraphWithoutBeadsDir(t *testing.T) {
+	const graph = "/g/.beads"
+	t.Setenv("BEADS_DIR", "")
+	orig, origRoot := graphDir, git.RepoRoot
+	t.Cleanup(func() { graphDir, git.RepoRoot = orig, origRoot })
+	git.RepoRoot = func() (string, error) { return "/w", nil }
+	graphDir = func(string) (string, error) { return graph, nil }
+
+	var seen string
+	stubPs(t, []bd.Bead{{ID: "mc-b", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"}}, nil)
+	probe = func(ids []string) map[string]bool { seen = os.Getenv("BEADS_DIR"); return nil }
+	if err := runPs(nil, io.Discard); err != nil || seen != graph {
+		t.Errorf("ps probed under BEADS_DIR %q, %v; want %q", seen, err, graph)
+	}
+
+	t.Setenv("BEADS_DIR", "")
+	seen = ""
+	oa := abortEffort
+	t.Cleanup(func() { abortEffort = oa })
+	abortEffort = func(string, string) ([]int, bool, error) { seen = os.Getenv("BEADS_DIR"); return nil, true, nil }
+	if err := runAbort([]string{"mc-b"}, io.Discard); err != nil || seen != graph {
+		t.Errorf("abort ran under BEADS_DIR %q, %v; want %q", seen, err, graph)
 	}
 }

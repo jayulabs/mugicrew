@@ -1,0 +1,1 @@
+error: flake 'git+file:///x?ref=a&rev=b' does not provide attribute 'packages.x86_64-linux.nope'

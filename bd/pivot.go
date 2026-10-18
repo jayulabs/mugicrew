@@ -170,6 +170,11 @@ func PivotCheckpoint(pivotID string) (string, bool, error) {
 	return kindAlong(pivotID, "up", "blocks", contract.KindCheckpoint)
 }
 
+// GateTargets is every bead a pivot blocks, any status — the reverse gate walk
+// PivotCheckpoint takes, unfiltered: the loop's backstop supersedes a pivot
+// whose every target is closed (ADR 0124).
+func GateTargets(pivotID string) ([]Bead, error) { return depTargets(pivotID, "up", "blocks") }
+
 // PivotSpec is the Spec a pivot is related to — Zoro.Launch's second resolved id.
 func PivotSpec(pivotID string) (string, bool, error) {
 	return kindAlong(pivotID, "down", "related", contract.KindSpec)
@@ -254,6 +259,47 @@ func SpawnDiscoveredIfAbsent(originID, predID string, s Successor) (id string, c
 	return id, err == nil, err
 }
 
+// SpawnOffshootSignalIfAbsent files an unparented Signal discovered-from originID
+// unless one (any status) already is: external work found mid-run, gated by intake
+// like any other (idempotent, so a re-run of the finding bead files it once).
+func SpawnOffshootSignalIfAbsent(originID, title, body string) (id string, created bool, err error) {
+	found, err := depTargets(originID, "up", "discovered-from")
+	if err != nil {
+		return "", false, err
+	}
+	if id, ok := firstOfKind(found, contract.KindSignal); ok {
+		return id, false, nil
+	}
+	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindSignal}, title, body), "--deps", "discovered-from:"+originID)...)
+	return id, err == nil, err
+}
+
+// signalTitled is the Signal among beads titled exactly title.
+func signalTitled(beads []Bead, title string) (string, bool) {
+	for _, b := range beads {
+		if b.Kind == contract.KindSignal && b.Title == title {
+			return b.ID, true
+		}
+	}
+	return "", false
+}
+
+// SpawnOffshootSignalTitledIfAbsent is SpawnOffshootSignalIfAbsent keyed on the
+// title instead of any Signal: the origin may already carry a crewmate's own offshoot
+// Signal (a Draft, published or closed) that must not stand in for this one.
+func SpawnOffshootSignalTitledIfAbsent(originID, title, body string) (id string, created bool, err error) {
+	found, err := depTargets(originID, "up", "discovered-from")
+	if err != nil {
+		return "", false, err
+	}
+	title = stripTitle(title, "kind", string(contract.KindSignal))
+	if id, ok := signalTitled(found, title); ok {
+		return id, false, nil
+	}
+	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindSignal}, title, body), "--deps", "discovered-from:"+originID)...)
+	return id, err == nil, err
+}
+
 // OpenChildBeads is a container's open children of every kind — the members a
 // sweep closes out.
 func OpenChildBeads(id string) ([]Bead, error) {
@@ -273,6 +319,16 @@ func OpenChildBeads(id string) ([]Bead, error) {
 // ForceClose closes over bd's refusals (an open blocker, open children) — the
 // sweep retiring a frozen Checkpoint and its members, already decided by a human.
 func ForceClose(id, reason string) error {
-	_, err := run("close", id, "--force", "--reason", reason)
+	return ForceCloseAll([]string{id}, reason)
+}
+
+// ForceCloseAll is ForceClose over ids in one bd close: the loop's straggler
+// backstop retiring a swept Checkpoint's late children, and a swept member's
+// tail retiring its non-Signal Drafts (ADR 0124).
+func ForceCloseAll(ids []string, reason string) error {
+	_, err := run(append(append([]string{"close"}, ids...), "--force", "--reason", reason)...)
 	return err
 }
+
+// DiscoveredFromSources is the beads id was discovered from: where an offshoot was found.
+func DiscoveredFromSources(id string) ([]Bead, error) { return depTargets(id, "down", "discovered-from") }

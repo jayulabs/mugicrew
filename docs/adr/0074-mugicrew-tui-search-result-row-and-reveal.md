@@ -1,6 +1,6 @@
 # ADR 0074: mugicrew TUI Search result row, and `G` reveals the selection in the Graph
 
-Status: Accepted
+Status: Accepted; for v2, §3's `h` flip superseded by ADR 0175 (v1 keeps it)
 Date: 2026-10-06
 
 Amends: ADR 0058 §1 (`G` is a plain tab jump) for the Search tab, and fills the

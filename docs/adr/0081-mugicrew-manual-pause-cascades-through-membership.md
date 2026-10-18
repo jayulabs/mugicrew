@@ -75,3 +75,5 @@ The grilling settled the rule.
   they stay open. That is intended: the container is paused.
 - How the TUI renders an inherited pause on a member row is still open
   (pause-controls Chart).
+
+> **Amended by ADR 0158:** `paused:context` cascades through membership like `manual`; the walk runs only when a known bead carries one of them.

@@ -322,12 +322,18 @@ the clone's `main` and runs on the clone's own lock, event log and beads.
   stdout/stderr (panic traces, child tools' raw output) go to
   `<git-common-dir>/mugicrew/loop.out`, beside `events.jsonl`, truncated on each
   start and never rotated.
-- `mugicrew loop status`: `off`, `on (pid N, main <short-rev>, <store path>)` or
-  `draining (pid N, main <short-rev>, <store path>, K in flight: …)`. An `on`
-  loop whose build of a newer main failed adds a second line, `stale: build of
-  main <short-rev> failed (see build.failed in events)`. `--json`
+- `mugicrew loop status`: prints labelled `label: value` fields in sections
+  separated by a blank line, each section left out when empty: state
+  (`state: off|on|limited|draining`, `restarting onto: main <short-rev>` on a
+  restart drain, `pid: N`), build (`main: <short-rev>` from source, `store:
+  <path>`), `in flight: N` (a count), limit (`held by usage limit until:
+  <time>`, `reset time from: …`), stale (`stale: build of main <short-rev>
+  failed (see build.failed in events)`) and watch (`watching: <source repo>
+  <mainline>`). A stale loop reads `on (stale)` or `limited (stale)`. Off
+  prints only `state: off`. `--json`
   prints the lock body as one object (`state`, `pid`, `rev`, `store_path`,
-  `inflight`, `restart_to`, `failed_rev`; empty optional fields omitted).
+  `inflight`, `restart_to`, `failed_rev`; empty optional fields omitted). See
+  ADR 0295 (mugicrew-loop-status-prints-labelled-fields…).
 - `mugicrew loop stop [--force]`: SIGTERM drains (waits for in-flight efforts);
   `--force` abandons them, leaving their claims `in_progress`. Force is a second
   SIGTERM, sent once the loop has written `draining` (the runtime coalesces an

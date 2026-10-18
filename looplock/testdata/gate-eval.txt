@@ -1,0 +1,2 @@
+error: syntax error, unexpected '}'
+       at /nix/store/x-source/flake.nix:3:1

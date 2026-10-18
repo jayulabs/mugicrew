@@ -73,11 +73,10 @@ If the human exits while the current step still fails, leave the Task claimed
 If the blocker is work mugicrew could do (a code change, a missing capability),
 offer an offshoot Signal and file it only on the human's approval, before the
 stuck comment, and name it in that comment. It is discovered-from the Task with
-no blocks edge, so the Task is not released when the Signal is published:
-
-    bd create --type task --labels kind:signal,drafted-by:%[1]s -s deferred --no-inherit-labels \
-      --deps discovered-from:%[1]s \
-      --title "<what is missing>" --description "<the stuck step, what failed, what mugicrew should change>"
+no blocks edge, so the Task is not released when the Signal is published. Read
+crew doc signal-filing.md and file it in its offshoot form, discovered-from
+%[1]s; the description holds the stuck step, what failed, and what mugicrew
+should change.
 
 %[2]s
 

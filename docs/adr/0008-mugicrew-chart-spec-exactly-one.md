@@ -71,6 +71,10 @@ The dichotomy is clean with no middle ground lost:
 | coherent work, one branch, several pieces | **one Spec**, sliced into many Builds |
 | genuinely independent efforts | **offshoot-Signals** → own Charts → own Specs |
 
+> **Amended by ADR 0135:** fan-out *above* the spine is valid too: an
+> Initiative holds several member chains, beside offshoots and the Spec → Build
+> slice. Succession stays 1:1, `Chart → Spec` included.
+
 ## Consequences
 
 - **One rule for the spine:** succession is always 1:1; fan-out is always an

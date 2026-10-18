@@ -27,6 +27,9 @@ Judge from the graph, not from memory:
 
       bd dep list %[1]s --direction=up --json     # then keep only the CLOSED parent-child children
 
+  Skip the kind:survey child: it is the Chart's charting session, not a defog
+  bead, and settles no answer.
+
   Closed children close the promote-side spin: a Not-yet-specified bullet can read
   as open while a now-closed child already answered it, if charting never
   back-updated the body. Without the closed children in hand you WILL
@@ -64,6 +67,8 @@ Spawn each with chart-body.md's defog-create command, filled in for this Chart
 
     bd create --type task --labels kind:<grilling|research|prototype>,drafted-by:%[1]s \
       -s deferred --parent %[1]s --no-inherit-labels --title "..." --description "..."
+
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 A step the work will need in the external world (outside the bead graph and
 the code) may be drafted as a free-standing Task, never a Chart child (no

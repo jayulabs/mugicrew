@@ -2,6 +2,8 @@ package session
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -16,7 +18,7 @@ func stubIntegrate(t *testing.T, sha string, err error) (args *[]string, unpause
 	origGit, origUnpause := integrateGit, unpause
 	t.Cleanup(func() { integrateGit, unpause = origGit, origUnpause })
 	args, unpaused = new([]string), new([]string)
-	integrateGit = func(container, id, trailer string) (string, int, error) {
+	integrateGit = func(_ git.Repo, container, id, trailer string) (string, int, error) {
 		*args = []string{container, id, trailer}
 		return sha, 0, err
 	}
@@ -27,7 +29,7 @@ func stubIntegrate(t *testing.T, sha string, err error) (args *[]string, unpause
 var pausedBuild = bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Labels: []string{"paused:" + bd.PausedIntegrateConflict}}
 
 // The verb's exit code says what happened (FR10): 0 integrated or nothing ahead,
-// 2 a conflict (rebase, held, landed), 1 transient (spent retries included). Only
+// 2 a conflict (rebase, held), 3 landed, 1 transient (spent retries included). Only
 // a 0 lifts paused:integrate-conflict (FR37).
 func TestIntegrateExitCodesAndPauseLift(t *testing.T) {
 	cases := []struct {
@@ -41,7 +43,7 @@ func TestIntegrateExitCodesAndPauseLift(t *testing.T) {
 		{"nothing ahead", "", nil, 0, true},
 		{"rebase conflict", "", &git.IntegrateConflict{Reason: "rebase", Container: "checkpoint/ws-cp"}, 2, false},
 		{"held", "", &git.IntegrateConflict{Reason: "held", Container: "checkpoint/ws-cp", Holder: "/h"}, 2, false},
-		{"landed", "", &git.IntegrateConflict{Reason: "landed", Container: "checkpoint/ws-cp"}, 2, false},
+		{"landed", "", &git.IntegrateConflict{Reason: "landed", Container: "checkpoint/ws-cp"}, 3, false},
 		{"retries spent", "", git.ErrContended, 1, false},
 		{"transient", "", errors.New("boom"), 1, false},
 	}
@@ -107,6 +109,7 @@ func TestIntegrateReplaceModeExpectsThePinnedTip(t *testing.T) {
 		want []string
 	}{
 		{bd.Bead{ID: "mc-c", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: b\nTip: t1p"}, []string{"checkpoint/ws-cp", "t1p"}},
+		{bd.Bead{ID: "ws-cr", Kind: contract.KindCritique, Parent: "ws-cp", Description: "Base: b\nTip: t3p"}, []string{"checkpoint/ws-cp", "t3p"}},
 		{bd.Bead{ID: "ws-cc", Kind: contract.KindChartConflict, Parent: "ws-ch", Description: "Base: b\nTip: t2p"}, []string{"chart/ws-ch", "t2p"}},
 	} {
 		squash, _ := stubIntegrate(t, "sq1", nil)
@@ -127,7 +130,7 @@ func stubReplace(t *testing.T, sha string, err error) (args *[]string) {
 	orig := integrateReplace
 	t.Cleanup(func() { integrateReplace = orig })
 	args = new([]string)
-	integrateReplace = func(container, pinned string) (string, int, error) {
+	integrateReplace = func(_ git.Repo, container, pinned string) (string, int, error) {
 		*args = []string{container, pinned}
 		return sha, 0, err
 	}
@@ -147,5 +150,50 @@ func TestIntegrateRefusesUnpinnedReplaceAndContainerless(t *testing.T) {
 		if code := Integrate(b, "agent", &out); code != 1 || *args != nil || *replace != nil || out.Len() == 0 {
 			t.Errorf("%s: exit %d, git args %q %q, output %q; want a loud 1 with no git", b.Kind, code, *args, *replace, out.String())
 		}
+	}
+}
+
+// stubGitlabFetch sets land_strategy and scripts the Forge main fetch, recording call order.
+func stubGitlabFetch(t *testing.T, strategy string, fetchErr error) (calls *[]string) {
+	t.Helper()
+	origName, origFetch, origReplace := git.LandStrategyName, fetchMainline, integrateReplace
+	t.Cleanup(func() { git.LandStrategyName, fetchMainline, integrateReplace = origName, origFetch, origReplace })
+	calls = new([]string)
+	git.LandStrategyName = func() (string, error) { return strategy, nil }
+	fetchMainline = func(git.Repo) (string, error) { *calls = append(*calls, "fetch"); return "", fetchErr }
+	integrateReplace = func(git.Repo, string, string) (string, int, error) {
+		*calls = append(*calls, "replace")
+		return "", 0, &git.IntegrateConflict{Reason: git.ConflictLanded, Container: "checkpoint/ws-cp"}
+	}
+	return calls
+}
+
+var replaceBead = bd.Bead{ID: "mc-c", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: b\nTip: t1p"}
+
+// Under gitlab a replace integrate fetches Forge main before its landed check (exit 3
+// once the fetched main carries the trailer); a failed fetch publishes nothing
+// (exit 1); other strategies never fetch.
+func TestIntegrateReplaceFetchesForgeMainUnderGitlab(t *testing.T) {
+	var out strings.Builder
+	calls := stubGitlabFetch(t, git.LandStrategyGitlab, nil)
+	if code := Integrate(replaceBead, "agent", &out); code != ExitLanded || strings.Join(*calls, ",") != "fetch,replace" {
+		t.Errorf("gitlab: exit %d, calls %q; want 3 after fetch,replace", code, *calls)
+	}
+	calls = stubGitlabFetch(t, git.LandStrategyGitlab, errors.New("forge down"))
+	if code := Integrate(replaceBead, "agent", &out); code != ExitTransient || strings.Join(*calls, ",") != "fetch" {
+		t.Errorf("failed fetch: exit %d, calls %q; want 1 and no replace", code, *calls)
+	}
+	calls = stubGitlabFetch(t, git.LandStrategyLocal, nil)
+	Integrate(replaceBead, "agent", &out)
+	if strings.Join(*calls, ",") != "replace" {
+		t.Errorf("local: calls %q, want no fetch", *calls)
+	}
+}
+
+// A replace refused off its pinned tip is its own exit (5), not a transient 1.
+func TestIntegrateReplaceOffPinIsItsOwnExit(t *testing.T) {
+	stubReplace(t, "", fmt.Errorf("%w: checkpoint/ws-cp was rewritten", git.ErrOffPin))
+	if code := Integrate(replaceBead, "agent", io.Discard); code != ExitOffPin {
+		t.Errorf("exit %d, want %d", code, ExitOffPin)
 	}
 }

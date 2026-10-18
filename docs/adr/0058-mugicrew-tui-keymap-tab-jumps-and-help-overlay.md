@@ -1,6 +1,6 @@
 # ADR 0058: mugicrew TUI keymap — G/I/L tab jumps, a `?` key reference, and the audit fixes
 
-Status: Accepted — §3 Logs `esc` amended by a Spec (FR7: `esc` clears search → kind → scope); `S` (Search) jump, 4-tab bar and its 40-col fallback added by ADR 0072; §1 `G` reveals the selection on Search (ADR 0074) and Inbox (a Spec)
+Status: Accepted — §3 Logs `esc` amended by a Spec (FR7: `esc` clears search → kind → scope); `S` (Search) jump, 4-tab bar and its 40-col fallback added by ADR 0072; §1 `G` reveals the selection on Search (ADR 0074) and Inbox (a Spec); for v2, §6's `h` key superseded by ADR 0175 (v1 keeps it); §4 Content and Layout and §5 separator tightening superseded by ADR 0229 (…hints-bar-and-key-reference…)
 Date: 2026-10-04
 
 Amends: ADR 0026 (the footer is the single command surface, with no modal). Chart

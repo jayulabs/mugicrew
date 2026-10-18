@@ -358,3 +358,23 @@ func TestRecordCarry(t *testing.T) {
 		t.Errorf("err attr: failed=%v info=%v", failed.Attrs["err"], info.Attrs["err"])
 	}
 }
+
+// A discussion bead is attributed to Robin by the registry row alone.
+func TestBeadAttrsDiscussion(t *testing.T) {
+	a := BeadAttrs(bd.Bead{ID: "mc-d", Kind: contract.KindDiscussion})
+	for k, v := range map[string]string{"crewmate": "robin", "kind": "discussion"} {
+		if i := slices.Index(a, any(k)); i < 0 || a[i+1] != v {
+			t.Errorf("BeadAttrs = %v, want %s=%s", a, k, v)
+		}
+	}
+}
+
+// BeadAttrs carries the bead's raw kind, even an unregistered one (no owner).
+func TestBeadAttrsKind(t *testing.T) {
+	for _, b := range []bd.Bead{{ID: "mc-b", Kind: contract.KindBuild}, {ID: "mc-x", Kind: "bogus"}} {
+		a := BeadAttrs(b)
+		if i := slices.Index(a, any("kind")); i < 0 || a[i+1] != string(b.Kind) {
+			t.Errorf("BeadAttrs(%s) = %v, want kind %q", b.Kind, a, b.Kind)
+		}
+	}
+}

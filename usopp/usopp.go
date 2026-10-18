@@ -14,6 +14,8 @@ import (
 	"text/template"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 )
@@ -56,12 +58,14 @@ var (
 	openChildrenOfKind      = bd.OpenChildrenOfKind
 	openChildrenBeadsOfKind = bd.OpenChildrenOfKindBeads
 	specOf                  = bd.SpecOf
-	surgeryOf               = bd.SurgeryOf
+	surgeriesOf             = bd.SurgeriesOf
 	head                    = git.Head
+	declaredRepos           = cfglayer.Repos
 	openPivots              = bd.OpenPivots
 	pivotsDiscoveredFrom    = bd.PivotsDiscoveredFrom
 	raisePivot              = bd.RaisePivot
 	closeOnPublish          = bd.CloseOnPublish
+	changedPaths            = git.ChangedPaths
 )
 
 // reviewPrompt (review.md) runs the two-axis code-review Crew doc whole —
@@ -70,9 +74,10 @@ var (
 // findings→beads instead of a report. The effective-Spec/AMENDMENT rule, Critique
 // filing and pivot raise-or-merge are the checkpoint-rules Crew doc, shared with
 // Franky and Zoro (ADR 0005, ADR 0043–0045, ADR 0087, ADR 0088); the prompt keeps
-// only the commands with its own ids filled in. On a Spec-less Checkpoint the
-// Spec axis reads the Surgery, or reports "no spec available", and the pivot
-// section is left out (Spec D6). Pure — asserted through the render
+// only the commands with its own ids filled in. The Surgeries are always
+// read and passed beside the Spec: a Spec-less Checkpoint's Spec axis runs one
+// Surgery check per Surgery, or reports "no spec available" with none; the pivot
+// section is left out without a Spec (Spec D1, D6). Pure — asserted through the render
 // test, mirroring Franky's implementPrompt.
 //
 //go:embed prompts/review.md
@@ -84,12 +89,15 @@ var reviewTmpl = template.Must(template.New("review").Parse(reviewSrc))
 // transposition-safe: a silent swap (branch↔pin) of bare positional strings
 // would slip past the compiler.
 type reviewArgs struct {
-	ReviewID     string // the Review bead id
-	CheckpointID string // the Checkpoint under review, --parent for filed critiques
-	SpecID       string // the Spec axis's source, empty on a Spec-less Checkpoint
-	SurgeryID    string // the Spec-less Checkpoint's Surgery, the intent source in place of the Spec
-	Branch       string // checkpoint/<id>
-	Pin          string // the pinned SHA the diff is cut against
+	ReviewID     string    // the Review bead id
+	CheckpointID string    // the Checkpoint under review, --parent for filed critiques
+	SpecID       string    // the Spec axis's source, empty on a Spec-less Checkpoint
+	Surgeries    []bd.Bead // the Checkpoint's Surgeries, filing order: ID and Title are rendered
+	Branch       string    // checkpoint/<id>
+	Pin          string    // the pinned SHA the diff is cut against
+	Context      string    // the Checkpoint's declared context, empty when unfocused
+	Subtree      string    // that context's path
+	OutOfScope   []string  // changed paths outside Subtree, minus the exempt set; empty renders nothing
 }
 
 // Draft is the review's shared Draft block.
@@ -101,7 +109,7 @@ func reviewPrompt(a reviewArgs) string { return contract.Render(reviewTmpl, a) }
 
 // runReview is the one review handler (FR26–FR31): pin the Checkpoint branch HEAD
 // at review start (the Review was spawned BARE by Jinbe — Usopp pins it himself),
-// resolve the Spec (else the Surgery) for the Spec axis, fork the read-only review agent (it files
+// resolve the Spec and the Surgeries for the Spec axis, fork the read-only review agent (it files
 // critique beads, a pivot, or nothing), then drive the tail: a raised pivot wins
 // over the clean→Approval transition. An errored fork leaves the Review open for
 // the next tick, mirroring runImplement.
@@ -113,21 +121,27 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 		return fmt.Errorf("usopp: review bead %s has no parent Checkpoint membership edge", bead.ID)
 	}
 	branch := git.BranchName(string(contract.KindCheckpoint), bead.Parent)
-	pin, err := head(branch)
+	pin, err := pinOf(bead.Parent, branch)
 	if err != nil {
 		return err
 	}
-	specID, found, err := specOf(bead.Parent)
+	specID, _, err := specOf(bead.Parent)
 	if err != nil {
 		return err
 	}
-	var surgeryID string
-	if !found {
-		if surgeryID, _, err = surgeryOf(bead.Parent); err != nil {
-			return err
-		}
+	surgeries, err := surgeriesOf(bead.Parent)
+	if err != nil {
+		return err
 	}
-	prompt := reviewPrompt(reviewArgs{ReviewID: bead.ID, CheckpointID: bead.Parent, SpecID: specID, SurgeryID: surgeryID, Branch: branch, Pin: pin})
+	args := reviewArgs{ReviewID: bead.ID, CheckpointID: bead.Parent, SpecID: specID, Surgeries: surgeries, Branch: branch, Pin: pin}
+	focus, err := focusReview(&args)
+	if err != nil {
+		return err
+	}
+	prompt := reviewPrompt(args)
+	if focus != "" {
+		prompt += "\n\n" + focus
+	}
 	inv, err := contract.NewInvocation(bead.ID, prompt)
 	if err != nil {
 		return err
@@ -147,6 +161,50 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 		return raisePivot(ctx, bead, specID, pivots)
 	}
 	return approveIfClean(ctx, bead, pin)
+}
+
+// pinOf is the Checkpoint branch's live tip: read in the child repo for a repo
+// context. With no repo = declared it reads no bead (ADR 0157's second rule).
+func pinOf(checkpointID, branch string) (string, error) {
+	if len(declaredRepos(".")) > 0 {
+		cp, err := showBead(checkpointID)
+		if err != nil {
+			return "", err
+		}
+		if r := contexts.RepoOf(cp); r != "" {
+			return r.Head(branch)
+		}
+	}
+	return head(branch)
+}
+
+// focusReview fills the out-of-scope slots for a Checkpoint labelled with a declared
+// context and returns its focus line ("" when none). With no contexts declared it
+// reads no bead and does no git work; with an unlabelled Checkpoint, no git work.
+func focusReview(a *reviewArgs) (string, error) {
+	cs := contexts.Contexts(".")
+	if len(cs) == 0 {
+		return "", nil
+	}
+	cp, err := showBead(a.CheckpointID)
+	if err != nil {
+		return "", err
+	}
+	name := bd.ContextOf(cp)
+	subtree, ok := cs[name]
+	if name == "" || !ok {
+		return "", nil
+	}
+	if contexts.RepoOf(cp) != "" { // the whole child is in scope: no paths to compute
+		a.Context, a.Subtree = name, subtree
+		return contexts.FullLine(cs, cp), nil
+	}
+	paths, err := changedPaths(git.Mainline(), a.Pin)
+	if err != nil {
+		return "", err
+	}
+	a.Context, a.Subtree, a.OutOfScope = name, subtree, contexts.OutOfScope(paths, subtree)
+	return contexts.FullLine(cs, cp), nil
 }
 
 // sweptOr is a failed fork's err — unless a concurrent confirm sweep closed the

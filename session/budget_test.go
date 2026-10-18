@@ -9,7 +9,6 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/claudecode"
 	"jayulabs.org/mugicrew/contract"
-	"jayulabs.org/mugicrew/crewdocs"
 	"jayulabs.org/mugicrew/luffy"
 	"jayulabs.org/mugicrew/nami"
 	"jayulabs.org/mugicrew/sanji"
@@ -20,11 +19,12 @@ type harnessCtx struct{ h contract.Harness }
 
 func (c harnessCtx) Harness() contract.Harness { return c.h }
 
-// Spec D6.3: every HITL kind's real tmux new-session command — the
-// crewmate's Launch through the claude backend (preamble, kind prompt, closing
-// line, --add-dir), wrapped by paneArgs/launchArgs — stays ≤ 14 KiB, 2 KiB under
-// tmux's ~16 KiB "command too long". Long paths and a long title stand in for a
-// worst realistic launch.
+// Spec D6.3, as superseded by mc-gr9l: every HITL kind's real tmux new-session
+// command — the crewmate's Launch through the claude backend, wrapped by
+// paneArgs/launchArgs — stays within the 14 KiB budget, 2 KiB under tmux's
+// ~16 KiB "command too long", and carries none of the agent argv (the prompt,
+// closing line, --add-dir, hooks), which reaches hitl-run by file. Long paths
+// and a long title stand in for a worst realistic launch.
 func TestHITLLaunchByteBudget(t *testing.T) {
 	// Zoro's pivot Launch resolves its Checkpoint and Spec through bd.
 	bin := t.TempDir()
@@ -34,12 +34,7 @@ func TestHITLLaunchByteBudget(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	dir, err := crewdocs.Dir()
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := "/home/" + strings.Repeat("u", 32)
-	longCache := strings.NewReplacer(filepath.Dir(dir), home+"/.cache/mugicrew/crewdocs")
 	wt := home + "/src/" + strings.Repeat("w", 40) + "/.git/mugicrew/worktrees/ws-rwch.12"
 	title := strings.Repeat("A long bead title naming what the session settles ", 3)
 	ctx := contract.WithClosingLine(harnessCtx{claudecode.New("claude-opus-5-5")})
@@ -48,7 +43,7 @@ func TestHITLLaunchByteBudget(t *testing.T) {
 		crew contract.Crewmate
 		kind contract.Kind
 	}{
-		{nami.Nami{}, contract.KindSignal},
+		{luffy.Luffy{}, contract.KindSignal},
 		{nami.Nami{}, contract.KindGrilling},
 		{zoro.Zoro{}, contract.KindPivot},
 		{sanji.Sanji{}, contract.KindPrototype},
@@ -60,19 +55,22 @@ func TestHITLLaunchByteBudget(t *testing.T) {
 			t.Fatalf("%s Launch: %v", c.kind, err)
 		}
 		ac := lc.(contract.AgentCommand)
-		argv := make([]string, len(ac.Argv))
-		for i, a := range ac.Argv {
-			argv[i] = longCache.Replace(a)
-		}
-		tags := sessionTags{b, ac.SessionID, wt}
-		args := launchArgs(tmuxName(b.ID), wt, home+"/.cache/mugicrew/env-1234567890", paneArgs(home+"/.nix-profile/bin/mugicrew", tags, argv), tags)
+		tags := sessionTags{b, ac.SessionID, wt, ""}
+		args := launchArgs(tmuxName(b.ID), wt, paneArgs(home+"/.nix-profile/bin/mugicrew", tags, home+"/.cache/mugicrew/argv-1234567890", home+"/.cache/mugicrew/env-1234567890"), tags)
 		n := len("tmux -S " + home + "/.cache/mugicrew/tmux-sock")
 		for _, a := range args {
 			n += len(a) + 1
 		}
 		t.Logf("%s: %d bytes", c.kind, n)
 		if n > 14*1024 {
-			t.Errorf("%s launch command is %d bytes, budget 14 KiB", c.kind, n)
+			t.Errorf("%s launch command is %d bytes, over the 14 KiB budget", c.kind, n)
+		}
+		joined := strings.Join(args, " ")
+		for _, a := range ac.Argv {
+			// Short elements (the binary, flags, the session and bead ids) legitimately recur in tags.
+			if len(a) > 40 && strings.Contains(joined, a) {
+				t.Errorf("%s: agent argv element %.60q leaked into the tmux command", c.kind, a)
+			}
 		}
 	}
 }

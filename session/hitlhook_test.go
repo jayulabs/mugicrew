@@ -4,10 +4,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 )
 
@@ -117,7 +119,7 @@ func TestHitlRunExportsPane(t *testing.T) {
 				got, seen = os.LookupEnv(paneVar)
 				return exec.Command("false").Run()
 			}
-			HitlRun([]string{"--bead=g", "--", "claude"}, meter(t))
+			HitlRun([]string{"--bead=g", argvArg(t, "claude")}, meter(t))
 			if got != tc.want || seen != (tc.want != "") {
 				t.Errorf("agent %s = %q (set %v), want %q", paneVar, got, seen, tc.want)
 			}
@@ -197,5 +199,39 @@ func TestHitlHookAutoExitRealTmux(t *testing.T) {
 	HitlHook(strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`), noAutoExit)
 	if got := deadline(); !got.IsZero() {
 		t.Errorf("deadline after a reply = %v, want disarmed", got)
+	}
+}
+
+// Finish against real tmux (Spec FR 2, FR 8): an armed session's @autofinish moves
+// to now and Finish reports armed; an unarmed one is left unset and reports not.
+func TestFinishRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	sock := filepath.Join(t.TempDir(), "s.sock")
+	origSock := socket
+	socket = func() (string, error) { return sock, nil }
+	t.Cleanup(func() { socket = origSock; tmuxCmd(sock, "kill-server").Run() })
+	if out, err := tmuxCmd(sock, "-f", "/dev/null", "new-session", "-d", "-s", "mc-x",
+		";", "new-session", "-d", "-s", "mc-y").CombinedOutput(); err != nil {
+		t.Fatalf("tmux new-session: %v: %s", err, out)
+	}
+	opt := func(s string) string {
+		out, _ := tmuxCmd(sock, "display-message", "-p", "-t", "="+s+":", "#{@autofinish}").Output()
+		return strings.TrimSpace(string(out))
+	}
+	tmuxCmd(sock, "set-option", "-t", "=mc-x:", "@autofinish", "1999999999").Run()
+	before := time.Now().Unix()
+	if armed, err := Finish(bd.Bead{ID: "mc-x"}); err != nil || !armed {
+		t.Fatalf("Finish(armed) = %v, %v; want true, nil", armed, err)
+	}
+	if n, _ := strconv.ParseInt(opt("mc-x"), 10, 64); n < before || n > time.Now().Unix() {
+		t.Errorf("@autofinish = %q, want about now", opt("mc-x"))
+	}
+	if armed, err := Finish(bd.Bead{ID: "mc-y"}); err != nil || armed {
+		t.Errorf("Finish(unarmed) = %v, %v; want false, nil", armed, err)
+	}
+	if got := opt("mc-y"); got != "" {
+		t.Errorf("unarmed @autofinish = %q after Finish, want unset", got)
 	}
 }

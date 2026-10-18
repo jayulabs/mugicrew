@@ -103,6 +103,8 @@ Lay each missing Build as a member of the Checkpoint epic:
     bd create --type task --labels kind:build,drafted-by:%[1]s -s deferred \
       --no-inherit-labels --parent <checkpointID> --title "..." --description "..."
 
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
+
 %[2]s
 
 Your own bead is the Spec, and you never close it: succession closes it for you.

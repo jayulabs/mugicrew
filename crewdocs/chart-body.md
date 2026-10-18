@@ -23,6 +23,12 @@ The whole Chart at low resolution, in five sections:
 - **Not-yet-specified**: in-scope fog you can't bead yet (see Fog of war).
 - **Out-of-scope**: work ruled beyond the Spec (see Out of scope).
 
+**At triage** (the Chart's first body, written by Luffy): the Destination names
+the one Spec (what is built, what is in and out); Notes carry what the human
+settled at triage; Decisions-so-far and Not-yet-specified are left to Nami,
+each present but empty; Out-of-scope carries only calls the human made at
+triage.
+
 ## Defog beads
 
 Each defog bead is a child of the Chart; its bead id is its identity. Its body
@@ -44,6 +50,8 @@ Each new defog bead is a Draft child of the Chart, drafted by your own bead:
 
     bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:<your bead id> \
       --parent <chartID> --no-inherit-labels --title "..." --description "..."
+
+If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 Always pass --no-inherit-labels and set kind explicitly: a child that inherits
 the Chart's kind:chart breaks one-kind routing. Wire ordering only where one
@@ -79,6 +87,6 @@ and it doesn't belong in Not-yet-specified. It gets its own Out-of-scope line:
 the gist plus why it's out.
 
 **Offshoot Signals.** Separable new work found along the way splits as an
-offshoot Signal (kind:signal, discovered-from the bead that found it), one
+offshoot Signal (filed through signal-filing.md's Offshoot form), one
 Chart each, never a second Spec on this Chart. Title it for the work it names,
 with no kind prefix: the kind:signal label carries the kind.

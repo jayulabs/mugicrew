@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"jayulabs.org/mugicrew/contexts/contextstest"
 	"jayulabs.org/mugicrew/contract"
 )
 
@@ -285,5 +289,74 @@ func TestEdgesOnPublishLandsDraftAndGateInOneBatch(t *testing.T) {
 	}
 	if len(*scripts) != 1 || !reflect.DeepEqual(ctx.edges, gate) || len(ctx.closes) != 0 {
 		t.Errorf("an effort must hand the gate to its tail and close nothing, got batches %q edges %v closes %v", *scripts, ctx.edges, ctx.closes)
+	}
+}
+
+func TestPublishRetriesTransientBatchConflict(t *testing.T) {
+	realBatch := runBatch
+	fakeDrafts(t, `[{"id":"mc-a","title":"A","status":"deferred"}]`, nil, nil)
+	runBatch = realBatch // the retry under test lives in runBatch; fake only its exec
+	sleep = func(time.Duration) {}
+	orig := runBatchOnce
+	t.Cleanup(func() { runBatchOnce, sleep = orig, time.Sleep })
+	n := 0
+	runBatchOnce = func(string) error {
+		if n++; n == 1 {
+			return exitErr("Error 1213 (40001): serialization failure")
+		}
+		return nil
+	}
+	ids, err := Publish("ws-spec", nil, nil)
+	if err != nil || !reflect.DeepEqual(ids, []string{"mc-a"}) || n != 2 {
+		t.Fatalf("ids=%v err=%v attempts=%d", ids, err, n)
+	}
+}
+
+// A nested Draft's branch was cut in the child, so it is judged and deleted there;
+// an unlabelled Draft keeps the cwd's repo.
+func TestDeleteDraftBranchesActsInTheChild(t *testing.T) {
+	ws, kid := contextstest.Workspace(t)
+	contextstest.Git(t, kid, "branch", "checkpoint/ws-nested")
+	contextstest.Git(t, ws, "branch", "checkpoint/ws-plain")
+	hasIn := func(dir, b string) bool {
+		return exec.Command("git", "-C", dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+b).Run() == nil
+	}
+	outs := deleteDraftBranches([]Bead{
+		{ID: "ws-nested", Kind: contract.KindCheckpoint, Labels: []string{"kind:checkpoint", contextstest.Label}},
+		{ID: "ws-plain", Kind: contract.KindCheckpoint, Labels: []string{"kind:checkpoint"}},
+	})
+	if len(outs) != 2 || outs[0].Err != nil || outs[1].Err != nil {
+		t.Fatalf("outcomes = %v", outs)
+	}
+	if hasIn(kid, "checkpoint/ws-nested") || hasIn(ws, "checkpoint/ws-plain") {
+		t.Error("a Draft branch survived its delete")
+	}
+}
+
+// A context-labelled Draft in a Workspace declaring no repo = makes no git call.
+func TestDraftRepoSubtreeOnlyMakesNoGitCall(t *testing.T) {
+	root := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".mugicrew"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mugicrew", "config.toml"), []byte("[context.c]\npath = \"sub\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	real, _ := exec.LookPath("git")
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\nexec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if r := draftRepo(Bead{Labels: []string{"context:c"}}); r != "" {
+		t.Fatalf("draftRepo = %q; want none", r)
+	}
+	if b, _ := os.ReadFile(log); len(b) != 0 {
+		t.Fatalf("draftRepo made git calls:\n%s", b)
 	}
 }

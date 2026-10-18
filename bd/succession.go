@@ -1,13 +1,20 @@
 package bd
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 )
@@ -18,11 +25,17 @@ import (
 // charting session fills the real body (§8.1). Container picks the bd type (epic
 // vs task, ADR 0002).
 type Successor struct {
-	Kind        contract.Kind
-	Container   bool
-	Title       string
-	Description string
-	DraftedBy   string // creator bead id: non-empty spawns a Draft (ADR 0059 §2) instead of an open bead
+	Kind           contract.Kind
+	Container      bool
+	Title          string
+	Description    string
+	DraftedBy      string // creator bead id: non-empty spawns a Draft (ADR 0059 §2) instead of an open bead
+	Parent         string // successor only: the Initiative it is born into (InitiativeOf, Spec D2); "" spawns it unparented
+	CausedBy       string // child only: a predecessor the member also succeeds (a Landing's Approval, ADR 0145 §4); "" adds no caused-by edge
+	DiscoveredFrom string // child only: provenance edge to the bead it was found from (a gate Critique's Landing); "" adds none
+	Context        string // successor container only: the context: label to carry; "" adds none
+	Repo           string // successor container only: the repo:<dir> stamp to copy; "" adds none
+	ExternalRef    string // bd external_ref the bead carries (an unparented create or a successor spawn); "" adds none
 }
 
 // Bead is what a read returns: the routing key (from labels[]) plus the fields
@@ -30,24 +43,31 @@ type Successor struct {
 // reconcile and the loop (chart:defogged, §8.3); parent/priority/created/
 // assignee/container are the TUI's grouping, ordering, and detail fields (§9).
 type Bead struct {
-	ID          string
-	Kind        contract.Kind
-	Status      string
-	Title       string
-	Description string // the bead body; reconcileChart reads it to gate the Spec-body-authored close (§8.4)
-	Labels      []string
-	Parent      string    // membership edge: the container this bead is a child of (§9.1 grouping)
-	Priority    int       // bd priority 0–4
-	Created     time.Time // freshest-first ordering in the Inbox (§9.2)
-	Updated     time.Time // bd updated_at: the Search tab's default sort (Spec D1)
-	Assignee    string    // the claimer (loop or a human), shown in detail
-	Started     time.Time // bd started_at: when it was claimed — age-since-claim, never liveness (ADR 0025); zero if unclaimed
-	Container   bool      // bd epic (a container kind, ADR 0002) → a Graph group head
-	BlockedBy   []string  // Ordering edges: depends_on_id of each blocks / conditional-blocks dependency, in edge order
-	Related     []string  // depends_on_id of each related edge, in edge order: a Rollback's target rides here (ADR 0047 §3)
-	CloseReason string    // bd close_reason: why a closed bead was closed (bd defaults it to DefaultCloseReason); detail pane only
-	CreatedBy   string    // bd created_by: an event bead's actor (ADR 0057 §2)
-	Event       bool      // bd issue_type event: a state-change record, history not work (GLOSSARY.md "Event bead")
+	ID             string
+	Kind           contract.Kind
+	Status         string
+	Title          string
+	Description    string // the bead body; reconcileChart reads it to gate the Spec-body-authored close (§8.4)
+	Labels         []string
+	Parent         string    // membership edge: the container this bead is a child of (§9.1 grouping)
+	Priority       int       // bd priority 0–4
+	Created        time.Time // freshest-first ordering in the Inbox (§9.2)
+	Updated        time.Time // bd updated_at: the Search tab's default sort (Spec D1)
+	Assignee       string    // the claimer (loop or a human), shown in detail
+	Closed         time.Time // bd closed_at: when it was closed; zero while open
+	Started        time.Time // bd started_at: when it was claimed — age-since-claim, never liveness (ADR 0025); zero if unclaimed
+	Container      bool      // bd epic (a container kind, ADR 0002) → a Graph group head
+	BlockedBy      []string  // Ordering edges: depends_on_id of each blocks / conditional-blocks dependency, in edge order
+	Related        []string  // depends_on_id of each related edge, in edge order: a Rollback's target rides here (ADR 0047 §3)
+	CausedBy       string    // depends_on_id of the caused-by edge: the predecessor, linking an Initiative's member chains in the Graph (Spec D10)
+	DiscoveredFrom []string  // depends_on_id of each discovered-from edge, oldest edge first, ties by target id (bd's array order is a hash order)
+	CloseReason    string    // bd close_reason: why a closed bead was closed (bd defaults it to DefaultCloseReason); detail pane only
+	CreatedBy      string    // bd created_by: an event bead's actor (ADR 0057 §2)
+	ExternalRef    string    // bd external_ref: the outside item this bead mirrors (jira-<KEY>); "" when none
+	Event          bool      // bd issue_type event: a state-change record, history not work (GLOSSARY.md "Event bead")
+
+	Notes, Design, AcceptanceCriteria string // bd notes, design, acceptance_criteria: free-text fields beside the description
+	CommentCount                      int    // bd comment_count: how many comments bd comments would list
 }
 
 // FixForwardReason prefixes a Rollback's close reason when it fixed forward
@@ -57,6 +77,21 @@ const FixForwardReason = "fix-forward:"
 // ObsoleteReason prefixes the close reason a confirm sweep gives the members and
 // the Checkpoint it closes out (pivot confirmed or escalated).
 const ObsoleteReason = "obsolete:"
+
+// ContainerLandedReason prefixes the close reason of a child whose integrate was
+// refused because its container had already landed (ADR 0201). It carries
+// ObsoleteReason, so a child so closed reads as swept; DrainBlockersOver skips it
+// though its effort/<child> branch is kept.
+const ContainerLandedReason = ObsoleteReason + " container landed"
+
+// ApprovedReason is the close reason of an approved Approval. Approved means
+// CloseReason equals it exactly (no prefix, no case-fold; empty is not approved),
+// so a rework:, obsolete: or Approval obsoleted: close never reads as approval
+// (ADR 0203 §5).
+const ApprovedReason = "approved"
+
+// ApprovedClosed reports whether the bead is closed with exactly ApprovedReason.
+func (b Bead) ApprovedClosed() bool { return !b.Open() && b.CloseReason == ApprovedReason }
 
 // DefaultCloseReason is the close_reason bd records when `bd close` gets no --reason.
 const DefaultCloseReason = "Closed"
@@ -69,6 +104,10 @@ const DefaultCloseReason = "Closed"
 func (b Bead) Open() bool {
 	return b.Status == "open" || b.Status == "in_progress" || b.Status == "deferred"
 }
+
+// Unclosed reports whether the bead is anything but closed (blocked included,
+// unlike Open).
+func (b Bead) Unclosed() bool { return b.Status != "closed" }
 
 // Titles is each bead's title, in order.
 func Titles(bs []Bead) []string {
@@ -102,15 +141,19 @@ func (b Bead) HasLabel(want string) bool {
 // successorCreateArgs is the pure argv that spawns a successor — split out so the
 // §3.1/§4.3 invariants are checkable without a DB: the caused-by edge is fixed
 // here in the right direction (new bead caused-by <pred>), --no-inherit-labels
-// keeps one kind: label, and the bd type is derived from Container (ADR 0002).
-// extraDeps ride the same --deps value (discoveredCreateArgs' re-run key).
+// keeps one kind: label, the bd type is derived from Container (ADR 0002), and
+// --parent rides only when the successor joins an Initiative (Spec D2). extraDeps
+// ride the same --deps value (discoveredCreateArgs' re-run key).
 func successorCreateArgs(predID string, s Successor, extraDeps ...string) []string {
 	typ := "task"
 	if s.Container {
 		typ = "epic"
 	}
 	args := append([]string{"create", "--type", typ}, labelArgs(s)...)
-	return append(args,
+	if s.Parent != "" {
+		args = append(args, "--parent", s.Parent)
+	}
+	return append(append(args, externalRefArgs(s)...),
 		"--no-inherit-labels",
 		"--deps", strings.Join(append([]string{"caused-by:" + predID}, extraDeps...), ","), // new bead caused-by pred → new is the successor
 		"--title", stripTitle(s.Title, "parent", predID), // a copied upstream prefix stops here (ADR 0097)
@@ -119,14 +162,61 @@ func successorCreateArgs(predID string, s Successor, extraDeps ...string) []stri
 	)
 }
 
-// labelArgs is a create's single kind: label — plus, for a Draft, its
+// externalRefArgs is --external-ref <ref> when s carries one, else nothing.
+func externalRefArgs(s Successor) []string {
+	if s.ExternalRef == "" {
+		return nil
+	}
+	return []string{"--external-ref", s.ExternalRef}
+}
+
+// labelArgs is a create's single kind: label — plus a context: label when set, and, for a Draft, its
 // drafted-by:<creator> label in the same --labels value and --status deferred, so
 // the Draft is born unpublished in the one bd create (Spec D3).
 func labelArgs(s Successor) []string {
-	if s.DraftedBy == "" {
-		return []string{"--labels", "kind:" + string(s.Kind)}
+	labels := "kind:" + string(s.Kind)
+	if s.Context != "" {
+		labels += "," + contextPrefix + s.Context
 	}
-	return []string{"--labels", "kind:" + string(s.Kind) + "," + contract.DraftedBy(s.DraftedBy), "--status", "deferred"}
+	if s.Repo != "" {
+		labels += "," + repoPrefix + s.Repo
+	}
+	if s.DraftedBy == "" {
+		return []string{"--labels", labels}
+	}
+	return []string{"--labels", labels + "," + contract.DraftedBy(s.DraftedBy), "--status", "deferred"}
+}
+
+const contextPrefix = "context:"
+
+// repoPrefix is the Repo stamp's label: repo:<dir>, the dir a nested container was cut
+// in (ADR 0167).
+const repoPrefix = "repo:"
+
+// RepoStampOf is the bead's repo:<dir> stamp, "" when it carries none.
+func RepoStampOf(b Bead) string {
+	for _, l := range b.Labels {
+		if dir, ok := strings.CutPrefix(l, repoPrefix); ok {
+			return dir
+		}
+	}
+	return ""
+}
+
+// StampRepo adds the repo:<dir> stamp to id.
+func StampRepo(id, dir string) error {
+	_, err := run("update", id, "--add-label", repoPrefix+dir)
+	return err
+}
+
+// ContextOf is the bead's context: label value, "" when it carries none.
+func ContextOf(b Bead) string {
+	for _, l := range b.Labels {
+		if name, ok := strings.CutPrefix(l, contextPrefix); ok {
+			return name
+		}
+	}
+	return ""
 }
 
 // findKindInDeps scans a `bd dep list … -t caused-by --json` result for the first
@@ -227,6 +317,21 @@ func SuccessorOf(id string, want contract.Kind) (succID string, found bool, err 
 	return succ, ok, nil
 }
 
+// InitiativeOf is the Initiative a successor of b is born into (Spec D2, FR11):
+// b's parent if that parent is an unclosed kind:initiative, else "". Every
+// successor spawn sets Successor.Parent through it, so a member chain stays
+// under its Initiative; a closed one is never joined (FR32).
+func InitiativeOf(b Bead) (string, error) {
+	if b.Parent == "" {
+		return "", nil
+	}
+	p, err := Show(b.Parent)
+	if err != nil || p.Kind != contract.KindInitiative || !p.Unclosed() {
+		return "", err
+	}
+	return p.ID, nil
+}
+
 // SpawnSuccessorIfAbsent is the ONLY sanctioned successor-spawn path (spec §4.3):
 // check for an existing caused-by successor of the wanted kind → if present it is
 // a no-op (idempotency by construction, safe for the stateless loop and re-run
@@ -257,8 +362,9 @@ type CarrySkip struct {
 // via blocks/conditional-blocks, so X stays gated past pred's close (ADR 0085;
 // Spec D1). Add-only — the old edge stays as lineage — and idempotent: a
 // same-type re-add exits 0 and counts as moved. Closed dependents and succ itself
-// are skipped; a dep add bd refuses for a known reason (carrySkipReason) is
+// are skipped; a dep add bd refuses for a known reason (CarrySkipReason) is
 // skipped; any other failure returns at once with moved holding what landed.
+// It also carries pred's open latch blockers onto succ (carryLatches).
 // Event-blind: callers record it (eventlog.RecordCarry).
 func Carry(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
 	out, err := run("dep", "list", pred, "--direction=up", "--json")
@@ -283,7 +389,7 @@ func Carry(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
 			skipped = append(skipped, CarrySkip{d.ID, "hierarchy"})
 		default:
 			if _, err := run("dep", "add", d.ID, succ, "-t", d.Type); err != nil {
-				reason := carrySkipReason(err)
+				reason := CarrySkipReason(err)
 				if reason == "" {
 					return moved, skipped, err
 				}
@@ -293,13 +399,46 @@ func Carry(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
 			moved = append(moved, d.ID)
 		}
 	}
+	return carryLatches(pred, succ, moved, skipped)
+}
+
+// carryLatches also lists pred's incoming blockers and blocks succ with each open
+// kind:latch among them (Spec D6; ADR 0223 §3), so a Jira wait outlives pred's
+// close. Same add-only, idempotent, skip-classified rules as the outgoing carry.
+func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]string, []CarrySkip, error) {
+	out, err := run("dep", "list", pred, "--direction=down", "-t", "blocks", "--json")
+	if err != nil {
+		return moved, skipped, err
+	}
+	var deps []struct {
+		ID     string   `json:"id"`
+		Status string   `json:"status"`
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(out), &deps); err != nil {
+		return moved, skipped, fmt.Errorf("bd: parse dep list: %w", err)
+	}
+	for _, d := range deps {
+		if d.Status == "closed" || !slices.Contains(d.Labels, "kind:"+string(contract.KindLatch)) {
+			continue
+		}
+		if _, err := run("dep", "add", succ, d.ID, "-t", "blocks"); err != nil {
+			reason := CarrySkipReason(err)
+			if reason == "" {
+				return moved, skipped, err
+			}
+			skipped = append(skipped, CarrySkip{d.ID, reason})
+			continue
+		}
+		moved = append(moved, d.ID)
+	}
 	return moved, skipped, nil
 }
 
-// carrySkipReason classifies a refused carry dep add by bd 1.3.0's error text,
+// CarrySkipReason classifies a refused carry dep add by bd 1.3.0's error text,
 // or ""
 // for an error that is not a known skip. Re-check these on a bd bump.
-func carrySkipReason(err error) string {
+func CarrySkipReason(err error) string {
 	switch msg := err.Error(); {
 	case strings.Contains(msg, "cannot be blocked by its ancestor"), strings.Contains(msg, "cannot be blocked by its descendant"):
 		return "hierarchy" // DependencyHierarchyConflictError
@@ -322,6 +461,16 @@ func childCreateArgs(parentID string, s Successor) []string {
 		typ = "epic"
 	}
 	args := append([]string{"create", "--type", typ}, labelArgs(s)...)
+	var deps []string
+	if s.CausedBy != "" {
+		deps = append(deps, "caused-by:"+s.CausedBy)
+	}
+	if s.DiscoveredFrom != "" {
+		deps = append(deps, "discovered-from:"+s.DiscoveredFrom)
+	}
+	if len(deps) > 0 {
+		args = append(args, "--deps", strings.Join(deps, ","))
+	}
 	return append(args,
 		"--no-inherit-labels",
 		"--parent", parentID,
@@ -363,6 +512,84 @@ func SpawnChildIfAbsent(parentID string, s Successor) (id string, created bool, 
 	return id, true, nil
 }
 
+// SpawnBlockingTaskIfAbsent files a Brook-owned HITL Task that blocks containerID
+// (the land hold), unless one of its open blocking Tasks already carries key in its
+// body: idempotent on (container, key). Born unparented, so it is no member.
+func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string, created bool, err error) {
+	open, err := OpenBlockersOfKind(containerID, contract.KindTask)
+	if err != nil {
+		return "", false, err
+	}
+	for _, t := range open {
+		if strings.Contains(t.Description, key) {
+			return t.ID, false, nil
+		}
+	}
+	// --deps is atomic with the create: no orphan Task that blocks nothing
+	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindTask}, title, body), "--deps", "blocks:"+containerID)...)
+	return id, err == nil, err
+}
+
+// SpawnUnblockingTaskIfAbsent files a Brook-owned HITL Task that blocks nothing
+// (no parent, no blocks edge), unless an open Task already carries key in its
+// body. SpawnBlockingTaskIfAbsent's sibling for what a human should see but no
+// container waits on (ADR 0216).
+func SpawnUnblockingTaskIfAbsent(key, title, body string) (id string, created bool, err error) {
+	open, err := OpenSet()
+	if err != nil {
+		return "", false, err
+	}
+	for _, t := range open {
+		if t.Kind == contract.KindTask && strings.Contains(t.Description, key) {
+			return t.ID, false, nil
+		}
+	}
+	id, err = run(unparentedArgs(Successor{Kind: contract.KindTask}, title, body)...)
+	return id, err == nil, err
+}
+
+// ChildrenOfKind reads a container's children of kind, in ANY status — closed
+// and Drafts included (`bd children` lists both).
+func ChildrenOfKind(id string, kind contract.Kind) ([]Bead, error) {
+	kids, err := childBeads(id)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(kids, func(b Bead) bool { return b.Kind != kind }), nil
+}
+
+// ChildCount counts a container's children in any status.
+func ChildCount(id string) (int, error) {
+	kids, err := childBeads(id)
+	return len(kids), err
+}
+
+// surveyChild is the one Survey shape (Spec mc-r832 D3): the Chart's charting
+// leaf, a Draft by the Chart's own drafter — bd delete does not cascade, so a
+// Survey with any other drafted-by would strand on a Chart-only delete or publish.
+func surveyChild(title, drafter string) Successor {
+	return Successor{Kind: contract.KindSurvey, Title: title, Description: contract.SurveyBody, DraftedBy: drafter}
+}
+
+// SpawnSurveyIfAbsent seeds chartID's Survey as a Draft unless the Chart has a
+// Survey in any status: SpawnChildIfAbsent's open-only guard would spawn a
+// second once the first closed. The Chart must already exist (a Draft is fine).
+// Both Chart creators (ACCEPT triage, pivot escalate) call it.
+func SpawnSurveyIfAbsent(chartID, title, drafter string) (id string, created bool, err error) {
+	surveys, err := ChildrenOfKind(chartID, contract.KindSurvey)
+	if err != nil {
+		return "", false, err
+	}
+	if len(surveys) > 0 {
+		return surveys[0].ID, false, nil
+	}
+	id, err = SpawnChild(chartID, surveyChild(title, drafter))
+	if err != nil {
+		return "", false, err
+	}
+	return id, true, nil
+}
+
 // SpawnChild creates a membership child of s under parentID, unguarded — for a
 // kind the container may already hold (a chart-conflict's grilling Draft beside
 // the Chart's own defog grillings); the caller owns idempotency.
@@ -386,12 +613,19 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 		Updated     time.Time `json:"updated_at"`
 		Assignee    string    `json:"assignee"`
 		Started     time.Time `json:"started_at"`
+		Closed      time.Time `json:"closed_at"`
 		IssueType   string    `json:"issue_type"`
 		CloseReason string    `json:"close_reason"`
 		CreatedBy   string    `json:"created_by"`
+		ExternalRef string    `json:"external_ref"`
+		Notes       string    `json:"notes"`
+		Design      string    `json:"design"`
+		Acceptance  string    `json:"acceptance_criteria"`
+		Comments    int       `json:"comment_count"`
 		Deps        []struct {
-			DependsOn string `json:"depends_on_id"`
-			Type      string `json:"type"`
+			DependsOn string    `json:"depends_on_id"`
+			Type      string    `json:"type"`
+			Created   time.Time `json:"created_at"` // the edge's, in bd list rows only
 		} `json:"dependencies"`
 	}
 	if err := json.Unmarshal(listJSON, &arr); err != nil {
@@ -401,21 +635,41 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 	for i, b := range arr {
 		beads[i] = Bead{
 			ID: b.ID, Kind: kindFromLabels(b.Labels), Status: b.Status, Title: b.Title, Description: b.Description, Labels: b.Labels,
-			Parent: b.Parent, Priority: b.Priority, Created: b.Created, Updated: b.Updated, Assignee: b.Assignee, Started: b.Started,
-			CloseReason: b.CloseReason, CreatedBy: b.CreatedBy,
+			Parent: b.Parent, Priority: b.Priority, Created: b.Created, Updated: b.Updated, Assignee: b.Assignee, Started: b.Started, Closed: b.Closed,
+			CloseReason: b.CloseReason, CreatedBy: b.CreatedBy, ExternalRef: b.ExternalRef,
 			Container: b.IssueType == "epic", // container kind = bd epic (ADR 0002)
 			Event:     b.IssueType == "event",
+			Notes:     b.Notes, Design: b.Design, AcceptanceCriteria: b.Acceptance, CommentCount: b.Comments,
 		}
+		var df []dfEdge
 		for _, d := range b.Deps {
-			if d.Type == "blocks" || d.Type == "conditional-blocks" { // Ordering edges; related kept apart below, membership/lineage ignored
+			if d.Type == "discovered-from" {
+				df = append(df, dfEdge{d.DependsOn, d.Created})
+			}
+			if d.Type == "blocks" || d.Type == "conditional-blocks" { // Ordering edges; related and caused-by kept apart below, membership ignored
 				beads[i].BlockedBy = append(beads[i].BlockedBy, d.DependsOn)
 			}
 			if d.Type == "related" {
 				beads[i].Related = append(beads[i].Related, d.DependsOn)
 			}
+			if d.Type == "caused-by" {
+				beads[i].CausedBy = d.DependsOn
+			}
+		}
+		slices.SortFunc(df, func(x, y dfEdge) int {
+			return cmp.Or(x.at.Compare(y.at), cmp.Compare(x.id, y.id))
+		})
+		for _, d := range df {
+			beads[i].DiscoveredFrom = append(beads[i].DiscoveredFrom, d.id)
 		}
 	}
 	return beads, nil
+}
+
+// dfEdge is a discovered-from edge: its target and the edge's created_at (Spec D1).
+type dfEdge struct {
+	id string
+	at time.Time
 }
 
 // parseShow maps a `bd show <id> --json` blob (a one-element array) to a Bead.
@@ -441,6 +695,31 @@ func kindFromLabels(labels []string) contract.Kind {
 	return ""
 }
 
+// OpenBlocked reports whether any bead that id blocks is still unclosed; a
+// deferred Draft counts (it is still being set up, as Open does).
+func OpenBlocked(id string) (bool, error) {
+	out, err := run("dep", "list", id, "--direction=up", "--json")
+	if err != nil {
+		return false, err
+	}
+	var deps []struct {
+		Status string `json:"status"`
+		Type   string `json:"dependency_type"`
+	}
+	if err := json.Unmarshal([]byte(out), &deps); err != nil {
+		return false, fmt.Errorf("bd: parse dep list: %w", err)
+	}
+	for _, d := range deps {
+		if (d.Type == "blocks" || d.Type == "conditional-blocks") && d.Status != "closed" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IsNotFound reports whether err is bd's "not found" for a missing bead.
+func IsNotFound(err error) bool { return err != nil && strings.Contains(err.Error(), "not found") }
+
 // Show reads a bead (spec §3.1 reads use --json).
 func Show(id string) (Bead, error) {
 	out, err := run("show", id, "--json")
@@ -457,6 +736,18 @@ func Close(id, reason string) error {
 		args = append(args, "--reason", reason)
 	}
 	_, err := run(args...)
+	return err
+}
+
+// AddBlocker makes blocked wait on blocker through a plain blocks edge; bd refuses a cycle.
+func AddBlocker(blocked, blocker string) error {
+	_, err := run("dep", "add", blocked, blocker, "-t", "blocks")
+	return err
+}
+
+// RemoveBlocker drops the blocks edge that makes blocked wait on blocker; it never touches blocker.
+func RemoveBlocker(blocked, blocker string) error {
+	_, err := run("dep", "remove", blocked, blocker)
 	return err
 }
 
@@ -508,31 +799,70 @@ func childBeads(id string) ([]Bead, error) {
 // (§8.4: 0 open children AND chart:defogged). `bd children` includes closed
 // children, so the open filter is applied here. A closed child still holding
 // effort/<child> counts as open (Spec D7): its work is not on the container.
-func OpenChildren(id string) (int, error) {
-	open, held, err := DrainBlockers(id)
+func OpenChildren(id string, efforts map[string]bool) (int, error) {
+	open, held, err := DrainBlockers(id, efforts)
 	return open + len(held), err
 }
 
-// effortRefs is the effort-branch read DrainBlockers takes, a var so a test runs
-// without a live repo.
-var effortRefs = git.EffortRefs
+// effortRefs is the effort-branch read the drain gates fall back to when the caller
+// hands no set, a var so a test runs without a live repo.
+var effortRefs = EffortRefsAcross
+
+// EffortRefsAcross is the effort-ref set of the cwd's repo plus every declared repo =
+// dir's (Spec D8): a nested leaf's closed-but-unintegrated effort lives in its child.
+// With no repo declared it is today's single for-each-ref, after one config read.
+// The loop resolves it once per tick and hands it to the drain gates.
+func EffortRefsAcross() (map[string]bool, error) {
+	refs, _, err := RefsAcross()
+	return refs, err
+}
+
+// RefsAcross is EffortRefsAcross plus the checkpoint/<id> branch tips (id → sha),
+// each Checkpoint's from the repo that declares it: the TUI's one ref read per refresh.
+func RefsAcross() (map[string]bool, map[string]string, error) {
+	refs, tips, err := git.Repo("").BranchRefs()
+	repos := cfglayer.Repos(".")
+	if err != nil || len(repos) == 0 {
+		return refs, tips, err
+	}
+	root, err := git.RepoRoot()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, dir := range repos {
+		p := filepath.Join(root, dir)
+		if !git.IsRepoRoot(p) { // a declared child not checked out holds no efforts
+			continue
+		}
+		kidRefs, kidTips, err := git.Repo(p).BranchRefs()
+		if err != nil {
+			return nil, nil, err
+		}
+		maps.Copy(refs, kidRefs)
+		maps.Copy(tips, kidTips)
+	}
+	return refs, tips, nil
+}
 
 // childrenAndEfforts is the drain gates' shared read: id's children and the
-// git.EffortRefs set.
-func childrenAndEfforts(id string) ([]Bead, map[string]bool, error) {
+// effort-ref set the caller passed (nil reads EffortRefsAcross itself).
+func childrenAndEfforts(id string, efforts map[string]bool) ([]Bead, map[string]bool, error) {
 	kids, err := childBeads(id)
 	if err != nil {
 		return nil, nil, err
 	}
-	efforts, err := effortRefs()
+	if efforts == nil {
+		efforts, err = effortRefs()
+	}
 	return kids, efforts, err
 }
 
 // DrainBlockers is what keeps a container from draining (Spec D7): its
-// open children, and held, its closed children still holding effort/<child>. The
-// refs come from one for-each-ref per call, never one git call per child.
-func DrainBlockers(id string) (open int, held []Bead, err error) {
-	kids, efforts, err := childrenAndEfforts(id)
+// open children, and held, its closed children still holding effort/<child>.
+// efforts is the caller's effort-ref set (the loop's per-tick union); nil reads it
+// once here. Never one git call per child.
+func DrainBlockers(id string, efforts map[string]bool) (open int, held []Bead, err error) {
+	kids, efforts, err := childrenAndEfforts(id, efforts)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -542,13 +872,16 @@ func DrainBlockers(id string) (open int, held []Bead, err error) {
 
 // DrainBlockersOver is DrainBlockers over an already-read graph, as the TUI
 // does at refresh: kids' open count, and the closed ones whose id is in efforts
-// (the git.EffortRefs set).
+// (the git.EffortRefs set). An open Landing is skipped: a Chart's own Landing
+// never undrains it (ADR 0145), nor does a child closed ContainerLandedReason
+// (ADR 0201): its kept branch is carried by a Signal.
 func DrainBlockersOver(kids []Bead, efforts map[string]bool) (open int, held []Bead) {
 	for _, k := range kids {
 		switch {
+		case k.Open() && k.Kind == contract.KindLanding:
 		case k.Open():
 			open++
-		case efforts[k.ID]:
+		case efforts[k.ID] && !strings.HasPrefix(k.CloseReason, ContainerLandedReason):
 			held = append(held, k)
 		}
 	}
@@ -558,12 +891,12 @@ func DrainBlockersOver(kids []Bead, efforts map[string]bool) (open int, held []B
 // ReviewDue reports whether a Checkpoint wants its bare Review (Spec D8,
 // FRs 28–31): its members are drained (MembersDrainedOver), at least one of them
 // is closed (a Checkpoint whose members aren't spawned yet isn't reviewed empty),
-// no pivot is open, and no Approval, open or closed, pins the tip
+// no pivot is open, and no Approval that is open or closed approved pins the tip
 // (approvedAtHead, git.ApprovedAtHead's shape, asked of checkpoint/<id>). A
-// stale Approval doesn't count, so a tip moved past it gets a fresh Review. One
-// children read, one effort-ref read and one pivot read.
-func ReviewDue(checkpointID string, approvedAtHead func(approvalBody, branch string) bool) (bool, error) {
-	kids, efforts, err := childrenAndEfforts(checkpointID)
+// stale or rework/obsolete-closed Approval doesn't count, so a tip moved past it
+// gets a fresh Review. One children read, one effort-ref read and one pivot read.
+func ReviewDue(checkpointID string, efforts map[string]bool, approvedAtHead func(approvalBody, branch string) bool) (bool, error) {
+	kids, efforts, err := childrenAndEfforts(checkpointID, efforts)
 	if err != nil {
 		return false, err
 	}
@@ -585,9 +918,9 @@ func ReviewDueOver(kids []Bead, efforts map[string]bool, pivots []Bead, atHead f
 	members := 0
 	for _, k := range kids {
 		switch {
-		case isMember(k.Kind):
+		case IsMember(k.Kind):
 			members++
-		case k.Kind == contract.KindApproval && atHead(k.Description):
+		case k.Kind == contract.KindApproval && (k.Open() || k.ApprovedClosed()) && atHead(k.Description):
 			return false
 		}
 	}
@@ -598,8 +931,8 @@ func ReviewDueOver(kids []Bead, efforts map[string]bool, pivots []Bead, atHead f
 // D7, FR 28): no Build, Critique, Conflict, Surgery or Review open or
 // still holding effort/<id>. Both the Review spawn and the approved land gate on
 // it, so neither runs without a member's work.
-func MembersDrained(checkpointID string) (bool, error) {
-	kids, efforts, err := childrenAndEfforts(checkpointID)
+func MembersDrained(checkpointID string, efforts map[string]bool) (bool, error) {
+	kids, efforts, err := childrenAndEfforts(checkpointID, efforts)
 	if err != nil {
 		return false, err
 	}
@@ -609,15 +942,15 @@ func MembersDrained(checkpointID string) (bool, error) {
 // MembersDrainedOver is MembersDrained over an already-read graph.
 func MembersDrainedOver(kids []Bead, efforts map[string]bool) bool {
 	for _, k := range kids {
-		if isMember(k.Kind) && (k.Open() || efforts[k.ID]) {
+		if IsMember(k.Kind) && (k.Open() || efforts[k.ID]) {
 			return false
 		}
 	}
 	return true
 }
 
-// isMember is whether a Checkpoint child of kind k carries work onto its branch.
-func isMember(k contract.Kind) bool {
+// IsMember is whether a Checkpoint child of kind k carries work onto its branch.
+func IsMember(k contract.Kind) bool {
 	switch k {
 	case contract.KindBuild, contract.KindCritique, contract.KindConflict, contract.KindSurgery, contract.KindReview:
 		return true
@@ -644,6 +977,39 @@ func HeldHint(held []Bead) string {
 // written, and callers skip and record claim.failed. No lease is stamped.
 func Claim(id string) error {
 	_, err := run("update", id, "--if-status", "open", "--status", "in_progress", "--assignee", actor())
+	return classifyClaim(err)
+}
+
+// ErrClaimedSince is Claim's refusal when this actor already holds the bead (bd
+// exits 13, a status CAS mismatch): the caller's snapshot was stale.
+var ErrClaimedSince = errors.New("claimed since the last refresh")
+
+// HeldError is Claim's refusal when another actor holds the bead (bd exits 1,
+// "cannot reassign"). Err is bd's own error.
+type HeldError struct {
+	Holder string
+	Err    error
+}
+
+func (e *HeldError) Error() string { return e.Err.Error() }
+func (e *HeldError) Unwrap() error { return e.Err }
+
+var heldBy = regexp.MustCompile(`cannot reassign \S+: held by "([^"]*)"`)
+
+// classifyClaim turns bd's two claim refusals into *HeldError and ErrClaimedSince
+// (texts pinned in docs/research/initiative-open-status-checks-under-a-cut-session-claim.md);
+// any other error passes through unchanged.
+func classifyClaim(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if m := heldBy.FindStringSubmatch(msg); m != nil {
+		return &HeldError{Holder: m[1], Err: err}
+	}
+	if strings.Contains(msg, "status mismatch:") && strings.Contains(msg, `has status "in_progress", expected "open"`) {
+		return fmt.Errorf("%w: %w", ErrClaimedSince, err)
+	}
 	return err
 }
 
@@ -656,6 +1022,18 @@ var actor = sync.OnceValue(func() string {
 		return name
 	}, os.Getenv("USER"))
 })
+
+// PinActor makes this process's bd actor name, for a test outside the package; it
+// returns the restore.
+func PinActor(name string) (restore func()) {
+	old := actor
+	actor = func() string { return name }
+	return func() { actor = old }
+}
+
+// ClaimedElsewhere is whether assignee names another bd actor than this one; an
+// empty assignee is nobody's, so not elsewhere (ADR 0240).
+func ClaimedElsewhere(assignee string) bool { return assignee != "" && assignee != actor() }
 
 // actorFrom is bd's resolution order: $BEADS_ACTOR, then git user.name, then
 // $USER. git is a func so it is only shelled out when $BEADS_ACTOR is unset.
@@ -677,4 +1055,52 @@ func actorFrom(beadsActor string, gitName func() string, unixUser string) string
 func Unclaim(id string) error {
 	_, err := run("unclaim", id)
 	return err
+}
+
+// LandingsOf reads a container's Landings, in any status.
+func LandingsOf(id string) ([]Bead, error) { return ChildrenOfKind(id, contract.KindLanding) }
+
+// NewestLanding is the Landing a stale-pin flag names: an open one, else the most
+// recently closed (an obsolete Landing whose MR a human merged later, Spec FR 20).
+func NewestLanding(landings []Bead) (Bead, bool) {
+	var best Bead
+	found := false
+	for _, l := range landings {
+		if !found || (l.Open() && !best.Open()) || (l.Open() == best.Open() && l.Closed.After(best.Closed)) {
+			best, found = l, true
+		}
+	}
+	return best, found
+}
+
+// CloseLandings closes each still-open Landing landed: <sha> through closer, behind the
+// Open() guard so a stale or re-run read never double-closes.
+func CloseLandings(landings []Bead, sha string, closer func(id, reason string) error) error {
+	for _, l := range landings {
+		if l.Open() {
+			if err := closer(l.ID, "landed: "+sha); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// SubtreeIDs is every descendant id of a container, closed ones included, children
+// before their own children.
+// ponytail: one bd call per node, fine at container sizes; batch the child query if trees grow large.
+func SubtreeIDs(id string) ([]string, error) {
+	kids, err := childBeads(id)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, k := range kids {
+		sub, err := SubtreeIDs(k.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(append(out, k.ID), sub...)
+	}
+	return out, nil
 }

@@ -1,8 +1,10 @@
 package tui
 
-// The History tab: main's newest first-parent commits as landed
-// Checkpoints, newest first. enter/G reveal a row's Checkpoint; R files a
-// Rollback of it, which Jinbe runs (the tab never reverts itself).
+// The History tab (FR45–48; ADR 0233 (the-history-tab-lists-every-mainline-commit…)): the mainline log — main's newest
+// first-parent commits, one row each, newest first: a land (Checkpoint, Chart or Spec
+// anchor) with a kind badge, a revert, or a dimmed plain commit; Checkpoint lands carry
+// rollback badges. enter reveals a land's or revert's bead in Graph, u (undo) files a Rollback
+// of a Checkpoint land through a form dialog (the tab never reverts).
 
 import (
 	"cmp"
@@ -11,49 +13,65 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
+
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 )
 
-// historyCap is how many mainline commits the tab reads (FR2): no paging.
+// historyCap is how many mainline commits the tab reads: no paging.
 const historyCap = 200
 
-// readMainline is the History tab's git read, a var so tests run without a repo.
+// readMainline is the History tab's git read, a seam so tests run without a repo.
+// ponytail: re-read every tick; cache on the mainline tip if a Build measures it.
 var readMainline = func() ([]git.MainlineCommit, error) {
-	return git.MainlineLog(string(contract.KindCheckpoint), historyCap)
+	return git.MainlineLogAcross(historyCap, cfglayer.Repos("."))
 }
 
-// histKind is a History row's kind (FR3–5).
+var (
+	newRollback = bd.NewRollback
+
+	keyHistReveal = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "reveal"))
+	keyRollback   = key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo"))
+)
+
+// rollbackMsg is r on a rollbackable land: open the Rollback form for Checkpoint id.
+type rollbackMsg struct{ id, title, sha string }
+
 type histKind int
 
 const (
-	histCheckpoint histKind = iota // a land: Checkpoint: <id>
-	histRevert                     // a revert: Reverts-Checkpoint: <id>
-	histHidden                     // a folded run of other commits
+	histLand   histKind = iota // a land: Checkpoint, Chart or Spec trailer
+	histRevert                 // a revert: Reverts-Checkpoint: <id>
+	histPlain                  // any other commit
 )
 
-// histRow is one History line; callers read its fields, so a later field (the FR6 badge) needs no rework.
 type histRow struct {
-	kind   histKind
-	sha    string
-	time   time.Time
-	id     string // the Checkpoint landed or reverted
-	title  string // its bead title; "" when the bead is missing from the snapshot
-	hidden int    // histHidden: how many commits it folds
-	badge  string // histCheckpoint: its Rollback state (FR6), "" for none
+	kind  histKind
+	sha   string
+	time  time.Time
+	id    string // the bead landed or reverted
+	title string // its bead title; "" when the bead is missing from the snapshot
+	lkind string // histLand: the land trailer's kind
+	subj  string // histPlain: the commit's subject
+	ctx   string // the declared repo context it landed in; "" for the Workspace
+	badge string // histLand of a Checkpoint: its Rollback state, "" for none
 }
 
-// The FR6 Rollback badges, in precedence order.
+// The Rollback badges, in precedence order.
 const (
 	badgeRolledBack   = "rolled back"
 	badgeFixedForward = "fixed forward"
 	badgePending      = "rollback pending"
 )
 
-// foldHistory turns mainline commits (newest first) into History rows: a land
-// or revert is a row, each maximal run of other commits one hidden line.
-func foldHistory(cs []git.MainlineCommit, beads []bd.Bead) []histRow {
+// historyRows turns mainline commits (newest first) into one row each: a land, else
+// a revert, else a plain commit.
+func historyRows(cs []git.MainlineCommit, beads []bd.Bead) []histRow {
 	titles := map[string]string{}
 	kinds := map[string]contract.Kind{}
 	for _, b := range beads {
@@ -62,19 +80,17 @@ func foldHistory(cs []git.MainlineCommit, beads []bd.Bead) []histRow {
 	badges := rollbackBadges(cs, beads, kinds)
 	var rows []histRow
 	for _, c := range cs {
-		r := histRow{sha: c.SHA, time: c.Time, id: c.Lands}
+		r := histRow{sha: c.SHA, time: c.Time, id: c.Lands, ctx: c.Context}
 		switch {
-		case c.Lands != "":
-			r.badge = badges[c.Lands]
+		case c.Kind != "":
+			r.lkind = c.Kind
+			if c.Kind == string(contract.KindCheckpoint) {
+				r.badge = badges[c.Lands]
+			}
 		case c.Reverts != "":
 			r.kind, r.id = histRevert, c.Reverts
 		default:
-			if n := len(rows); n > 0 && rows[n-1].kind == histHidden {
-				rows[n-1].hidden++
-			} else {
-				rows = append(rows, histRow{kind: histHidden, hidden: 1})
-			}
-			continue
+			r.kind, r.subj = histPlain, c.Subject
 		}
 		r.title = titles[r.id]
 		rows = append(rows, r)
@@ -82,9 +98,9 @@ func foldHistory(cs []git.MainlineCommit, beads []bd.Bead) []histRow {
 	return rows
 }
 
-// rollbackBadges is each Checkpoint's FR6 badge: rolled back when the window
-// holds its revert, else fixed forward when a related Rollback closed
-// "fix-forward:…", else rollback pending when a related Rollback is still open.
+// rollbackBadges is each Checkpoint's badge: rolled back when the window holds its
+// revert, else fixed forward when a related Rollback closed "fix-forward:…", else
+// rollback pending when a related Rollback is still open.
 func rollbackBadges(cs []git.MainlineCommit, beads []bd.Bead, kinds map[string]contract.Kind) map[string]string {
 	badges := map[string]string{}
 	for _, b := range beads {
@@ -107,113 +123,231 @@ func rollbackBadges(cs []git.MainlineCommit, beads []bd.Bead, kinds map[string]c
 	return badges
 }
 
-// historyRows is the tab's rows over the last load.
-func (m Model) historyRows() []histRow { return foldHistory(m.histCommits, m.beads) }
-
-// selectedHist is the selected row's index, -1 when nothing is selectable.
-func (m Model) selectedHist(rows []histRow) int {
-	return slices.IndexFunc(rows, func(r histRow) bool { return r.kind != histHidden && r.sha == m.selHist })
+// histData is the slice of the shell's data History reads, handed over before every
+// update and view.
+type histData struct {
+	commits []git.MainlineCommit
+	err     error
+	beads   []bd.Bead
+	w, h    int // the body's size
 }
 
-// histSelection is the selected row, false when nothing is selected.
-func (m Model) histSelection() (histRow, bool) {
-	rows := m.historyRows()
-	if i := m.selectedHist(rows); i >= 0 {
+// histTab's state: the selected commit, kept by sha.
+type histTab struct {
+	histData
+	sel string
+}
+
+func newHistory() histTab { return histTab{} }
+
+func (t histTab) count() int { return 0 }
+func (t histTab) actN() int  { return 0 }
+
+func (t histTab) rows() []histRow { return historyRows(t.commits, t.beads) }
+
+// selIndex is the selected row's index, -1 when nothing is selectable.
+func (t histTab) selIndex(rows []histRow) int {
+	return slices.IndexFunc(rows, func(r histRow) bool { return r.sha == t.sel })
+}
+
+func (t histTab) selection() (histRow, bool) {
+	rows := t.rows()
+	if i := t.selIndex(rows); i >= 0 {
 		return rows[i], true
 	}
 	return histRow{}, false
 }
 
-// moveHist steps the selection d rows, skipping hidden lines (FR5), wrapping.
-func (m *Model) moveHist(d int) {
-	rows := m.historyRows()
-	i := m.selectedHist(rows)
-	for range rows {
-		i = clampWrap(i+d, len(rows))
-		if rows[i].kind != histHidden {
-			m.selHist = rows[i].sha
-			return
-		}
+// selected is the selected commit's bead, nil when the snapshot lacks it.
+func (t histTab) selected() *bd.Bead {
+	if r, ok := t.selection(); ok {
+		return beadByID(t.beads, r.id)
 	}
+	return nil
 }
 
-// fixHist keeps the selection by sha across a reload (FR10), else the top row.
-func (m *Model) fixHist() {
-	rows := m.historyRows()
-	if m.selectedHist(rows) >= 0 {
-		return
+// fix keeps the selection by sha across a reload, else the top row.
+func (t histTab) fix() histTab {
+	rows := t.rows()
+	if t.selIndex(rows) >= 0 {
+		return t
 	}
-	m.selHist = ""
-	if i := slices.IndexFunc(rows, func(r histRow) bool { return r.kind != histHidden }); i >= 0 {
-		m.selHist = rows[i].sha
+	t.sel = ""
+	if len(rows) > 0 {
+		t.sel = rows[0].sha
 	}
+	return t
 }
 
-// histLine renders one row: `sha · age · title (id)`, a revert dimmed with ↺.
-func histLine(r histRow) string {
-	if r.kind == histHidden {
-		s := "s"
-		if r.hidden == 1 {
-			s = ""
+// refusal is why r cannot roll r back, "" when it can.
+func refusal(r histRow, ok bool) string {
+	switch {
+	case !ok:
+		return "nothing to roll back"
+	case r.kind == histPlain:
+		return "not a land"
+	case r.kind == histRevert:
+		return "a revert can't be rolled back"
+	case r.lkind == string(contract.KindChart):
+		return "a Chart land can't be rolled back"
+	case r.lkind == string(contract.KindSpec):
+		return "a Spec anchor can't be rolled back"
+	case r.badge == badgePending:
+		return r.id + ": rollback pending"
+	case r.badge != "":
+		return r.id + ": already " + r.badge
+	}
+	return ""
+}
+
+func (t histTab) bindings() []key.Binding {
+	r, ok := t.selection()
+	if !ok {
+		return nil
+	}
+	var bs []key.Binding
+	if r.kind != histPlain {
+		bs = append(bs, keyHistReveal)
+	}
+	if refusal(r, ok) == "" {
+		bs = append(bs, keyRollback)
+	}
+	return bs
+}
+
+// extra is moving, and u when the selection can't roll back (it answers with a
+// refusal): shown in ? alone.
+func (t histTab) extra() []key.Binding {
+	var out []key.Binding
+	if len(t.rows()) >= 2 {
+		out = append(out, keyMove)
+	}
+	if r, ok := t.selection(); refusal(r, ok) != "" {
+		out = append(out, keyRollback)
+	}
+	return out
+}
+
+func (t histTab) update(k tea.KeyMsg) (component, tea.Cmd) {
+	rows := t.rows()
+	r, ok := t.selection()
+	switch {
+	case key.Matches(k, keyMove):
+		d := 1
+		if s := k.String(); s == "k" || s == "up" {
+			d = -1
 		}
-		return dimmer.Render(fmt.Sprintf("+%d hidden commit%s", r.hidden, s))
+		i := t.selIndex(rows)
+		if len(rows) > 0 {
+			t.sel = rows[clampWrap(i+d, len(rows))].sha
+		}
+	case key.Matches(k, keyHistReveal) && ok && r.kind != histPlain:
+		return t, func() tea.Msg { return revealMsg{r.id} }
+	case key.Matches(k, keyRollback):
+		if why := refusal(r, ok); why != "" {
+			return t, func() tea.Msg { return statusMsg(why) }
+		}
+		return t, func() tea.Msg { return rollbackMsg{r.id, r.title, r.sha} }
+	}
+	return t, nil
+}
+
+// histCtxWidth is the context column's width: 0 (no column) when no row is nested.
+func histCtxWidth(rows []histRow) int {
+	w := 0
+	for _, r := range rows {
+		w = max(w, len(r.ctx))
+	}
+	return w
+}
+
+// histLine renders one row: `sha · [context ·] age · title (id)`, a revert dimmed with ↺, a land ending in its kind badge, a plain commit dimmed.
+func histLine(r histRow, ctxW int) string {
+	head := r.sha[:min(7, len(r.sha))] + " · "
+	if ctxW > 0 { // the context column, blank for Workspace rows
+		head += fmt.Sprintf("%-*s · ", ctxW, r.ctx)
+	}
+	head += HumanAge(r.time) + " · "
+	if r.kind == histPlain {
+		return dimSt.Render(head + r.subj)
 	}
 	name := r.id
 	if r.title != "" {
 		name = r.title + " (" + r.id + ")"
 	}
-	head := r.sha[:min(7, len(r.sha))] + " · " + HumanAge(r.time) + " · "
 	if r.kind == histRevert {
-		return dim.Render("↺ " + head + "revert of " + name)
+		return dimSt.Render("↺ " + head + "revert of " + name)
 	}
 	if r.badge != "" {
-		name += " " + warn.Render(r.badge)
+		name += " " + warnSt.Render(r.badge)
 	}
-	return dim.Render(head) + name
+	name += " " + kindTag(&bd.Bead{Kind: contract.Kind(r.lkind), Container: r.lkind != string(contract.KindSpec)})
+	return dimSt.Render(head) + name
 }
 
-// historyView is the History body: a header naming the cap, then the rows full width.
-func (m Model) historyView(height int) string {
-	head := dim.Render(fmt.Sprintf("main · newest %d first-parent commits", historyCap))
-	rows := m.historyRows()
-	sel := m.selectedHist(rows)
+// view is a header naming the cap, then the rows full width.
+func (t histTab) view(w, h int) string {
+	head := dimSt.Render(fmt.Sprintf("main · newest %d first-parent commits", historyCap))
+	rows := t.rows()
+	sel := t.selIndex(rows)
 	var lines []string
 	switch {
-	case m.histErr != nil:
-		lines = append(lines, warn.Render("git log failed: "+m.histErr.Error()))
+	case t.err != nil:
+		lines = append(lines, warnSt.Render("git log failed: "+t.err.Error()))
 	case len(rows) == 0:
-		lines = append(lines, dim.Render("no commits on main"))
+		lines = append(lines, dimSt.Render("no commits on main"))
 	}
-	selLine := len(lines) + max(sel, 0) // past any error line
+	at := len(lines) + max(sel, 0) // past any error line
+	ctxW := histCtxWidth(rows)
 	for i, r := range rows {
-		marker := "  "
+		line := ansi.Truncate("  "+histLine(r, ctxW), w, "…")
 		if i == sel {
-			marker = selMarker.Render("❯ ")
+			line = selectRow("❯ "+ansi.TruncateLeft(line, 2, ""), w)
 		}
-		lines = append(lines, trunc(marker+histLine(r), m.w))
+		lines = append(lines, line)
 	}
-	out := windowRows(strings.Join(lines, "\n"), m.w, height-1, followOffset(len(lines), height-1, selLine))
-	return trunc(head, m.w) + "\n" + strings.Join(out, "\n")
+	off := followOffset(len(lines), h-1, at)
+	return " " + ansi.Truncate(head, w-1, "") + "\n" + strings.Join(lines[off:min(off+h-1, len(lines))], "\n")
 }
 
-// historyKeys are the keys History handles: the global ones plus j/k, reveal and R.
-var historyKeys = []string{"q", "ctrl+c", "left", "shift+tab", "right", "G", "I", "S", "H", "L", "#", "*", "j", "down", "k", "up", "enter", "?", "o", "f5", "R"}
-
-// openRollback is R (FR8–9): on an unbadged Checkpoint row it opens the create
-// form aimed at that Checkpoint; anywhere else it only says why not.
-func (m *Model) openRollback() {
-	r, ok := m.histSelection()
-	switch {
-	case !ok:
-		m.status = "nothing to roll back"
-	case r.kind == histRevert:
-		m.status = "a revert can't be rolled back"
-	case r.badge == badgePending:
-		m.status = r.id + ": rollback pending"
-	case r.badge != "":
-		m.status = r.id + ": already " + r.badge
-	default:
-		m.editMode, m.createFor, m.createField, m.createSurgery = editCreate, r.id, 0, false
-		m.createTitle, m.createDesc, m.status = lineAt("Roll back "+cmp.Or(r.title, r.id)), line{}, ""
-	}
+// rollbackForm opens the Rollback form (title, evidence): the dialog is the
+// rollback's guard, and submitting files it per ADR 0047. Submit rechecks the gate,
+// as a refresh may have made a Rollback pending under the open form.
+func (m Model) rollbackForm(msg rollbackMsg) Model {
+	d := inputDialog("Rollback of "+msg.id, []string{"title", "evidence"}, msg.id, func(m Model, d dialog) (Model, tea.Cmd) {
+		title := strings.TrimSpace(d.inputs[0].text)
+		if title == "" {
+			d.body = []string{warnSt.Render("create: title required")}
+			return m.push(d), nil
+		}
+		h := m.tabAt(tabHistory).(histTab)
+		for _, r := range h.rows() {
+			if r.sha == msg.sha {
+				if why := refusal(r, true); why != "" {
+					m.setStatus(why)
+					return m, nil
+				}
+			}
+		}
+		target := bd.Bead{ID: msg.id}
+		if i := beadIndex(h.beads, msg.id); i >= 0 {
+			target = h.beads[i]
+		}
+		next, cmd := m.startWrite(msg.id, "filing", func() writeDoneMsg {
+			id, err := newRollback(title, d.inputs[1].text, target)
+			return writeDoneMsg{msg.id, func(m Model) (tea.Model, tea.Cmd) {
+				switch {
+				case id == "" && err != nil:
+					return m.retry(d, "create", err)
+				case err != nil: // filed, but unrelated: no badge until the edge is added by hand
+					m.setStatus("filed Rollback " + id + " without its related edge: " + err.Error())
+					return m, m.load()
+				}
+				return m.doneOrErr("create", "filed Rollback "+id+" of "+msg.id, nil)
+			}}
+		})
+		return into(next, cmd)
+	})
+	d.inputs[0] = lineAt("Roll back " + cmp.Or(msg.title, msg.id))
+	return m.push(d)
 }

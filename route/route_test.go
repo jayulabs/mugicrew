@@ -13,15 +13,28 @@ import (
 // resolves to the right placement and branch/ref, asserted with fake beads and
 // no git subprocess.
 func TestRouteCoversEveryKindInTable(t *testing.T) {
+	orig := ParentKind
+	t.Cleanup(func() { ParentKind = orig })
+	ParentKind = func(id string) (contract.Kind, error) {
+		if id == "ws-chart" {
+			return contract.KindChart, nil
+		}
+		return contract.KindCheckpoint, nil
+	}
 	cases := []struct {
 		name string
 		bead bd.Bead
 		want Destination
 	}{
 		{
-			name: "charting → worktree of its own effort branch, integrating onto its OWN chart",
+			name: "the AFK judge's tree → worktree of the Chart's own effort branch, integrating onto its OWN chart",
 			bead: bd.Bead{ID: "ws-chart", Kind: contract.KindChart},
 			want: Destination{Placement: Worktree, Branch: "effort/ws-chart", Container: "chart/ws-chart"},
+		},
+		{
+			name: "survey → worktree of its own effort branch, integrating onto its PARENT chart",
+			bead: bd.Bead{ID: "ws-s", Kind: contract.KindSurvey, Parent: "ws-chart"},
+			want: Destination{Placement: Worktree, Branch: "effort/ws-s", Container: "chart/ws-chart"},
 		},
 		{
 			name: "grilling → worktree of its own effort branch, integrating onto its PARENT chart",
@@ -49,9 +62,24 @@ func TestRouteCoversEveryKindInTable(t *testing.T) {
 			want: Destination{Placement: Worktree, Branch: "effort/ws-crit", Container: "checkpoint/ws-cp"},
 		},
 		{
+			name: "Base-pinned critique → replaces its PARENT checkpoint at the pinned Tip",
+			bead: bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Parent: "ws-cp", Description: "Base: b4se\nTip: t1p"},
+			want: Destination{Placement: Worktree, Branch: "effort/ws-crit", Container: "checkpoint/ws-cp", Mode: Replace, Tip: "t1p"},
+		},
+		{
 			name: "conflict → worktree of its own effort branch cut at the pinned Tip, replacing its PARENT checkpoint",
 			bead: bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: b4se\nTip: t1p"},
 			want: Destination{Placement: Worktree, Branch: "effort/ws-conf", Container: "checkpoint/ws-cp", Mode: Replace, Tip: "t1p"},
+		},
+		{
+			name: "requested checkpoint rebase → Replace at the pinned Tip, like any conflict",
+			bead: bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "requested rebase\nBase: b4se\nTip: t1p\nvariant: requested"},
+			want: Destination{Placement: Worktree, Branch: "effort/ws-conf", Container: "checkpoint/ws-cp", Mode: Replace, Tip: "t1p"},
+		},
+		{
+			name: "requested chart rebase → Replace at the pinned Tip",
+			bead: bd.Bead{ID: "ws-cc", Kind: contract.KindChartConflict, Parent: "ws-chart", Description: "Base: b4se\nTip: t1p\nvariant: requested"},
+			want: Destination{Placement: Worktree, Branch: "effort/ws-cc", Container: "chart/ws-chart", Mode: Replace, Tip: "t1p"},
 		},
 		{
 			name: "surgery → worktree of its own effort branch, integrating onto its PARENT checkpoint",
@@ -69,8 +97,23 @@ func TestRouteCoversEveryKindInTable(t *testing.T) {
 			want: Destination{Placement: Detached, Branch: "checkpoint/ws-cp"},
 		},
 		{
+			name: "landing → detached tree at its PARENT checkpoint tip",
+			bead: bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-cp"},
+			want: Destination{Placement: Detached, Branch: "checkpoint/ws-cp"},
+		},
+		{
+			name: "landing → detached tree at its PARENT chart tip",
+			bead: bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-chart"},
+			want: Destination{Placement: Detached, Branch: "chart/ws-chart"},
+		},
+		{
 			name: "signal triage → repo root",
 			bead: bd.Bead{ID: "ws-sig", Kind: contract.KindSignal},
+			want: Destination{Placement: RepoRoot},
+		},
+		{
+			name: "initiative → repo root: no branch, no worktree, no land (FR46)",
+			bead: bd.Bead{ID: "ws-init", Kind: contract.KindInitiative},
 			want: Destination{Placement: RepoRoot},
 		},
 		{
@@ -127,7 +170,7 @@ func TestRouteUnknownKindDefaultsToRepoRoot(t *testing.T) {
 // exit-128 worktree-add git rejects as an invalid ref on every tick.
 // Every parent-derived kind must guard.
 func TestRouteEmptyParentIsHardError(t *testing.T) {
-	for _, k := range []contract.Kind{contract.KindGrilling, contract.KindResearch, contract.KindPrototype, contract.KindChartConflict, contract.KindBuild, contract.KindCritique, contract.KindConflict, contract.KindSurgery} {
+	for _, k := range []contract.Kind{contract.KindGrilling, contract.KindSurvey, contract.KindResearch, contract.KindPrototype, contract.KindChartConflict, contract.KindBuild, contract.KindCritique, contract.KindConflict, contract.KindSurgery} {
 		got, err := Route(bd.Bead{ID: "mc-orphan", Kind: k}) // Parent: ""
 		if err == nil {
 			t.Errorf("Route(%s, no parent) = %+v, want hard error", k, got)

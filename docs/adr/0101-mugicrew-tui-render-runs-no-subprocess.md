@@ -1,6 +1,6 @@
 # ADR 0101: mugicrew TUI render runs no subprocess; the launch preview is static
 
-Status: Accepted
+Status: Accepted; §2 amended by ADR 0238 (§1: the ON LAUNCH preview line is removed)
 Date: 2026-10-08
 
 Extends ADR 0098 (press-time bd calls off the event loop) from key handlers to

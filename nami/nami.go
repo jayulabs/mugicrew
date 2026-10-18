@@ -1,7 +1,7 @@
-// Package nami holds Nami, the charting crewmate. She owns signal/grilling/
-// research (and chart-conflict) and stewards the chart (GLOSSARY.md). This slice wires the triage
-// front door: Launch composes the charting session for a Signal, and reconcile
-// is the idempotent graph-driver behind the accept path (spec §7–§8).
+// Package nami holds Nami, the charting crewmate. She owns grilling/research
+// (and chart-conflict) and stewards the chart (GLOSSARY.md): she maps the fog
+// toward a Destination Luffy's triage settled (ADR 0129), and reconcile is the
+// idempotent graph-driver behind a drained Chart (spec §8).
 package nami
 
 import (
@@ -13,10 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
+	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 )
 
@@ -60,7 +63,7 @@ func (Nami) Run(ctx contract.Ctx, bead contract.Bead) error {
 // between the agent's Write and this close converges on re-dispatch (no duplicate
 // doc, no double close).
 func runResearch(ctx contract.Ctx, bead contract.Bead) error {
-	inv, err := contract.NewInvocation(bead.ID, researchPrompt(bead.ID))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusUnder(researchPrompt(bead.ID), bead.ID, showBead))
 	if err != nil {
 		return err
 	}
@@ -117,11 +120,19 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 	if err != nil {
 		return err
 	}
-	start, err := branchHead("HEAD")
+	// A nested Chart's branch lives in the child tree <tree>/<dir>: head, check and
+	// restore all run there, against the child's base (Spec FR 30).
+	// The handle is the effort tree's <cwd>/<dir>, not RepoOfID's main checkout of
+	// the child: restore must never reset a human's checkout.
+	repo, err := childTreeOfID(b.Parent)
 	if err != nil {
 		return err
 	}
-	inv, err := contract.NewInvocation(bead.ID, chartConflictPrompt(bead.ID))
+	start, err := headIn(repo, "HEAD")
+	if err != nil {
+		return err
+	}
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(chartConflictPrompt(bead.ID), b.Parent, showBead))
 	if err != nil {
 		return err
 	}
@@ -137,8 +148,8 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 	if !ok {
 		return fmt.Errorf("chart-conflict %s: final line %q is not a %s outcome", bead.ID, line, resolvedOutcome)
 	}
-	if err := checkResolved(base, tip); err != nil {
-		return errors.Join(err, restoreResolved(start))
+	if err := checkResolved(repo, base, tip); err != nil {
+		return errors.Join(err, restoreResolved(repo, start))
 	}
 	// Publish only a checked rewrite, and check it before the replay of commits
 	// integrated onto the Chart since Tip, which check 3 would flag as stray.
@@ -146,6 +157,10 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 	switch rc := integrate(&out); rc {
 	case 0:
 	case 2: // logged integrate.conflict; with no agent left to resolve it, the backstop's re-run pauses it integrate-conflict (ADR 0102 §6)
+		return nil
+	case 4: // no cut point survived a rewrite: non-transient, the backstop's re-run pauses it integrate-conflict naming no-cut-point
+		return nil
+	case 5: // refused off its pinned tip: the backstop's re-run closes it moot, re-pins it once, or pauses it
 		return nil
 	default:
 		return fmt.Errorf("chart-conflict %s: mugicrew integrate exited %d; nothing was closed: %s", bead.ID, rc, strings.TrimSpace(out.String()))
@@ -212,18 +227,29 @@ func escalationPayload(output string) string {
 	return ""
 }
 
-// Launch composes the HITL command a human opens (spec §7.2, §9.3). Both of
-// Nami's launchable kinds are agent-variety — a Signal opens an interactive
-// charting session (the Chart is spawned later, inside, on accept — §7.3); a
-// Grilling opens an interview session — formatted by the harness. Research and
-// chart-conflict are AFK (loop-only, ADR 0080), not launchable.
+// Launch composes the HITL command a human opens (spec §9.3). A Grilling opens
+// an agent-variety interview session, formatted by the harness; a Survey opens
+// the charting session on its parent Chart (Spec mc-r832 D6). A Chart is a
+// container, a Signal is Luffy's to triage (ADR 0129), and research and
+// chart-conflict are AFK (loop-only, ADR 0080); none is launchable here.
 func (Nami) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand, error) {
 	var prompt string
 	switch bead.Kind {
-	case contract.KindSignal:
-		prompt = chartingPrompt(bead.ID)
 	case contract.KindGrilling:
 		prompt = grillingPrompt(bead.ID)
+		if b, err := showBead(bead.ID); err == nil && hasThreadLine(b.Description) {
+			prompt = threadGrillingPrompt(bead.ID)
+		}
+		prompt = contexts.FocusUnder(prompt, bead.ID, showBead)
+	case contract.KindSurvey:
+		b, err := showBead(bead.ID)
+		if err != nil {
+			return nil, err
+		}
+		if b.Parent == "" {
+			return nil, fmt.Errorf("nami.Launch: survey %s has no parent Chart", bead.ID)
+		}
+		prompt = contexts.FocusByID(chartingPrompt(bead.ID, b.Parent), b.Parent, showBead)
 	default:
 		return nil, fmt.Errorf("nami.Launch: kind %q is not a launchable HITL kind", bead.Kind)
 	}
@@ -248,6 +274,25 @@ var grillingTmpl string
 
 func grillingPrompt(grillingID string) string {
 	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID))
+}
+
+// threadGrillingTmpl frames a Merge Request review thread's grilling: the
+// reviewer asked for a Chart change, so the session writes it (ADR 0199).
+//
+//go:embed prompts/grilling-thread.md
+var threadGrillingTmpl string
+
+// threadGrillingPrompt is the plain grilling prompt under the reviewer-change
+// framing, so the Draft instruction and the close contract carry over.
+func threadGrillingPrompt(grillingID string) string {
+	return threadGrillingTmpl + "\n" + grillingPrompt(grillingID)
+}
+
+// hasThreadLine reports a "Thread:" key line in a grilling body; a quoted
+// "> Thread:" does not start a line with the key, so it never matches.
+func hasThreadLine(body string) bool {
+	_, ok := git.ParseLine(body, "Thread:")
+	return ok
 }
 
 // researchDocPointer is the prefix of the pointer line the research agent emits as
@@ -290,13 +335,13 @@ func researchPrompt(researchID string) string {
 
 // chartConflictPrompt is the headless resolve workflow runChartConflict runs (ADR
 // 0030 §3–5, ADR 0079, ADR 0080): one prompt for both variants — rebase onto the
-// carried base, or renumber the Chart's clashing ADRs above mainline's max and
+// carried base, or renumber the Chart's clashing numbered files above mainline's max and
 // sweep references only in what the Chart owns — committing on the Chart branch
 // and ending in one outcome line for Go; the agent never closes the bead. The
 // payload (branch, Base:, Tip:, variant) is the bead body. Rationale the prompt
 // no longer cites (ADR 0088 §6): the conflict policy (ADR 0011), no re-review on
 // re-land (ADR 0009), the dispatched worktree holds the Chart branch (ADR 0071).
-// The renumber procedure is the adr-renumber Crew doc, shared with Franky's
+// The renumber procedure is the sequence-renumber Crew doc, shared with Franky's
 // conflict (ADR 0030).
 //
 //go:embed prompts/chart-conflict.md
@@ -311,25 +356,20 @@ func chartConflictPrompt(conflictID string) string {
 // contract.ChartPlaceholderBody compose from one string and can't drift.
 const wayfinderMapFields = contract.WayfinderMapFields
 
-// chartingPrompt is the /wayfinder-equivalent workflow the launched agent runs
-// (spec §5.3: the prompt carries the workflow; §8.1: charting is done in-session,
-// not in Go). It fixes only the accept/reject *contract* this ticket owns —
-// charting quality is OOS. The accept verb is `mugicrew reconcile <signal>`
-// (§8.2), which idempotently spawns the one Chart; the fast-lane verb is
-// `mugicrew reconcile <signal> --spec <body-file>` (ADR 0035 §10), which spawns
-// the one Spec and anchors it. Neither closes the Signal: the session's
-// clean-exit publish does (ADR 0096).
-// Rationale the prompt no longer cites (ADR 0088 §6): a Chart charts toward
-// exactly one Spec (ADR 0008, ADR 0013); separable work is an offshoot Signal
-// (ADR 0006); the fast lane's one predicate and its standard template (ADR 0035).
-// The Chart-body meanings, the Spec template and the interview are Crew docs
-// (chart-body, spec-template, grilling, domain-modeling; ADR 0087, ADR 0088).
+// chartingPrompt is the charting session a Survey's Launch opens (ADR 0129,
+// Spec mc-r832 D7). It claims and drafts as the Survey, but works on the parent
+// Chart: read the Destination and Notes Luffy wrote, map Notes /
+// Not-yet-specified / Out-of-scope and seed the defog beads as Chart children,
+// or push back (ADR 0130: narrow in place, split an offshoot Signal, hand back,
+// or reject/duplicate on the human's assent), closing only the Chart. The
+// clean-exit publish, Survey close and claim release are hitl-run's, in Go.
+// Section meanings and defog-create rules are the chart-body Crew doc.
 //
 //go:embed prompts/charting.md
 var chartingTmpl string
 
-func chartingPrompt(signalID string) string {
-	return fmt.Sprintf(chartingTmpl, signalID, wayfinderMapFields, contract.DraftInstruction(signalID))
+func chartingPrompt(surveyID, chartID string) string {
+	return fmt.Sprintf(chartingTmpl, surveyID, wayfinderMapFields, contract.DraftInstruction(surveyID), chartID)
 }
 
 // speccingPrompt is the fork-of-to-spec workflow the AFK speccing session runs
@@ -373,8 +413,6 @@ func promoteOrStampPrompt(chartID string) string {
 // no caller reads twice.
 func (Nami) Reconcile(ctx contract.Ctx, bead bd.Bead) error {
 	switch bead.Kind {
-	case contract.KindSignal:
-		return reconcileSignal(bead)
 	case contract.KindChart:
 		return reconcileChart(ctx, bead)
 	default:
@@ -382,9 +420,9 @@ func (Nami) Reconcile(ctx contract.Ctx, bead bd.Bead) error {
 	}
 }
 
-// chartBranch is the git branch a Signal's Chart accrues on (ADR 0010 §3:
-// chart/<id>), built via git/'s naming helper so the convention lives in one
-// place. Pure, so the name reconcileSignal computes is checkable without git.
+// chartBranch is the git branch a Chart accrues on (ADR 0010 §3: chart/<id>),
+// built via git/'s naming helper so the convention lives in one place. Pure, so
+// the name reconcileChart lands is checkable without git.
 func chartBranch(chartID string) string {
 	return git.BranchName(string(contract.KindChart), chartID)
 }
@@ -397,141 +435,12 @@ func chartTrailer(chartID string) string {
 	return git.TrailerFor(string(contract.KindChart), chartID)
 }
 
-// chartSuccessor is the one Chart a Signal spawns on accept (§7.3): a container
-// kind:chart bead seeded with contract.ChartPlaceholderBody, created as a Draft by
-// the Signal — the charting session's hitl-run publishes it with its defog
-// children, so the loop never sees it un-charted or unfogged (ADR 0059 §7). Pure
-// and named once so the shape is checkable without a DB (mirrors specSuccessor).
-func chartSuccessor(sig bd.Bead) bd.Successor {
-	return bd.Successor{
-		Kind:        contract.KindChart,
-		Container:   true,
-		Title:       sig.Title,
-		Description: contract.ChartPlaceholderBody,
-		DraftedBy:   sig.ID,
-	}
-}
-
-// reconcileSignal is the accept path (§7.3). The graph picks the leg, never a
-// flag (ADR 0035 §10): a Signal with a caused-by Spec successor (seeded by
-// SeedSpec) takes the fast lane; otherwise ensure its one Chart successor, cut
-// that Chart's git branch, then carry the Signal's Ordering edges to the Chart
-// (ADR 0085). It never closes the Signal: the session's clean-exit publish does,
-// in the batch that opens the Chart (ADR 0096), so a drop leaves it open and
-// re-chartable. Every step is idempotent — SpawnSuccessorIfAbsent,
-// branch-if-absent CutBranch, the anchor's LandedBase check, and Carry — so a
-// re-run (or a crash mid-way) converges without a second successor, branch or
-// anchor (ADR 0006/0009/0010). Both successors present is a mixed-leg graph: a loud
-// error before any write (FR18, ADR 0006) — the fast lane must never run beside a Chart.
-func reconcileSignal(sig bd.Bead) error {
-	specID, fastLane, err := successorOf(sig.ID, contract.KindSpec)
-	if err != nil {
-		return err
-	}
-	chartID, charted, err := successorOf(sig.ID, contract.KindChart)
-	if err != nil {
-		return err
-	}
-	if fastLane && charted {
-		return fmt.Errorf("reconcile: signal %s has both Spec %s and Chart %s; refusing to pick a leg", sig.ID, specID, chartID)
-	}
-	if fastLane {
-		return reconcileFastLane(sig, specID)
-	}
-	chartID, _, err = spawnSuccessor(sig.ID, chartSuccessor(sig))
-	if err != nil {
-		return err
-	}
-	if _, err := cutBranch(chartBranch(chartID), git.Mainline()); err != nil {
-		return err
-	}
-	if sig.Open() {
-		return carryOrdering(sig, chartID)
-	}
-	return nil
-}
-
 // carryOrdering carries pred's Ordering edges to succ outside the publish batch
 // (ADR 0085), and records the carry. A carry error fails the reconcile, leaving
 // pred open for the next reconcile to retry.
 func carryOrdering(pred bd.Bead, succ string) error {
 	moved, skipped, err := carry(pred.ID, succ)
 	return eventlog.RecordCarry(pred, succ, moved, skipped, err)
-}
-
-// specTrailer is the direct-Spec anchor trailer ("Spec: <id>", ADR 0014 §2), built
-// via git/'s trailer rule so Zoro's LandedBase greps back the same string.
-func specTrailer(specID string) string {
-	return git.TrailerFor(string(contract.KindSpec), specID)
-}
-
-// reconcileFastLane is the fast-lane leg (ADR 0035 §4, §10): write the empty
-// "Spec: <id>" anchor on mainline if LandedBase can't find it, then carry the
-// Signal's Ordering edges to the Spec (ADR 0085) and log one triage.fastlane with
-// the anchor sha — or one triage.failed for a failed read, write, or carry (Spec
-// D6). It never closes the Signal: the clean-exit publish does (ADR 0096); a
-// dropped session's anchor stays on mainline, inert. The Spec already exists —
-// SeedSpec spawned it, and that successor is what routed here.
-func reconcileFastLane(sig bd.Bead, specID string) error {
-	trailer := specTrailer(specID)
-	sha, err := git.AnchorIfAbsent(trailer, landedBase, writeAnchor)
-	if err == nil && !sig.Open() {
-		return nil
-	}
-	attrs := append(eventlog.BeadAttrs(sig), "spec", specID)
-	if err == nil {
-		// ponytail: logged on every run while the Signal is open, so a resumed
-		// session logs it again; key it on the eventlog if it must be exactly-once.
-		if err = carryOrdering(sig, specID); err == nil {
-			attrs = append(attrs, "anchor", sha)
-		}
-	}
-	return eventlog.Record("triage.fastlane", "triage.failed", err, attrs...)
-}
-
-// SeedSpec is the whole job of `reconcile <signal> --spec` (ADR 0035 §10): spawn
-// the Signal's one caused-by kind:spec leaf successor carrying Nami's body
-// verbatim, titled title or exactly the Signal's title. It only seeds — the
-// reconcile that follows sees the Spec and takes the fast-lane leg. Idempotent
-// via SpawnSuccessorIfAbsent; refuses a non-Signal, an empty body, a Signal that
-// already has a Chart (no mixing legs, ADR 0006: one successor), and a closed
-// Signal with no Spec (REJECT/DUPLICATE) — one already fast-laned and published is
-// a no-op. Mid-session the Signal stays open (ADR 0096), so a re-run after a drop
-// seeds a fresh Spec.
-func SeedSpec(sig bd.Bead, title, body string) error {
-	if sig.Kind != contract.KindSignal {
-		return fmt.Errorf("reconcile --spec: %s is kind %q, not a signal", sig.ID, sig.Kind)
-	}
-	if strings.TrimSpace(body) == "" {
-		return fmt.Errorf("reconcile --spec: empty Spec body for %s", sig.ID)
-	}
-	if !sig.Open() {
-		if _, seeded, err := successorOf(sig.ID, contract.KindSpec); err != nil || seeded {
-			return err
-		}
-		return fmt.Errorf("reconcile --spec: signal %s is closed; refusing to fast-lane it", sig.ID)
-	}
-	chartID, charted, err := successorOf(sig.ID, contract.KindChart)
-	if err != nil {
-		return err
-	}
-	if charted {
-		return fmt.Errorf("reconcile --spec: signal %s already has Chart %s; refusing to fast-lane it", sig.ID, chartID)
-	}
-	_, _, err = spawnSuccessor(sig.ID, specFastLaneSuccessor(sig, title, body))
-	return err
-}
-
-// specFastLaneSuccessor is the one Spec a fast-laned Signal spawns (ADR 0035 §10):
-// a leaf kind:spec carrying Nami's approved body verbatim, titled title or
-// exactly the Signal's title — a Draft by the Signal, so the session's hitl-run
-// publishes it only after its Spec: anchor is on mainline (Spec D11 row 11).
-// Pure, like chartSuccessor and specSuccessor.
-func specFastLaneSuccessor(sig bd.Bead, title, body string) bd.Successor {
-	if title == "" {
-		title = sig.Title
-	}
-	return bd.Successor{Kind: contract.KindSpec, Title: title, Description: body, DraftedBy: sig.ID}
 }
 
 // placeholderSpecBody is the seed body the emitted Spec carries until the speccing
@@ -550,35 +459,72 @@ func specSuccessor(chart bd.Bead) bd.Successor {
 		Title:       chart.Title,
 		Description: placeholderSpecBody,
 		DraftedBy:   chart.ID, // published with the Chart's close once the body is authored (Spec D6, FR 21)
+		Context:     bd.ContextOf(chart),
+		Repo:        bd.RepoStampOf(chart),
 	}
 }
 
-// Seams over the bd/git legs reconcileChart and reconcileSignal drive, so the
-// drained-Chart→Spec flow (land → spawn → speccing session → close) and the
-// Signal's Chart/fast-lane legs are testable with a fake harness and no live
-// bd/git (ADR 0035). These alias the real package funcs; the nami test
+// Seams over the bd/git legs reconcileChart and the chart-conflict arm drive, so
+// the drained-Chart→Spec flow (land → spawn → speccing session → close) is
+// testable with a fake harness and no live bd/git. These alias the real package funcs; the nami test
 // swaps them — the same package-level var seam loop.go uses for worktreeRun.
 var (
-	successorOf        = bd.SuccessorOf
-	cutBranch          = git.CutBranch
-	writeAnchor        = git.Anchor
-	openChildren       = bd.OpenChildren
-	landBranch         = git.Land
+	openChildren       = func(id string) (int, error) { return bd.OpenChildren(id, nil) }
+	landedBase         = git.LandedBase
+	spawnSignal        = bd.SpawnOffshootSignalIfAbsent
+	landedTip          = git.LandedTip
+	landingsOf         = bd.LandingsOf
+	closeBead          = bd.Close
 	spawnSuccessor     = bd.SpawnSuccessorIfAbsent
 	showBead           = bd.Show
 	closeOnPublish     = bd.CloseOnPublish
-	landedBase         = git.LandedBase
 	spawnChildIfAbsent = bd.SpawnChildIfAbsent
 	branchHead         = git.Head
-	checkResolved      = git.CheckResolved
-	restoreResolved    = git.RestoreResolved
+	isAncestor         = git.IsAncestor
+	checkResolved      = git.Repo.CheckResolved
+	restoreResolved    = git.Repo.RestoreResolved
 	integrate          = integrateVerb
 	openBlockers       = bd.OpenBlockersOfKind
+	openAnyBlockers    = bd.OpenBlockers
 	spawnChild         = bd.SpawnChild
 	hasEdge            = bd.HasEdge
 	edgesOnPublish     = bd.EdgesOnPublish
 	carry              = bd.Carry
+	initiativeOf       = bd.InitiativeOf
+	postLandClashes    = git.PostLandClashes
+	subtreeIDs         = bd.SubtreeIDs
+	cutBranch          = git.CutBranch
+	buildChildren      = bd.BuildChildren
+	repoDirOf          = contexts.RepoDirOf
+	forgeFindOpenMR    = forge.FindOpenMR
+	forgeCloseMR       = forge.CloseMR
+	forgeProject       = func(r git.Repo) (forge.Project, error) { return git.SameHostProject(r, git.Repo.ForgeProject) }
 )
+
+// childTreeOfID is the child tree <cwd>/<dir> of the repo = container id, "" when
+// it names none (a no-context Workspace reads nothing about the Chart).
+func childTreeOfID(id string) (git.Repo, error) {
+	if contexts.RepoOfID(id, showBead) == "" {
+		return "", nil
+	}
+	chart, err := showBead(id)
+	if err != nil {
+		return "", err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return git.Repo(contexts.ChildTree(chart, cwd)), nil
+}
+
+// headIn is ref's tip in repo, the Workspace's (through branchHead) when repo is "".
+func headIn(repo git.Repo, ref string) (string, error) {
+	if repo == "" {
+		return branchHead(ref)
+	}
+	return repo.Head(ref)
+}
 
 // integrateVerb runs `mugicrew integrate` in the cwd, the chart-conflict's effort
 // tree, as its agent would (by: agent), and returns the verb's exit; one that
@@ -614,7 +560,7 @@ func integrateVerb(out io.Writer) int {
 //     state change, so there is nothing for the handler to verify after (ADR 0021).
 //     Deliberately unlike the defogged branch below, whose close is gated on the
 //     Spec body being authored and so must re-read.
-//   - chart:defogged → land + spawn Spec + speccing session + gated close, below.
+//   - chart:defogged → spawn the Landing; once landed: spawn Spec + speccing session + gated close, below.
 //
 // The chart:defogged branch below lands only with no open children, and each leg is
 // idempotent — git-native re-land is a no-op returning the SHA,
@@ -633,15 +579,11 @@ func integrateVerb(out io.Writer) int {
 // re-dispatches — the close is gated on the artifact existing, not on the session
 // merely having run.
 //
-// A git.Land rebase conflict (two Charts colliding on GLOSSARY.md / an ADR number)
-// is turned into one chart-conflict bead — a MEMBER of the Chart carrying the
-// base SHA — instead of propagating (ADR 0011). The open child undrains the Chart
-// so the loop stops re-dispatching the same failing land (kills the retry spin);
-// idempotent, so a re-run with the conflict still open files no second bead. A
-// human resolves + closes it → the Chart re-drains → this handler re-lands cleanly.
-// An ADR number the Chart adds that mainline already holds rebases cleanly, so
-// Land checks it under the lock against the exact base and returns *ADRClash, which
-// files the same chart-conflict, adr-number-clash variant (ADR 0030 §1, ADR 0069).
+// The Chart never lands (ADR 0145): drained and stamped, it spawns a Landing pinned
+// at the chart/<id> head and returns; Jinbe's Landing lands it, or files the
+// chart-conflict member (ADR 0011, ADR 0030) and closes obsolete. The post-land
+// steps run only once the "Chart: <id>" trailer is on mainline, after any
+// still-open Landing is closed landed: <sha>.
 func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 	if chart.Description == contract.ChartPlaceholderBody {
 		return nil // un-charted gate: nothing to judge until the charting session writes the body (ADR 0021)
@@ -652,7 +594,7 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 		// itself; the handler stays thin (no re-read, no close — ADR 0021). The Chart
 		// stays open, so dispatch releases the caller's claim (ADR 0034) and the next
 		// tick re-dispatches into the land branch (after STAMP) or a re-drain-check.
-		inv, err := contract.NewInvocation(chart.ID, promoteOrStampPrompt(chart.ID))
+		inv, err := contract.NewInvocation(chart.ID, contexts.Focus(promoteOrStampPrompt(chart.ID), chart))
 		if err != nil {
 			return err
 		}
@@ -666,31 +608,81 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 	if open > 0 {
 		return nil // still draining; the loop pre-checks, but reconcile is self-contained
 	}
-	sha, err := landBranch(chartBranch(chart.ID), chartTrailer(chart.ID))
-	eventlog.RecordLand(chart, chartBranch(chart.ID), sha, err)
+	// The Chart never lands (ADR 0145): Jinbe's Landing does. The trailer on mainline
+	// is the landed fact; until then a drained, stamped Chart only spawns its Landing.
+	landings, err := landingsOf(chart.ID)
 	if err != nil {
-		var conflict *git.RebaseConflict
-		var clash *git.ADRClash
-		var base, variant string
-		var clashes []string
-		switch {
-		case errors.As(err, &conflict):
-			base, variant = conflict.Base, conflictRebase
-		case errors.As(err, &clash):
-			base, variant, clashes = clash.Base, conflictADRClash, clash.Clashes
-		default:
-			return err
+		return err
+	}
+	if sha, landed, err := contexts.Landed(chart, chartTrailer(chart.ID), landedBase); err != nil {
+		if foreign := (*git.ForeignLanding)(nil); errors.As(err, &foreign) {
+			return bd.HoldForeign(chart, foreign) // the hold exists even with no Landing (ADR 0187 §3)
 		}
-		// Land never writes the branch (ADR 0102 §8), so the tip read now is the tip
-		// the failed land pinned (Spec D4).
-		// refs/heads/ so the read matches Land's own, never a same-named tag.
-		tip, err := branchHead("refs/heads/" + chartBranch(chart.ID))
+		return err
+	} else if landed {
+		name, err := git.LandStrategyName()
 		if err != nil {
 			return err
 		}
-		return fileChartConflict(chart, base, tip, variant, clashes)
+		if name == git.LandStrategyGitlab { // before the Landing closes (Spec FR 20)
+			l, hasLanding := bd.NewestLanding(landings)
+			evBead := chart // the event bead, as Jinbe's: the Landing, else the Chart
+			r, dir := repoDirOf(chart)
+			var nested []any // a nested Landing's attrs, as Jinbe's legs (Spec FR 30)
+			if r != "" {
+				nested = contexts.NestedAttrs(chart, r, dir)
+			}
+			if hasLanding {
+				evBead = l
+				if err := FlagStalePin(l, chart, chartBranch(chart.ID), sha,
+					func(sha string) (string, bool) { return contexts.LandedTip(chart, sha, landedTip) },
+					func(ref string) (string, error) { return contexts.Head(chart, ref, branchHead) },
+					contexts.AncestorIn(contexts.RepoOf(chart), isAncestor), spawnSignal); err != nil {
+					return err
+				}
+			}
+			if err := closeLandedMR(evBead, chart.ID, r, nested); err != nil { // before any bead closes, so a failure retries
+				// a held 429 returns nil before anything closes; the next tick retries (ADR 0185 §8)
+				return holdRateLimited(evBead, err, nested)
+			}
+			rateLimited.Delete(evBead.ID)
+			if hasLanding && l.Open() { // CloseLandings below closes it; logged after the MR close so a retry doesn't re-log it
+				eventlog.RecordLandOutcome(l, eventlog.LandLanded, git.RecordedMR(l.Description), append([]any{"sha", sha}, nested...)...)
+			}
+			if bd.RepoStampOf(chart) == "" { // a nested container skips the post-land renumber (out of scope: no child-scoped clash read)
+				if err := mintRenumber(chart, sha); err != nil {
+					return err
+				}
+			}
+		}
+		if err := bd.CloseLandings(landings, sha, closeBead); err != nil {
+			return err
+		}
+	} else {
+		for _, l := range landings {
+			if l.Open() {
+				return nil // its Landing is landing it
+			}
+		}
+		if held, err := openAnyBlockers(chart.ID); err != nil || len(held) > 0 {
+			return err // any open blocker (a human's Task, an offshoot Signal) freezes the Chart (ADR 0268)
+		}
+		head, err := contexts.Head(chart, "refs/heads/"+chartBranch(chart.ID), branchHead)
+		if err != nil {
+			return err
+		}
+		_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
+			Kind:        contract.KindLanding,
+			Title:       chart.Title,
+			Description: git.CommitPin(head),
+		})
+		return err
 	}
-	specID, _, err := spawnSuccessor(chart.ID, specSuccessor(chart))
+	succ := specSuccessor(chart)
+	if succ.Parent, err = initiativeOf(chart); err != nil {
+		return err
+	}
+	specID, _, err := spawnSuccessor(chart.ID, succ)
 	if err != nil {
 		return err
 	}
@@ -701,7 +693,7 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 	if spec.Description == placeholderSpecBody {
 		// Body not yet authored: run the speccing session over the Chart. It writes
 		// the Spec body via `bd update` (speccing.md); on failure the Chart stays open.
-		inv, err := contract.NewInvocation(specID, speccingPrompt(chart.ID))
+		inv, err := contract.NewInvocation(specID, contexts.Focus(speccingPrompt(chart.ID), chart))
 		if err != nil {
 			return err
 		}
@@ -726,44 +718,81 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 	return nil
 }
 
-// fileChartConflict spawns the one open chart-conflict member that undrains the
-// Chart (ADR 0011): idempotent via SpawnChildIfAbsent (open-child guard), so a
-// re-run with the conflict still open files no second bead. Returns nil on
-// success — the conflict is now a bead, not a propagated error.
-func fileChartConflict(chart bd.Bead, base, tip, variant string, clashes []string) error {
-	_, _, err := spawnChildIfAbsent(chart.ID, bd.Successor{
-		Kind:        contract.KindChartConflict,
-		Container:   false,
-		Title:       chart.Title + " conflicts with main",
-		Description: chartConflictBody(chart.ID, base, tip, variant, clashes),
+// mintRenumber files the renumber Checkpoint when the landed Chart is the later side
+// of an ADR-number clash (ADR 0225); before the Landings close and the Spec spawns,
+// so an error leaves the Chart open and the re-run files no duplicate. Nami only
+// calls the mint: the Checkpoint routes to Jinbe from then on.
+func mintRenumber(chart bd.Bead, sha string) error {
+	clashes, err := postLandClashes(sha)
+	if err != nil {
+		return err
+	}
+	_, err = MintRenumber(chart, sha, clashes, RenumberSeams{
+		SpawnSuccessor: spawnSuccessor, CutBranch: cutBranch, BuildChildren: buildChildren,
+		SpawnBuild: spawnChildIfAbsent, InitiativeOf: initiativeOf, SubtreeIDs: subtreeIDs, CausedBy: bd.CausedBy,
 	})
 	return err
 }
 
 // The chart-conflict variants name which leg the resolve session runs (ADR 0030
-// §3): a textual rebase conflict, or an added ADR number mainline already holds.
+// §3): a textual rebase conflict, or an added numbered file whose number mainline
+// already holds in its own sequence (ADR 0219).
 const (
-	conflictRebase   = "rebase-conflict"
-	conflictADRClash = "adr-number-clash"
+	ConflictRebase      = "rebase-conflict"
+	ConflictNumberClash = "number-clash"
+	// ConflictRequested is a human-filed rebase onto the pinned base (ADR 0262): no
+	// failed land stands behind it, and a clean rebase is a complete result.
+	ConflictRequested = "requested"
 )
 
-// chartConflictBody is the payload the chart-conflict bead carries for its
+// ChartConflictBody is the payload the chart-conflict bead carries for its
 // resolve session (ADR 0011 §1, ADR 0030 §3): the branch, the mainline base SHA
 // (git.BasePin), the Chart tip the failed land saw (git.TipPin), the variant, and
-// (adr-number-clash) the colliding ADR files. Pure, so the payload is checkable
-// without git or bd.
-func chartConflictBody(chartID, base, tip, variant string, clashes []string) string {
-	body := fmt.Sprintf(`Chart-land conflict (ADR 0011, ADR 0030). It is resolved AFK; closing it
-re-drains the Chart and reconcileChart re-lands it.
+// (number-clash) the colliding numbered files, each with its template. Pure, so the payload is checkable
+// without git or bd. Exported: Jinbe's Chart-parent Landing files the same bead.
+func ChartConflictBody(chartID, base, tip, variant string, clashes []string) string {
+	intro := "Chart-land conflict"
+	if len(clashes) > 0 {
+		intro = "Chart-land numbered-file clash"
+	}
+	intro += ` (ADR 0011, ADR 0219). It is resolved AFK; closing it
+re-drains the Chart and reconcileChart re-lands it.`
+	if variant == ConflictRequested {
+		intro = "Requested rebase (ADR 0262 (mugicrew-a-requested-rebase-is-a-human-filed-conflict-variant…)): a human asked for this Chart to be rebased onto mainline;\nit is not a land conflict. It is resolved AFK; closing it re-drains the Chart."
+	}
+	body := fmt.Sprintf(`%s
 
 branch: %s
 %s
 %s
-variant: %s`, chartBranch(chartID), git.BasePin(base), git.TipPin(tip), variant)
+variant: %s`, intro, chartBranch(chartID), git.BasePin(base), git.TipPin(tip), variant)
 	if len(clashes) > 0 {
 		body += "\nclashes:\n- " + strings.Join(clashes, "\n- ")
 	}
 	return body
+}
+
+// RequestedChartTitle and RequestedCheckpointTitle are the titles of a requested
+// rebase's bead (ADR 0262).
+func RequestedChartTitle(chartTitle string) string { return chartTitle + " rebases onto main" }
+func RequestedCheckpointTitle(cpID string) string  { return "Checkpoint " + cpID + " rebases onto main" }
+
+// RequestedCheckpointBody is the body of a Checkpoint's requested-rebase Conflict:
+// the same Base:/Tip: pins as a land conflict, variant: requested. Pure.
+func RequestedCheckpointBody(cpID, base, tip string) string {
+	return "requested rebase: Franky rebases checkpoint/" + cpID + " onto the pinned base, then this bead closes\n" +
+		git.BasePin(base) + "\n" + git.TipPin(tip) + "\nvariant: " + ConflictRequested
+}
+
+// BodyVariant reads a conflict body's "variant:" line; a body without one (a
+// Checkpoint land conflict) is "".
+func BodyVariant(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "variant:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // chartConflictPins reads a chart-conflict body's base and tip pins for the AFK
@@ -793,4 +822,73 @@ func legacyBase(body string) string {
 		}
 	}
 	return ""
+}
+
+// rateLimited remembers the beads whose Forge 429 is already logged: one event, not one per
+// tick (ADR 0185 §8). Entries leave on the bead's next success; a bead that closes while
+// limited leaves a stale id (ponytail: Jinbe prunes these, Nami's volume doesn't need it).
+var rateLimited sync.Map
+
+// holdRateLimited returns err unless it is a Forge 429, which it logs once per bead and
+// swallows so the bead stays open and the next tick retries. Jinbe's twin cannot be shared
+// (Jinbe imports Nami, and its prune reads beads through Jinbe's seams).
+func holdRateLimited(b bd.Bead, err error, nested []any) error {
+	if !errors.Is(err, forge.ErrRateLimited) {
+		rateLimited.Delete(b.ID)
+		return err
+	}
+	if _, seen := rateLimited.LoadOrStore(b.ID, true); !seen {
+		attrs := append(eventlog.BeadAttrs(b), "mr", git.RecordedMR(b.Description))
+		slog.Warn("land.rate_limited", append(attrs, nested...)...)
+	}
+	return nil
+}
+
+// closeLandedMR closes whatever MR is still open on a landed Chart's branch (the fetch/push
+// race's orphan, ADR 0185 §6), on the Chart's own Forge project; the event rides the Landing
+// when there is one. Jinbe does the same for a Checkpoint.
+func closeLandedMR(evBead bd.Bead, chartID string, r git.Repo, nested []any) error {
+	proj, err := forgeProject(r)
+	if err != nil {
+		return err
+	}
+	iid, err := forge.CloseOpenMR(proj, chartBranch(chartID), forgeFindOpenMR, forgeCloseMR)
+	if err != nil || iid == 0 {
+		return err
+	}
+	eventlog.RecordLandMRClosed(evBead, iid, "container landed", nested...)
+	return nil
+}
+
+// FlagStalePin files the offshoot Signal (discovered-from the Landing) for a landed
+// squash whose Tip: is not the container branch's head (a stale pin merged after the
+// branch advanced): the commits after the pin would otherwise be lost (Spec FR 20,
+// ADR 0185 §6). A squash without a Tip: line, or a branch already gone, files nothing;
+// any other head-read error is returned so the Landing stays open and retries. A
+// landed Tip: that is not an ancestor of the head means the branch was rewritten after
+// the pin, so tip..head would list every rebased commit as lost: the body points at
+// git range-diff instead (Spec FR 39).
+func FlagStalePin(l, cp bd.Bead, branch, sha string, landedTip func(string) (string, bool),
+	head func(string) (string, error), isAncestor func(a, b string) bool, signal func(origin, title, body string) (string, bool, error)) error {
+	tip, ok := landedTip(sha)
+	if !ok {
+		return nil
+	}
+	h, err := head("refs/heads/" + branch)
+	if git.MissingRef(err) || (err == nil && h == tip) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var body string
+	if isAncestor(tip, h) {
+		body = fmt.Sprintf("%s landed with Tip: %s, but branch %s has advanced to %s.\nLanded Tip: %s\nHead: %s\nRange: %s..%s\n"+
+			"Fix: the commits in that range are not on mainline. Land them as new work.\n", cp.ID, tip, branch, h, tip, h, tip, h)
+	} else {
+		body = fmt.Sprintf("%s landed with Tip: %s, but branch %s was rewritten after the landed pin and is now at %s.\nLanded Tip: %s\nHead: %s\n"+
+			"Fix: the commits not on mainline are those `git range-diff %s...%s` shows as new or changed. Land them as new work.\n", cp.ID, tip, branch, h, tip, h, tip, h)
+	}
+	_, _, err = signal(l.ID, cp.Title+": commits after the landed Tip: are not on mainline", body)
+	return err
 }

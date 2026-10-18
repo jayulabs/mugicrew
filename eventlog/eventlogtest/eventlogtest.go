@@ -5,8 +5,13 @@ package eventlogtest
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 )
+
+// mu guards every captured slice, so Wait can poll while code under test logs.
+var mu sync.Mutex
 
 // Event is one captured record. Int attrs read back as int, the rest as given.
 type Event struct {
@@ -38,6 +43,22 @@ func Names(evs []Event) []string {
 	return out
 }
 
+// Wait blocks until done(*evs) holds, failing the test after 2s.
+func Wait(t testing.TB, evs *[]Event, done func([]Event) bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		mu.Lock()
+		ok := done(*evs)
+		mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for events")
+		}
+	}
+}
+
 // recorder keeps every record; attrs from .With ride ahead of the record's own.
 type recorder struct {
 	evs   *[]Event
@@ -60,7 +81,9 @@ func (r recorder) Handle(_ context.Context, rec slog.Record) error {
 		add(a)
 	}
 	rec.Attrs(add)
+	mu.Lock()
 	*r.evs = append(*r.evs, Event{rec.Level, rec.Message, m})
+	mu.Unlock()
 	return nil
 }
 

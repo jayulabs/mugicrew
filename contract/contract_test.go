@@ -43,6 +43,7 @@ func TestDraftInstruction(t *testing.T) {
 		"before you exit",
 		"before you close your own bead",
 		"Never publish",
+		"mugicrew latch jira <KEY> --blocks <bead> --drafted-by ws-spec",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("DraftInstruction missing %q:\n%s", want, got)
@@ -56,7 +57,7 @@ func TestDraftInstruction(t *testing.T) {
 // The one HITL closing line (Spec D8) keeps /exit literal.
 func TestClosingLine(t *testing.T) {
 	bar := "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	want := "When you have closed your bead, print exactly these four lines and stop:\n" + bar + "\n" +
+	want := "When your session's work is done (you closed your bead, or you finished your outcome and left the close to mugicrew), print exactly these four lines and stop:\n" + bar + "\n" +
 		"✅ **The work for this session is finished.** You may close this chat.\n" +
 		"`/exit` or hit Ctrl+C twice to close.\n" + bar
 	got := ClosingLine()
@@ -72,8 +73,8 @@ func TestClosingLine(t *testing.T) {
 // Spec D1: StripKindPrefix removes every leading kind prefix, driven
 // from Kinds so a new Kind const is covered without touching this test.
 func TestStripKindPrefix(t *testing.T) {
-	if len(Kinds) != 17 {
-		t.Fatalf("len(Kinds) = %d, want 17", len(Kinds))
+	if len(Kinds) != 23 {
+		t.Fatalf("len(Kinds) = %d, want 23", len(Kinds))
 	}
 	for _, k := range Kinds {
 		if got := StripKindPrefix(string(k) + ": Foo misses bar"); got != "Foo misses bar" {
@@ -85,6 +86,8 @@ func TestStripKindPrefix(t *testing.T) {
 		"critique: x":                         "x",
 		"  critique : x":                      "x",
 		"Chart-conflict: x":                   "x",
+		"Survey: x":                           "x",
+		"Initiative: Multi-phase rollout":     "Multi-phase rollout", // FR48
 		"Spec: Chart: foo":                    "foo",
 		"Spec:":                               "Spec:",
 		"Spec:  ":                             "Spec:  ",

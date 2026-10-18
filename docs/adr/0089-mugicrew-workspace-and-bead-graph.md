@@ -58,3 +58,5 @@ how its code is written, styled, built and tested.
   Pushing upstream is out of scope.
 - Which repos use contributor mode (for example, an OE's vendored repos) is the
   hosting OE's policy, not mugicrew's.
+
+> **Amended by ADR 0167:** a Workspace may hold declared child repos (`repo =` contexts); one Workspace still has one Bead Graph and one loop.

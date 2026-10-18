@@ -42,14 +42,12 @@ func EditChartBody(chartID, section, line string, drop bool) error {
 // non-blank line (after a blank under the heading when it is empty).
 func editSection(body, section, line string, drop bool) (string, bool, error) {
 	lines := strings.Split(body, "\n")
-	head := slices.IndexFunc(lines, func(l string) bool { return strings.TrimSpace(l) == "## "+section })
-	if head < 0 {
+	secs := contract.ChartSections(lines)
+	i := slices.IndexFunc(secs, func(s contract.Section) bool { return s.Name == section })
+	if i < 0 {
 		return "", false, fmt.Errorf("chart: body has no ## %s section", section)
 	}
-	end := len(lines)
-	if i := slices.IndexFunc(lines[head+1:], func(l string) bool { return strings.HasPrefix(l, "## ") }); i >= 0 {
-		end = head + 1 + i
-	}
+	head, end := secs[i].Head, secs[i].End
 	at := slices.Index(lines[head+1:end], line)
 	if drop {
 		if at < 0 {

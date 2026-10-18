@@ -1,6 +1,7 @@
 # ADR 0035: mugicrew Signal-triage fast lane — a sharp Signal emits a direct Spec; review is kept
 
 Status: Accepted
+Amended by: ADR 0129, ADR 0212 (§4 under gitlab), ADR 0287 (a-direct-spec-s-anchor-is-a-bead-pin-under-every-land-strategy) (§4)
 Date: 2026-09-30
 
 Extends: ADR 0006 (Signal intake — a fourth triage outcome), ADR 0014 (the fast
@@ -31,6 +32,11 @@ one slice, fed by a direct Spec, already works end to end (`364e809`).
 4. **Nami's Go code writes the anchor.** After the Spec exists, the triage
    handler writes the empty `Spec: <spec-id>` commit on mainline, skipping it if
    the commit already exists (ADR 0014 §2's shape). The prompt never writes it.
+
+   > **Superseded by ADR 0287 (a-direct-spec-s-anchor-is-a-bead-pin-under-every-land-strategy):** the anchor is now an `Anchor: <sha>` pin on the Spec
+   > bead under every land strategy; no commit is written. Only a legacy Spec carries
+   > the empty commit.
+
 5. **Triage writes no files to the repo.** Signal triage runs at the repo root
    with no branch (ADR 0009), so the anchor is always the empty commit. Any doc or
    glossary edit the Spec calls for is part of the Build and is reviewed with it.

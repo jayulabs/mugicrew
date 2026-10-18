@@ -21,6 +21,9 @@ the effort children, because they share the loop's process group. Decided in gri
    goroutine to finish (post-session step, claim release, teardown), and exits.
    It keeps holding the single-loop lock while it drains, so `loop start` is
    refused with "loop is draining".
+   > **Amended (2026-10-16):** `loop start` on a stop drain cancels it
+   > (SIGUSR1) and the loop polls again; ADR 0236
+   > (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain…).
 2. **Force stop exits immediately.** `loop stop --force`, a second stop while
    draining, or a second Ctrl-C exits at once, as today. In-flight effort
    processes are not signalled: worktree efforts finish on their own. Whatever
@@ -28,14 +31,26 @@ the effort children, because they share the loop's process group. Decided in gri
    > **Amended (2026-10-04):** `--force` is delivered as a
    > second stop signal (SIGTERM twice), never SIGKILL, so the loop can log
    > `effort.abandoned` and `loop.forced` before exiting (ADR 0029).
+   >
+   > **Amended (2026-10-16):** a cancelled stop drain (§1) fully resets the stop,
+   > so the next stop starts a fresh drain with its own StopWindow, never a
+   > force; only a second stop past that window forces. ADR 0236
+   > (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain…).
 3. **Only a TUI force with live efforts asks for confirmation.** A plain stop
    never asks, because it cannot lose work. A TUI force with efforts in flight
    asks: "N efforts in flight will be abandoned. Force stop?". The CLI
    `--force` flag counts as the confirmation.
+   > **Amended (2026-10-16, ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain-by-signal-generation)):** the TUI dialog is three-way:
+   > `y` force, `k` keep on (shells out to `loop start`, which cancels the drain)
+   > and `n`/esc back. It still lists the efforts a force would abandon.
 4. **The loop has three states, read from its lockfile:** `off`, `on (pid)` and
    `draining (pid, N in flight: <bead titles>)`. On a stop signal the loop
    writes `draining` into the lockfile, so `loop status` and the TUI read one
    file and derive nothing. While draining, the TUI toggle offers force stop.
+   > **Amended (2026-10-16, ADR 0236 (mugicrew-loop-run-re-arms-from-a-cancelled-stop-drain-by-signal-generation)):** it also offers `k` keep
+   > on, and `n`/esc goes back.
+   > **Amended (2026-10-18, ADR 0295 (mugicrew-loop-status-prints-labelled-fields…)):** `loop status` prints `state: <word>` and `pid: N` as labelled fields, and a
+   > drain's in-flight beads are a count (`in flight: N`), not titles.
 5. **Foreground and detached loops behave the same.** Effort children start
    with `Setpgid: true`, so a terminal Ctrl-C or hangup reaches only the loop,
    and SIGHUP joins SIGINT/SIGTERM as a drain signal. A first Ctrl-C drains and

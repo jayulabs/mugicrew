@@ -22,8 +22,9 @@ import (
 // (ADR 0002). It is the key the registry resolves an owner from.
 type Kind string
 
-// Nami's MVP kinds (spec §4.2; chart-conflict added by ADR 0011), plus kinds
-// other crewmates own: Spec (Zoro's) — the terminal artifact a drained Chart
+// The intake and charting kinds (spec §4.2; chart-conflict added by ADR 0011):
+// Signal is Luffy's to triage (ADR 0129), the rest Nami's. Plus kinds other
+// crewmates own: Spec (Zoro's) — the terminal artifact a drained Chart
 // spawns in succession (§8.4); Prototype (Sanji's), an Inbox HITL kind (§9.2);
 // and Task (Brook's), a free-standing HITL walk-through of external-world steps
 // (ADR 0115; ADR 0013 had removed it from the defog set and reserved the name).
@@ -32,6 +33,7 @@ const (
 	KindGrilling      Kind = "grilling"
 	KindResearch      Kind = "research"
 	KindChart         Kind = "chart"
+	KindSurvey        Kind = "survey"         // Nami-owned HITL leaf: a Chart's charting session, seeded as its first child (Spec mc-r832 D1)
 	KindChartConflict Kind = "chart-conflict" // Nami-owned AFK leaf: a Chart-land conflict, member of the Chart, carrying the Base:/Tip: pins (ADR 0011, ADR 0080)
 	KindSpec          Kind = "spec"
 	KindCheckpoint    Kind = "checkpoint" // Zoro-cut container, handled by Jinbe (registry row); BranchName/TrailerFor name the kind from this one const (FR27)
@@ -39,7 +41,10 @@ const (
 	KindTask          Kind = "task"       // Brook-owned HITL leaf: a human-launched guide through external-world steps (ADR 0113/0115); not a defog kind (ADR 0013)
 	KindPivot         Kind = "pivot"      // Zoro-owned HITL leaf: a Spec flaw a Checkpoint effort raised; its Checkpoint blocks on it (ADR 0043)
 	KindRollback      Kind = "rollback"   // human-filed, Jinbe-owned AFK leaf undoing a landed Checkpoint; a successor Checkpoint is caused-by it (ADR 0047/0048)
-	KindSurgery       Kind = "surgery"    // human-filed, Franky-owned HITL leaf: dictated code on its own surgery Checkpoint (ADR 0091/0092)
+	KindSurgery       Kind = "surgery"    // human-filed, Franky-owned HITL leaf: dictated code on a Checkpoint: a fresh one it files, or an existing one it joins (ADR 0091/0092)
+	KindInitiative    Kind = "initiative" // Luffy-owned HITL container above the spine: branchless, no land; member chains are its children (ADR 0128, 0135)
+	KindDiscussion    Kind = "discussion" // Robin-owned HITL leaf: a human-started read-only session that explains the Workspace and drafts Signals (ADR 0194)
+	KindCheckup       Kind = "checkup"    // Chopper-owned HITL leaf: a human-started session that diagnoses and repairs one broken bead (ADR 0272)
 )
 
 // The Checkpoint tail kinds, in spine order: a landed Spec's Checkpoint
@@ -56,12 +61,19 @@ const (
 	KindApproval Kind = "approval"
 )
 
+// KindLanding is the Jinbe-owned AFK leaf that lands its parent container: a child
+// pinned to the approved commit, so the container never lands itself (ADR 0145/0147).
+const KindLanding Kind = "landing"
+
+// KindLatch is the Brook-owned AFK leaf that blocks beads until a Jira ticket reaches Done.
+const KindLatch Kind = "latch"
+
 // Kinds is every Kind const above (both blocks). StripKindPrefix is built from
 // it, so a new Kind must be added here to join the title backstop (ADR 0097).
 var Kinds = []Kind{
-	KindSignal, KindGrilling, KindResearch, KindChart, KindChartConflict, KindSpec,
-	KindCheckpoint, KindPrototype, KindTask, KindPivot, KindRollback, KindSurgery,
-	KindBuild, KindReview, KindCritique, KindConflict, KindApproval,
+	KindSignal, KindGrilling, KindResearch, KindChart, KindSurvey, KindChartConflict, KindSpec,
+	KindCheckpoint, KindPrototype, KindTask, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup,
+	KindBuild, KindReview, KindCritique, KindConflict, KindApproval, KindLanding, KindLatch,
 }
 
 // kindPrefix matches one leading "<kind>:" (case-insensitive, whitespace around
@@ -74,6 +86,17 @@ var kindPrefix = func() *regexp.Regexp {
 	slices.SortFunc(names, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return regexp.MustCompile(`(?i)^\s*(?:` + strings.Join(names, "|") + `)\s*:\s*`)
 }()
+
+// AdmitsLandOnlyHold reports whether an open blocker of this kind holds only a
+// Checkpoint's land, not its work (ADR 0269): the offshoot-shaped kinds. A pivot or
+// any other kind freezes the whole Checkpoint. Shared by loop.Readmit and the TUI.
+func (k Kind) AdmitsLandOnlyHold() bool {
+	switch k {
+	case KindTask, KindSignal, KindChart, KindSpec, KindCheckpoint, KindInitiative:
+		return true
+	}
+	return false
+}
 
 // StripKindPrefix removes every leading kind prefix from title ("Spec: Chart:
 // foo" → "foo"); the colon is required. A title that would strip to nothing is
@@ -106,6 +129,10 @@ const WayfinderMapFields = "Destination / Notes / Decisions-so-far / Not-yet-spe
 // Its field list composes from WayfinderMapFields.
 const ChartPlaceholderBody = "Chart body — to be written by the charting session as a wayfinder map (" + WayfinderMapFields + ")."
 
+// SurveyBody is every Survey's body (Spec mc-r832 D1): a pointer to its parent
+// Chart, so the bead holds no content to keep in sync.
+const SurveyBody = "Survey of its parent Chart: a HITL charting session that maps the Chart's fog with a human. The map lives on the Chart (crew doc chart-body.md), not here; this bead holds no content and is closed by mugicrew when the session exits cleanly."
+
 // DraftedBy is the label that marks a Draft and names its creator — the effort's
 // or session's own bead (ADR 0059 §2). Publish and cleanup select on it, so two
 // efforts on one container never touch each other's Drafts.
@@ -119,7 +146,8 @@ func DraftInstruction(creator string) string {
 - Create each one with `+"`-s deferred`"+` and the label %[1]s in the same -l list as its kind label (`+"`-l kind:<kind>,%[1]s`"+`), keeping --no-inherit-labels.
 - Add every edge between your Drafts, and from them to existing beads, before you exit.
 - Create every Draft before you close your own bead.
-- Never publish: do not set a Draft's status to open and do not remove its %[1]s label.`, DraftedBy(creator))
+- Never publish: do not set a Draft's status to open and do not remove its %[1]s label.
+- A bead that must wait on a Jira ticket: run `+"`mugicrew latch jira <KEY> --blocks <bead> --drafted-by %[2]s`"+` (it files the latch as your Draft).`, DraftedBy(creator), creator)
 }
 
 // Render executes an embedded prompt template over data. The templates are
@@ -138,7 +166,7 @@ func Render(t *template.Template, data any) string {
 // the harness's markdown rendering; /exit is literal until a second harness
 // supplies its own finish wording.
 func ClosingLine() string {
-	return "When you have closed your bead, print exactly these four lines and stop:\n" + closingBar + "\n" +
+	return "When your session's work is done (you closed your bead, or you finished your outcome and left the close to mugicrew), print exactly these four lines and stop:\n" + closingBar + "\n" +
 		"✅ **" + ClosingPhrase + "** You may close this chat.\n" +
 		"`/exit` or hit Ctrl+C twice to close.\n" + closingBar
 }
@@ -209,6 +237,7 @@ type Invocation struct {
 	Prompt    string
 	BeadID    string
 	SessionID string
+	ReadOnly  bool // drop the edit tools from the session (registry Entry.ReadOnly, ADR 0191)
 }
 
 // preamble is the Crewmate preamble (CREWMATE.md): static text, no fmt verbs,
@@ -268,6 +297,16 @@ type Cost struct {
 	Unpriced bool                 // some model had no price, so USD undercounts
 }
 
+// Metered is a HITL meter's result: the run's Cost, plus where the session went if
+// its transcript ends in a continued-in record (ContinuedIn, "" = nowhere) and its
+// last cost-state as cumulative totals (Last; the baseline of the remainder the
+// destination adds).
+type Metered struct {
+	Cost
+	ContinuedIn string
+	Last        Cost
+}
+
 // UsageWindow is one Plan usage rate-limit window: Pct used (0–100) and when it
 // resets (zero = unknown).
 type UsageWindow struct {
@@ -289,6 +328,12 @@ type ModelCost struct {
 	Out        int64   `json:"out"`
 	CacheRead  int64   `json:"cache_read"`
 	CacheWrite int64   `json:"cache_write"`
+}
+
+// Sub is m − p, field by field.
+func (m ModelCost) Sub(p ModelCost) ModelCost {
+	return ModelCost{USD: m.USD - p.USD, In: m.In - p.In, Out: m.Out - p.Out,
+		CacheRead: m.CacheRead - p.CacheRead, CacheWrite: m.CacheWrite - p.CacheWrite}
 }
 
 // Attrs are the cost's top-level event attrs: cost_usd, api_ms, models, and
@@ -315,7 +360,27 @@ type Summary struct {
 	IsError        bool     `json:"is_error"`
 	Errors         []string `json:"errors"`
 	Result         string   `json:"result"`
+	APIError       string   `json:"api_error"`
+	APIErrorStatus int      `json:"api_error_status"`
 }
+
+// Limit is a Plan usage limit hit's reset: when the window resets and where that
+// time came from. Source is "message" (transcript or result prose), "usage"
+// (ReadUsage) or "fallback" (now + 1h, no reset time found).
+type Limit struct {
+	ResetsAt time.Time
+	Source   string
+}
+
+// LimitError is the error a Harness's Run returns when the session ended on a
+// Plan usage limit hit; Err is the ordinary error it would have returned.
+type LimitError struct {
+	Limit
+	Err error
+}
+
+func (e *LimitError) Error() string { return e.Err.Error() }
+func (e *LimitError) Unwrap() error { return e.Err }
 
 // Harness is the single choke point for spawning an agent (spec §5). Run is the
 // AFK path (exec headless, block till done); LaunchCommand is the HITL path
@@ -327,7 +392,7 @@ type Summary struct {
 type Harness interface {
 	Run(ctx Ctx, inv Invocation) (Result, error)
 	LaunchCommand(inv Invocation) (LaunchCommand, error)
-	ResumeCommand(sessionID string) (AgentCommand, error)
+	ResumeCommand(sessionID string, readOnly bool) (AgentCommand, error)
 }
 
 // Crewmate owns >=1 kind and exposes the kind's two dispatch shapes (spec §4).
@@ -350,11 +415,14 @@ type LaunchCommand interface {
 }
 
 // AgentCommand is an agent invocation the human runs in their own terminal; the
-// harness produces it (spec §5.3). Argv is the command line; cwd/env join it
-// when the harness backend lands.
+// harness produces it (spec §5.3). Argv is the command line; Env is its Agent
+// Profile's expanded env, which the launcher hands the agent through its process
+// environment, never argv (ADR 0125).
 type AgentCommand struct {
 	Argv      []string
-	SessionID string // the pre-assigned agent session id, "" if the argv carries none
+	SessionID string            // the pre-assigned agent session id, "" if the argv carries none
+	Env       map[string]string // KEY=VAL on top of the launcher's environment
+	Profile   string            // the Agent Profile it runs on, "" = the built-in; set by the launcher, not the harness
 }
 
 func (AgentCommand) isLaunchCommand() {}

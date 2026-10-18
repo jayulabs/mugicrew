@@ -2,7 +2,6 @@ package zoro
 
 import (
 	"errors"
-	"os/exec"
 	"reflect"
 	"slices"
 	"strings"
@@ -24,14 +23,17 @@ type fakeGraph struct {
 	spawned    []bd.Successor           // SpawnDiscoveredIfAbsent creates
 	pred       string                   // the predecessor the new Spec was caused-by
 	superseded map[string]string        // old → new
-	anchors    []string                 // trailers written onto main
-	landed     map[string]bool          // trailers already on main
+	anchors    []string                 // ids whose Anchor: pin was written
+	pins       map[string]string        // id → its Anchor: pin sha
 	closes     map[string][]string      // id → every close reason written (a double close shows as 2)
 	failClose  string                   // a close of this id errors once (partial failure)
 	forced     []string                 // ids closed with --force
 	cuts       map[string]string        // branch → base
 	seq        []string                 // supersede, carry and close calls in order: "supersede <old> <new>" / "carry <pred> <succ>" / "close <id>"
 	carryErr   error                    // carry: the error bd.Carry returns
+	parent     map[string]string        // id → its parent (membership edge)
+	labels     map[string][]string      // id → its labels
+	surveys    [][3]string              // SpawnSurveyIfAbsent calls: {chart, title, drafter}
 }
 
 func newFakeGraph(chart string) *fakeGraph {
@@ -44,7 +46,7 @@ func newFakeGraph(chart string) *fakeGraph {
 		pivots:     []string{"ws-pv", "ws-pv2", "ws-pvx"},
 		chart:      chart,
 		superseded: map[string]string{},
-		landed:     map[string]bool{},
+		pins:       map[string]string{},
 		closes:     map[string][]string{},
 		spawnedIDs: map[contract.Kind]string{},
 		cuts:       map[string]string{},
@@ -56,7 +58,11 @@ func (g *fakeGraph) bead(id string) bd.Bead {
 	if slices.Contains(g.pivots, id) {
 		kind = contract.KindPivot
 	}
-	return bd.Bead{ID: id, Kind: kind, Status: g.status[id], Title: "Spec: old"}
+	desc := ""
+	if sha, ok := g.pins[id]; ok {
+		desc = "Anchor: " + sha + "\n"
+	}
+	return bd.Bead{ID: id, Kind: kind, Status: g.status[id], Title: "Spec: old", Description: desc, Parent: g.parent[id], Labels: g.labels[id]}
 }
 
 func (g *fakeGraph) close(id, reason string) error {
@@ -72,18 +78,16 @@ func (g *fakeGraph) close(id, reason string) error {
 
 func stubSweepSeams(t *testing.T, g *fakeGraph) {
 	t.Helper()
-	// AnchorIfAbsent takes the land lock under the git-common-dir: give it a scratch
-	// repo, so the test needs no checkout (Nix sandbox) and never touches the real one.
-	t.Chdir(t.TempDir())
-	if out, err := exec.Command("git", "init", "-q").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	oShow, oCp, oSpec, oCause, oSpawn, oLand, oAnchor, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry :=
-		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, landedBase, writeAnchor, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry
+	oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey :=
+		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey
 	t.Cleanup(func() {
-		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, landedBase, writeAnchor, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry =
-			oShow, oCp, oSpec, oCause, oSpawn, oLand, oAnchor, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry
+		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey =
+			oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey
 	})
+	spawnSurvey = func(chart, title, drafter string) (string, bool, error) {
+		g.surveys = append(g.surveys, [3]string{chart, title, drafter})
+		return "mc-survey", len(g.surveys) == 1, nil
+	}
 	carry = func(pred, succ string) ([]string, []bd.CarrySkip, error) {
 		g.seq = append(g.seq, "carry "+pred+" "+succ)
 		return nil, nil, g.carryErr
@@ -110,17 +114,15 @@ func stubSweepSeams(t *testing.T, g *fakeGraph) {
 		g.spawned = append(g.spawned, s)
 		return id, true, nil
 	}
-	landedBase = func(trailer string) (string, error) {
-		if g.landed[trailer] {
-			return "anchorsha", nil
-		}
-		return "", git.ErrNotLanded
-	}
-	writeAnchor = func(trailer string) (string, error) {
-		g.anchors = append(g.anchors, trailer)
-		g.landed[trailer] = true
-		return "anchorsha", nil
-	}
+	// Local strategy: the pin is the tip; no Spec: trailer is on main.
+	swap(t, &landStrategy, func() (string, error) { return git.LandStrategyLocal, nil })
+	swap(t, &repoLanded, func(git.Repo, string) (string, error) { return "", git.ErrNotLanded })
+	swap(t, &repoTip, func(git.Repo) (string, error) { return "tipsha", nil })
+	swap(t, &updateBody, func(id string, a []string) error {
+		g.anchors = append(g.anchors, id)
+		g.pins[id] = "tipsha"
+		return nil
+	})
 	supersede = func(old, new string) error {
 		g.seq = append(g.seq, "supersede "+old+" "+new)
 		g.superseded[old] = new
@@ -217,7 +219,7 @@ func TestConfirmChartedSweep(t *testing.T) {
 }
 
 // A fast-laned Spec (no Chart): the corrected Spec is caused-by the old Spec's
-// Signal and gets a fresh "Spec: <new>" anchor on main (FR41, ADR 0035).
+// Signal and gets an Anchor: pin at the local tip, no commit on main (FR41, ADR 0035).
 func TestConfirmFastLanedAnchorsNewSpec(t *testing.T) {
 	g := newFakeGraph("")
 	stubSweepSeams(t, g)
@@ -233,8 +235,8 @@ func TestConfirmFastLanedAnchorsNewSpec(t *testing.T) {
 	if g.spawned[0].DraftedBy != "ws-pv" {
 		t.Errorf("new Spec DraftedBy = %q, want the pivot (FR 28)", g.spawned[0].DraftedBy)
 	}
-	if want := []string{baseTrailer(contract.KindSpec, "ws-new")}; !reflect.DeepEqual(g.anchors, want) {
-		t.Errorf("anchors = %v, want %v", g.anchors, want)
+	if want := []string{"ws-new"}; !reflect.DeepEqual(g.anchors, want) || g.pins["ws-new"] != "tipsha" {
+		t.Errorf("anchors = %v pins = %v, want an Anchor: pin on %v at the tip", g.anchors, g.pins, want)
 	}
 }
 
@@ -311,7 +313,8 @@ func TestConfirmRefusesBadInput(t *testing.T) {
 
 // Escalate on a charted Spec (FR43–44, 46): one fresh Chart caused-by the original
 // Signal (reached through the old Chart), titled for the Signal and seeded with the
-// evidence as a wayfinder map off the placeholder; chart/<new> cut from main; old
+// evidence as a wayfinder map off the placeholder, with a Survey seeded under it
+// through the shared helper (Spec mc-r832 D5); chart/<new> cut from main; old
 // Chart supersedes→new Chart; the same close-out as confirm; the pivot closes
 // 'escalated' last. No Spec is spawned or superseded.
 func TestEscalateChartedSweep(t *testing.T) {
@@ -340,6 +343,9 @@ func TestEscalateChartedSweep(t *testing.T) {
 		if !strings.Contains(c.Description, "## "+f+"\n") {
 			t.Errorf("Chart body lacks the wayfinder section %q", f)
 		}
+	}
+	if want := [][3]string{{"mc-newchart", "Spec: old", "ws-pv"}}; !reflect.DeepEqual(g.surveys, want) {
+		t.Errorf("surveys = %v, want one under the new Chart, titled for the Signal, drafted-by the pivot (Spec D5)", g.surveys)
 	}
 	if want := map[string]string{"chart/mc-newchart": git.Mainline()}; !reflect.DeepEqual(g.cuts, want) {
 		t.Errorf("cuts = %v, want %v", g.cuts, want)
@@ -440,4 +446,114 @@ func TestEscalateRefusesBadInput(t *testing.T) {
 	if len(g.spawned)+len(g.closes)+len(g.superseded) != 0 {
 		t.Errorf("a refused Escalate wrote: spawned %v closes %v superseded %v", g.spawned, g.closes, g.superseded)
 	}
+}
+
+// Spec D2, FR31: an escalated pivot's fresh Chart joins the escalated chain's
+// Initiative, read off its Checkpoint (the chain's unclosed head), never the
+// closed original Signal; a chain outside one yields an unparented Chart.
+func TestEscalateChartJoinsTheChainsInitiative(t *testing.T) {
+	for _, tc := range []struct{ parent, want string }{{"ws-init", "ws-init"}, {"ws-closed-init", ""}, {"", ""}} {
+		t.Run(tc.parent, func(t *testing.T) {
+			g := newFakeGraph("ws-chart")
+			g.parent = map[string]string{"ws-cp": tc.parent}
+			stubSweepSeams(t, g)
+			stubInitiative(t)
+			if err := Escalate("ws-pv", "the FR3 assumption is wrong"); err != nil {
+				t.Fatalf("Escalate: %v", err)
+			}
+			if len(g.spawned) != 1 || g.spawned[0].Parent != tc.want {
+				t.Errorf("spawned %+v, want one Chart with Parent %q", g.spawned, tc.want)
+			}
+		})
+	}
+}
+
+func TestConfirmSpecJoinsTheChainsInitiative(t *testing.T) {
+	for _, tc := range []struct{ parent, want string }{{"ws-init", "ws-init"}, {"ws-closed-init", ""}, {"", ""}} {
+		t.Run(tc.parent, func(t *testing.T) {
+			g := newFakeGraph("ws-chart")
+			g.parent = map[string]string{"ws-cp": tc.parent}
+			stubSweepSeams(t, g)
+			stubInitiative(t)
+			if err := Confirm("ws-pv", "", "the corrected body"); err != nil {
+				t.Fatalf("Confirm: %v", err)
+			}
+			if len(g.spawned) != 1 || g.spawned[0].Parent != tc.want {
+				t.Errorf("spawned %+v, want one Spec with Parent %q", g.spawned, tc.want)
+			}
+		})
+	}
+}
+
+// The pivot-confirm Spec and pivot-escalate Chart are born with the Checkpoint
+// head's context: label; an unlabelled head yields none.
+func TestSweepSuccessorsCopyTheHeadsContext(t *testing.T) {
+	for _, tc := range []struct {
+		labels []string
+		want   string
+	}{{[]string{"kind:checkpoint", "context:apps-x", "repo:vendor/x"}, "apps-x"}, {[]string{"kind:checkpoint"}, ""}} {
+		for name, run := range map[string]func() error{
+			"confirm":  func() error { return Confirm("ws-pv", "", "the corrected body") },
+			"escalate": func() error { return Escalate("ws-pv", "the FR3 assumption is wrong") },
+		} {
+			g := newFakeGraph("ws-chart")
+			g.labels = map[string][]string{"ws-cp": tc.labels}
+			stubSweepSeams(t, g)
+			stubInitiative(t)
+			if err := run(); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if len(g.spawned) != 1 || g.spawned[0].Context != tc.want || g.spawned[0].Repo != map[bool]string{true: "vendor/x"}[tc.want != ""] {
+				t.Errorf("%s: spawned %+v, want Context %q and its Repo stamp", name, g.spawned, tc.want)
+			}
+		}
+	}
+}
+
+// ADR 0212: under gitlab a corrected direct Spec is pinned Anchor: <fetched sha>
+// and writes no anchor commit; a Chart-backed one is untouched.
+func TestConfirmGitlabPinsCorrectedDirectSpec(t *testing.T) {
+	for _, chart := range []string{"", "ws-chart"} {
+		g := newFakeGraph(chart)
+		stubSweepSeams(t, g)
+		var pinned []string
+		swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
+		swap(t, &fetchForge, func() (string, error) { return "forgesha", nil })
+		swap(t, &updateBody, func(id string, a []string) error { pinned = append(pinned, id+a[1]); return nil })
+		if err := Confirm("ws-pv", "", "corrected body"); err != nil {
+			t.Fatalf("Confirm: %v", err)
+		}
+		want := []string{"ws-new\nAnchor: forgesha\n"}
+		if chart != "" {
+			want = nil
+		}
+		if !slices.Equal(pinned, want) || len(g.anchors) != 0 {
+			t.Errorf("chart=%q pinned=%q anchors=%v, want %q and no commit", chart, pinned, g.anchors, want)
+		}
+	}
+}
+
+// FR 13: a nested pivot-corrected direct Spec pins at the child's fetched mainline,
+// never the Workspace's, and writes no anchor commit.
+func TestConfirmGitlabPinsNestedCorrectedSpecInChild(t *testing.T) {
+	g := newFakeGraph("")
+	stubSweepSeams(t, g)
+	var pinned []string
+	swap(t, &repoOf, func(bd.Bead) git.Repo { return "/ws/child" })
+	swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &fetchForge, func() (string, error) { return "wssha", nil })
+	swap(t, &repoFetch, func(r git.Repo) (string, error) { return "childsha", nil })
+	swap(t, &updateBody, func(id string, a []string) error { pinned = append(pinned, id+a[1]); return nil })
+	if err := Confirm("ws-pv", "", "corrected body"); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if want := []string{"ws-new\nAnchor: childsha\n"}; !slices.Equal(pinned, want) || len(g.anchors) != 0 {
+		t.Errorf("pinned=%q anchors=%v, want %q and no commit", pinned, g.anchors, want)
+	}
+}
+
+func swap[T any](t *testing.T, seam *T, v T) {
+	old := *seam
+	t.Cleanup(func() { *seam = old })
+	*seam = v
 }

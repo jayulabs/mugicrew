@@ -202,8 +202,8 @@ func TestAutoExitClockBar(t *testing.T) {
 	for _, tc := range []struct {
 		status, restored string
 	}{
-		{"open", "F12 back to TUI · /exit to finish"},
-		{"closed", "#[fg=green,reverse] ✓ mc-x closed — /exit to finish · F12 back to TUI "},
+		{"open", "F10 bead · F12 back to TUI · /exit to finish"},
+		{"closed", "#[fg=green,reverse] ✓ mc-x closed — /exit to finish · F10 bead · F12 back to TUI "},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			origShow := showBead
@@ -251,7 +251,7 @@ func TestHitlRunAutoExitCleanClose(t *testing.T) {
 	}
 	t.Setenv("TMUX", "/s,1,0")
 	t.Setenv("TMUX_PANE", "%3")
-	if rc := HitlRun([]string{"--bead=g", "--", "claude"}, meter(t)); rc != 0 {
+	if rc := HitlRun([]string{"--bead=g", argvArg(t, "claude")}, meter(t)); rc != 0 {
 		t.Fatalf("rc = %d, want 0", rc)
 	}
 	if want := []string{"closing /s,1,0 %3", "return /s,1,0 %3", "publish g"}; !slices.Equal(*calls, want) {

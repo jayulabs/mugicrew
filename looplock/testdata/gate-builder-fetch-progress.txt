@@ -1,0 +1,9 @@
+remote: Enumerating objects: 120, done.
+remote: Counting objects: 100% (120/120), done.
+> Running phase: checkPhase
+> --- FAIL: TestGateProbeUnstubbedBd (0.00s)
+> FAIL        jayulabs.org/mugicrew/looplock  0.109s
+error: Cannot build '/nix/store/p45mg7c0aaaa-mugicrew-0.0.0.drv'.
+       Reason: builder failed with exit code 1.
+error: Cannot build '/nix/store/gsahywbkbbbb-mugicrew-0.0.0.drv'.
+       Reason: 1 dependency failed.

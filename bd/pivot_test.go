@@ -163,3 +163,20 @@ func TestDiscoveredCreateArgs(t *testing.T) {
 		t.Errorf("prefixed discovered --title = %q, want stripped", got)
 	}
 }
+
+// The title-keyed offshoot filer matches only a Signal with the exact title: a
+// crewmate's own offshoot Signal (Draft or closed) with another title never does.
+func TestSignalTitled(t *testing.T) {
+	found := []Bead{
+		{ID: "mc-a", Kind: contract.KindSignal, Title: "other", Status: "deferred"},
+		{ID: "mc-b", Kind: contract.KindSignal, Title: "other", Status: "closed"},
+		{ID: "mc-c", Kind: contract.KindBuild, Title: "x: commits stranded"},
+		{ID: "mc-d", Kind: contract.KindSignal, Title: "x: commits stranded"},
+	}
+	if id, ok := signalTitled(found[:3], "x: commits stranded"); ok {
+		t.Errorf("different titles and a non-Signal matched %s", id)
+	}
+	if id, ok := signalTitled(found, "x: commits stranded"); !ok || id != "mc-d" {
+		t.Errorf("exact title = %q, %v; want mc-d, true", id, ok)
+	}
+}

@@ -24,6 +24,9 @@ and specified in a Spec.
    the Chart *adds*: one that already exists on mainline under any filename stops
    the land and files a `chart-conflict` (ADR 0011 §1–2, same open-child guard).
    Only added numbers are checked — pre-existing mainline duplicates never block.
+   > **Amended by ADR 0225:** a post-land check also renumbers a Forge-merged
+   > duplicate of a number the just-landed container added; pre-existing
+   > duplicates still never block.
 2. **Chart-only.** ADRs are written only by charting, so the Checkpoint land path
    is not guarded. Revisit if builds start writing ADRs.
    > **Amended by ADR 0069:** the clash check now runs inside Land, under the land
@@ -35,6 +38,8 @@ and specified in a Spec.
    escape hatch ADR 0011's rejected alternative left open).
 4. **The landing Chart moves; mainline is fixed.** Its colliding ADRs shift to the
    next free numbers above mainline's max, keeping their relative order.
+   > **Amended by ADR 0225:** the later-landed container moves, including after
+   > its land.
 5. **Reference sweep is scoped to what the Chart owns:** files the Chart changed
    (diff vs merge-base) and the Chart's own bead subtree (body + defog beads).
    Files that came only from mainline, and beads outside the Chart, mean

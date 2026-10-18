@@ -34,7 +34,7 @@ func TestGraphDirResolvesLikeBd(t *testing.T) {
 	if !errors.As(err, &ng) {
 		t.Fatalf("GraphDir(no graph) = %v, want a *NoGraphError", err)
 	}
-	for _, want := range []string{none, "bd init", "--stealth", "--contributor"} {
+	for _, want := range []string{none, "mugicrew init"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}

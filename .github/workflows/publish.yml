@@ -1,0 +1,330 @@
+name: publish
+
+on:
+  push:
+    branches: [main]
+  # branch runs (Checkpoint verification) never reach publish: it only runs from main.
+  # A manual dispatch on main passes that gate too, so it publishes.
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install tmux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: go test ./...
+        env:
+          CGO_ENABLED: "0"
+          # a real path: macOS's default temp dir runs through the /var and /tmp symlinks
+          TMPDIR: ${{ runner.temp }}
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build and pack
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
+          for p in mugicrew mugicrew-linux-x64 mugicrew-linux-arm64 mugicrew-darwin-arm64 mugicrew-darwin-x64; do
+            v=$(node -p "require('./npm/$p/package.json').version")
+            if [ "$v" != "$VERSION" ]; then
+              echo "version mismatch: $p is $v, mugicrew is $VERSION" >&2
+              exit 1
+            fi
+          done
+          for p in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+            pin=$(node -p "require('./npm/mugicrew/package.json').optionalDependencies['@jayulabs/mugicrew-$p']")
+            if [ "$pin" != "$VERSION" ]; then
+              echo "pin mismatch: optionalDependencies @jayulabs/mugicrew-$p is $pin, mugicrew is $VERSION" >&2
+              exit 1
+            fi
+          done
+          mkdir -p dist
+          for t in linux-x64:linux:amd64 linux-arm64:linux:arm64 darwin-arm64:darwin:arm64 darwin-x64:darwin:amd64; do
+            IFS=: read -r pkg goos goarch <<<"$t"
+            mkdir -p "npm/mugicrew-$pkg/bin"
+            CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION" \
+              -o "npm/mugicrew-$pkg/bin/mugicrew" .
+          done
+          for p in mugicrew mugicrew-linux-x64 mugicrew-linux-arm64 mugicrew-darwin-arm64 mugicrew-darwin-x64; do
+            (cd "npm/$p" && npm pack --pack-destination ../../dist)
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarballs
+          path: dist/*.tgz
+          if-no-files-found: error
+
+  smoke-platform:
+    name: smoke-platform (${{ matrix.platform }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-latest
+            platform: darwin-arm64
+          - os: macos-15-intel
+            platform: darwin-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: ${{ runner.temp }}/dist
+      - name: Install tarballs and run --version
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
+          dist="$RUNNER_TEMP/dist"
+          mkdir "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          npm init -y
+          npm i -D "$dist/jayulabs-mugicrew-$VERSION.tgz" "$dist/jayulabs-mugicrew-${{ matrix.platform }}-$VERSION.tgz"
+          got=$(npx mugicrew --version)
+          echo "mugicrew --version: $got"
+          [ "$got" = "$VERSION" ]
+
+  smoke-pm:
+    name: smoke-pm (${{ matrix.name }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # same check as smoke-platform's linux-x64 cell, kept as the Node 24 baseline
+          # for the rows below (smoke-platform runs the runner image's Node)
+          - name: npm
+            node: '24'
+            install: npm i -D
+            exec: npm exec --no -- mugicrew
+          - name: pnpm 10
+            node: '24'
+            install: npm i -g pnpm@10 && pnpm add -D
+            exec: pnpm exec mugicrew
+          - name: yarn 1
+            node: '24'
+            install: npm i -g yarn@1 && yarn add -D
+            exec: yarn --silent exec mugicrew
+          - name: npm --ignore-scripts
+            node: '24'
+            install: npm i -D --ignore-scripts
+            exec: npm exec --no -- mugicrew
+          # Node < 22.15 has no process.execve, so the shim spawns and forwards
+          - name: npm node 20
+            node: '20'
+            install: npm i -D
+            exec: npm exec --no -- mugicrew
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: ${{ runner.temp }}/dist
+      - name: Install tarballs and run --version
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
+          dist="$RUNNER_TEMP/dist"
+          mkdir "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          npm init -y
+          ${{ matrix.install }} "$dist/jayulabs-mugicrew-$VERSION.tgz" "$dist/jayulabs-mugicrew-linux-x64-$VERSION.tgz"
+          got=$(${{ matrix.exec }} --version)
+          echo "mugicrew --version (${{ matrix.name }}): $got"
+          [ "$got" = "$VERSION" ]
+
+  smoke-repo:
+    name: smoke-repo (${{ matrix.platform }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            dolt: linux-amd64
+            beads: linux_amd64
+          - os: macos-latest
+            platform: darwin-arm64
+            dolt: darwin-arm64
+            beads: darwin_arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      # BD_VERSION is the bd the Workspace's devShell carries (flake.nix beads, nixpkgs-locked);
+      # DOLT_VERSION is bd's pin (docs/install.md)
+      BD_VERSION: 1.3.0
+      DOLT_VERSION: 2.2.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: ${{ runner.temp }}/dist
+      - name: ${{ matrix.platform }} install git, tmux, bd and dolt
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y git tmux
+          else
+            brew install tmux
+          fi
+          curl -fsSL "https://github.com/gastownhall/beads/releases/download/v$BD_VERSION/beads_${BD_VERSION}_${{ matrix.beads }}.tar.gz" | tar -xz -C "$bin" bd
+          curl -fsSL "https://github.com/dolthub/dolt/releases/download/v$DOLT_VERSION/dolt-${{ matrix.dolt }}.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          cp "$RUNNER_TEMP/dolt-${{ matrix.dolt }}/bin/dolt" "$bin/"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: ${{ matrix.platform }} create scratch repo and install tarballs
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
+          dist="$RUNNER_TEMP/dist"
+          scratch="$RUNNER_TEMP/scratch"
+          mkdir "$scratch"
+          cd "$scratch"
+          git init -q
+          git config user.name smoke
+          git config user.email smoke@example.invalid
+          git commit -q --allow-empty -m init
+          npm init -y
+          npm i -D "$dist/jayulabs-mugicrew-$VERSION.tgz" "$dist/jayulabs-mugicrew-${{ matrix.platform }}-$VERSION.tgz"
+          # exported before anything writes: bd resolves the graph from BEADS_DIR (CREW.md trap)
+          echo "SCRATCH=$scratch" >> "$GITHUB_ENV"
+          echo "BEADS_DIR=$scratch/.beads" >> "$GITHUB_ENV"
+      - name: ${{ matrix.platform }} mugicrew init
+        run: |
+          set -euo pipefail
+          cd "$SCRATCH"
+          npx mugicrew init --prefix smoke
+      - name: ${{ matrix.platform }} mugicrew doctor git and bd checks pass
+        run: |
+          set -uo pipefail
+          cd "$SCRATCH"
+          # exit code ignored: doctor FAILs on the absent claude, which this job does not need
+          npx mugicrew doctor | tee "$RUNNER_TEMP/doctor.txt" || true
+          for c in git bd 'git repo' 'bead graph' 'bd store'; do
+            grep -q "^ok  $c: " "$RUNNER_TEMP/doctor.txt" || { echo "doctor check '$c' did not report ok" >&2; exit 1; }
+          done
+
+      - name: ${{ matrix.platform }} write drain helper
+        run: |
+          cat > "$RUNNER_TEMP/drain.sh" <<'DRAIN'
+          # usage: drain.sh <label> <self|parent>
+          # Runs a foreground `npx mugicrew loop`, sends it one SIGINT after loop.started,
+          # and asserts exit 0, loop.stopped and no loop.forced. self: the loop's own pid
+          # (execve shim); parent: the Node shim that spawned it (Node < 22.15 fallback).
+          # The target is the pid `loop status --json` reports (or its parent), never the
+          # backgrounded npx pid: npm exec runs the bin in a child, so $npx_pid is not the
+          # Go pid. Don't "fix" this back to $npx_pid.
+          set -uo pipefail
+          label=$1 target=$2
+          [ "$target" = parent ] || node -e 'process.exit(typeof process.execve === "function" ? 0 : 1)' \
+            || { echo "FAIL $label: Node lacks process.execve; the self drain would test the fallback" >&2; exit 1; }
+          cd "$SCRATCH"
+          ev="$SCRATCH/.git/mugicrew/events.jsonl"
+          skip=$(wc -l < "$ev" 2>/dev/null || echo 0)
+          fresh() { tail -n +"$((skip + 1))" "$ev" 2>/dev/null; }
+          fail() { echo "FAIL $label: $*" >&2; fresh >&2; kill -KILL "${npx_pid:-0}" 2>/dev/null; exit 1; }
+          npx mugicrew loop > "$RUNNER_TEMP/loop-$label.out" 2>&1 &
+          npx_pid=$!
+          for _ in $(seq 120); do fresh | grep -q '"msg":"loop.started"' && break; sleep 0.5; done
+          fresh | grep -q '"msg":"loop.started"' || fail "loop.started not logged within 60s"
+          pid=$(npx mugicrew loop status --json | node -p 'JSON.parse(require("fs").readFileSync(0)).pid')
+          [ -n "$pid" ] || fail "loop status --json carried no pid"
+          if [ "$target" = parent ]; then pid=$(ps -o ppid= -p "$pid" | tr -d ' '); fi
+          kill -INT "$pid" || fail "could not send SIGINT to pid $pid"
+          for _ in $(seq 60); do kill -0 "$npx_pid" 2>/dev/null || break; sleep 0.5; done
+          kill -0 "$npx_pid" 2>/dev/null && fail "loop did not exit within 30s of SIGINT"
+          wait "$npx_pid"; rc=$?
+          [ "$rc" = 0 ] || fail "loop exited $rc, want 0"
+          fresh | grep -q '"msg":"loop.forced"' && fail "loop.forced logged"
+          fresh | grep -q '"msg":"loop.stopped"' || fail "loop.stopped not logged"
+          echo "$label: drained, exit 0"
+          DRAIN
+      - name: ${{ matrix.platform }} foreground loop drains on one SIGINT
+        timeout-minutes: 3
+        run: bash "$RUNNER_TEMP/drain.sh" drain self
+      - name: ${{ matrix.platform }} detached loop start, status, stop
+        timeout-minutes: 3
+        run: |
+          set -uo pipefail
+          cd "$SCRATCH"
+          step() { echo "FAIL lifecycle: $*" >&2; exit 1; }
+          npx mugicrew loop start || step "loop start failed"
+          npx mugicrew loop status | grep -qx 'state: on' || step "loop status did not report running after start"
+          npx mugicrew loop stop || step "loop stop failed"
+          for _ in $(seq 60); do npx mugicrew loop status | grep -qx 'state: off' && break; sleep 0.5; done
+          npx mugicrew loop status | grep -qx 'state: off' || step "loop status did not report stopped within 30s of stop"
+      # Node < 22.15 has no process.execve, so the shim spawns and forwards the SIGINT.
+      # The Node 20 steps must stay last: every step after them inherits Node 20.
+      - name: linux-x64 use Node 20
+        if: matrix.platform == 'linux-x64'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: linux-x64 foreground loop drains on one SIGINT under Node 20
+        if: matrix.platform == 'linux-x64'
+        timeout-minutes: 3
+        run: |
+          node --version
+          bash "$RUNNER_TEMP/drain.sh" drain-node20 parent
+
+  publish:
+    needs: [test, smoke-platform, smoke-pm, smoke-repo]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarballs
+          path: dist
+      - name: Publish unpublished packages, platforms first
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
+          for p in mugicrew-linux-x64 mugicrew-linux-arm64 mugicrew-darwin-arm64 mugicrew-darwin-x64 mugicrew; do
+            pkg="@jayulabs/$p"
+            if [ "$(npm view "$pkg@$VERSION" version)" = "$VERSION" ]; then
+              echo "$pkg@$VERSION already published, skipping"
+              continue
+            fi
+            npm publish "dist/jayulabs-$p-$VERSION.tgz" --access public
+          done

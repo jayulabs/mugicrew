@@ -5,7 +5,8 @@ Date: 2026-10-05
 
 Chart: Bead telemetry. Settles the grilling "Telemetry query verb
 shape and rollups". Builds on the ADR 0029 cost-attrs amendment
-and the retention research.
+and the retention research. §2 and Consequences amended by ADR 0286
+(mugicrew-stats-filter-takes-a-resolved-scope-map…).
 
 ## Context
 
@@ -66,8 +67,9 @@ keeps roughly 41 days of history at the loop-era rate.
 
 ## Consequences
 
-- `stats` only reads history and reports it, so ADR 0033 needs no amendment.
-  Nothing decides dispatch from these numbers.
+- `stats` reads history, and bd for scope only (amended by ADR 0286
+  (mugicrew-stats-filter-takes-a-resolved-scope-map…)), so ADR 0033 needs no
+  amendment. Nothing decides dispatch from these numbers.
 - Grandchildren of a Chart are not counted, the same blind spot the Logs tab
   has (ADR 0029).
 - Wall time for HITL sessions overstates how long the agent was actually

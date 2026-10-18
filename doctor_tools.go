@@ -23,6 +23,9 @@ var doctorToolVersion = func(bin string, args ...string) (string, error) {
 // doctorExe is the running binary's path; a var so tests stub it.
 var doctorExe = os.Executable
 
+// doctorOS is the OS that picks an install hint; a var so tests pin it.
+var doctorOS = runtime.GOOS
+
 // prereq is one row of the prerequisite table that feeds doctor's tool lines
 // (and install.md's short list). Hints are verbatim from docs/research/
 // mugicrew-prerequisite-tool-versions-and-install-commands.md; one too long for a
@@ -102,7 +105,7 @@ func verLess(a, b string) bool {
 }
 
 func (p prereq) install() string {
-	if runtime.GOOS == "darwin" {
+	if doctorOS == "darwin" {
 		return p.macos
 	}
 	return p.linux

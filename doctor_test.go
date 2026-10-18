@@ -29,8 +29,10 @@ func doctorWS(t *testing.T, missing ...string) string {
 	t.Setenv("MUGICREW_MD_RENDERER", "")
 	t.Setenv("BROWSER", "wslview")
 	t.Chdir(dir)
-	oldLook, oldBD, oldVer, oldExe := lookPath, doctorBD, doctorToolVersion, doctorExe
-	t.Cleanup(func() { lookPath, doctorBD, doctorToolVersion, doctorExe = oldLook, oldBD, oldVer, oldExe })
+	oldLook, oldBD, oldVer, oldExe, oldOS := lookPath, doctorBD, doctorToolVersion, doctorExe, doctorOS
+	t.Cleanup(func() {
+		lookPath, doctorBD, doctorToolVersion, doctorExe, doctorOS = oldLook, oldBD, oldVer, oldExe, oldOS
+	})
 	doctorExe = func() (string, error) { return "/bin/mugicrew", nil }
 	doctorToolVersion = func(bin string, _ ...string) (string, error) { return healthyVersions[bin], nil }
 	lookPath = func(bin string) (string, error) {
@@ -735,10 +737,15 @@ func TestDoctorToolVersions(t *testing.T) {
 }
 
 func TestDoctorAbsentToolHintHasFloor(t *testing.T) {
-	doctorWS(t, "tmux", "dolt")
-	out, code := doctorRun(t)
-	if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH — need ≥ 3.5: install ") || !strings.Contains(out, "distro package may be older than 3.5") || !strings.Contains(out, "FAIL  dolt: not on PATH — install pinned 2.2.0 tarball, see docs/install.md#dolt") {
-		t.Errorf("code %d out %q", code, out)
+	for goos, hint := range map[string]string{"linux": "distro package may be older than 3.5", "darwin": "brew install tmux"} {
+		t.Run(goos, func(t *testing.T) {
+			doctorWS(t, "tmux", "dolt")
+			doctorOS = goos
+			out, code := doctorRun(t)
+			if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH — need ≥ 3.5: install ") || !strings.Contains(out, hint) || !strings.Contains(out, "FAIL  dolt: not on PATH — install pinned 2.2.0 tarball, see docs/install.md#dolt") {
+				t.Errorf("code %d out %q", code, out)
+			}
+		})
 	}
 }
 

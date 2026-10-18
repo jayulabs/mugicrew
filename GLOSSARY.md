@@ -938,11 +938,11 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   "pending".
 - **Finished (HITL session)** — the session exited cleanly: its Drafts are
   published and it is gone from the session list. The human finishes a session
-  with `/exit`, and F12 only goes back to the TUI (ADR 0067). _Avoid:_ "detached"
+  with `/exit`, and F6 only goes back to the TUI (ADR 0067). _Avoid:_ "detached"
   for a session that has ended. No human-facing label says "detached".
 - **Reattach** — joining an _alive_ detached session's live process again; the
   conversation and any running tool are as they were left. The human's terminal
-  moves from their TUI to the session, and F12 moves it back (ADR 0065).
+  moves from their TUI to the session, and F6 moves it back (ADR 0065).
 - **TUI session** — one running TUI, hosted in the same multiplexer as the
   detached sessions and belonging to the terminal that launched it. It is never
   a detached session and never in the session list. It ends when the TUI quits

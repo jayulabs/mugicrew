@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -231,25 +232,93 @@ func TestStatsFooterSurvivesRule(t *testing.T) {
 	}
 }
 
+// hdrAt is the (row, column) of header in v, or -1, -1.
+func hdrAt(v, header string) (row, col int) {
+	for i, l := range lines(v) {
+		if c := strings.Index(l, header); c >= 0 {
+			return i, c
+		}
+	}
+	return -1, -1
+}
+
 func TestStatsSectionLayout(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local)
-	pinClock(t, t0)
-	band := "5h 62% (resets 14:00) · wk 40%"
-	s := statsTab{statsData: statsData{events: statEvents(), band: band}, win: 3}.recompute()
+	pinClock(t, time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local))
+	s := burnTab(append(distEvents(), usageReadEv(burnNow.Add(-time.Minute), 10, burnNow.Add(2*time.Hour)))...)
+	for _, tc := range []struct{ w, perRow int }{{100, 1}, {109, 1}, {110, 2}, {141, 2}, {142, 3}, {238, 3}} {
+		v := s.view(tc.w, 80)
+		ls := lines(v)
+		pr, pc := hdrAt(v, "Plan usage")
+		sr, sc := hdrAt(v, "Sessions")
+		dr, dc := hdrAt(v, "Distribution")
+		if pr != 0 || pc != 0 {
+			t.Errorf("w=%d Plan usage at %d,%d:\n%s", tc.w, pr, pc, v)
+		}
+		switch tc.perRow {
+		case 1:
+			if sr <= pr || dr <= sr || sc != 0 || dc != 0 || ls[sr-1] != "" || ls[dr-1] != "" {
+				t.Errorf("w=%d not stacked:\n%s", tc.w, v)
+			}
+		case 2:
+			if sr != 0 || sc < 36+2 || dr <= 0 || dc != 0 || ls[dr-1] != "" {
+				t.Errorf("w=%d not Usage|Sessions over Distribution:\n%s", tc.w, v)
+			}
+		case 3:
+			if sr != 0 || dr != 0 || dc < sc+72+2 {
+				t.Errorf("w=%d not one row:\n%s", tc.w, v)
+			}
+		}
+		for _, l := range ls {
+			if lipgloss.Width(l) > tc.w {
+				t.Errorf("w=%d line too wide: %q", tc.w, l)
+			}
+		}
+		if tc.perRow > 1 && sc-2 > 92 {
+			t.Errorf("w=%d Plan usage wider than 92", tc.w)
+		}
+		if tc.w == 100 { // stacked: Plan usage's band and chart stay within 92
+			for _, l := range ls[:sr] {
+				if lipgloss.Width(l) > 92 {
+					t.Errorf("w=%d Plan usage line wider than 92: %q", tc.w, l)
+				}
+			}
+		}
+		if dc >= 0 && tc.perRow < 3 {
+			for _, l := range ls[dr:] {
+				if lipgloss.Width(l) > 46 {
+					t.Errorf("w=%d wrapped Distribution wider than 46: %q", tc.w, l)
+				}
+			}
+		}
+	}
+}
 
-	wide := lines(s.view(120, 30))
-	if i, j := strings.Index(wide[0], "Sessions"), strings.Index(wide[0], "Plan usage"); i != 0 || j != statsTableW+2 {
-		t.Errorf("wide headers at %d, %d:\n%s", i, j, flat(s.view(120, 30)))
+func TestStatsSessionsGrowsToNaturalWidth(t *testing.T) {
+	pinClock(t, time.Date(2026, 10, 9, 12, 0, 0, 0, time.Local))
+	s := burnTab(distEvents()...)
+	s.by = slices.Index(statsGroups, "day") // ten-character keys
+	s = s.recompute()
+	nat := s.tableWidth()
+	if nat <= 72 {
+		t.Fatalf("natural width %d should exceed 72", nat)
 	}
-	if lipgloss.Width(wide[1][:strings.Index(wide[1], "5h 62%")]) != statsTableW+2 {
-		t.Errorf("wide band not right of the head line:\n%s", flat(s.view(120, 30)))
+	v := s.view(238, 80)
+	var hdr []string
+	for _, l := range strings.Split(v, "\n") {
+		if strings.Contains(l, "SESSIONS") {
+			hdr = strings.Fields(l[strings.Index(l, "KEY") : strings.Index(l, "TOKENS")+len("TOKENS")])
+		}
 	}
-
-	narrow := lines(s.view(80, 30))
-	if !strings.Contains(narrow[0], "Plan usage") || !strings.Contains(narrow[1], "5h 62%") || !strings.Contains(narrow[2], "no 5h window") || narrow[3] != "" || !strings.Contains(narrow[4], "Sessions") {
-		t.Errorf("narrow does not stack:\n%s", flat(s.view(80, 30)))
+	if want := "KEY SESSIONS FAILED AGENT API COST AVG_COST AVG_API FAIL% TOKENS"; strings.Join(hdr, " ") != want || !strings.Contains(v, "2026-10-09") {
+		t.Errorf("wide pane squeezed the table (header %q):\n%s", hdr, v)
 	}
-	if h := brand.Render("Sessions"); !strings.Contains(s.view(80, 30), h) {
-		t.Errorf("header not bold accent")
+	// 110-141: Sessions grows before Plan usage passes 36.
+	_, sc := hdrAt(s.view(115, 80), "Sessions")
+	if sc != 36+2 {
+		t.Errorf("w=115 Plan usage grew to %d before Sessions was full", sc-2)
+	}
+	s.by = 0
+	if w := s.recompute().tableWidth(); w >= nat {
+		t.Errorf("grouping none width %d should be under %d", w, nat)
 	}
 }

@@ -167,13 +167,13 @@ func TestSwitchClientRealTmux(t *testing.T) {
 	}
 }
 
-// F12 against real tmux (ADR 0065 §5): with the preamble's binding and each TUI's
-// recorded @tty, F12 in a HITL session returns the pressing terminal to its own
+// F6 against real tmux (ADR 0065 §5): with the preamble's binding and each TUI's
+// recorded @tty, F6 in a HITL session returns the pressing terminal to its own
 // TUI, after hopping sessions and with two terminals on one HITL session; it does
 // nothing on a TUI session; a hand-attached terminal with no TUI detaches. The bar
 // (and key table) is set after the clients are on the sessions, so this also
 // shows a key table set on a viewed session takes effect.
-func TestF12RealTmux(t *testing.T) {
+func TestF6RealTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
 	}
@@ -213,7 +213,7 @@ func TestF12RealTmux(t *testing.T) {
 			}
 		}
 	}
-	f12 := func(term string) { tm(out, "send-keys", "-t", "="+term+":", "F12") }
+	f6 := func(term string) { tm(out, "send-keys", "-t", "="+term+":", "F6") }
 	waitFor("the three terminals attached", "mc-a_1", "tui-1", "tui-2")
 	for _, s := range []string{"mc-a_1", "mc-b_1"} {
 		tm(in, setArgs(s, bar(bd.Bead{ID: s, Title: "x"}))...)
@@ -241,14 +241,14 @@ func TestF12RealTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor("all three on mc-a_1", "mc-a_1", "mc-a_1", "mc-a_1")
-	f12("tui-1")
+	f6("tui-1")
 	waitFor("t1 back on its TUI", "mc-a_1", "mc-a_1", "tui-1")
-	f12("tui-2")
+	f6("tui-2")
 	waitFor("t2 back on its TUI", "mc-a_1", "tui-1", "tui-2")
-	f12("tui-1") // on a TUI session: nothing
+	f6("tui-1") // on a TUI session: nothing
 	time.Sleep(300 * time.Millisecond)
-	waitFor("F12 on a TUI doing nothing", "mc-a_1", "tui-1", "tui-2")
-	f12("mc-a_1") // hand attach, no mapping: detach
+	waitFor("F6 on a TUI doing nothing", "mc-a_1", "tui-1", "tui-2")
+	f6("mc-a_1") // hand attach, no mapping: detach
 	waitFor("the hand-attached terminal detached", "tui-1", "tui-2")
 }
 
@@ -311,7 +311,7 @@ func TestReturnViewersRealTmux(t *testing.T) {
 }
 
 // A TUI running in a split pane of a bead-tagged session (a TUI prototype in a HITL
-// window) records nothing, so the real TUI keeps its @tty and F12 still returns
+// window) records nothing, so the real TUI keeps its @tty and F6 still returns
 // the terminal to it.
 func TestRecordClientSkipsBeadSessionRealTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
@@ -368,61 +368,8 @@ func TestRecordClientSkipsBeadSessionRealTmux(t *testing.T) {
 	if got := tm(in, "display-message", "-p", "-t", "=mc-a_1:", "#{"+ttyOption+"}"); got != "" {
 		t.Errorf("HITL session @tty = %q, want none", got)
 	}
-	tm(out, "send-keys", "-t", "=term:", "F12")
-	waitFor("F12 back on tui-1", "tui-1")
-}
-
-// F11 against real tmux (Spec D5): pressed in an attached HITL session it
-// unsets that session's @autofinish, leaves another armed session's alone, keeps
-// the session alive, and on an unarmed session is a harmless no-op.
-func TestF11RealTmux(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-	dir := t.TempDir()
-	in, out := filepath.Join(dir, "in.sock"), filepath.Join(dir, "out.sock")
-	tm := func(sock string, args ...string) string {
-		t.Helper()
-		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
-		if err != nil {
-			t.Fatalf("tmux %v: %v: %s", args, err, b)
-		}
-		return strings.TrimSpace(string(b))
-	}
-	t.Cleanup(func() {
-		tmuxCmd(in, "kill-server").Run()
-		tmuxCmd(out, "kill-server").Run()
-	})
-	tm(in, append(preamble(), ";", "new-session", "-d", "-s", "mc-a_1")...) // chained, or the empty server exits
-	tm(in, "new-session", "-d", "-s", "mc-b_1")
-	for _, s := range []string{"mc-a_1", "mc-b_1"} {
-		tm(in, setArgs(s, append(bar(bd.Bead{ID: s, Title: "x"}), [2]string{"@autofinish", "1999999999"}))...)
-	}
-	tm(out, "new-session", "-d", "-s", "term", "-x", "80", "-y", "24",
-		"env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-S", in, "attach-session", "-t", "=mc-a_1")
-	armed := func(s string) string { return tm(in, "display-message", "-p", "-t", "="+s+":", "#{@autofinish}") }
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-		if b, _ := tmuxCmd(in, "list-clients").Output(); len(b) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for the terminal to attach")
-		}
-	}
-	for range 2 { // the second press finds it unarmed: a no-op
-		tm(out, "send-keys", "-t", "=term:", "F11")
-		for deadline := time.Now().Add(10 * time.Second); armed("mc-a_1") != ""; time.Sleep(50 * time.Millisecond) {
-			if time.Now().After(deadline) {
-				t.Fatal("F11 left mc-a_1 armed")
-			}
-		}
-	}
-	if got := armed("mc-b_1"); got != "1999999999" {
-		t.Errorf("mc-b_1 @autofinish = %q after F11 in mc-a_1, want it still armed", got)
-	}
-	if got := tm(in, "list-clients", "-F", "#{session_name}"); got != "mc-a_1" {
-		t.Errorf("clients %q after F11, want still on mc-a_1", got)
-	}
+	tm(out, "send-keys", "-t", "=term:", "F6")
+	waitFor("F6 back on tui-1", "tui-1")
 }
 
 // F10 against real tmux: in a HITL-tabled session tagged with a @bead, F10 splits
@@ -520,8 +467,16 @@ func TestF10BeadPaneRealTmux(t *testing.T) {
 		t.Errorf("second F10 left pane %s active, want bead pane %s", got, bead)
 	}
 
-	tm("send-keys", "-t", bead, "q")
-	waitPanes("q to close the bead pane", 1)
+	// re-send q each pass: on a slow runner the first can be lost; once the pane is gone the send errors, so ignore it
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		tmuxCmd(sock, "send-keys", "-t", bead, "q").Run()
+		if count() == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for q to close the bead pane: %d panes, want 1", count())
+		}
+	}
 }
 
 // The preamble copies root's mouse bindings (by key name) into the HITL table.
@@ -562,9 +517,14 @@ func TestPreambleCopiesRootMouseRealTmux(t *testing.T) {
 	if got := cmd(hitlTable, "M-x"); got != "" {
 		t.Errorf("non-mouse M-x copied: %q", got)
 	}
-	for _, k := range []string{"F10", "F11", "F12"} {
+	for _, k := range []string{"F1", "F10", "F6"} {
 		if cmd(hitlTable, k) == "" {
 			t.Errorf("%s unbound in %s", k, hitlTable)
+		}
+	}
+	for _, k := range []string{"F11", "F12"} {
+		if cmd(hitlTable, k) != "" {
+			t.Errorf("%s still bound in %s", k, hitlTable)
 		}
 	}
 }

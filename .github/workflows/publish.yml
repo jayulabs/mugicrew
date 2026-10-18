@@ -129,7 +129,16 @@ jobs:
           - name: yarn 1
             node: '24'
             install: npm i -g yarn@1 && yarn add -D
-            exec: yarn --silent exec mugicrew
+            # yarn exec swallows a bare --version as its own flag
+            exec: yarn --silent exec mugicrew --
+            # yarn 1 looks every optional dependency up on the registry, where the platform
+            # packages don't exist until publish; serve all four from the local tarballs on a
+            # throwaway registry (the wrong-platform ones are still skipped by yarn's os/cpu
+            # check; file: resolutions don't work, they make yarn treat them as required)
+            pre: >-
+              node "$GITHUB_WORKSPACE/.github/smoke-registry.js" "$dist" "$VERSION" 4873 &
+              echo '@jayulabs:registry=http://127.0.0.1:4873' > .npmrc &&
+              sleep 1
           - name: npm --ignore-scripts
             node: '24'
             install: npm i -D --ignore-scripts
@@ -157,6 +166,7 @@ jobs:
           mkdir "$RUNNER_TEMP/smoke"
           cd "$RUNNER_TEMP/smoke"
           npm init -y
+          ${{ matrix.pre }}
           ${{ matrix.install }} "$dist/jayulabs-mugicrew-$VERSION.tgz" "$dist/jayulabs-mugicrew-linux-x64-$VERSION.tgz"
           got=$(${{ matrix.exec }} --version)
           echo "mugicrew --version (${{ matrix.name }}): $got"

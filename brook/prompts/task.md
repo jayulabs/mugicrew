@@ -54,6 +54,14 @@ answer.
 
 - **Fail**: show the human what you observed, diagnose it and offer a fix.
   Never advance past a failing Check.
+  If you diagnose that an open Chart's or Checkpoint's branch is behind
+  mainline, name the fix as pressing
+  `r` on that Chart's or Checkpoint's row in the TUI
+  (say which row) and let the human press it.
+  Never run the mugicrew rebase verb yourself, and
+  never merge or rebase a container branch by hand or suggest doing so.
+  The step stays failing until that rebase integrates, so
+  hand off to the Stuck exit, whose stuck comment names the requested rebase.
 
 ## 3. Amend a step
 

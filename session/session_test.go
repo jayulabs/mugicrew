@@ -202,8 +202,8 @@ func TestAutoExitClockBar(t *testing.T) {
 	for _, tc := range []struct {
 		status, restored string
 	}{
-		{"open", "F10 bead · F12 back to TUI · /exit to finish"},
-		{"closed", "#[fg=green,reverse] ✓ mc-x closed — /exit to finish · F10 bead · F12 back to TUI "},
+		{"open", "F1 help · F6 back to TUI · /exit to finish"},
+		{"closed", "#[fg=green,reverse] ✓ mc-x closed — /exit to finish · F6 back to TUI "},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			origShow := showBead
@@ -212,9 +212,9 @@ func TestAutoExitClockBar(t *testing.T) {
 			r := runClock(t, now,
 				optRead{now.Add(105 * time.Second), WaitTurn},
 				optRead{now.Add(104 * time.Second), WaitTurn},
-				optRead{time.Time{}, WaitTurn}, // F11 or a reply cleared it
+				optRead{time.Time{}, WaitTurn}, // the F1 menu or a reply cleared it
 				optRead{time.Time{}, WaitTurn})
-			want := []string{"auto-exit in 1:45 · F11 cancels", "auto-exit in 1:44 · F11 cancels", tc.restored}
+			want := []string{"auto-exit in 1:45 · F1 to cancel", "auto-exit in 1:44 · F1 to cancel", tc.restored}
 			if !slices.Equal(r.bars, want) {
 				t.Errorf("bars %q, want %q", r.bars, want)
 			}

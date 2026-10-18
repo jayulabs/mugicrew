@@ -641,14 +641,16 @@ func TestTUIArgs(t *testing.T) {
 	if !strings.HasPrefix(pre, "start-server ; set-option -gw remain-on-exit failed ; ") {
 		t.Errorf("preamble = %q, want server start and remain-on-exit failed", pre)
 	}
-	// F12 is bound only in the HITL key table, never in root (ADR 0065 §5).
-	if strings.Contains(pre, "-n F12") || strings.Contains(pre, "bind-key -T root") || !strings.Contains(pre, "bind-key -T mchitl F12 ") {
-		t.Errorf("preamble binds F12 outside the HITL table: %q", pre)
+	// F6 is bound only in the HITL key table, never in root (ADR 0065 §5); F12 is no longer bound.
+	if strings.Contains(pre, "-n F6") || strings.Contains(pre, "bind-key -T root") || !strings.Contains(pre, "bind-key -T mchitl F6 ") {
+		t.Errorf("preamble binds F6 outside the HITL table: %q", pre)
 	}
-	// F11 cancels an Auto-exit tmux-side (Spec D5): it unsets the pressing
-	// client's session's @autofinish, in the HITL table only.
-	if !strings.Contains(pre, " ; bind-key -T mchitl F11 set-option -u @autofinish") || strings.Contains(pre, "-n F11") {
-		t.Errorf("preamble lacks the HITL table's F11 cancel: %q", pre)
+	if strings.Contains(pre, "bind-key -T mchitl F12 ") {
+		t.Errorf("preamble still binds F12: %q", pre)
+	}
+	// F1 opens the HITL keys menu, in the HITL table only (ADR 0296); F11 is not bound.
+	if !strings.Contains(pre, " ; bind-key -T mchitl F1 ") || strings.Contains(pre, "-n F1 ") || strings.Contains(pre, "bind-key -T mchitl F11 ") {
+		t.Errorf("preamble lacks the HITL table's F1 menu or still binds F11: %q", pre)
 	}
 	// F10 opens the session's bead pane, in the HITL table only.
 	if !strings.Contains(pre, " ; bind-key -T mchitl F10 ") || strings.Contains(pre, "-n F10") {
@@ -1520,7 +1522,7 @@ func assertBar(t *testing.T, args []string, left string) {
 	}
 	for name, want := range map[string]string{
 		"status-left": left, "status-left-length": "200",
-		"status-right": "F10 bead · F12 back to TUI · /exit to finish", "key-table": "mchitl",
+		"status-right": "F1 help · F6 back to TUI · /exit to finish", "key-table": "mchitl",
 		"window-status-format": "", "window-status-current-format": "",
 	} {
 		if got := opt(name); got != want {
@@ -1552,7 +1554,7 @@ func TestBarsArgsSkipsArmed(t *testing.T) {
 	left := map[string]string{"mc-b.1": "◐ TASK P2 · B #1 · mc-b.1", "mc-a": "Why? · Robin discussion"}
 	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, left, armed), " ")
 	want := "set-option -t =mc-a: status-left Why? · Robin discussion ; " +
-		"set-option -t =mc-a: status-right F10 bead · F12 back to TUI · /exit to finish ; " +
+		"set-option -t =mc-a: status-right F1 help · F6 back to TUI · /exit to finish ; " +
 		"set-option -t =mc-b_1: status-left ◐ TASK P2 · B ##1 · mc-b.1"
 	if got != want {
 		t.Errorf("barsArgs =\n %q\nwant\n %q", got, want)
@@ -1565,11 +1567,11 @@ func TestBarsArgsSkipsArmed(t *testing.T) {
 // The countdown bar reads M:SS, rounding a part second up (Spec FR14).
 func TestAutoExitBar(t *testing.T) {
 	for left, want := range map[time.Duration]string{
-		105 * time.Second:                     "auto-exit in 1:45 · F11 cancels",
-		59*time.Second + 100*time.Millisecond: "auto-exit in 1:00 · F11 cancels",
-		9 * time.Second:                       "auto-exit in 0:09 · F11 cancels",
-		10 * time.Minute:                      "auto-exit in 10:00 · F11 cancels",
-		0:                                     "auto-exit in 0:00 · F11 cancels",
+		105 * time.Second:                     "auto-exit in 1:45 · F1 to cancel",
+		59*time.Second + 100*time.Millisecond: "auto-exit in 1:00 · F1 to cancel",
+		9 * time.Second:                       "auto-exit in 0:09 · F1 to cancel",
+		10 * time.Minute:                      "auto-exit in 10:00 · F1 to cancel",
+		0:                                     "auto-exit in 0:00 · F1 to cancel",
 	} {
 		if got := autoExitBar(left); got != want {
 			t.Errorf("autoExitBar(%v) = %q, want %q", left, got, want)
@@ -1581,8 +1583,8 @@ func TestAutoExitBar(t *testing.T) {
 // bar, a closed one's the loud green/reversed ✓ line; one ;-joined call, id order.
 func TestBarsArgs(t *testing.T) {
 	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, nil, nil), " ")
-	want := "set-option -t =mc-a: status-right F10 bead · F12 back to TUI · /exit to finish ; " +
-		"set-option -t =mc-b_1: status-right #[fg=green,reverse] ✓ mc-b.1 closed — /exit to finish · F10 bead · F12 back to TUI "
+	want := "set-option -t =mc-a: status-right F1 help · F6 back to TUI · /exit to finish ; " +
+		"set-option -t =mc-b_1: status-right #[fg=green,reverse] ✓ mc-b.1 closed — /exit to finish · F6 back to TUI "
 	if got != want {
 		t.Errorf("barsArgs =\n %q\nwant\n %q", got, want)
 	}

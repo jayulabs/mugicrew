@@ -137,38 +137,80 @@ func removeFiles(paths ...string) {
 }
 
 // preamble is the server-wide setup (tmux argv after -S) that both a HITL Start
-// and the TUI self-launch run first, since either may be the one to start the
-// server (ADR 0065 §4): remain-on-exit failed (ADR 0037 §2), and F12, F11 and F10
-// in the HITL key table only, so none does anything on a TUI session (ADR 0065
-// §5). F11 cancels an Auto-exit by unsetting the pressing client's session's
-// @autofinish (Spec D5): no TUI, no subprocess, a no-op when unarmed. F10 shows
-// the session's @bead in a side pane, or focuses the one already open.
+// and the TUI self-launch run first, since either may start the server (ADR 0065
+// §4): remain-on-exit failed (ADR 0037 §2), and F1, F6 and F10 in the HITL key
+// table only, so none does anything on a TUI session (ADR 0065 §5). F1 opens the
+// "HITL keys" menu (ADR 0296): Back to TUI (F6), Bead pane (F10), and while the
+// pressing session's @autofinish is set a separator and Cancel auto-exit (c),
+// which unsets it: no TUI, no subprocess. F10 shows the session's @bead in a side
+// pane, or focuses the one already open.
 //
 // A session's key-table is its default table and tmux never falls back to root
 // from it, so every mouse event in a HITL session would be dropped. The run-shell
 // after start-server (so ~/.tmux.conf has loaded) copies root's mouse bindings
 // (key name, not command text, has Mouse, Wheel or Click) into the HITL table,
-// before the F-key binds so none can overwrite F10-F12. run-shell sets $TMUX, so
+// before the F-key binds so none can overwrite F1, F6 or F10. run-shell sets $TMUX, so
 // tmux there is this server, not the human's outer one. Re-binding replaces, so
 // every Start is safe; root rebinds on a running server land at the next Start.
 func preamble() []string {
-	return []string{
+	f1 := []string{"bind-key", "-T", hitlTable, "F1", "if-shell", "-F", "#{@autofinish}",
+		cmdline(menuArgv(true)...), cmdline(menuArgv(false)...)}
+	f6 := slices.Concat([]string{"bind-key", "-T", hitlTable, "F6"}, f6Cmd())
+	f10 := slices.Concat([]string{"bind-key", "-T", hitlTable, "F10"}, beadCmd())
+	return slices.Concat([]string{
 		"start-server", ";",
 		"set-option", "-gw", "remain-on-exit", "failed", ";",
-		"run-shell", copyMouse, ";",
-		"bind-key", "-T", hitlTable, "F12", "if-shell", "-F", ownTUI,
-		"run-shell -C 'switch-client -t =" + ownTUI + "'", "detach-client", ";",
-		"bind-key", "-T", hitlTable, "F11", "set-option", "-u", "@autofinish", ";",
-		"bind-key", "-T", hitlTable, "F10", "if-shell", "-F", beadPane,
-		"run-shell -C 'select-pane -t " + beadPane + "'", beadSplit(beadExe()),
+		"run-shell", copyMouse, ";"},
+		f1, []string{";"},
+		f6, []string{";"},
+		f10)
+}
+
+// f6Cmd and beadCmd are the commands F6 and F10 run, defined once so the F1 menu
+// entries run the same text as the direct bindings.
+func f6Cmd() []string {
+	return []string{"if-shell", "-F", ownTUI, backToTUI, "detach-client"}
+}
+
+func beadCmd() []string {
+	return []string{"if-shell", "-F", beadPane, focusBead, beadSplit(beadExe())}
+}
+
+// cmdline joins argv into one tmux command string, each word quoted.
+func cmdline(argv ...string) string {
+	q := make([]string, len(argv))
+	for i, a := range argv {
+		q[i] = tmuxQuote(a)
 	}
+	return strings.Join(q, " ")
+}
+
+// menuArgv is the F1 display-menu (ADR 0296): -M so a click picks with mouse on or
+// off, bottom-right above the bar. display-menu format-expands each entry's command
+// as it opens, so the shared commands are literal()'d to run as the direct bindings
+// do (#{@bead} stays unspliced). Entry names omit the key: tmux appends it.
+func menuArgv(armed bool) []string {
+	a := []string{"display-menu", "-M", "-x", "R", "-y", "S", "-T", "HITL keys",
+		"Back to TUI", "F6", literal(cmdline(f6Cmd()...)),
+		"Bead pane", "F10", literal(cmdline(beadCmd()...))}
+	if armed {
+		a = append(a, "", "", "", "Cancel auto-exit", "c", "set-option -u @autofinish")
+	}
+	return a
 }
 
 // copyMouse lists root's bindings, keeps the mouse-keyed ones retargeted at the
 // HITL table, and sources them back into the same server.
 const copyMouse = `tmux list-keys -T root | sed -n -E 's/^(bind-key +(-r +)?)-T root +([^ ]*(Mouse|Wheel|Click)[^ ]* .*)$/\1-T ` + hitlTable + ` \3/p' | tmux source-file -`
 
-// hitlTable is the key table every HITL session uses: it binds only F12, F11 and
+// backToTUI and focusBead are the commands F6 and F10 run when their format is
+// non-empty.
+const (
+	backToTUI = "run-shell -C 'switch-client -t =" + ownTUI + "'"
+	focusBead = "run-shell -C 'select-pane -t " + beadPane + "'"
+)
+
+// hitlTable is the key table every HITL session uses: it binds only F1, F6 and
 // F10, so other keys reach the pane and the prefix still works.
 const hitlTable = "mchitl"
 
@@ -202,12 +244,12 @@ func beadSplit(exe string) string {
 }
 
 // ttyOption is the user option a TUI session carries naming its own client's tty
-// (RecordClient): the client → TUI map F12 reads.
+// (RecordClient): the client → TUI map F6 reads.
 const ttyOption = "@tty"
 
 // ownTUI is a format naming the TUI session whose @tty is the pressing client's
-// tty, "" if none — no TUI for this terminal, or it is gone, so F12 detaches.
-// All tmux-side: F12 works with the TUI hung. run-shell -C, since switch-client
+// tty, "" if none — no TUI for this terminal, or it is gone, so F6 detaches.
+// All tmux-side: F6 works with the TUI hung. run-shell -C, since switch-client
 // doesn't expand its -t.
 const ownTUI = "#{S:#{?#{==:#{" + ttyOption + "},#{client_tty}},#{session_name},}}"
 
@@ -237,7 +279,7 @@ func tagArgs(sess string, t sessionTags) []string {
 }
 
 // bar is a HITL session's status line (ADR 0066 §3) and key table (ADR 0065 §5): b
-// on the left, F10 and both ways out on the right, no window list, no prefix keys. A dead
+// on the left, F1 and both ways out on the right, no window list, no prefix keys. A dead
 // pane keeps it.
 func bar(b bd.Bead) [][2]string {
 	left := plainSBRN(b)
@@ -269,20 +311,20 @@ func plainSBRN(b bd.Bead) string {
 	return fmt.Sprintf("%s %s P%d · %s · %s", glyph, kind, b.Priority, b.Title, b.ID)
 }
 
-// rightBar is a HITL session's status-right: F10 and both ways out, flipped loud (green,
+// rightBar is a HITL session's status-right: F1 and both ways out, flipped loud (green,
 // reversed) once its bead is closed (ADR 0066 §4).
 func rightBar(id string, closed bool) string {
 	if closed {
-		return "#[fg=green,reverse] ✓ " + literal(id) + " closed — /exit to finish · F10 bead · F12 back to TUI "
+		return "#[fg=green,reverse] ✓ " + literal(id) + " closed — /exit to finish · F6 back to TUI "
 	}
-	return "F10 bead · F12 back to TUI · /exit to finish"
+	return "F1 help · F6 back to TUI · /exit to finish"
 }
 
 // autoExitBar is an armed HITL session's status-right, left the time to its
 // Auto-exit deadline, in M:SS with a part second rounded up (Spec D4).
 func autoExitBar(left time.Duration) string {
 	s := int((max(left, 0) + time.Second - 1) / time.Second)
-	return fmt.Sprintf("auto-exit in %d:%02d · F11 cancels", s/60, s%60)
+	return fmt.Sprintf("auto-exit in %d:%02d · F1 to cancel", s/60, s%60)
 }
 
 // SetBars sets each alive HITL session's status-right from its bead's closed-ness
@@ -816,7 +858,7 @@ func Prefix() (string, error) {
 }
 
 // RecordClient records this TUI's own client tty as its session's @tty, the
-// client → TUI map F12 reads (ADR 0065 §5). The TUI runs it at startup and each
+// client → TUI map F6 reads (ADR 0065 §5). The TUI runs it at startup and each
 // tick: a client's tty is stable for its attach. With no client on the TUI (not
 // yet attached, or away in a HITL session) or in a bead-tagged session (a nested
 // TUI prototype) it writes nothing.
@@ -879,7 +921,7 @@ func recordArgs(tty, own, sessions string) []string {
 }
 
 // returnClients switches each client viewing pane's session to the TUI session
-// whose @tty is that client's tty (the F12 lookup, ADR 0065 §5), leaving clients
+// whose @tty is that client's tty (the F6 lookup, ADR 0065 §5), leaving clients
 // with no TUI where they are.
 func returnClients(sock, pane string) error {
 	ttys, err := tmuxCmd(sock, clientArgs(pane)...).Output()

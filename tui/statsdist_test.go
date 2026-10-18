@@ -3,10 +3,14 @@ package tui
 import (
 	"encoding/json"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"jayulabs.org/mugicrew/eventlog"
 )
@@ -44,19 +48,6 @@ func distCounts(v string) (sum int) {
 
 func TestDistributionPlacementAndCounts(t *testing.T) {
 	s := burnTab(distEvents()...)
-	wide := lines(s.view(120, 30))
-	var hdr int
-	for i, l := range wide {
-		if strings.Contains(l, "Distribution") {
-			hdr = i
-			if strings.Index(l, "Distribution") != statsTableW+2 {
-				t.Errorf("wide Distribution not in the right column:\n%s", flat(s.view(120, 30)))
-			}
-		}
-	}
-	if len(wide[hdr-1]) > statsTableW && strings.TrimSpace(wide[hdr-1][statsTableW:]) != "" {
-		t.Errorf("no blank line before the block:\n%s", flat(s.view(120, 30)))
-	}
 	narrow := flat(s.view(80, 40))
 	if strings.Index(narrow, "Distribution") < strings.Index(narrow, "TOTAL") {
 		t.Errorf("narrow Distribution not below Sessions:\n%s", narrow)
@@ -179,5 +170,122 @@ func TestDistributionCostToggle(t *testing.T) {
 	s.win = 2
 	if !s.recompute().cost {
 		t.Error("w/recompute reset the d choice")
+	}
+}
+
+// A block gives way only when it alone is taller than its row's height: with
+// Sessions the tallest block, the chart and Distribution stay whole until they
+// alone exceed the height (wide and 110-141 widths).
+func TestGiveWayPerRow(t *testing.T) {
+	pinClock(t, burnNow)
+	s := burnTab(append(distEvents(), usageReadEv(burnNow.Add(-30*time.Minute), 10, burnNow.Add(2*time.Hour)))...)
+	s.by = slices.Index(statsGroups, "day")
+	s = s.recompute()
+	for len(s.rows) < 9 {
+		s.rows = append(s.rows, s.rows[0])
+	}
+	for _, w := range []int{238, 120} {
+		n := len(lines(s.view(w, 100)))
+		for h := n; h >= n-2 && (w == 238 || h == n); h-- {
+			v := flat(s.view(w, h))
+			if strings.Contains(v, "hidden") || !strings.Contains(v, "1h+") || !strings.Contains(v, "▲") || !strings.Contains(v, "without a cost") {
+				t.Errorf("w=%d h=%d gave way though the chart and Distribution fit:\n%s", w, h, v)
+			}
+		}
+	}
+	if v := flat(s.view(238, 7)); !strings.Contains(v, "distribution hidden") {
+		t.Errorf("view(238,7) dropped the Distribution placeholder:\n%s", v)
+	}
+	// Walking the height down, the chart is hidden only once its row has less than
+	// the 7 lines its 2-row minimum needs (at 120 the Distribution row takes 3 more),
+	// and the Distribution is whole or its placeholder, never partial.
+	for _, c := range []struct{ w, floor int }{{238, 7}, {120, 10}} {
+		whole := distCounts(flat(s.view(c.w, 100)))
+		for h := len(lines(s.view(c.w, 100))); h >= c.floor; h-- {
+			v := flat(s.view(c.w, h))
+			if strings.Contains(v, "chart hidden") {
+				t.Errorf("w=%d h=%d hid the chart though its row has room:\n%s", c.w, h, v)
+			}
+			if got := distCounts(v); got != 0 && got != whole {
+				t.Errorf("w=%d h=%d drew a partial Distribution:\n%s", c.w, h, v)
+			}
+			if !strings.Contains(v, "without a cost") {
+				t.Errorf("w=%d h=%d lost the no-cost footer:\n%s", c.w, h, v)
+			}
+		}
+	}
+}
+
+// Cutting Sessions rows must leave no line of the pane unused where no chart is
+// beside Sessions (stacked width): the view is exactly h lines once rows are cut.
+func TestSessionsCutFillsPane(t *testing.T) {
+	pinClock(t, burnNow)
+	s := burnTab(append(distEvents(), usageReadEv(burnNow.Add(-30*time.Minute), 10, burnNow.Add(2*time.Hour)))...)
+	s.by = slices.Index(statsGroups, "day")
+	s = s.recompute()
+	for len(s.rows) < 9 {
+		s.rows = append(s.rows, s.rows[0])
+	}
+	dayRe := regexp.MustCompile(`(?m)^\d{4}-\d\d-\d\d`)
+	nat := len(dayRe.FindAllString(flat(s.view(80, 100)), -1))
+	if nat < 9 {
+		t.Fatalf("fixture shows %d day rows, want >= 9", nat)
+	}
+	cut := 0
+	for h := len(lines(s.view(80, 100))); h >= 12; h-- {
+		v := s.view(80, h)
+		if len(dayRe.FindAllString(flat(v), -1)) < nat {
+			cut++
+			if got := len(lines(v)); got != h {
+				t.Errorf("h=%d cut Sessions rows but drew %d lines:\n%s", h, got, flat(v))
+			}
+		}
+	}
+	if cut == 0 {
+		t.Error("never cut Sessions rows")
+	}
+}
+
+// Without a no-cost footer Sessions rows still give way, so the tab never draws
+// taller than the pane and the chart/Distribution follow their row's real height.
+func TestGiveWayWithoutFooter(t *testing.T) {
+	pinClock(t, burnNow)
+	s := burnTab(append(distEvents(), usageReadEv(burnNow.Add(-30*time.Minute), 10, burnNow.Add(2*time.Hour)))...)
+	s.by = slices.Index(statsGroups, "day")
+	s = s.recompute()
+	for len(s.rows) < 20 {
+		s.rows = append(s.rows, s.rows[0])
+	}
+	s.total.CostPartial = 0
+	for _, w := range []int{238, 120, 80} {
+		whole := distCounts(flat(s.view(w, 100)))
+		for h := 25; h >= 12; h-- {
+			v := s.view(w, h)
+			if got := len(lines(v)); got > h {
+				t.Errorf("w=%d h=%d drew %d lines", w, h, got)
+			}
+			f := flat(v)
+			if got := distCounts(f); got != 0 && got != whole {
+				t.Errorf("w=%d h=%d partial Distribution:\n%s", w, h, f)
+			}
+		}
+	}
+}
+
+// The placeholder never makes a row wider than the pane, even in the Distribution's
+// 30-column minimum.
+func TestDistributionPlaceholderFitsItsBlock(t *testing.T) {
+	pinClock(t, burnNow)
+	s := burnTab(append(distEvents(), usageReadEv(burnNow.Add(-30*time.Minute), 10, burnNow.Add(2*time.Hour)))...)
+	s.by = slices.Index(statsGroups, "day")
+	s = s.recompute()
+	for _, w := range []int{142, 180} {
+		for h := 10; h >= 7; h-- {
+			for i, l := range lines(s.view(w, h)) {
+				if n := ansi.StringWidth(l); n > w {
+					t.Errorf("w=%d h=%d line %d is %d wide", w, h, i, n)
+				}
+			}
+		}
 	}
 }

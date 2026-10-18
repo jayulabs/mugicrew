@@ -91,6 +91,10 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		"signal-filing.md",
 		"bd close ws-task",
 		"crew doc task-body.md",
+		"`r` on that Chart's or Checkpoint's row in the TUI",
+		"Never run the mugicrew rebase verb yourself",
+		"never merge or rebase a container branch by hand",
+		"hand off to the Stuck exit",
 		contract.DraftInstruction("ws-task"),
 	} {
 		if !strings.Contains(p, want) {

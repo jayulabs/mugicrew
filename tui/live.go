@@ -286,7 +286,7 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 		for id := range prev { // a drop-out (closed or deleted) reads closed lineage now
 			listed = listed || !openIDs[id]
 		}
-		recordClient()                // refresh F12's client → TUI map; a failure only costs F12 its way back
+		recordClient()                // refresh F6's client → TUI map; a failure only costs F6 its way back
 		sessions, _ := readSessions() // a failed read is an empty table
 		recents := loadRecents(recentsPath())
 		claimed := claimedIDs(recents, sessions)

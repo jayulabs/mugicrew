@@ -349,5 +349,5 @@ jobs:
               echo "$pkg@$VERSION already published, skipping"
               continue
             fi
-            npm publish "dist/jayulabs-$p-$VERSION.tgz" --access public
+            npm publish "./dist/jayulabs-$p-$VERSION.tgz" --access public
           done

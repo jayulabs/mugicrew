@@ -705,8 +705,8 @@ func TestDoctorToolVersions(t *testing.T) {
 		{"bd", "bd version 1.3.0 (dev)", "ok  bd: 1.3.0"},
 		{"bd", "bd version 1.2.1 (dev)", "FAIL  bd: 1.2.1 is below 1.3.0"},
 		{"tmux", "tmux 3.7c", "ok  tmux: 3.7c"},
-		{"tmux", "tmux 3.1", "FAIL  tmux: 3.1 is below 3.2"},
-		{"tmux", "tmux 3.2a", "ok  tmux: 3.2a"},
+		{"tmux", "tmux 3.4", "FAIL  tmux: 3.4 is below 3.5"},
+		{"tmux", "tmux 3.5a", "ok  tmux: 3.5a"},
 		{"claude", "2.1.301 (Claude Code)", "ok  claude: 2.1.301"},
 		{"claude", "2.1.77 (Claude Code)", "FAIL  claude: 2.1.77 is below 2.1.78"},
 		{"dolt", "dolt version 2.2.0", "ok  dolt: 2.2.0"},
@@ -737,7 +737,7 @@ func TestDoctorToolVersions(t *testing.T) {
 func TestDoctorAbsentToolHintHasFloor(t *testing.T) {
 	doctorWS(t, "tmux", "dolt")
 	out, code := doctorRun(t)
-	if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH — need ≥ 3.2: install ") || !strings.Contains(out, "FAIL  dolt: not on PATH — install pinned 2.2.0 tarball, see docs/install.md#dolt") {
+	if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH — need ≥ 3.5: install ") || !strings.Contains(out, "distro package may be older than 3.5") || !strings.Contains(out, "FAIL  dolt: not on PATH — install pinned 2.2.0 tarball, see docs/install.md#dolt") {
 		t.Errorf("code %d out %q", code, out)
 	}
 }

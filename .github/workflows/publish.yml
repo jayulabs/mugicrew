@@ -22,9 +22,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install tmux
+      # apt's tmux 3.4 is below ADR 0296's 3.5 floor (no display-menu -M): build the floor from source
+      - name: Build tmux 3.5a
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        env:
+          TMUX_VERSION: 3.5a
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y build-essential libevent-dev libncurses-dev bison
+          src="$RUNNER_TEMP/tmux-src"
+          mkdir "$src"
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz" | tar -xz -C "$src" --strip-components=1
+          cd "$src"
+          ./configure
+          make -j"$(nproc)"
+          sudo make install
+          tmux -V
       - run: go test ./...
         env:
           CGO_ENABLED: "0"

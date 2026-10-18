@@ -18,7 +18,7 @@ Always checked. Each FAIL names the minimum version and this OS's install comman
 
 - `bd` 1.3.0 or later
 - `dolt` (bd pins 2.2.0; doctor WARNs on 2.3.0 or later)
-- `tmux` 3.2 or later
+- `tmux` 3.5 or later
 - `claude` 2.1.78 or later
 - `git`
 

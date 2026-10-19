@@ -1,6 +1,6 @@
 # ADR 0218: `graph push` and `graph fetch` are a `graph` noun, and fetch clones into a cache scratch graph
 
-Status: Accepted
+Status: Superseded by ADR 0300
 Date: 2026-10-15
 
 Chart mc-t72m.16 (A personal Bead Graph publishes to its per-username ref on the

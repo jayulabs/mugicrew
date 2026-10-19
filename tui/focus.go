@@ -499,6 +499,8 @@ func (m Model) focusKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		return m.focusAction(k, r)
+	case r.kind == fHead && key.Matches(k, keyWithdrawKey): // X on the Initiative's own row cancels it
+		return m.actionKey(k)
 	case r.kind == fBead && r.sec == secIdeate:
 		return m.focusIdeateKey(k)
 	case r.kind == fBead:
@@ -525,6 +527,8 @@ func (m Model) focusAction(k tea.KeyMsg, r fRow) (tea.Model, tea.Cmd, bool) {
 func (m Model) focusIdeateKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch {
 	case key.Matches(k, keyPrio), key.Matches(k, keyPauseKey), key.Matches(k, keyDropKey) && m.gateData().xHint(m.focusBead()) != "": // unhinted x does nothing
+		return m.actionKey(k)
+	case key.Matches(k, keyWithdrawKey):
 		return m.actionKey(k)
 	case key.Matches(k, keyEdit), key.Matches(k, keyReject):
 		return m.graphKey(k)
@@ -632,6 +636,9 @@ func (m Model) focusBindings() []key.Binding {
 			bs = append(bs, keyPrio)
 		}
 	}
+	if r.b != nil && (r.kind == fBead || r.kind == fHead) && g.xOffers(r.b) {
+		bs = append(bs, xBinding(r.b))
+	}
 	if r.b != nil && (r.kind == fBead || r.kind == fHead) && canCheckup(r.b) {
 		bs = append(bs, keyCheckup)
 	}
@@ -665,7 +672,7 @@ func (m Model) focusExtra() []key.Binding {
 		cand = append(cand, keyReject, keyPauseKey) // z answers with a status line where it is not hinted
 	}
 	if r.kind == fBead && (r.sec == secDefog || r.sec == secExec) {
-		cand = append(cand, keyPauseKey, keyDropKey, keyPrio)
+		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
 	}
 	for _, b := range cand {
 		if !shown[b.Keys()[0]] {

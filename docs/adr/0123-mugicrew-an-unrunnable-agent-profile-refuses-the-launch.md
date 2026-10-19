@@ -20,6 +20,11 @@ model does.
    holds. Each is checked at resolve time, before anything runs:
    - it is absent from the catalog. That includes an empty catalog, a missing
      file, or a layer dropped as unusable;
+
+     > **Amended by ADR 0308 (the-settings-cycle-is-every-declared-profile-name…):**
+     > a name no profile file declares reads `not declared`, not "absent from
+     > the catalog".
+
    - its `harness` is not one mugicrew supports, or that harness's binary is
      not on `PATH`;
    - an `env` value names a `${VAR}` that is **unset**. A variable that is set
@@ -55,6 +60,15 @@ model does.
    `paused:failing`. In HITL the human sees the error in the pane.
 
 ## Amendments
+
+- ADR 0309 (config-toml-layers-may-declare-profiles-beside-the-oe-catalog…), with
+  ADR 0305 (an-unusable-config-toml-profile-table…), ADR 0306
+  (doctor-and-refusal-reasons-name-the-file…) and ADR 0307
+  (agentprofile-reads-profile-files-and-cfglayer…) §6: §1 gains a cause, a
+  `[profiles.<name>]` table in a `config.toml` that is bad, which reads
+  `declared unusable: <defect>`. Every reason for a name that was found ends
+  `(from <path>)`, the winning file. §6's `profile.unusable` gains `path` beside
+  `reason`, omitted when the name is not declared.
 
 - Root ADR 0093 §2: an unset `${VAR}` makes the profile unrunnable instead of
   expanding to empty. The unset case matters because an empty

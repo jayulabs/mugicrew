@@ -202,6 +202,9 @@ func TestF1MenuActs(t *testing.T) {
 // A click picks an entry with tmux mouse on or off. tmux picks on release, so the
 // SGR press is followed by the release.
 func TestF1MenuMouse(t *testing.T) {
+	if !menuMouse() {
+		t.Skip("PATH tmux not known to be >= 3.5 (display-menu -M)")
+	}
 	for _, mouse := range []string{"on", "off"} {
 		t.Run(mouse, func(t *testing.T) {
 			r := newF1Rig(t)

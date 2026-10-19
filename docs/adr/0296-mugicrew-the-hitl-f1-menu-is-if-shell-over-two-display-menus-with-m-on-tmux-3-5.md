@@ -1,6 +1,6 @@
 # ADR 0296: the HITL F1 menu is an if-shell over two display-menus, with -M, on tmux ≥ 3.5
 
-Status: Accepted
+Status: Accepted; point 5 (tmux floor 3.5) superseded by ADR 0303 (the-hitl-f1-menu-passes-m-only…): floor 3.4, -M only on a known tmux ≥ 3.5
 Date: 2026-10-18
 
 Chart: HITL session F-keys follow the byobu convention. The prototype "F1

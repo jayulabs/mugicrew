@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
@@ -478,5 +480,26 @@ func TestLandEnforcesConfiguredSequences(t *testing.T) {
 	_, err = git.Land("chart/x", "Chart: x", git.LandLocal)
 	if errors.As(err, &clash) || err == nil || !strings.Contains(err.Error(), "V__*.sql") || !strings.Contains(err.Error(), "config.toml") {
 		t.Fatalf("Land = %v, want a plain error naming the rule and config.toml", err)
+	}
+}
+
+// A Kind-profiles save rewrites the whole local file but keeps hand-written
+// [profiles.*] tables, a bad one included, as data (ADR 0308 §6).
+func TestSetLocalKindProfileKeepsProfileTables(t *testing.T) {
+	root := gitRepo(t)
+	writeLocal(t, root, "[profiles.good]\nmodel = \"opus\"\n\n[profiles.bad]\nmodle = \"x\"\n")
+	if err := SetLocalKindProfile(root, "build", "good"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, ".git", "mugicrew", "config.toml"))
+	var got struct {
+		Profiles     map[string]map[string]any
+		KindProfiles map[string]string `toml:"kind_profiles"`
+	}
+	if _, err := toml.Decode(string(b), &got); err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	if got.Profiles["good"]["model"] != "opus" || got.Profiles["bad"]["modle"] != "x" || got.KindProfiles["build"] != "good" {
+		t.Errorf("after save: %+v\n%s", got, b)
 	}
 }

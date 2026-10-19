@@ -19,6 +19,8 @@ import (
 type node struct {
 	id, kind, status, parent string
 	blockedBy                []string
+	causedBy                 string
+	draft                    bool // an unpublished Draft: deferred with a drafted-by: label
 }
 
 // fakeSnapshot stands the snapshot behind run's `bd list --all` and records every
@@ -31,11 +33,18 @@ func fakeSnapshot(t *testing.T, nodes ...node) *[][]string {
 		for _, b := range n.blockedBy {
 			deps = append(deps, map[string]string{"depends_on_id": b, "type": "blocks"})
 		}
+		if n.causedBy != "" {
+			deps = append(deps, map[string]string{"depends_on_id": n.causedBy, "type": "caused-by"})
+		}
+		labels := []string{"kind:" + n.kind}
+		if n.draft {
+			labels = append(labels, "drafted-by:someone")
+		}
 		typ := "task"
 		if n.kind == "initiative" || n.kind == "chart" || n.kind == "checkpoint" {
 			typ = "epic"
 		}
-		rows = append(rows, map[string]any{"id": n.id, "title": "t " + n.id, "status": n.status, "labels": []string{"kind:" + n.kind},
+		rows = append(rows, map[string]any{"id": n.id, "title": "t " + n.id, "status": n.status, "labels": labels,
 			"parent": n.parent, "issue_type": typ, "dependencies": deps})
 	}
 	snap, _ := json.Marshal(rows)
@@ -52,9 +61,17 @@ func fakeSnapshot(t *testing.T, nodes ...node) *[][]string {
 	return &writes
 }
 
-// inFlight marks the listed ids as running efforts.
-func inFlight(ids ...string) func(Bead) bool {
-	return func(b Bead) bool { return slices.Contains(ids, b.ID) }
+func heads(t *testing.T, nodes []node) (all []Bead, isHead func(string) bool) {
+	t.Helper()
+	fakeSnapshot(t, nodes...)
+	all, err := ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return all, func(id string) bool {
+		i := slices.IndexFunc(all, func(b Bead) bool { return b.ID == id })
+		return IsChainHead(all[i], all)
+	}
 }
 
 func refusedNames(t *testing.T, err error) []string {
@@ -79,133 +96,6 @@ func initiativeGraph() []node {
 		{id: "b2", kind: "build", status: "open", parent: "cp2", blockedBy: []string{"b1"}},
 		{id: "s3", kind: "signal", status: "deferred", parent: "in"},
 		{id: "x", kind: "signal", status: "open"},
-	}
-}
-
-// FR34: cancel refuses while any member at any depth runs, names those beads,
-// and writes nothing.
-func TestCancelRefusesInFlight(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	evs := eventlogtest.Capture(t)
-	err := CancelInitiative("in", inFlight("b2", "x"))
-	if got := refusedNames(t, err); !slices.Equal(got, []string{"b2"}) {
-		t.Errorf("blocking = %v, want [b2] (x is no member)", got)
-	}
-	if len(*writes) != 0 {
-		t.Errorf("a refusal wrote %v", *writes)
-	}
-	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"initiative.cancel.refused"}) {
-		t.Errorf("events = %v", got)
-	}
-}
-
-// Cancel also refuses while the Initiative itself runs (Luffy's cut session).
-func TestCancelRefusesInFlightInitiative(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	err := CancelInitiative("in", inFlight("in"))
-	if got := refusedNames(t, err); !slices.Equal(got, []string{"in"}) {
-		t.Errorf("blocking = %v, want [in]", got)
-	}
-	if len(*writes) != 0 {
-		t.Errorf("a refusal wrote %v", *writes)
-	}
-}
-
-// FR33: cancel closes every unclosed member leaves-first, then the Initiative,
-// with reason cancelled: <initiative>; closed members are left alone.
-func TestCancelClosesMembersThenInitiative(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	evs := eventlogtest.Capture(t)
-	if err := CancelInitiative("in", inFlight()); err != nil {
-		t.Fatal(err)
-	}
-	want := [][]string{{"close", "b1", "b2", "cp2", "s3", "in", "--force", "--reason", "cancelled: in"}}
-	if fmt.Sprint(*writes) != fmt.Sprint(want) {
-		t.Errorf("writes = %v, want %v", *writes, want)
-	}
-	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"initiative.cancel"}) {
-		t.Errorf("events = %v", got)
-	}
-}
-
-// Cancel takes only an unclosed Initiative: a closed one is final (FR28).
-func TestCancelRejectsNonInitiative(t *testing.T) {
-	g := append(initiativeGraph(), node{id: "done", kind: "initiative", status: "closed"})
-	writes := fakeSnapshot(t, g...)
-	for _, id := range []string{"cp2", "done", "nope"} {
-		if err := CancelInitiative(id, inFlight()); err == nil || errors.As(err, new(*RefusedError)) {
-			t.Errorf("cancel %s: want a plain error, got %v", id, err)
-		}
-	}
-	if len(*writes) != 0 {
-		t.Errorf("wrote %v", *writes)
-	}
-}
-
-// FR36: withdraw refuses while an unclosed member of the same Initiative is
-// ordered after the chain; a dependent outside the Initiative, or inside the
-// chain itself, does not count.
-func TestWithdrawRefusesOrderedAfter(t *testing.T) {
-	g := append(initiativeGraph(),
-		node{id: "s4", kind: "signal", status: "open", parent: "in", blockedBy: []string{"b1"}},
-		node{id: "s5", kind: "signal", status: "closed", parent: "in", blockedBy: []string{"cp2"}},
-		node{id: "y", kind: "signal", status: "open", blockedBy: []string{"cp2"}},
-	)
-	writes := fakeSnapshot(t, g...)
-	evs := eventlogtest.Capture(t)
-	err := WithdrawChain("cp2", inFlight())
-	if got := refusedNames(t, err); !slices.Equal(got, []string{"s4"}) {
-		t.Errorf("blocking = %v, want [s4]", got)
-	}
-	if len(*writes) != 0 {
-		t.Errorf("a refusal wrote %v", *writes)
-	}
-	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"initiative.withdraw.refused"}) {
-		t.Errorf("events = %v", got)
-	}
-}
-
-// FR36: withdraw refuses while the chain has an in-flight effort; one outside
-// the chain does not count.
-func TestWithdrawRefusesInFlight(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	err := WithdrawChain("cp2", inFlight("b1", "s3"))
-	if got := refusedNames(t, err); !slices.Equal(got, []string{"b1"}) {
-		t.Errorf("blocking = %v, want [b1]", got)
-	}
-	if len(*writes) != 0 {
-		t.Errorf("a refusal wrote %v", *writes)
-	}
-}
-
-// FR35: withdraw closes only its chain (the head's open children, then the
-// head) with reason withdrawn; the sibling chain and the Initiative stay.
-func TestWithdrawClosesOnlyItsChain(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	evs := eventlogtest.Capture(t)
-	if err := WithdrawChain("cp2", inFlight()); err != nil {
-		t.Fatal(err)
-	}
-	want := [][]string{{"close", "b1", "b2", "cp2", "--force", "--reason", "withdrawn"}}
-	if fmt.Sprint(*writes) != fmt.Sprint(want) {
-		t.Errorf("writes = %v, want %v", *writes, want)
-	}
-	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"initiative.withdraw"}) {
-		t.Errorf("events = %v", got)
-	}
-}
-
-// Withdraw takes only an unclosed member chain head of an Initiative.
-func TestWithdrawRejectsNonHead(t *testing.T) {
-	writes := fakeSnapshot(t, initiativeGraph()...)
-	for _, id := range []string{"in", "cp1", "b1", "x", "nope"} {
-		err := WithdrawChain(id, inFlight())
-		if err == nil || errors.As(err, new(*RefusedError)) {
-			t.Errorf("withdraw %s: want a plain error, got %v", id, err)
-		}
-	}
-	if len(*writes) != 0 {
-		t.Errorf("wrote %v", *writes)
 	}
 }
 
@@ -361,5 +251,80 @@ func TestHasDoneWhen(t *testing.T) {
 				t.Errorf("HasDoneWhen(%q) = %v, want %v", tc.body, got, tc.want)
 			}
 		})
+	}
+}
+
+// Spec D1: every head kind is a chain head standalone and under an open and a
+// closed Initiative; defog beads, Builds, Landings, Drafts, closed beads and beads
+// with an unclosed successor are not.
+func TestIsChainHead(t *testing.T) {
+	g := []node{
+		{id: "in", kind: "initiative", status: "open"},
+		{id: "done", kind: "initiative", status: "closed"},
+		{id: "ch", kind: "chart", status: "open"},
+		{id: "sig", kind: "signal", status: "open"},
+		{id: "spec", kind: "spec", status: "open", parent: "in"},
+		{id: "cp", kind: "checkpoint", status: "blocked", parent: "done"},
+		{id: "rb", kind: "rollback", status: "open"},
+		{id: "survey", kind: "survey", status: "open", parent: "ch"},
+		{id: "build", kind: "build", status: "open", parent: "cp"},
+		{id: "land", kind: "landing", status: "open", parent: "cp"},
+		{id: "drspec", kind: "spec", status: "deferred", parent: "ch", draft: true},
+		{id: "drsig", kind: "signal", status: "deferred", draft: true},
+		{id: "gone", kind: "signal", status: "closed"},
+		{id: "task", kind: "task", status: "open"},
+		{id: "pred", kind: "spec", status: "open"},
+		{id: "succ", kind: "checkpoint", status: "open", causedBy: "pred"},
+		{id: "pred2", kind: "spec", status: "open"},
+		{id: "succ2", kind: "checkpoint", status: "closed", causedBy: "pred2"},
+	}
+	_, isHead := heads(t, g)
+	for _, id := range []string{"ch", "sig", "spec", "cp", "rb", "succ", "pred2"} {
+		if !isHead(id) {
+			t.Errorf("%s: want a chain head", id)
+		}
+	}
+	for _, id := range []string{"in", "survey", "build", "land", "drspec", "drsig", "gone", "task", "pred"} {
+		if isHead(id) {
+			t.Errorf("%s: want not a chain head", id)
+		}
+	}
+}
+
+// Withdrawing a Checkpoint takes its still-open Spec and both subtrees, leaves
+// first, head last; a closed predecessor's closed subtree stays out.
+func TestWithdrawSet(t *testing.T) {
+	g := []node{
+		{id: "spec", kind: "spec", status: "open"},
+		{id: "sd", kind: "signal", status: "deferred", parent: "spec", draft: true},
+		{id: "cp", kind: "checkpoint", status: "open", causedBy: "spec"},
+		{id: "b1", kind: "build", status: "open", parent: "cp"},
+		{id: "b0", kind: "build", status: "closed", parent: "cp"},
+	}
+	all, _ := heads(t, g)
+	if got := IDs(WithdrawSet("cp", all)); !slices.Equal(got, []string{"sd", "spec", "b1", "cp"}) {
+		t.Errorf("WithdrawSet = %v", got)
+	}
+}
+
+// Cancel's set is every unclosed member (a Draft member too) then the Initiative.
+func TestCancelSet(t *testing.T) {
+	all, _ := heads(t, initiativeGraph())
+	if got := IDs(CancelSet("in", all)); !slices.Equal(got, []string{"b1", "b2", "cp2", "s3", "in"}) {
+		t.Errorf("CancelSet = %v", got)
+	}
+}
+
+// OrderedAfter scans every unclosed bead outside the set, wherever it sits.
+func TestOrderedAfter(t *testing.T) {
+	g := append(initiativeGraph(),
+		node{id: "s4", kind: "signal", status: "open", parent: "in", blockedBy: []string{"b1"}},
+		node{id: "s5", kind: "signal", status: "closed", parent: "in", blockedBy: []string{"cp2"}},
+		node{id: "y", kind: "signal", status: "open", blockedBy: []string{"cp2"}},
+		node{id: "z", kind: "signal", status: "open", blockedBy: []string{"x"}},
+	)
+	all, _ := heads(t, g)
+	if got := IDs(OrderedAfter(WithdrawSet("cp2", all), all)); !slices.Equal(got, []string{"s4", "y"}) {
+		t.Errorf("OrderedAfter = %v, want [s4 y] (b2 is inside, s5 is closed, z waits on x)", got)
 	}
 }

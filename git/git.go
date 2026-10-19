@@ -417,6 +417,22 @@ func recordCut(r Repo, id, at string) error {
 	return err
 }
 
+// CommitsSinceCut counts branch's commits since id's recorded cut point
+// (cut..branch): the effort's own work, however far its container has moved on.
+// ok is false when no cut ref is recorded (an effort cut before ADR 0264), leaving
+// the caller to estimate from the container.
+func (r Repo) CommitsSinceCut(id, branch string) (n int, ok bool, err error) {
+	_, err = r.run("rev-parse", "--verify", "--quiet", cutRefPrefix+id+"^{commit}")
+	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	n, err = r.CommitsAhead(cutRefPrefix+id, branch)
+	return n, err == nil, err
+}
+
 // dropCut deletes the cut ref of branch when it is an effort branch; absent is no error.
 func (r Repo) dropCut(branch string) error {
 	if id, ok := strings.CutPrefix(branch, effortPrefix); ok {
@@ -2843,7 +2859,7 @@ func (r Repo) runOut(args ...string) (string, error) {
 }
 
 // runForge is run for a call that talks to the Forge remote: it carries glab's
-// credential helper for that remote's URL (ADR 0256), none for an ssh remote.
+// credential helper for that remote's URL (ADR 0300), none for an ssh remote.
 func (r Repo) runForge(remote string, args ...string) (string, error) {
 	u, _ := r.run("config", "--get", "remote."+remote+".url")
 	if r != "" {
@@ -3215,7 +3231,7 @@ func ForgeURL() (string, error) {
 }
 
 // GlabHelperEnv is the env that points git at glab's credential helper for a
-// Forge remote URL (ADR 0256): helper only, never a username entry, which trips
+// Forge remote URL (ADR 0300): helper only, never a username entry, which trips
 // glab's username-mismatch refusal under GITLAB_TOKEN. Nil for a non-http(s) URL.
 func GlabHelperEnv(forgeURL string) []string {
 	u, err := url.Parse(forgeURL)
@@ -3225,25 +3241,6 @@ func GlabHelperEnv(forgeURL string) []string {
 	return []string{"GIT_CONFIG_COUNT=1",
 		"GIT_CONFIG_KEY_0=credential." + u.Scheme + "://" + u.Host + ".helper",
 		"GIT_CONFIG_VALUE_0=!glab auth git-credential"}
-}
-
-// ForgeHasRef reports whether the Forge carries ref exactly (git ls-remote
-// matches by path tail, so each listed name is compared, not just the output).
-func ForgeHasRef(ref string) (bool, error) {
-	u, _ := ForgeURL()
-	return ForgeHasRefEnv(ref, GlabHelperEnv(u))
-}
-
-// ForgeHasRefEnv is ForgeHasRef with extra env entries on the ls-remote.
-func ForgeHasRefEnv(ref string, env []string) (bool, error) {
-	out, err := runRawEnv(env, "ls-remote", ForgeRemote(), ref)
-	out = strings.TrimSpace(out)
-	for _, line := range strings.Split(out, "\n") {
-		if _, name, ok := strings.Cut(line, "\t"); ok && name == ref {
-			return true, err
-		}
-	}
-	return false, err
 }
 
 // PostLandClash is one numbered file the landed commit added whose number
@@ -3375,4 +3372,15 @@ func (r Repo) introducedAt(tip, path string) (string, error) {
 		return "", fmt.Errorf("git: no first-parent commit on %s adds %s", tip, path)
 	}
 	return c, nil
+}
+
+// WorktreeTop is the cwd's own worktree top-level dir: unlike RepoRoot, the
+// linked worktree itself when the cwd is inside one.
+func WorktreeTop() (string, error) { return run("rev-parse", "--show-toplevel") }
+
+// OnMainline reports whether the cwd's worktree has the mainline branch checked
+// out (a detached HEAD never does).
+func OnMainline() bool {
+	b, err := run("symbolic-ref", "--quiet", "--short", "HEAD")
+	return err == nil && b == Mainline()
 }

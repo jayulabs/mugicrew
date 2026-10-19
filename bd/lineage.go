@@ -29,7 +29,7 @@ type lineageEdge struct{ from, to, typ string }
 
 // LoadLineage reads the lineage with one bd sql.
 func LoadLineage() (*Lineage, error) {
-	rows, err := sqlRows(nil, lineageSQL)
+	rows, err := sqlRows(lineageSQL)
 	if err != nil {
 		return nil, fmt.Errorf("bd: read lineage: %w", err)
 	}

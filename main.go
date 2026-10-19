@@ -64,6 +64,7 @@ import (
 	"jayulabs.org/mugicrew/session"
 	"jayulabs.org/mugicrew/tui"
 	"jayulabs.org/mugicrew/usopp"
+	"jayulabs.org/mugicrew/withdraw"
 	"jayulabs.org/mugicrew/zoro"
 )
 
@@ -122,8 +123,8 @@ func main() {
 		return
 	}
 
-	if args[0] == "doctor" && len(args) == 1 { // read-only: before the event log opens, so it writes nothing
-		os.Exit(runDoctor(os.Stdout))
+	if args[0] == "doctor" { // before the event log opens: bare doctor is read-only, doctor fix writes no event (ADR 0301 §5)
+		os.Exit(runDoctorCmd(args[1:], os.Stdout))
 	}
 	if args[0] == "hitl-follow" { // hidden: hitl-run's detached follower (ADR 0254); its log path is argv, not its cwd's repo
 		if err := runHitlFollow(args[1:], followWait, os.Stderr); err != nil {
@@ -157,6 +158,8 @@ func main() {
 		err = runPivotEscalate(args[2:])
 	case args[0] == "initiative":
 		err = runInitiative(args[1:])
+	case args[0] == "withdraw":
+		err = runWithdraw(args[1:])
 	case args[0] == "reconcile":
 		err = runReconcile(args[1:])
 	case args[0] == "loop":
@@ -167,8 +170,6 @@ func main() {
 		os.Exit(runRecover(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "checkup":
 		os.Exit(runCheckup(args[1:], os.Stderr))
-	case args[0] == "graph":
-		err = runGraph(args[1:], os.Stdout)
 	case args[0] == "ps":
 		err = runPs(args[1:], os.Stdout)
 	case args[0] == "stats":
@@ -219,7 +220,8 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew checkup <bead> [--problem "<one line>"]          repair a broken bead in a Chopper session
   mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>]  file a pivot's corrected Spec
   mugicrew pivot escalate <pivot-id> --evidence <file>      re-chart a pivot from its evidence
-  mugicrew initiative cancel <initiative> | withdraw <head>  drop an Initiative, or one member chain
+  mugicrew withdraw <head> [--discard]  drop any unclosed chain head (initiative withdraw is its alias)
+  mugicrew initiative cancel <initiative> [--release <head>]... [--discard]  drop an Initiative and its member chains
   mugicrew initiative adopt <head> <initiative> | release <head>  move a chain into or out of an Initiative
   mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>]  drive a bead to its next state
   mugicrew loop [--watch | start [--watch] | status [--json] | stop [--force]]  run or control the dispatch loop
@@ -228,10 +230,10 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew ps [--json]                                      list active AFK efforts
   mugicrew stats [<bead>] [--spine] [--since <dur|date>] [--by crewmate|model|profile|kind|day] [--kind <kind>] [--json]  show session cost and agent time
   mugicrew transcript [--no-follow] [--session <prefix> | --last] [--no-pager] <bead>  read every session a bead ran
-  mugicrew graph push                                       push the Bead Graph to its Graph ref on the Forge (gitlab strategy)
-  mugicrew graph fetch <username> [<dir>]                   clone a teammate's Graph ref into a Scratch graph to read with plain bd
   mugicrew init [--prefix <p>]                              bootstrap this clone's server-mode bd store (never commits)
+  mugicrew init workspace [--land-strategy local|gitlab] [--require-initiatives <bool>] [--external-ref <bool>] [--jira-site <host>] [--context name=[repo:|path:]dir]...  write the Workspace's shared settings to .mugicrew/config.toml in a linked worktree (never commits)
   mugicrew doctor                                           check the environment and Workspace are ready (read-only)
+  mugicrew doctor fix                                       apply doctor's safe fixes, then re-check
   mugicrew integrate                                        squash this effort branch onto its Checkpoint
   mugicrew rebase <chart-or-checkpoint-id>                  file a rebase of an open Chart or Checkpoint onto mainline
   mugicrew chart append|drop <chart-id> <section> <line>    edit one line of a Chart section
@@ -295,7 +297,7 @@ func requireGraph(args []string) error {
 		args[0] == "intake" && len(args) >= 2 && args[1] == "jira" ||
 		args[0] == "latch" && len(args) >= 2 && (args[1] == "jira" || args[1] == "mr") ||
 		args[0] == "surgery" && len(args) >= 2 && (args[1] == "new" || args[1] == "end") ||
-		args[0] == "checkup" || args[0] == "integrate" || args[0] == "rebase" || args[0] == "chart" || args[0] == "graph" || args[0] == "approval"
+		args[0] == "checkup" || args[0] == "integrate" || args[0] == "rebase" || args[0] == "chart" || args[0] == "approval"
 	if !user {
 		return nil
 	}
@@ -442,9 +444,9 @@ func (c appCtx) ForProfile(name string) (contract.Ctx, error) {
 	return ctxForProfile(root, name)
 }
 
-// ProfileReasons checks a loaded catalog's runnability in one batch (FR44).
-func (c appCtx) ProfileReasons(catalog map[string]agentprofile.Profile) map[string]string {
-	return profileReasons(catalog)
+// ProfileReasons checks the merged profiles' runnability in one batch (FR44).
+func (c appCtx) ProfileReasons(root string, declared map[string]agentprofile.Entry) map[string]string {
+	return profileReasons(root, declared)
 }
 
 var _ dispatch.Profiled = appCtx{}
@@ -1783,41 +1785,98 @@ type stringList []string
 func (l *stringList) String() string     { return strings.Join(*l, ",") }
 func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
-// cancelInitiative, withdrawChain, adoptChain, releaseChain and
-// initiativeSessions are the guarded bd acts and the session table, vars so the
+// withdrawChain, cancelInitiative, adoptChain, releaseChain and
+// initiativeSessions are the guarded acts and the session table, vars so the
 // CLI's tests stub them.
 var (
-	cancelInitiative   = bd.CancelInitiative
-	withdrawChain      = bd.WithdrawChain
+	withdrawChain      = withdraw.Withdraw
+	cancelInitiative   = withdraw.Cancel
 	adoptChain         = bd.AdoptChain
 	releaseChain       = bd.ReleaseChain
 	initiativeSessions = session.Sessions
 )
 
-// runInitiative is `mugicrew initiative cancel <initiative>` and `mugicrew
-// initiative withdraw <head>` (Spec D9): human-run, no TUI key. A bead is in
-// flight when it is an active AFK effort or has a live session; a session table
-// that can't be read refuses the act rather than guess. `adopt <head>
-// <initiative>` and `release <head>` (Spec D5) are the TUI's a/A as verbs.
+// runWithdraw is `mugicrew withdraw <head>`, and `mugicrew initiative withdraw
+// <head>` its alias (Spec mc-5rttm D8): human-run. A bead is in flight when it is
+// an active AFK effort or has a live session; a session table that can't be read
+// refuses the act rather than guess.
+func runWithdraw(argv []string) error {
+	argv, discard := cutDiscard(argv)
+	if len(argv) != 1 || argv[0] == "" {
+		return errors.New("usage: mugicrew withdraw <head> [--discard]")
+	}
+	o, err := withdraw.LiveOpts(initiativeSessions)
+	if err != nil {
+		return err
+	}
+	o.Discard = discard
+	res, err := withdrawChain(argv[0], o)
+	if err == nil {
+		fmt.Println("withdrawn", argv[0]+": closed", strings.Join(res.Closed, " "))
+		printKept(os.Stdout, res)
+	}
+	return err
+}
+
+// cutDiscard removes the --discard flag from argv: the human's say-so that a chain
+// whose cleanup loses work may close anyway (Spec D8).
+func cutDiscard(argv []string) (rest []string, discard bool) {
+	for _, a := range argv {
+		if a == "--discard" {
+			discard = true
+		} else {
+			rest = append(rest, a)
+		}
+	}
+	return rest, discard
+}
+
+// printKept names each cleanup item that stayed behind, for the human to clear by
+// hand or with mugicrew recover; the close stands.
+func printKept(w io.Writer, res withdraw.Result) {
+	for _, k := range res.Kept {
+		fmt.Fprintln(w, "kept", k)
+	}
+}
+
+// runInitiative is `mugicrew initiative cancel <initiative>`, `withdraw <head>`
+// (runWithdraw), and `adopt <head> <initiative>` / `release <head>` (Spec D5), the
+// TUI's a/A as verbs.
 func runInitiative(argv []string) error {
-	const usage = "usage: mugicrew initiative cancel <initiative> | withdraw <head> | adopt <head> <initiative> | release <head>"
+	const usage = "usage: mugicrew initiative cancel <initiative> [--release <head>]... [--discard] | withdraw <head> [--discard] | adopt <head> <initiative> | release <head>"
 	switch {
 	case len(argv) == 3 && argv[0] == "adopt":
 		return adoptChain(argv[1], argv[2])
 	case len(argv) == 2 && argv[0] == "release":
 		return releaseChain(argv[1])
-	case len(argv) != 2 || argv[0] != "cancel" && argv[0] != "withdraw":
+	case len(argv) > 0 && argv[0] == "withdraw":
+		return runWithdraw(argv[1:])
+	case len(argv) < 2 || argv[0] != "cancel":
 		return errors.New(usage)
 	}
-	sessions, err := initiativeSessions()
+	fs := flag.NewFlagSet("initiative cancel", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var release stringList
+	fs.Var(&release, "release", "member chain head to release instead of close (repeatable)")
+	discard := fs.Bool("discard", false, "close even though it discards uncommitted or unintegrated work")
+	// the Initiative comes first, its flags after
+	if fs.Parse(argv[2:]) != nil || fs.NArg() != 0 || strings.HasPrefix(argv[1], "-") {
+		return errors.New(usage)
+	}
+	o, err := withdraw.LiveOpts(initiativeSessions)
 	if err != nil {
 		return err
 	}
-	inFlight := func(b bd.Bead) bool { return loop.IsActiveAFKEffort(b) || sessions[b.ID].State == session.Alive }
-	if argv[0] == "cancel" {
-		return cancelInitiative(argv[1], inFlight)
+	o.Release, o.Discard = release, *discard
+	res, err := cancelInitiative(argv[1], o)
+	if err == nil {
+		fmt.Println("cancelled", argv[1]+": closed", strings.Join(res.Closed, " "))
+		if len(res.Released) > 0 {
+			fmt.Println("released", strings.Join(res.Released, " "))
+		}
+		printKept(os.Stdout, res)
 	}
-	return withdrawChain(argv[1], inFlight)
+	return err
 }
 
 // runSurgeryEnd ends a Surgery (Spec D5): a thin shim over franky.EndSurgery,

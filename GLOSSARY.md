@@ -66,6 +66,13 @@ The optional, human-authored `.mugicrew/CREW.md` of a Workspace or Context, nami
 the traps in its architecture. The crew reads it and changes it only through a Signal.
 _Avoid_: manifest, memory, notes
 
+**Agent Profile catalog**:
+The OE's `agent-profiles.toml` and its local twin, one of the places a profile
+name can be declared. mugicrew's `config.toml` layers declare profiles too, and
+the merged set of all four files is "the declared names", not the catalog
+(ADR 0308 (the-settings-cycle-is-every-declared-profile-name…)).
+_Avoid_: catalog (for the merged four-file set)
+
 **Repo stamp**:
 The `repo:<dir>` label that a nested-repo container's first branch cut writes. It
 guards against a moved `repo =`: a mismatch holds the container as
@@ -88,20 +95,6 @@ _Avoid_: graph name (for the id)
 A Bead Graph's human-readable label: its owner's GitLab username. It labels
 a graph for people and never identifies one (ADR 0200).
 _Avoid_: graph id (for the label)
-
-**Graph ref**:
-The git ref on the Forge that holds one person's Bead Graph,
-`refs/mugicrew/graphs/<graph-name>`, outside `refs/dolt/` (ADR 0216).
-_Avoid_: sync ref (bd's own `refs/dolt/data`), mirror
-
-**Graph push**:
-Pushing a Bead Graph's whole Dolt data to its Graph ref (ADR 0216).
-_Avoid_: publish, graph publish (Publish is a Draft's)
-
-**Scratch graph**:
-A disposable, read-only local copy of another person's Bead Graph, fetched
-back from their Graph ref and kept apart from your own (ADR 0218).
-_Avoid_: mirror, clone (for the copy)
 
 **Qualified Bead Id**:
 A bead id qualified by its Bead Graph, written `<bead-id>@<graph-id>`. Its
@@ -256,8 +249,8 @@ start from that tab now; on Execute that includes every open, unblocked Task, wh
 it sits), then its paused band: leaves carrying their own paused:* label that are
 otherwise ready (not blocked, Live, waiting, launching or exited), HITL and AFK alike
 (on Execute, every open Checkpoint member; AFK beads join only this band); each tab's
-own container kind joins it when own-paused, open and unblocked: Ideate's Initiatives
-(as ADR 0180's combined row), Defog's Charts and Execute's Checkpoints (as their
+own container kind joins it when own-paused, open and unblocked: Ideate's P0–P2 Initiatives
+(as ADR 0180's combined row; a P3 or P4 one is Actionable only while its cut session waits, ADR 0314), Defog's Charts and Execute's Checkpoints (as their
 section rows); beads paused only by an ancestor stay out. A live session the agent is
 working is not Actionable (ADR 0179). _Avoid:_ ready, queue, todo.
 
@@ -272,14 +265,18 @@ published Spec, headed `Specs (N)`; status only, unfolded by default.
 
 **Initiatives:** the section below Live on the Ideate and Defog tabs, and below
 Checkpoints on the Execute tab: the
-tab's Initiative groups only, headed `Initiatives (N)` for N groups. _Avoid:_ tree, all.
+tab's Initiative groups only, headed `Initiatives (N)` for N groups; on Ideate a P3 or
+P4 Initiative's whole group sits in Backlog instead while ADR 0314 puts it there (ADR 0315). _Avoid:_ tree, all.
 
 **No Initiative:** the top-level section below Initiatives on the Ideate, Defog and
 Execute tabs: the freestanding beads that sit under no Initiative, headed
 `No Initiative (N)`. Always shown, folded by default. _Avoid:_ loose group.
 
-**Backlog:** the last top-level section of the Ideate tab: the P3 and P4 Signals,
-whatever their Initiative, headed `Backlog (N)`. Always shown, folded by default.
+**Backlog:** the last top-level section of the Ideate tab: the listed P3 and P4
+Initiatives with no cut session alive or launching and no member in triage, each with
+its whole group (members at any priority), then the other P3 and P4 Signals not in
+triage, loose or under a P0–P2 Initiative, headed `Backlog (N)`, N counting each bead
+once (ADR 0314, ADR 0315). Nothing in it is Actionable. Always shown, folded by default.
 Defog and Execute have none.
 
 **Recents:** the TUI's list of the last beads the human acted on in the TUI,
@@ -327,7 +324,16 @@ command palette, jump menu.
   See ADR 0126, ADR 0127, ADR 0272.
 - **doctor** — `mugicrew doctor`: the read-only verb that checks whether the environment
   and Workspace are ready to run mugicrew (tools, git repo, bead graph, profiles, preview
-  renderer) and repairs nothing. Not **Chopper**, who repairs stranded beads in the graph.
+  renderer). It reports each warn or FAIL row's precondition and fix, classed **safe fix**
+  or **manual fix**, and repairs nothing itself. Not **Chopper**, who repairs stranded
+  beads in the graph. See ADR 0302.
+- **doctor fix** — `mugicrew doctor fix`: applies every safe fix without asking, lists the
+  manual ones it left, re-checks, and exits 1 if any FAIL remains. It changes only this
+  machine or clone, never the bead graph. See ADR 0302.
+- **safe fix** / **manual fix** — a doctor row's fix class. A safe fix changes only this
+  machine or clone, needs no prompt, credential or sudo, is idempotent, and takes only
+  values doctor can derive. Every other fix is manual.
+  _Avoid:_ "hint" for a fix.
 
 ## Bead kinds
 
@@ -906,6 +912,12 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   `mugicrew abort` or TUI `x`: its bead is paused _manual_ first, then its
   processes are terminated, and a live host cleans up as for a failure (ADR 0083).
   _Avoid:_ calling it abandoned, which leaves its claim and tree behind.
+- **Withdraw** — the human dropping one unfinished chain, inside an Initiative
+  or not: its unclosed head and every unclosed bead under it close with reason
+  `withdrawn` and no successor, and their effort worktrees and branches go with
+  them. Dropping a whole Initiative is **cancel** (ADR 0310).
+  _Avoid:_ "abandon" (an abandoned effort), "cancel" for one chain, "reject"
+  (a triage verdict on a Signal).
 - **Auto-exit (HITL session)** — the visible countdown that a session's
   closing line starts. When it runs out, the session exits by itself just as a
   human `/exit` would, and ends _finished_. A reply cancels it, and so does its

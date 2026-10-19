@@ -36,6 +36,9 @@ type prereq struct {
 	verArgs      []string               // nil: presence only
 	field        int                    // which whitespace field of the output is the version
 	floor        string                 // FAIL below ("" none)
+	warnBelow    string                 // WARN below ("" none), with warnDetail and warnHint
+	warnDetail   string                 // appended to the version in the warnBelow WARN
+	warnHint     string                 // the warnBelow WARN's hint
 	warnFrom     string                 // WARN at or above ("" none)
 	linux, macos string                 // install hint
 	why          string                 // appended to the absent hint
@@ -57,8 +60,9 @@ var prereqs = []prereq{
 	{name: "dolt", bin: "dolt", verArgs: []string{"version"}, field: 2, warnFrom: "2.3.0",
 		linux: "pinned 2.2.0 tarball, see docs/install.md#dolt", macos: "pinned 2.2.0 tarball, see docs/install.md#dolt"},
 	{name: "git", bin: "git", linux: "apt install git (dnf/yum install git)", macos: "xcode-select --install or brew install git"},
-	{name: "tmux", bin: "tmux", verArgs: []string{"-V"}, field: 1, floor: "3.5",
-		linux: "apt install tmux (dnf/yum install tmux); the distro package may be older than 3.5 (Ubuntu 24.04 ships 3.4), then use a newer distro release or build tmux from source", macos: "brew install tmux", why: "; HITL sessions cannot open without it"},
+	{name: "tmux", bin: "tmux", verArgs: []string{"-V"}, field: 1, floor: "3.4",
+		warnBelow: "3.5", warnDetail: "the F1 menu ignores the mouse", warnHint: "build tmux from source or use a newer distro release for mouse-picking in the F1 menu",
+		linux: "apt install tmux (dnf/yum install tmux); 3.5's mouse-picking in the F1 menu needs a source build or a newer distro release", macos: "brew install tmux", why: "; HITL sessions cannot open without it"},
 	{name: "claude", bin: harnesses[builtinHarness].binary, verArgs: []string{"--version"}, field: 0, floor: "2.1.78",
 		linux: "curl -fsSL https://claude.ai/install.sh | bash", macos: "curl -fsSL https://claude.ai/install.sh | bash",
 		why: "; no crewmate session can start without it"},
@@ -111,34 +115,61 @@ func (p prereq) install() string {
 	return p.linux
 }
 
+// presence is the precondition of an absent or too-old tool.
+func (p prereq) presence() string {
+	if p.floor != "" {
+		return p.name + " " + p.floor + " or later is on PATH"
+	}
+	return p.name + " is on PATH"
+}
+
+// anchor is the install.md section a tool's fix links.
+func (p prereq) anchor() string {
+	switch p.name {
+	case "dolt", "acli":
+		return p.name
+	case "glab":
+		return "gitlab"
+	}
+	return "core"
+}
+
+// manual is the tool's one-step manual fix, linking its install.md section.
+func (p prereq) manual(step string) fix { return manual(p.anchor(), step) }
+
 // check runs one table row; nil when its feature is not configured.
 func (p prereq) check(root string) []result {
 	if p.gated != nil && !p.gated(root) {
 		return nil
 	}
 	if _, err := lookPath(p.bin); err != nil {
-		hint := "install " + p.install()
+		step := "install " + p.install()
 		if p.floor != "" {
-			hint = "need ≥ " + p.floor + ": " + hint
+			step = "need ≥ " + p.floor + ": " + step
 		}
-		return []result{{stFail, p.name, "not on PATH", hint + p.why}}
+		return []result{problem(stFail, p.name, "not on PATH", p.presence(), p.manual(step+p.why))}
 	}
 	if p.verArgs == nil {
-		return []result{{stOK, p.name, "on PATH", ""}}
+		return []result{quiet(stOK, p.name, "on PATH")}
 	}
 	out, err := doctorToolVersion(p.bin, p.verArgs...)
 	f := strings.Fields(out)
 	if err != nil || p.field >= len(f) || len(verParts(f[p.field])) == 0 {
-		return []result{{stWarn, p.name, "on PATH, version unreadable", "run " + p.bin + " " + strings.Join(p.verArgs, " ")}}
+		return []result{problem(stWarn, p.name, "on PATH, version unreadable", "the version of "+p.bin+" can be read",
+			manual("", "run `"+p.bin+" "+strings.Join(p.verArgs, " ")+"`"))}
 	}
 	v := f[p.field]
 	switch {
 	case p.floor != "" && verLess(v, p.floor):
-		return []result{{stFail, p.name, v + " is below " + p.floor, "install " + p.install()}}
+		return []result{problem(stFail, p.name, v+" is below "+p.floor, p.presence(), p.manual("install "+p.install()))}
+	case p.warnBelow != "" && verLess(v, p.warnBelow):
+		return []result{problem(stWarn, p.name, v+" is below "+p.warnBelow+" and "+p.warnDetail,
+			p.name+" "+p.warnBelow+" or later is on PATH", p.manual(p.warnHint))}
 	case p.warnFrom != "" && !verLess(v, p.warnFrom):
-		return []result{{stWarn, p.name, v + " is outside the measured-clean range (bd pins 2.2.0; 2.3.x regressed)", "install " + p.install()}}
+		return []result{problem(stWarn, p.name, v+" is outside the measured-clean range (bd pins 2.2.0; 2.3.x regressed)",
+			"dolt is below "+p.warnFrom+", the measured-clean range", p.manual("install "+p.install()))}
 	}
-	return []result{{stOK, p.name, v, ""}}
+	return []result{quiet(stOK, p.name, v)}
 }
 
 // checkTools is the table's rows in order, gated ones only when configured.
@@ -161,13 +192,16 @@ func resolved(p string) string {
 // checkBinary always prints the running binary; WARN when the first mugicrew on
 // PATH is another file.
 func checkBinary(string) []result {
+	const binaryPre = "the running mugicrew is the first one on PATH"
 	exe, err := doctorExe()
 	if err != nil {
-		return []result{{stWarn, "binary", "cannot resolve the running executable: " + err.Error(), ""}}
+		return []result{problem(stWarn, "binary", "cannot resolve the running executable: "+err.Error(), binaryPre,
+			manual("", "run mugicrew from a path the OS can resolve"))}
 	}
 	detail := fmt.Sprintf("%s (version %s)", exe, versionString())
 	if onPath, err := lookPath("mugicrew"); err == nil && resolved(onPath) != resolved(exe) {
-		return []result{{stWarn, "binary", detail, "the first mugicrew on PATH is " + onPath + ", a different file"}}
+		return []result{problem(stWarn, "binary", detail, binaryPre,
+			manual("", "the first mugicrew on PATH is "+onPath+", a different file", "put the running binary first on PATH, or remove the other"))}
 	}
-	return []result{{stOK, "binary", detail, ""}}
+	return []result{quiet(stOK, "binary", detail)}
 }

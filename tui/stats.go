@@ -19,13 +19,17 @@ import (
 	"jayulabs.org/mugicrew/stats"
 )
 
-// Stats' keys: w cycles the window, b the grouping, f the kind, u the burn chart's limit, d the Distribution block's measure.
+// Stats' keys: w cycles the window, b the grouping, f the kind, m the session mode, u the burn chart's limit, d the Distribution block's measure.
 var (
 	keyWindow = key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "window"))
 	keyGroup  = key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "group by"))
 	keyLimit  = key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "5h/wk"))
 	keyDist   = key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "dist time/cost"))
+	keyMode   = key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mode"))
 )
+
+// statsModes is m's cycle, as stats.Filter.Mode values ("" is both).
+var statsModes = []string{"", "afk", "hitl"}
 
 // statsWindows is w's cycle; d 0 is the whole log.
 var statsWindows = []struct {
@@ -53,6 +57,7 @@ type statsTab struct {
 	cost    bool      // d: Distribution shows Session cost, not Agent time
 	limit   int       // u's index into burnWins; 0 = 5h
 	kind    string    // f's kind filter; "" = every kind
+	mode    int       // m's index into statsModes; 0 = both
 	kinds   []string  // f's kinds: those in the events, sorted, cached by recompute
 	total   stats.Row // the table, cached by recompute
 	rows    []stats.Row
@@ -66,7 +71,7 @@ func (s statsTab) count() int { return 0 }
 func (s statsTab) actN() int  { return 0 }
 
 func (s statsTab) bindings() []key.Binding {
-	bs := []key.Binding{keyWindow, keyGroup, keyLimit, keyDist}
+	bs := []key.Binding{keyWindow, keyGroup, keyLimit, keyDist, keyMode}
 	if len(s.kinds) > 0 {
 		bs = append(bs, keyKind)
 	}
@@ -79,6 +84,8 @@ func (s statsTab) update(k tea.KeyMsg) (component, tea.Cmd) {
 		s.win = (s.win + 1) % len(statsWindows)
 	case key.Matches(k, keyGroup):
 		s.by = (s.by + 1) % len(statsGroups)
+	case key.Matches(k, keyMode):
+		s.mode = (s.mode + 1) % len(statsModes)
 	case key.Matches(k, keyLimit):
 		s.limit = (s.limit + 1) % len(burnWins)
 	case key.Matches(k, keyDist):
@@ -93,7 +100,7 @@ func (s statsTab) update(k tea.KeyMsg) (component, tea.Cmd) {
 	return s.recompute(), nil
 }
 
-// recompute re-sums the events over the window, kind filter and grouping into the
+// recompute re-sums the events over the window, kind and mode filters and grouping into the
 // cache, and re-collects f's kinds; day rows newest first, the rest cost
 // descending as Sum returns them.
 func (s statsTab) recompute() statsTab {
@@ -110,8 +117,8 @@ func (s statsTab) recompute() statsTab {
 	}
 	by := statsGroups[s.by]
 	s.burn = newBurn(s.events, burnWins[s.limit], clock())
-	s.total, s.rows = stats.Sum(s.events, stats.Filter{Since: since, Kind: s.kind, By: by})
-	s.ses = stats.Sessions(s.events, stats.Filter{Since: since, Kind: s.kind})
+	s.total, s.rows = stats.Sum(s.events, stats.Filter{Since: since, Kind: s.kind, Mode: statsModes[s.mode], By: by})
+	s.ses = stats.Sessions(s.events, stats.Filter{Since: since, Kind: s.kind, Mode: statsModes[s.mode]})
 	if by == "" {
 		s.rows = nil
 	}
@@ -326,6 +333,9 @@ func (s statsTab) sessions(w, height int) []string {
 	head := statsWindows[s.win].label + " · by " + byLabel
 	if s.kind != "" {
 		head += " · kind " + s.kind
+	}
+	if s.mode != 0 {
+		head += " · " + strings.ToUpper(statsModes[s.mode])
 	}
 	head = dimSt.Render(head)
 

@@ -22,21 +22,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # apt's tmux 3.4 is below ADR 0296's 3.5 floor (no display-menu -M): build the floor from source
-      - name: Build tmux 3.5a
-        if: runner.os == 'Linux'
-        env:
-          TMUX_VERSION: 3.5a
+      # the floor is tmux 3.4 (ADR 0303): Linux tests apt's tmux 3.4 (no display-menu -M), macOS
+      # brew's tmux (3.5 or later) so TestF1MenuMouse runs somewhere
+      - name: Install tmux
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y build-essential libevent-dev libncurses-dev bison
-          src="$RUNNER_TEMP/tmux-src"
-          mkdir "$src"
-          curl -fsSL "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz" | tar -xz -C "$src" --strip-components=1
-          cd "$src"
-          ./configure
-          make -j"$(nproc)"
-          sudo make install
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
           tmux -V
       - run: go test ./...
         env:
@@ -343,11 +338,4 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
-          for p in mugicrew-linux-x64 mugicrew-linux-arm64 mugicrew-darwin-arm64 mugicrew-darwin-x64 mugicrew; do
-            pkg="@jayulabs/$p"
-            if [ "$(npm view "$pkg@$VERSION" version)" = "$VERSION" ]; then
-              echo "$pkg@$VERSION already published, skipping"
-              continue
-            fi
-            npm publish "./dist/jayulabs-$p-$VERSION.tgz" --access public
-          done
+          bash .github/publish-npm.sh ./dist "$VERSION" "${{ github.event_name }}"

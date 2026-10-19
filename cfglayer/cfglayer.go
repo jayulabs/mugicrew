@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
 
+	"jayulabs.org/mugicrew/agentprofile"
 	"jayulabs.org/mugicrew/git"
 )
 
@@ -32,6 +35,15 @@ func SharedPath(root string) string { return filepath.Join(root, ".mugicrew", "c
 // LocalPath is the machine-local override, <git common dir of root>/mugicrew/
 // config.toml; "" (a missing layer) when the common dir can't be resolved.
 func LocalPath(root string) string {
+	common := gitCommonDir(root)
+	if common == "" {
+		return ""
+	}
+	return filepath.Join(common, "mugicrew", "config.toml")
+}
+
+// gitCommonDir is root's git common dir, "" when unresolvable.
+func gitCommonDir(root string) string {
 	common, ok := commonDir(root)
 	if !ok {
 		var err error
@@ -39,7 +51,7 @@ func LocalPath(root string) string {
 			return ""
 		}
 	}
-	return filepath.Join(common, "mugicrew", "config.toml")
+	return common
 }
 
 // commonDir is the git common dir of the repo containing root, read off the
@@ -355,5 +367,115 @@ func InitiativesSetting(root string) Initiatives {
 			}
 		}
 	}
+	return out
+}
+
+// WorkspaceSetUp reads whether the Workspace was set up by `mugicrew init
+// workspace`: land_strategy and [initiatives] required both present in the
+// shared layer (no marker key). The State is the shared layer's: Missing and Unusable
+// are never set up. A Workspace with no shared config stays valid on defaults.
+func WorkspaceSetUp(root string) (bool, State) {
+	var l OwnedKeys
+	st := Decode(SharedPath(root), &l)
+	if st != Set {
+		return false, st
+	}
+	return l.LandStrategy != nil && l.Initiatives.Required != nil, st
+}
+
+// OwnedKeys is the shared-layer shape `mugicrew init workspace` owns: each
+// field is nil when the key is absent. Context is the declared [context.*] tables.
+type OwnedKeys struct {
+	LandStrategy *string `toml:"land_strategy"`
+	Initiatives  struct {
+		Required    *bool `toml:"required"`
+		ExternalRef *bool `toml:"external_ref"`
+	}
+	Jira struct {
+		Site *string `toml:"site"`
+	}
+	Context map[string]Context
+}
+
+// Defect is one unusable thing Profiles found: a bad [profiles.<name>] table
+// (Name set), or a whole file that contributes nothing (Name ""): a dropped OE
+// layer, or a config.toml whose profiles is not a table.
+type Defect struct {
+	Path, Name string
+	Err        error
+}
+
+// Catalog is the merged Agent Profile set: each declared name's winning table,
+// and every defect found, outranked ones included.
+type Catalog struct {
+	Winners  map[string]agentprofile.Entry
+	Unusable []Defect
+}
+
+type profileFile struct {
+	path   string
+	strict bool
+}
+
+// profileFiles is the four profile files in precedence order; a path is ""
+// when its layer can't be resolved.
+func profileFiles(root string) []profileFile {
+	oeShared, oeLocal := agentprofile.OEPaths(root, gitCommonDir(root))
+	return []profileFile{{LocalPath(root), false}, {oeLocal, true}, {SharedPath(root), false}, {oeShared, true}}
+}
+
+// ProfilePaths is the resolvable paths of the four files Profiles reads, in
+// precedence order.
+func ProfilePaths(root string) []string {
+	var out []string
+	for _, f := range profileFiles(root) {
+		if f.path != "" {
+			out = append(out, f.path)
+		}
+	}
+	return out
+}
+
+// Profiles reads the four profile files, never cached, and merges them first
+// wins: mugicrew local config.toml, OE local, mugicrew shared config.toml, OE
+// shared (ADR 0304). Each defect is logged once per read: config.unusable
+// {path, key, reason} for a bad table or a non-table profiles, config.unusable
+// {path, err} for a malformed config.toml (which contributes no profiles, and
+// is not in Unusable), agent-profiles.unusable {file, reason} for a dropped OE
+// layer. A missing file is silent.
+func Profiles(root string) Catalog {
+	var layers []agentprofile.Layer
+	var out Catalog
+	for _, f := range profileFiles(root) {
+		if f.path == "" {
+			continue
+		}
+		read := agentprofile.ReadTables
+		if f.strict {
+			read = agentprofile.ReadStrict
+		}
+		l, err := read(f.path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case f.strict && err != nil:
+			slog.Warn("agent-profiles.unusable", "file", f.path, "reason", err.Error())
+			out.Unusable = append(out.Unusable, Defect{Path: f.path, Err: err})
+			continue
+		case errors.Is(err, agentprofile.ErrProfilesNotTable):
+			slog.Warn("config.unusable", "path", f.path, "key", "profiles", "reason", err.Error())
+			out.Unusable = append(out.Unusable, Defect{Path: f.path, Err: err})
+			continue
+		case err != nil:
+			slog.Warn("config.unusable", "path", f.path, "err", err.Error())
+			continue
+		}
+		for _, name := range slices.Sorted(maps.Keys(l.Bad)) {
+			slog.Warn("config.unusable", "path", f.path, "key", "profiles."+name, "reason", l.Bad[name].Error())
+			out.Unusable = append(out.Unusable, Defect{Path: f.path, Name: name, Err: l.Bad[name]})
+		}
+		layers = append(layers, l)
+	}
+	out.Winners = agentprofile.Merge(layers...)
 	return out
 }

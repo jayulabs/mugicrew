@@ -779,34 +779,6 @@ func TestCarrierOfPicksInitiativeThenSignalThenNothing(t *testing.T) {
 	}
 }
 
-// The foreign-ref Task blocks nothing: no parent, no blocks edge, and an open Task
-// already carrying the key means no second one.
-func TestSpawnUnblockingTaskIfAbsent(t *testing.T) {
-	orig := run
-	t.Cleanup(func() { run = orig })
-	var creates [][]string
-	open := "[]"
-	run = func(args ...string) (string, error) {
-		if args[0] == "create" {
-			creates = append(creates, args)
-			return "ws-task", nil
-		}
-		return open, nil
-	}
-	id, created, err := SpawnUnblockingTaskIfAbsent("Graph ref: r\nTheirs: x\n", "t", "Graph ref: r\nTheirs: x\n")
-	if err != nil || !created || id != "ws-task" || len(creates) != 1 {
-		t.Fatalf("got %q %v %v creates %v", id, created, err, creates)
-	}
-	if j := strings.Join(creates[0], " "); strings.Contains(j, "--deps") || strings.Contains(j, "--parent") {
-		t.Errorf("create carries an edge: %v", creates[0])
-	}
-	open = `[{"id":"ws-old","status":"open","description":"x\nGraph ref: r\nTheirs: x\n","labels":["kind:task"]}]`
-	id, created, err = SpawnUnblockingTaskIfAbsent("Graph ref: r\nTheirs: x\n", "t", "b")
-	if err != nil || created || id != "ws-old" || len(creates) != 1 {
-		t.Errorf("got %q %v %v creates %d, want the open Task reused", id, created, err, len(creates))
-	}
-}
-
 // OpenBlocked counts a Draft (deferred) or conditional-blocks dependent as open,
 // ignores closed ones and non-blocking edges, and surfaces a dep-list error.
 func TestOpenBlocked(t *testing.T) {

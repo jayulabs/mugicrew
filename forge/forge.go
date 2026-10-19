@@ -468,6 +468,11 @@ type ProjectRefusal struct {
 	Field, Value, Fix string
 }
 
+// Wrong is what is wrong with the project, without the fix or the README pointer.
+func (e *ProjectRefusal) Wrong() string {
+	return fmt.Sprintf("project %s is %q", e.Field, e.Value)
+}
+
 func (e *ProjectRefusal) Error() string {
 	return fmt.Sprintf("forge: project %s is %q: %s (README, \"GitLab land strategy\")", e.Field, e.Value, e.Fix)
 }

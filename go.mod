@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.10.1
 	github.com/muesli/termenv v0.16.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/yuin/goldmark v1.7.13
 	golang.org/x/sys v0.36.0
 )

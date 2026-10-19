@@ -24,7 +24,7 @@ func claim(bs []bd.Bead, id string) []bd.Bead {
 func TestIdeateClaimedInitiativeKeepsOpenBehaviour(t *testing.T) {
 	// member-less with a cut session: listed, cut and launchable (attach)
 	m, _ := drainedModel(t, claim(drainedBeads(), "ua"), map[string]session.Info{"ua": {State: session.Alive, Waiting: session.WaitTurn}})
-	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · +/- prio · J/K section"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · +/- prio · X cancel · J/K section"; got != want {
 		t.Errorf("claimed cut hints %q, want %q", got, want)
 	}
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "your turn") {

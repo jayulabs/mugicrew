@@ -26,6 +26,14 @@ mugicrew setting lives.
 
    The table is not called `[profiles]`, so it can't be mistaken for the
    catalog's `[profiles.<name>]`.
+
+   > **Amended by ADR 0309 (config-toml-layers-may-declare-profiles-beside-the-oe-catalog…):**
+   > profile names come from any declared profile, not the OE catalog alone:
+   > mugicrew's `config.toml` layers may declare `[profiles.<name>]` too (ADR 0304
+   > (a-profile-name-in-several-files…)). The "not called `[profiles]`"
+   > rationale no longer holds, since `[kind_profiles]` and `[profiles.<name>]`
+   > now share a file; the name stays, as it is the mapping and not the
+   > profiles.
 2. **Layers per key.** Each key falls through on its own, the way `concurrency`
    and `auto_exit` do. The local `<git-common-dir>/mugicrew/config.toml` comes
    first, then the checked-in `.mugicrew/config.toml`. A local `research` line

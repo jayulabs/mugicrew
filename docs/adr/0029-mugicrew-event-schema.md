@@ -71,7 +71,7 @@ failed-session stderr-tail research §5).
    | `hitl.dropped` | Info | `session`, `state` (`alive`/`exited`), `err` |
    | `claim.taken` / `.released` | Info | `by` |
    | `claim.failed` | Error | `by`, `err` |
-   | `draft.published` / `.deleted` | Info | `creator`, `ids` (ADR 0059 publish / cleanup) |
+   | `draft.published` / `.deleted` | Info | `creator`, `ids` (ADR 0059 publish / cleanup); withdraw/cancel cleanup adds `target` |
    | `draft.obsoleted` | Info | `creator` (the retired child), `container`, `ids` (its non-Signal Drafts closed `obsolete:`, ADR 0124) |
    | `effort.stranded` | Warn | (common attrs); `branch`, `signal`, `container`, `landed`, `range` (a landed-refused child's commits carried as an offshoot Signal, ADR 0102) |
    | `draft.failed` | Error | `creator`, `ids`, `err` |
@@ -80,8 +80,10 @@ failed-session stderr-tail research §5).
    | `reconcile.failed` | Error | `branch`, `err` |
    | `land.done` | Info | `branch`, `into`, `sha` |
    | `land.failed` | Error | `branch`, `into`, `err` |
-   | `branch.deleted` | Info | `branch` (a landed, closed container's own branch, Spec FR30–32) |
-   | `branch.kept` | Warn | `branch`, `err` (that delete refused, e.g. a worktree holds it; the effort still succeeds) |
+   | `branch.deleted` | Info | `branch` (a landed, closed container's own branch, Spec FR30–32; withdraw and cancel cleanup widen it to any closed bead's effort branch and a withdrawn container's branch, adding `bead`, `target`, `repo`, and `unintegrated` (+`replace`) for `effort/*` or `ahead` for `chart/*`/`checkpoint/*`, ADR 0310) |
+   | `branch.kept` | Warn | `branch`, `err` (that delete refused, e.g. a worktree holds it; the effort still succeeds); from withdraw/cancel cleanup also `target`, `repo` and either `holder` (a foreign or alive tree still holds it) or `err` (that tree's removal failed) |
+   | `tree.removed` | Info | `target` (the withdrawn head or cancelled Initiative), `repo`, `tree`, `child`, `session`, `dirty` (changed files), `rebasing`, `prunable` (withdraw/cancel cleanup; keyed to the bead that owned the tree) |
+   | `tree.kept` | Warn | `target`, `repo`, `tree`, `child`, and either `holder` + `foreign=true` (a foreign or alive hold, skipped) or `err` (a failed removal) |
    | `revert.done` | Info | `target`, `squash`, `into`, `sha` (ADR 0047 Rollback) |
    | `revert.conflict` | Warn | `target`, `squash`, `into`, `paths` (planned: ADR 0049 then fixes forward) |
    | `revert.failed` | Error | `target`, `squash`, `into`, `err` |
@@ -92,6 +94,16 @@ failed-session stderr-tail research §5).
    | `triage.fastlane` | Info | `spec`, `anchor` |
    | `triage.failed` | Error | `spec`, `err` |
    | `initiative.new` | Info | `kind` (`initiative`; a human started an Initiative from the Initiatives tab, ADR 0190) |
+   | `initiative.adopt` | Info | `initiative`, `from` (a chain head re-parented into an Initiative, on the head) |
+   | `initiative.adopt.refused` | Warn | `reason`, `blocking` (ids, a list) |
+   | `initiative.release` | Info | `initiative` (a member chain head's parent cleared, on the head) |
+   | `initiative.release.refused` | Warn | `reason`, `blocking` (ids, a list) |
+   | `withdraw.done` | Info | on the chain head: `closed` (ids, leaves first, head last), `reason` (`withdrawn`); ADR 0310 |
+   | `withdraw.refused` | Warn | `reason` (`in-flight effort` \| `ordered after the chain` \| `open Landing`; several join with `; `), `blocking` (ids, a list), `mr` when a refusal names one; nothing written |
+   | `withdraw.failed` | Error | `step` (`read` \| `plan` \| `fence` \| `inventory` \| `close`), `err`, `closed` (on `close`: ids a re-read finds closed) |
+   | `cancel.done` | Info | on the Initiative: `closed` (member chains, then the Initiative), `released` (heads), `reason` (`cancelled: <initiative>`) |
+   | `cancel.refused` | Warn | as `withdraw.refused`, plus `release refused: Require Initiatives` with the locked heads in `blocking` for a `--release` naming a locked head |
+   | `cancel.failed` | Error | as `withdraw.failed`, with `step` `release <head>` for a failed release; `released` (heads released before the failure) |
    | `adoption.skipped` | Warn | `source` (the discovered-from bead whose climb failed; absent when the Signal itself failed to read), `err` (Luffy's best-effort Adoption offer lookup failed; `bead` is the Signal) |
    | `loop.no_owner` | Warn | |
    | `loop.tick_failed` | Error | `err` |

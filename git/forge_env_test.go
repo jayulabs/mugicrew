@@ -81,9 +81,6 @@ func TestForgeCallsCarryGlabHelper(t *testing.T) {
 	if _, err := FetchMainline("origin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ForgeHasRef("refs/heads/chart/x"); err != nil {
-		t.Fatal(err)
-	}
 	for _, sub := range []string{"fetch", "ls-remote", "push"} {
 		wantEnv(t, spy, sub, "gl.example.com")
 	}

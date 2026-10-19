@@ -191,6 +191,9 @@ func (g graphTab) bindings() []key.Binding {
 		if l := g.xHint(b); l != "" {
 			bs = append(bs, verbKey("x", l))
 		}
+		if g.xOffers(b) {
+			bs = append(bs, xBinding(b))
+		}
 		bs = append(bs, keyTranscript)
 	}
 	forms := formBindings(g.beads, b)
@@ -223,7 +226,7 @@ func (g graphTab) extra() []key.Binding {
 	if len(g.rows()) >= 2 { // one row has nowhere to move
 		out = append(out, keyMove)
 	}
-	for _, b := range []key.Binding{keyLaunch, keyBg, keyPauseKey, keyDropKey, keyPrio, keyReject, keyAdopt, keyRelease, keyBlock, keyUnblock, keyCheckup} {
+	for _, b := range []key.Binding{keyLaunch, keyBg, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio, keyReject, keyAdopt, keyRelease, keyBlock, keyUnblock, keyCheckup} {
 		if !shown[b.Keys()[0]] {
 			out = append(out, b)
 		}

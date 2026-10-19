@@ -1,6 +1,6 @@
 # ADR 0256: The Graph push runs under an injected glab helper, and restarts bd's sql-server once on failure
 
-Status: Accepted
+Status: Superseded by ADR 0300
 Date: 2026-10-17
 
 Chart mc-uqpj.14 (Forge-ready Land MRs and an https-safe Graph ref push under

@@ -1,6 +1,7 @@
 # ADR 0180: v2 Ideate's Actionable section lists drained and cut-session Initiatives as one combined row
 
 Status: Accepted
+Amended by ADR 0314 (§1, §5: a P3 or P4 Initiative is Actionable only while its cut session waits on the human).
 
 Date: 2026-10-14
 

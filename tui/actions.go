@@ -59,6 +59,8 @@ func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.togglePause(g, b) }
 	case key.Matches(k, keyDropKey):
 		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.dropKey(g, b) }
+	case key.Matches(k, keyWithdrawKey):
+		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.withdrawKey(g, b) }
 	case key.Matches(k, keyPrio):
 		d := 1 // + and = raise (P-1), - lowers
 		if s := k.String(); s == "+" || s == "=" {
@@ -69,6 +71,12 @@ func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 		return m, nil, false
 	}
 	b := m.selection()
+	if b == nil && key.Matches(k, keyWithdrawKey) {
+		if i := m.initRow(); isOpenInitiative(i) {
+			next, cmd = m.withdrawKey(g, *i)
+			return next, cmd, true
+		}
+	}
 	if b == nil {
 		m.setStatus("nothing selected")
 		if gt, isGraph := m.tabAt(m.tab).(graphTab); isGraph && gt.sel == unparentedSel {
@@ -698,4 +706,25 @@ func confirmOrphanPrompt(title, wt string, w int) string {
 func fitTitle(format, title string, w int, rest ...any) string {
 	room := w - lipgloss.Width(fmt.Sprintf(format, append([]any{""}, rest...)...))
 	return fmt.Sprintf(format, append([]any{trunc(title, max(minPromptTitle, room))}, rest...)...)
+}
+
+// initRow is the Initiative whose own header row the cursor rests on, on the tabs
+// whose header rows carry no bead; nil elsewhere. X cancels it.
+func (m Model) initRow() *bd.Bead {
+	if m.focus.id != "" {
+		return nil
+	}
+	switch t := m.tabAt(m.tab).(type) {
+	case ideaTab:
+		return t.cursor().init
+	case defogTab:
+		if r, _ := t.selRow(); r.kind == dHead {
+			return r.init
+		}
+	case execTab:
+		if r, _ := t.selRow(); r.kind == eSec {
+			return r.init
+		}
+	}
+	return nil
 }

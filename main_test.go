@@ -19,6 +19,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/brook"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/chopper"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
@@ -33,6 +34,7 @@ import (
 	"jayulabs.org/mugicrew/nami"
 	"jayulabs.org/mugicrew/rebase"
 	"jayulabs.org/mugicrew/session"
+	"jayulabs.org/mugicrew/withdraw"
 )
 
 // The reconcile verb resolves a kind's owner through the registry + crew table
@@ -1947,6 +1949,24 @@ func TestUnknownCommandPointsAtHelp(t *testing.T) {
 	}
 }
 
+// The graph noun is gone: any subcommand is an unknown command and usage has no graph line.
+func TestGraphVerbIsUnknown(t *testing.T) {
+	t.Chdir(t.TempDir())
+	self, _ := os.Executable()
+	for _, sub := range []string{"push", "fetch"} {
+		cmd := exec.Command(self, "graph", sub)
+		cmd.Env = append(os.Environ(), "MUGICREW_TEST_MAIN=1")
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), "unknown command") {
+			t.Errorf("graph %s = %v, %s; want exit 1 and the unknown-command error", sub, err, out)
+		}
+	}
+	if strings.Contains(usage, "mugicrew graph") {
+		t.Error("usage still lists a graph verb")
+	}
+}
+
 // Drift guard: the usage names every user-facing verb main dispatches and none
 // of the hidden surface (FR7, FR8; ADR 0060 §3, ADR 0037, ADR 0099).
 func TestUsageListsVerbsNotHidden(t *testing.T) {
@@ -2031,6 +2051,23 @@ func TestTriageResolvesSignalProfile(t *testing.T) {
 	}
 	if e := first(capt); e.Name != "profile.unusable" || e.Attrs["profile"] != "opus" || e.Attrs["launch"] != "hitl" || e.Attrs["kind"] != "signal" || e.Attrs["bead"] != "sig1" {
 		t.Errorf("events = %+v, want profile.unusable {opus, hitl}", *capt)
+	} else if _, ok := e.Attrs["path"]; ok || e.Attrs["reason"] != "not declared" {
+		t.Errorf("undeclared refusal attrs = %v, want no path and reason not declared", e.Attrs)
+	}
+
+	root = profileWorkspace(t, deepseekCatalog, "[profiles.bad]\nharness = \"claudecode\"\nmodle = \"x\"\n[kind_profiles]\nsignal = \"bad\"\n")
+	capt = eventlogtest.Capture(t)
+	if err := triage(rootCtx{root}, sig); err == nil {
+		t.Fatal("bad-table triage launched")
+	}
+	var a map[string]any
+	for _, e := range *capt {
+		if e.Name == "profile.unusable" {
+			a = e.Attrs
+		}
+	}
+	if a["path"] != cfglayer.SharedPath(root) || !strings.HasSuffix(fmt.Sprint(a["reason"]), " (from .mugicrew/config.toml)") {
+		t.Errorf("bad-table refusal attrs = %v, want path %s and reason ending (from .mugicrew/config.toml)", a, cfglayer.SharedPath(root))
 	}
 }
 
@@ -2136,9 +2173,10 @@ func TestRunRecoverForceRefusedWhileLoopOn(t *testing.T) {
 	}
 }
 
-// `mugicrew initiative cancel <initiative>` / `withdraw <head>` (Spec D9) map
-// onto the guarded bd acts with one in-flight test: an active AFK effort or a
-// live session. Anything else is a usage error that acts on nothing.
+// `mugicrew withdraw <head>`, its alias `initiative withdraw <head>` and
+// `initiative cancel <initiative>` (Spec mc-5rttm D8) map onto the verbs with one
+// in-flight test: an active AFK effort or a live session. Anything else is a
+// usage error that acts on nothing.
 func TestRunInitiative(t *testing.T) {
 	oc, ow, osn := cancelInitiative, withdrawChain, initiativeSessions
 	t.Cleanup(func() { cancelInitiative, withdrawChain, initiativeSessions = oc, ow, osn })
@@ -2147,23 +2185,47 @@ func TestRunInitiative(t *testing.T) {
 	}
 	var called []string
 	var flight func(bd.Bead) bool
-	cancelInitiative = func(id string, f func(bd.Bead) bool) error {
-		called, flight = append(called, "cancel "+id), f
-		return nil
+	var released []string
+	cancelInitiative = func(id string, o withdraw.Opts) (withdraw.Result, error) {
+		called, flight, released = append(called, "cancel "+id), o.InFlight, o.Release
+		return withdraw.Result{}, nil
 	}
-	withdrawChain = func(id string, f func(bd.Bead) bool) error { called = append(called, "withdraw "+id); return nil }
+	withdrawChain = func(id string, o withdraw.Opts) (withdraw.Result, error) {
+		called = append(called, "withdraw "+id)
+		return withdraw.Result{}, nil
+	}
 	for _, argv := range [][]string{nil, {"cancel"}, {"adopt", "x"}, {"withdraw", "a", "b"}} {
 		if err := runInitiative(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
 			t.Errorf("runInitiative(%q) = %v, want a usage error", argv, err)
 		}
 	}
+	for _, argv := range [][]string{nil, {}, {"a", "b"}, {""}} {
+		if err := runWithdraw(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runWithdraw(%q) = %v, want a usage error", argv, err)
+		}
+	}
 	if err := runInitiative([]string{"cancel", "in"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := runInitiative([]string{"cancel", "in", "--release", "a", "--release", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(released, []string{"a", "b"}) {
+		t.Errorf("released = %q", released)
+	}
+	called = called[:1]
+	for _, argv := range [][]string{{"cancel", "in", "stray"}, {"cancel", "--release", "a"}, {"cancel", "in", "--release"}} {
+		if err := runInitiative(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runInitiative(%q) = %v, want a usage error", argv, err)
+		}
 	}
 	if err := runInitiative([]string{"withdraw", "cp"}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(called, []string{"cancel in", "withdraw cp"}) {
+	if err := runWithdraw([]string{"cp2"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(called, []string{"cancel in", "withdraw cp", "withdraw cp2"}) {
 		t.Errorf("called = %q", called)
 	}
 	for _, tc := range []struct {
@@ -3189,5 +3251,50 @@ func TestLoopRestartVerbEndToEnd(t *testing.T) {
 	}
 	if !slices.Equal(seq, want) {
 		t.Fatalf("events:\n%s\nwant:\n%s", strings.Join(seq, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// --discard on `withdraw`, `initiative withdraw` and `initiative cancel` sets
+// Opts.Discard; without it a verb that stops for a discard returns its inventory as
+// the error and the CLI says nothing closed (Spec mc-5rttm D8).
+func TestRunWithdrawDiscardFlag(t *testing.T) {
+	oc, ow, osn := cancelInitiative, withdrawChain, initiativeSessions
+	t.Cleanup(func() { cancelInitiative, withdrawChain, initiativeSessions = oc, ow, osn })
+	initiativeSessions = func() (map[string]session.Info, error) { return nil, nil }
+	var got []bool
+	record := func(id string, o withdraw.Opts) (withdraw.Result, error) {
+		got = append(got, o.Discard)
+		return withdraw.Result{}, nil
+	}
+	cancelInitiative, withdrawChain = record, record
+	for _, argv := range [][]string{{"cp"}, {"cp", "--discard"}, {"--discard", "cp"}} {
+		if err := runWithdraw(argv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, argv := range [][]string{{"withdraw", "cp", "--discard"}, {"cancel", "in"}, {"cancel", "in", "--discard"}} {
+		if err := runInitiative(argv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []bool{false, true, true, true, false, true}; !slices.Equal(got, want) {
+		t.Errorf("Discard = %v, want %v", got, want)
+	}
+	inv := withdraw.Inventory{Beads: []withdraw.BeadLeftovers{{ID: "b1", Branch: "effort/b1", Unintegrated: 2}}}
+	withdrawChain = func(id string, o withdraw.Opts) (withdraw.Result, error) {
+		return withdraw.Result{}, &withdraw.DiscardRequiredError{Verb: "withdraw", Target: id, Inventory: inv}
+	}
+	err := runWithdraw([]string{"cp"})
+	if err == nil || !strings.Contains(err.Error(), "effort/b1 (2 unintegrated commits)") || !strings.Contains(err.Error(), "--discard") {
+		t.Errorf("err = %v, want the inventory and the flag", err)
+	}
+}
+
+// The verbs print each kept cleanup item.
+func TestPrintKeptItems(t *testing.T) {
+	var sb strings.Builder
+	printKept(&sb, withdraw.Result{Closed: []string{"h"}, Kept: []withdraw.Item{{Kind: "tree", Bead: "b1", Path: "/tmp/x", Holder: "/home/me/wt"}}})
+	if want := "kept tree /tmp/x (b1), held by /home/me/wt\n"; sb.String() != want {
+		t.Errorf("output = %q, want %q", sb.String(), want)
 	}
 }

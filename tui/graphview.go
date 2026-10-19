@@ -514,13 +514,13 @@ func (g graphData) liveBeads(bs []*bd.Bead, act map[string]bool) []*bd.Bead {
 }
 
 // initiativeProgress is an Initiative's landed N/M over its member chains (those
-// whose Checkpoint is closed) and the live member's title: the first open,
+// whose Checkpoint landed: closed with a landed: Landing, at any age) and the live member's title: the first open,
 // unblocked one in phase order (Spec D10, FR40). Read off the whole graph, so h
 // never changes it.
 func (g graphTab) initiativeProgress(id string) (landed, chains int, live string) {
 	cs := phaseOrder(g.memoOf().members[id])
 	for _, c := range cs {
-		if slices.ContainsFunc(c, func(b bd.Bead) bool { return b.Kind == contract.KindCheckpoint && b.Status == "closed" }) {
+		if slices.ContainsFunc(c, func(b bd.Bead) bool { return g.landingOf(&b) >= 0 }) {
 			landed++
 		}
 		for _, b := range c {

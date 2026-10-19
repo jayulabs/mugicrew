@@ -81,6 +81,43 @@ func TestIdeateEnterCutsDrainedInitiative(t *testing.T) {
 	}
 }
 
+// A nested P3 header and its hint row cut or attach in place with Backlog unfolded, and a
+// non-launchable one refuses (ADR 0315 §6).
+func TestIdeateEnterCutsNestedBacklogInitiative(t *testing.T) {
+	low := func() []bd.Bead {
+		bs := drainedBeads()
+		bs[0].Priority = 3
+		return bs
+	}
+	unfold := func(m Model) Model { return press(t, ideaAt(t, m, backlogKey), runeKey(" ")) }
+	for _, id := range []string{"i:d", "h:d"} {
+		t.Run("cut "+id, func(t *testing.T) {
+			m, calls := drainedModel(t, low(), nil)
+			o, cmd := send(t, ideaAt(t, unfold(m), id), enterKey())
+			settle(t, o, cmd)
+			if got := strings.Join(*calls, ";"); !strings.Contains(got, "hitlClaim d") || !strings.Contains(got, "startSession d") {
+				t.Errorf("calls %v", *calls)
+			}
+		})
+	}
+	t.Run("resume exited", func(t *testing.T) {
+		m, _ := drainedModel(t, low(), map[string]session.Info{"d": {State: session.Exited}})
+		o, cmd := send(t, ideaAt(t, unfold(m), "i:d"), enterKey())
+		if cmd == nil || !strings.HasPrefix(statusOf(o), "launching Drained") {
+			t.Errorf("no in-place launch: cmd %v status %q", cmd != nil, statusOf(o))
+		}
+	})
+	t.Run("open members", func(t *testing.T) {
+		bs := drainedBeads()
+		bs[2].Priority = 3 // "us" has an open member, so it is not launchable
+		m, calls := drainedModel(t, bs, nil)
+		o := press(t, ideaAt(t, unfold(m), "i:us"), enterKey())
+		if !strings.Contains(statusOf(o), "members still open · cut from Graph") || len(*calls) != 0 {
+			t.Errorf("status %q calls %v", statusOf(o), *calls)
+		}
+	})
+}
+
 func TestIdeateEnterAttachesAndAsksWhenPaused(t *testing.T) {
 	m, calls := drainedModel(t, drainedBeads(), map[string]session.Info{"d": {State: session.Alive}})
 	o, cmd := send(t, ideaAt(t, m, "h:d"), enterKey())
@@ -113,11 +150,11 @@ func TestIdeateDrainedHints(t *testing.T) {
 			t.Errorf("hints\n got %q\nwant %q", got, s)
 		}
 	}
-	want(ideaAt(t, m, "i:d"), "enter cut · space fold · d detail · +/- prio · J/K section")
-	want(ideaAt(t, m, "h:d"), "enter cut · d detail · +/- prio · J/K section")
+	want(ideaAt(t, m, "i:d"), "enter cut · space fold · d detail · +/- prio · X cancel · J/K section")
+	want(ideaAt(t, m, "h:d"), "enter cut · d detail · +/- prio · X cancel · J/K section")
 	m, _ = drainedModel(t, drainedBeads(), map[string]session.Info{"d": {State: session.Exited}})
-	want(ideaAt(t, m, "i:d"), "enter attach · space fold · d detail · +/- prio · J/K section")
-	want(ideaAt(t, m, "i:us"), "space fold · d detail · +/- prio · J/K section")
+	want(ideaAt(t, m, "i:d"), "enter attach · space fold · d detail · +/- prio · X cancel · J/K section")
+	want(ideaAt(t, m, "i:us"), "space fold · d detail · +/- prio · X cancel · J/K section")
 	for _, id := range []string{"i:d", "h:d"} {
 		checkCoverage(t, "Ideate "+id, ideaAt(t, m, id), true, "1", "J", "K", "ctrl+down", "ctrl+up")
 	}
@@ -184,10 +221,10 @@ func TestIdeateListsCutSessionInitiative(t *testing.T) {
 func TestIdeateCutSessionHeaderEnterHintsAndDetail(t *testing.T) {
 	sess := map[string]session.Info{"ua": {State: session.Alive}, "us": {State: session.Alive}}
 	m, calls := drainedModel(t, drainedBeads(), sess)
-	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · +/- prio · J/K section"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · +/- prio · X cancel · J/K section"; got != want {
 		t.Errorf("no Signals hints %q, want %q", got, want)
 	}
-	if got, want := hintsOf(ideaAt(t, m, "i:us")), "enter attach · space fold · d detail · +/- prio · J/K section"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "i:us")), "enter attach · space fold · d detail · +/- prio · X cancel · J/K section"; got != want {
 		t.Errorf("Signals hints %q, want %q", got, want)
 	}
 	if v := ansi.Strip(press(t, ideaAt(t, m, "i:ua"), runeKey("d")).View()); !strings.Contains(v, "SESSION — enter attaches") { // Graph's preview for a session

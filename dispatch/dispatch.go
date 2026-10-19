@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"jayulabs.org/mugicrew/agentprofile"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
@@ -723,7 +724,7 @@ func Admit(ctx contract.Ctx, b bd.Bead, pause func(id, cause string) error) (ref
 		return nil, nil
 	}
 	attrs := slices.Clip(append(eventlog.BeadAttrs(b), "profile", profile)) // clipped: each event's append copies
-	slog.Warn("profile.unusable", append(attrs, "reason", reason.Error(), "launch", "afk")...)
+	slog.Warn("profile.unusable", append(attrs, agentprofile.ReasonAttrs(reason, "afk")...)...)
 	refused = fmt.Errorf("profile %s: %w", profile, reason)
 	if err = pause(b.ID, bd.PausedProfile); err != nil {
 		return refused, err

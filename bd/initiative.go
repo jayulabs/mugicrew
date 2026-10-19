@@ -26,77 +26,6 @@ func (e *RefusedError) Error() string {
 	return fmt.Sprintf("%s refused: %s:\n  %s", e.What, e.Why, strings.Join(names, "\n  "))
 }
 
-// CancelInitiative is `mugicrew initiative cancel` (Spec D9, FR33–34): over one
-// snapshot it collects every unclosed member at any depth and refuses, listing
-// them, if any is inFlight; otherwise it closes them leaves-first, then the
-// Initiative, in one forced bd close with reason "cancelled: <initiative>"
-// (members may block each other; the human already decided). Landed work stays.
-func CancelInitiative(id string, inFlight func(Bead) bool) error {
-	all, err := ListAll()
-	if err != nil {
-		return err
-	}
-	in, kids := index(all)
-	ini, ok := in[id]
-	if !ok || ini.Kind != contract.KindInitiative || ini.Status == "closed" {
-		return fmt.Errorf("initiative cancel: %s is not an unclosed Initiative", id)
-	}
-	members := unclosedLeavesFirst(id, kids)
-	if busy := filter(append(members[:len(members):len(members)], ini), inFlight); len(busy) > 0 {
-		return refuse("cancel", id, "in-flight effort", busy)
-	}
-	reason := "cancelled: " + id
-	if err := ForceCloseAll(append(IDs(members), id), reason); err != nil {
-		return err
-	}
-	slog.Info("initiative.cancel", "bead", id, "closed", strings.Join(IDs(members), ","), "reason", reason)
-	return nil
-}
-
-// WithdrawChain is `mugicrew initiative withdraw` (Spec D9, FR35–37): head must
-// be an unclosed member chain head of an unclosed Initiative. It refuses,
-// listing them, while an unclosed member of that Initiative is ordered after the
-// chain (blocks/conditional-blocks on any bead in it) or while the chain runs;
-// otherwise it closes the chain's unclosed beads leaves-first with reason
-// withdrawn, spawning no successor. The last chain withdrawn leaves the
-// Initiative drained.
-// ponytail: the chain is head plus its subtree; closed predecessors' Ordering
-// edges were carried onto the head at succession (bd.Carry), so they're not walked.
-func WithdrawChain(head string, inFlight func(Bead) bool) error {
-	all, err := ListAll()
-	if err != nil {
-		return err
-	}
-	in, kids := index(all)
-	h, ok := in[head]
-	if !ok || h.Status == "closed" || h.Kind == contract.KindInitiative ||
-		in[h.Parent].Kind != contract.KindInitiative || in[h.Parent].Status == "closed" {
-		return fmt.Errorf("initiative withdraw: %s is not an unclosed member chain head of an unclosed Initiative", head)
-	}
-	chain := map[string]bool{head: true}
-	for _, b := range subtree(head, kids) {
-		chain[b.ID] = true
-	}
-	var after []Bead
-	for _, m := range unclosedLeavesFirst(h.Parent, kids) {
-		if !chain[m.ID] && slices.ContainsFunc(m.BlockedBy, func(id string) bool { return chain[id] }) {
-			after = append(after, m)
-		}
-	}
-	if len(after) > 0 {
-		return refuse("withdraw", head, "members ordered after the chain", after)
-	}
-	closing := append(unclosedLeavesFirst(head, kids), h)
-	if busy := filter(closing, inFlight); len(busy) > 0 {
-		return refuse("withdraw", head, "in-flight effort", busy)
-	}
-	if err := ForceCloseAll(IDs(closing), "withdrawn"); err != nil {
-		return err
-	}
-	slog.Info("initiative.withdraw", "bead", head, "parent", h.Parent, "closed", strings.Join(IDs(closing), ","))
-	return nil
-}
-
 // AdoptChain is `mugicrew initiative adopt` (Spec D5, FR13–17): it refuses a
 // closed head, an Initiative head (Initiatives never nest), a head inside a
 // mugicrew container other than an Initiative (a Build, a defog bead), and a
@@ -168,7 +97,7 @@ func ReleaseChain(head string) error {
 		return refuse("release", head, "the head is closed", []Bead{h})
 	case in[h.Parent].Kind != contract.KindInitiative:
 		return refuse("release", head, "not a member of an Initiative", []Bead{h})
-	case requireOn():
+	case RequireInitiativesOn():
 		return refuse("release", head, ReleaseRequiredWhy(head), []Bead{h})
 	}
 	if _, err := run("update", head, "--parent", ""); err != nil {
@@ -178,8 +107,9 @@ func ReleaseChain(head string) error {
 	return nil
 }
 
-// requireOn reads Require Initiatives from the Workspace root, not the cwd.
-func requireOn() bool {
+// RequireInitiativesOn reports Require Initiatives (ADR 0224) for the Workspace,
+// read from the Workspace root, not the cwd.
+func RequireInitiativesOn() bool {
 	root, err := git.RepoRoot()
 	return err == nil && cfglayer.InitiativesSetting(root).Required
 }
@@ -191,7 +121,7 @@ func ReleaseRequiredWhy(head string) string {
 }
 
 func refuse(verb, id, why string, blocking []Bead) error {
-	slog.Warn("initiative."+verb+".refused", "bead", id, "reason", why, "blocking", strings.Join(IDs(blocking), ","))
+	slog.Warn("initiative."+verb+".refused", "bead", id, "reason", why, "blocking", IDs(blocking))
 	return &RefusedError{What: "initiative " + verb + " " + id, Why: why, Blocking: blocking}
 }
 
@@ -219,10 +149,11 @@ func subtree(id string, kids map[string][]Bead) []Bead {
 // unclosedLeavesFirst is id's unclosed descendants, each after its children.
 // Unclosed is anything not closed: open, in_progress, blocked, deferred (D6).
 func unclosedLeavesFirst(id string, kids map[string][]Bead) []Bead {
-	return filter(subtree(id, kids), func(b Bead) bool { return b.Status != "closed" })
+	return Filter(subtree(id, kids), func(b Bead) bool { return b.Status != "closed" })
 }
 
-func filter(bs []Bead, keep func(Bead) bool) []Bead {
+// Filter is the beads of bs for which keep holds, in order.
+func Filter(bs []Bead, keep func(Bead) bool) []Bead {
 	var out []Bead
 	for _, b := range bs {
 		if keep(b) {

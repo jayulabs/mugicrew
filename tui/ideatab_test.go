@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -363,14 +364,14 @@ func TestIdeateHints(t *testing.T) {
 		}
 	}
 	want(m, "enter new · J/K section")
-	want(ideaAt(t, m, "i:ini"), "space fold · d detail · +/- prio · J/K section")
-	want(press(t, ideaAt(t, m, "i:ini"), runeKey("d")), "space fold · d close · pgup/pgdn scroll · +/- prio · J/K section")
+	want(ideaAt(t, m, "i:ini"), "space fold · d detail · +/- prio · X cancel · J/K section")
+	want(press(t, ideaAt(t, m, "i:ini"), runeKey("d")), "space fold · d close · pgup/pgdn scroll · +/- prio · X cancel · J/K section")
 	want(ideaAt(t, m, "i:"), "space fold · J/K section")
 	o := ideaAt(t, m, "mc-1") // open, unclaimed, in an Initiative
-	want(o, "enter triage · b bg · d detail · z reject · p pause · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
-	want(press(t, o, runeKey("d")), "enter triage · b bg · d close · pgup/pgdn scroll · z reject · p pause · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
-	want(ideaAt(t, m, "loose"), "enter triage · b bg · d detail · z reject · p pause · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective")
-	want(ideaAt(t, m, "mc-long-22"), "enter triage · d detail · p pause · x drop · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
+	want(o, "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
+	want(press(t, o, runeKey("d")), "enter triage · b bg · d close · pgup/pgdn scroll · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
+	want(ideaAt(t, m, "loose"), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective")
+	want(ideaAt(t, m, "mc-long-22"), "enter triage · d detail · p pause · x drop · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
 	o = press(t, ideaAt(t, m, "mc-1"), runeKey("?"))
 	for _, k := range []string{"enter", "triage", "reject", "adopt/release", "move"} {
 		if v := ansi.Strip(o.View()); !strings.Contains(v, k) {
@@ -510,7 +511,7 @@ func TestIdeateBadgeIgnoresFolds(t *testing.T) {
 func TestIdeateBacklogSignalKeys(t *testing.T) {
 	m := ideaModel(t, 100, 24, backlogBeads(), nil)
 	m = press(t, press(t, ideaAt(t, m, backlogKey), runeKey(" ")), runeKey("j"))
-	if got, want := hintsOf(m), "enter triage · b bg · d detail · z reject · p pause · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective"; got != want {
+	if got, want := hintsOf(m), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective"; got != want {
 		t.Errorf("backlog Signal hints %q, want %q", got, want)
 	}
 }
@@ -620,7 +621,7 @@ func TestIdeateBg(t *testing.T) {
 		}
 	}
 	// the bar: b bg right after enter triage, hidden on a live session
-	if got, want := hintsOf(ideaAt(t, m, "n2")), "enter triage · b bg · d detail · z reject · p pause · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "n2")), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective"; got != want {
 		t.Errorf("bar %q, want %q", got, want)
 	}
 	if got := hintsOf(ideaAt(t, m, "tri")); strings.Contains(got, "b bg") {
@@ -918,7 +919,11 @@ func TestIdeateInitiativeRowsReprioritise(t *testing.T) {
 		{"closed refused", members(ini("i", "closed", "Init", 2)), "i:i", "+", ""},
 	} {
 		calls = nil
-		m := ideaAt(t, ideaModel(t, 100, 24, c.beads, nil), c.row)
+		m := ideaModel(t, 100, 24, c.beads, nil)
+		if c.name == "P4 - stops" { // a parked Initiative lists under the folded Backlog
+			m = press(t, ideaAt(t, m, backlogKey), runeKey(" "))
+		}
+		m = ideaAt(t, m, c.row)
 		if h := hintsOf(m); !strings.Contains(h, "+/- prio") {
 			t.Errorf("%s: hints %q lack +/- prio", c.name, h)
 		}
@@ -942,5 +947,187 @@ func TestIdeateInitiativeRowsReprioritise(t *testing.T) {
 		if o, cmd := send(t, m, runeKey("+")); cmd != nil || len(calls) != 0 || o.status != m.status {
 			t.Errorf("+ on %q did something", row)
 		}
+	}
+}
+
+// A parked P3/P4 Initiative lists under Backlog with its whole group; anything under way
+// keeps it in the Initiatives section (ADR 0314, ADR 0315).
+func TestIdeaListBacklogNestsParkedInitiative(t *testing.T) {
+	open := map[string]bool{backlogKey: true, "i:": true, "i:p": true, "i:q": true}
+	list := func(bs []bd.Bead, sess map[string]session.Info, held func(string) bool) []ideaRow {
+		return ideaListHeld(graphData{beads: bs}, sess, held, open)
+	}
+	got := func(rs []ideaRow) string { return strings.Join(shape(rs), ",") }
+	base := func() []bd.Bead {
+		return []bd.Bead{ini("p", "open", "Park", 3), sig("m1", "open", 1, "p"), sig("m3", "open", 3, "p"),
+			ini("q", "open", "Quick", 1), sig("q1", "open", 1, "q"), sig("f4", "open", 4, "q"), sig("loose", "open", 4, "")}
+	}
+	rs := list(base(), nil, nil)
+	if want := "+,# Quick,q1,backlog 5,# Park,m1,m3,f4,loose"; got(rs) != want {
+		t.Errorf("parked: %s, want %s", got(rs), want)
+	}
+	if rs[4].depth != 1 || rs[5].depth != 2 || rs[7].depth != 1 || rs[7].hint != "Quick" {
+		t.Errorf("depths %d %d %d, hint %q", rs[4].depth, rs[5].depth, rs[7].depth, rs[7].hint)
+	}
+
+	alive := map[string]session.Info{"p": {State: session.Alive}}
+	if g := got(list(base(), alive, nil)); g != "+,# Quick,q1,# Park,m1,m3,backlog 2,f4,loose" {
+		t.Errorf("alive cut session: %s", g)
+	}
+	held := func(id string) bool { return id == "p" }
+	if g := got(list(base(), nil, held)); !strings.HasPrefix(g, "+,# Quick,q1,# Park,m1,m3") {
+		t.Errorf("held launch: %s", g)
+	}
+	tri := base()
+	tri[2].Status = "in_progress"
+	if g := got(list(tri, map[string]session.Info{"m3": {State: session.Alive}}, nil)); !strings.HasPrefix(g, "+,# Quick,q1,# Park,m1,m3") {
+		t.Errorf("member in triage: %s", g)
+	}
+
+	exited := map[string]session.Info{"p": {State: session.Exited}}
+	ex := base() // ADR 0239 leaves an exited cut session's Initiative in_progress
+	ex[0].Status = "in_progress"
+	rs = list(ex, exited, nil) // an exited session counts as none
+	if g := got(rs); !strings.Contains(g, "backlog 5,# Park,m1,m3") || !rs[4].cut {
+		t.Errorf("exited cut session: %s", g)
+	}
+	drained := []bd.Bead{ini("p", "open", "Park", 4), {ID: "x", Kind: contract.KindBuild, Status: "closed", Parent: "p", Created: epoch}}
+	if g := got(list(drained, nil, nil)); g != "+,backlog 1,# Park,hint p" {
+		t.Errorf("drained: %s", g)
+	}
+	drainedIP := []bd.Bead{ini("p", "in_progress", "Park", 4), drained[1]}
+	if g := got(list(drainedIP, exited, nil)); g != "+,backlog 1,# Park,hint p" {
+		t.Errorf("drained, exited: %s", g)
+	}
+	if g := got(list([]bd.Bead{ini("e", "open", "Empty", 4), {ID: "w", Kind: contract.KindBuild, Status: "open", Parent: "e", Created: epoch}}, nil, nil)); g != "+" {
+		t.Errorf("empty P4 Initiative listed: %s", g)
+	}
+	// a folded Backlog is its header alone, still counting the group
+	if g := got(ideaListHeld(graphData{beads: base()}, nil, nil, nil)); g != "+,# Quick,backlog 5" {
+		t.Errorf("folded: %s", g)
+	}
+}
+
+func TestIdeateNestedBacklogInitiativeView(t *testing.T) {
+	calls := stubActions(t)
+	bs := []bd.Bead{ini("p", "open", "Park", 3), sig("m1", "open", 1, "p")}
+	m := ideaModel(t, 100, 24, bs, nil)
+	m = press(t, ideaAt(t, m, backlogKey), runeKey(" "))
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "Backlog (2)") || !strings.Contains(v, "Initiatives (0)") || !strings.Contains(ideaLine(v, "Park"), "Park") {
+		t.Errorf("nested view:\n%s", v)
+	}
+	m = press(t, ideaAt(t, m, "i:p"), runeKey(" ")) // fold the nested header, then move it with +
+	o, cmd := send(t, ideaAt(t, m, "i:p"), runeKey("+"))
+	if len(*calls) != 0 {
+		t.Fatalf("calls before settle %v", *calls)
+	}
+	o = settle(t, o, cmd)
+	if len(*calls) != 1 || (*calls)[0] != "updateBead p [--priority 2]" {
+		t.Errorf("calls %v", *calls)
+	}
+	moved := []bd.Bead{ini("p", "open", "Park", 2), sig("m1", "open", 1, "p")}
+	o, _ = send(t, o, loadedMsg{beads: moved, live: map[string]bool{}})
+	var keys []string
+	for _, r := range o.tabAt(tabIdeate).(ideaTab).rows() {
+		keys = append(keys, r.key)
+	}
+	if i := slices.Index(keys, "i:p"); i < 0 || i > slices.Index(keys, "\x00backlog") || slices.Contains(keys, "m1") {
+		t.Errorf("rows after move %q, want the folded i:p in the Initiatives section, above Backlog", keys)
+	}
+}
+
+// foldBacklog folds the Backlog of a model whose other headers are open.
+func foldBacklog(m Model) Model {
+	tab := m.tabAt(tabIdeate).(ideaTab)
+	delete(tab.flip, backlogKey)
+	m.tabs[tabIdeate] = tab
+	return m
+}
+
+func backlogFolded(t *testing.T, bs []bd.Bead) Model {
+	return foldBacklog(ideaModel(t, 100, 24, bs, nil))
+}
+
+// A folded Backlog hides the nested groups' whole subgraphs: its trailer counts them and
+// its gutter marks a blocker inside one (ADR 0315 §9).
+func TestIdeateFoldedBacklogCountsAndGuttersNestedGroups(t *testing.T) {
+	build := func(id string) bd.Bead {
+		return bd.Bead{ID: id, Kind: contract.KindBuild, Status: "open", Title: "build " + id, Parent: "p", Created: epoch}
+	}
+	sel := sig("sel", "open", 0, "")
+	sel.BlockedBy = []string{"x"}
+	bs := []bd.Bead{sel, ini("p", "open", "Park", 3), sig("m1", "open", 1, "p"), build("x"), build("y"), sig("flat", "open", 4, "")}
+	m := ideaMoveTo(t, backlogFolded(t, bs), "sel")
+	l := ideaLine(ansi.Strip(m.View()), "Backlog (3)")
+	if !strings.Contains(l, "4 open") {
+		t.Errorf("trailer %q, want the nested subgraph's 3 open beads plus the flat Signal", l)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(l), "1") {
+		t.Errorf("gutter %q, want the nested blocker counted", l)
+	}
+	sel.BlockedBy = []string{"p"} // a blocker marked on the nested Initiative itself
+	bs[0] = sel
+	m = ideaMoveTo(t, backlogFolded(t, bs), "sel")
+	if l := ideaLine(ansi.Strip(m.View()), "Backlog (3)"); !strings.HasPrefix(strings.TrimSpace(l), "1") {
+		t.Errorf("gutter %q, want the nested Initiative's blocker counted", l)
+	}
+}
+
+// With Backlog folded, a selected row of a backlogged group falls back to the Backlog
+// header, not the create row (ADR 0315 §9).
+func TestIdeateBacklogFoldMovesCursorToBacklogHeader(t *testing.T) {
+	seam(t, &updateBead, func(string, []string) error { return nil })
+	drained := func() []bd.Bead {
+		return []bd.Bead{ini("d", "open", "Done", 2), {ID: "x", Kind: contract.KindBuild, Status: "closed", Parent: "d", Created: epoch}}
+	}
+	for _, c := range []struct {
+		name string
+		bs   []bd.Bead
+		sel  string
+	}{
+		{"header", []bd.Bead{ini("p", "open", "Park", 2), sig("m1", "open", 1, "p")}, "i:p"},
+		{"member", []bd.Bead{ini("p", "open", "Park", 2), sig("m1", "open", 1, "p")}, "m1"},
+		{"hint", drained(), "h:d"},
+		{"act row", drained(), "act:d"},
+	} {
+		m := ideaModel(t, 100, 24, c.bs, nil)
+		m = ideaAt(t, m, c.sel)
+		id := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(c.sel, "i:"), "h:"), "act:")
+		if c.sel == "m1" {
+			id = "p"
+		}
+		for i := range c.bs {
+			if c.bs[i].ID == id {
+				c.bs[i].Priority = 3 // as +/- from P2 to P3 would, after the refresh
+			}
+		}
+		m = foldBacklog(m)
+		m, _ = send(t, m, loadedMsg{beads: c.bs, live: map[string]bool{}})
+		if got := cursorKey(m); got != backlogKey {
+			t.Errorf("%s: cursor on %q, want the Backlog header", c.name, got)
+		}
+	}
+}
+
+// The - key on a selected Initiative moves its group into a folded Backlog; once the write
+// settles and the refresh lands, the cursor sits on the Backlog header.
+func TestIdeateBacklogFoldMovesCursorOnMinusKey(t *testing.T) {
+	bs := []bd.Bead{ini("p", "open", "Park", 2), sig("m1", "open", 1, "p")}
+	seam(t, &updateBead, func(id string, args []string) error {
+		for i := range bs {
+			if bs[i].ID == id && len(args) == 2 && args[0] == "--priority" {
+				bs[i].Priority = 3
+			}
+		}
+		return nil
+	})
+	m := foldBacklog(ideaModel(t, 100, 24, bs, nil))
+	m = ideaAt(t, m, "i:p")
+	m, cmd := send(t, m, runeKey("-"))
+	m = settle(t, m, cmd)
+	m, _ = send(t, m, loadedMsg{beads: bs, live: map[string]bool{}})
+	if got := cursorKey(m); got != backlogKey {
+		t.Errorf("cursor on %q, want the Backlog header", got)
 	}
 }

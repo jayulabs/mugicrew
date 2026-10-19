@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -49,23 +48,24 @@ func retrying(once func() (string, error)) (string, error) {
 }
 
 // runOnce is one bd exec; a var so a test fakes the process under the retry.
-var runOnce = func(dir string, args ...string) (string, error) { return execBd(nil, dir, args...) }
+var runOnce = func(dir string, args ...string) (string, error) { return execBd(dir, args...) }
 
-// runEnv is run with extra env entries after the process env, for the Graph push
-// (ADR 0256); it keeps run's retry (ADR 0153). A var so a test fakes it.
-var runEnv = func(env []string, args ...string) (string, error) {
-	return retrying(func() (string, error) { return runEnvOnce(env, args...) })
+// sqlRows runs q against the graph and returns its CSV rows below the header.
+func sqlRows(q string) ([][]string, error) {
+	out, err := run("sql", "--csv", q)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return rows[1:], nil
 }
 
-// runEnvOnce is one env-carrying bd exec; a var so a test fakes the process under the retry.
-var runEnvOnce = func(env []string, args ...string) (string, error) { return execBd(env, "", args...) }
-
-func execBd(env []string, dir string, args ...string) (string, error) {
+func execBd(dir string, args ...string) (string, error) {
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
-	if env != nil {
-		cmd.Env = append(os.Environ(), env...)
-	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // a loop's Ctrl-C drains; it must not kill an effort's bd write (ADR 0050)
 	out, err := cmd.Output()
 	if err != nil {
@@ -376,7 +376,7 @@ union select d.depends_on_issue_id from dependencies d join issues i on i.id=d.i
 // DefaultIDs is the ids of the default set (ADR 0232): the first of the slow
 // tier's two bd calls, ListByID the second.
 func DefaultIDs() ([]string, error) {
-	rows, err := sqlRows(nil, defaultIDsSQL)
+	rows, err := sqlRows(defaultIDsSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -1027,3 +1027,21 @@ func Kinds() (map[string]contract.Kind, error) {
 // RunIn is one bd call from dir, the choke point for verbs outside this package
 // (mugicrew init) that need bd's raw argv.
 func RunIn(dir string, args ...string) (string, error) { return runIn(dir, args...) }
+
+// TaskChildren counts a Spec's kind:task dependents over discovered-from in every
+// status (deferred, open, closed) — the Task-existence check reconcileSpec gates
+// the slicing re-fork on. Not an open-only scan: a closed Task still counts, or
+// the loop would re-fork over a Spec whose Tasks are done.
+func TaskChildren(specID string) (int, error) {
+	rows, err := depTargets(specID, "up", "discovered-from")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, r := range rows {
+		if r.Kind == contract.KindTask {
+			n++
+		}
+	}
+	return n, nil
+}

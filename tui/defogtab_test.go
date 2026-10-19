@@ -356,10 +356,10 @@ func TestDefogHints(t *testing.T) {
 		{"paused", "d detail · p unpause · t transcript · +/- prio · J/K section"},
 		{"inh", "d detail · p pause · t transcript · +/- prio · J/K section"},
 		{"afk", "enter run · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"c", "space fold · d detail · p pause · t transcript · +/- prio · J/K section · r retrospective"},
+		{"c", "space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
 		{"fail", "enter retry · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"dr", "enter spec · space fold · d detail · p pause · t transcript · +/- prio · J/K section · r retrospective"},
-		{"i:ini", "space fold · d detail · J/K section"},
+		{"dr", "enter spec · space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
+		{"i:ini", "space fold · d detail · X cancel · J/K section"},
 		{"c/closed", "space fold · d detail · J/K section"},
 	} {
 		n := defogAt(t, m, c.id)

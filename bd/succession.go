@@ -78,6 +78,12 @@ const FixForwardReason = "fix-forward:"
 // the Checkpoint it closes out (pivot confirmed or escalated).
 const ObsoleteReason = "obsolete:"
 
+// NothingToLandReason prefixes the close reason of a Checkpoint whose Spec laid
+// Tasks and no Builds: there is nothing to land. It deliberately does not start
+// with ObsoleteReason, which drives retireStragglers' cascade and the backstop's
+// swept-parent handling.
+const NothingToLandReason = "nothing to land:"
+
 // ContainerLandedReason prefixes the close reason of a child whose integrate was
 // refused because its container had already landed (ADR 0201). It carries
 // ObsoleteReason, so a child so closed reads as swept; DrainBlockersOver skips it
@@ -527,24 +533,6 @@ func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string,
 	}
 	// --deps is atomic with the create: no orphan Task that blocks nothing
 	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindTask}, title, body), "--deps", "blocks:"+containerID)...)
-	return id, err == nil, err
-}
-
-// SpawnUnblockingTaskIfAbsent files a Brook-owned HITL Task that blocks nothing
-// (no parent, no blocks edge), unless an open Task already carries key in its
-// body. SpawnBlockingTaskIfAbsent's sibling for what a human should see but no
-// container waits on (ADR 0216).
-func SpawnUnblockingTaskIfAbsent(key, title, body string) (id string, created bool, err error) {
-	open, err := OpenSet()
-	if err != nil {
-		return "", false, err
-	}
-	for _, t := range open {
-		if t.Kind == contract.KindTask && strings.Contains(t.Description, key) {
-			return t.ID, false, nil
-		}
-	}
-	id, err = run(unparentedArgs(Successor{Kind: contract.KindTask}, title, body)...)
 	return id, err == nil, err
 }
 

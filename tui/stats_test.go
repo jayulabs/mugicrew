@@ -322,3 +322,62 @@ func TestStatsSessionsGrowsToNaturalWidth(t *testing.T) {
 		t.Errorf("grouping none width %d should be under %d", w, nat)
 	}
 }
+
+// modeEvents are an AFK build, an AFK failure and a HITL exit, all within 7d.
+func modeEvents() []eventlog.Event {
+	now := time.Now()
+	e := func(ago time.Duration, msg, bead string, raw map[string]any) eventlog.Event {
+		return eventlog.Event{Time: now.Add(-ago), Level: "INFO", Msg: msg, Bead: bead, Raw: raw}
+	}
+	return []eventlog.Event{
+		e(time.Hour, "session.ended", "mc-a", map[string]any{"kind": "build", "crewmate": "franky", "dur_ms": 60000.0, "cost_usd": 1.5}),
+		e(2*time.Hour, "session.failed", "mc-b", map[string]any{"kind": "critique", "crewmate": "chopper", "dur_ms": 60000.0, "cost_usd": 3.0}),
+		e(3*time.Hour, "hitl.exited", "mc-c", map[string]any{"kind": "build", "crewmate": "nami", "dur_ms": 60000.0, "cost_usd": 2.0}),
+	}
+}
+
+func TestStatsModeCycle(t *testing.T) {
+	m := sized(t, 120, 30)
+	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: modeEvents(), digest: modeEvents()})
+	m, _ = send(t, m, runeKey("#"))
+	plan := func(m Model) string {
+		v := lines(m.View())
+		for i, l := range v {
+			if strings.Contains(l, "Plan usage") {
+				var out []string
+				for _, l := range v[i:min(i+3, len(v))] {
+					out = append(out, strings.TrimRight(string([]rune(l + strings.Repeat(" ", 40))[:40]), " ")) // the left column only
+				}
+				return strings.Join(out, "\n")
+			}
+		}
+		return ""
+	}
+	base := plan(m)
+	if v := flat(m.View()); !strings.Contains(v, "m mode") || strings.Contains(v, "· AFK") || strings.Contains(v, "· HITL") {
+		t.Errorf("default view:\n%s", v)
+	}
+	for _, c := range []struct{ label, count string }{{"· AFK", "2 "}, {"· HITL", "1 "}, {"", "3 "}} {
+		m, _ = send(t, m, runeKey("m"))
+		v := flat(m.View())
+		if got := total(m); !strings.HasPrefix(got, c.count) {
+			t.Errorf("%q total = %q", c.label, got)
+		}
+		if has := strings.Contains(v, "· AFK") || strings.Contains(v, "· HITL"); has != (c.label != "") || (c.label != "" && !strings.Contains(v, c.label)) {
+			t.Errorf("%q head line:\n%s", c.label, v)
+		}
+		if want := c.count + "sessions"; !strings.Contains(v, " "+want) && !strings.Contains(v, "· "+want) {
+			t.Errorf("%q Distribution lacks %q:\n%s", c.label, want, v)
+		}
+		if plan(m) != base {
+			t.Errorf("%q changed Plan usage:\n%s", c.label, plan(m))
+		}
+	}
+	// With f set, the mode label follows the kind label; m keeps across a reload.
+	m, _ = send(t, m, runeKey("f")) // build
+	m, _ = send(t, m, runeKey("m")) // AFK
+	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: modeEvents(), digest: modeEvents()})
+	if v := flat(m.View()); !strings.Contains(v, "kind build · AFK") || !strings.HasPrefix(total(m), "1 ") {
+		t.Errorf("kind + mode after reload:\n%s", v)
+	}
+}

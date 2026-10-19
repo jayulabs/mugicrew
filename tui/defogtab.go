@@ -613,6 +613,9 @@ func (t defogTab) bindings() []key.Binding {
 		bs = append(bs, keyDetail)
 	}
 	if r.b == nil {
+		if r.kind == dHead && isOpenInitiative(r.init) {
+			bs = append(bs, keyCancelKey)
+		}
 		return append(bs, keySection)
 	}
 	if r.b.Status != "closed" {
@@ -620,6 +623,9 @@ func (t defogTab) bindings() []key.Binding {
 	}
 	if l := t.g.xHint(r.b); l != "" {
 		bs = append(bs, verbKey("x", l))
+	}
+	if t.g.xOffers(r.b) {
+		bs = append(bs, xBinding(r.b))
 	}
 	bs = append(bs, keyTranscript)
 	if r.b.Status != "closed" {
@@ -642,7 +648,7 @@ func (t defogTab) extra() []key.Binding {
 	}
 	cand := []key.Binding{keyLaunch, keyBg}
 	if r.b != nil {
-		cand = append(cand, keyPauseKey, keyDropKey, keyPrio)
+		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
 	}
 	for _, b := range cand {
 		if !shown[b.Keys()[0]] {
@@ -697,9 +703,11 @@ func (m Model) queueRowKey(k tea.KeyMsg, b *bd.Bead, leaf bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		return m.actionKey(k)
+	case b == nil && key.Matches(k, keyWithdrawKey) && isOpenInitiative(m.initRow()): // a header carries no bead; actionKey finds it
+		return m.actionKey(k)
 	case b == nil:
 		return m, nil, false
-	case key.Matches(k, keyPauseKey), key.Matches(k, keyDropKey), key.Matches(k, keyPrio):
+	case key.Matches(k, keyPauseKey), key.Matches(k, keyDropKey), key.Matches(k, keyPrio), key.Matches(k, keyWithdrawKey):
 		return m.actionKey(k)
 	}
 	return m, nil, false

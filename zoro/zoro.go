@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
@@ -136,7 +137,9 @@ var (
 	showBead       = bd.Show
 	closeBead      = bd.Close
 	closeOnPublish = bd.CloseOnPublish
+	branchOutcome  = deleteCheckpointBranch
 	buildChildren  = bd.BuildChildren
+	taskChildren   = bd.TaskChildren
 	carry          = bd.Carry
 	initiativeOf   = bd.InitiativeOf
 
@@ -240,6 +243,47 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 	if err != nil {
 		return err
 	}
+	// Re-entry: a Task-only Spec's Checkpoint already closed nothing-to-land on a
+	// prior pass skips the cut and the fork and goes straight to the Spec's close.
+	cp, err := showBead(checkpointID)
+	if err != nil {
+		return err
+	}
+	if !cp.Open() && strings.HasPrefix(cp.CloseReason, bd.NothingToLandReason) {
+		if !spec.Open() {
+			return nil
+		}
+		// A failed publish (effort.fail / Chopper recover) may have deleted the
+		// Draft Tasks: re-count, and re-slice when none remain (FR19). The fork's
+		// after: land edges target the closed Checkpoint and release at once.
+		tasks, err := taskChildren(spec.ID)
+		if err != nil {
+			return err
+		}
+		if tasks == 0 {
+			inv, err := contract.NewInvocation(spec.ID, contexts.Focus(slicingPrompt(spec.ID), spec))
+			if err != nil {
+				return err
+			}
+			if _, err := ctx.Harness().Run(ctx, inv); err != nil {
+				return err
+			}
+			if tasks, err = taskChildren(spec.ID); err != nil {
+				return err
+			}
+			builds, err := buildChildren(checkpointID)
+			if err != nil {
+				return err
+			}
+			if builds > 0 {
+				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — the slicing fork must lay Builds only, not close the Checkpoint; leaving Spec open", checkpointID, spec.ID)
+			}
+			if tasks == 0 {
+				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor a Task for spec %s; leaving it open", spec.ID)
+			}
+		}
+		return closeOnPublish(ctx, spec.ID, "", nil)
+	}
 	if r := repoOf(spec); r != "" {
 		if err = stampCut(spec, checkpointID, r, checkpointBranch(checkpointID)); err == nil {
 			_, err = repoCut(r, checkpointBranch(checkpointID), base)
@@ -251,16 +295,20 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 		return err
 	}
 	if spec.Open() {
-		// Gate the fork on the Build artifact not yet existing (Nami-parity with
-		// reconcileChart's placeholder-body gate): re-read the Checkpoint's kind:build
-		// members BEFORE forking. The slicing prompt's roll-forward makes a re-fork
-		// safe (FR21) but wasteful, so a re-dispatch after Builds are laid skips the
-		// expensive LLM session and runs only the close leg.
+		// Gate the fork on no artifact existing yet: no kind:build member on the
+		// Checkpoint and no kind:task dependent of the Spec (Nami-parity with
+		// reconcileChart's placeholder-body gate). A re-fork is safe for Builds
+		// (FR21) but republishes Tasks, whose drafted-by label publishing strips, so
+		// a Spec holding Tasks is never re-forked.
 		builds, err := buildChildren(checkpointID)
 		if err != nil {
 			return err
 		}
-		if builds == 0 {
+		tasks, err := taskChildren(spec.ID)
+		if err != nil {
+			return err
+		}
+		if builds+tasks == 0 {
 			inv, err := contract.NewInvocation(spec.ID, contexts.Focus(slicingPrompt(spec.ID), spec))
 			if err != nil {
 				return err
@@ -268,11 +316,17 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			if _, err := ctx.Harness().Run(ctx, inv); err != nil {
 				return err
 			}
-			// Re-read: gate the close on the artifact existing, not on the fork
-			// returning nil (FR22, ADR 0015). A fork that laid zero leaves the Spec
-			// open for the loop to re-dispatch.
+			// Re-read: gate the close on an artifact existing, not on the fork
+			// returning nil (FR22, ADR 0015).
 			if builds, err = buildChildren(checkpointID); err != nil {
 				return err
+			}
+			if tasks, err = taskChildren(spec.ID); err != nil {
+				return err
+			}
+			if builds+tasks == 0 {
+				// Fail loud, leave the Spec open: the loop's failing tally pauses it.
+				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor a Task for spec %s; leaving it open", spec.ID)
 			}
 		}
 		if builds > 0 {
@@ -297,6 +351,45 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			}
 			return closeOnPublish(ctx, spec.ID, "", nil)
 		}
+		if tasks > 0 {
+			// Task-only: nothing lands, so the Checkpoint closes empty and its branch
+			// goes (ADR 0015 close gate, amended). Carry first, as the Builds arm does:
+			// a carry error closes nothing and leaves both beads open for the retry.
+			cp, err := showBead(checkpointID)
+			if err != nil {
+				return err
+			}
+			if !cp.Open() {
+				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — a Task-only Spec closes it itself; leaving Spec open", checkpointID, spec.ID)
+			}
+			moved, skipped, err := carry(spec.ID, checkpointID)
+			if err := eventlog.RecordCarry(spec, checkpointID, moved, skipped, err); err != nil {
+				return err
+			}
+			if err := closeBead(checkpointID, bd.NothingToLandReason+" Task-only Spec "+spec.ID); err != nil {
+				return err
+			}
+			// A branch outcome never fails the pass, and no land lock is taken.
+			if out, ok := branchOutcome(repoOf(spec), checkpointBranch(checkpointID)); ok {
+				eventlog.RecordBranches([]bd.BranchOutcome{out}, "checkpoint", checkpointID, "spec", spec.ID)
+			}
+			return closeOnPublish(ctx, spec.ID, "", nil)
+		}
 	}
 	return nil
+}
+
+// deleteCheckpointBranch deletes branch in r (a nested context's child repo, or
+// the Workspace for ""), shaped on bd's deleteDraftBranches: a missing branch is
+// skipped (ok false), one with work off mainline is kept, and git's refusal for a
+// branch a worktree holds is kept too.
+func deleteCheckpointBranch(r git.Repo, branch string) (bd.BranchOutcome, bool) {
+	if _, err := r.Head("refs/heads/" + branch); err != nil {
+		return bd.BranchOutcome{}, false
+	}
+	err := errors.New("has work")
+	if r.IsAncestor("refs/heads/"+branch, r.Mainline()) {
+		err = r.DeleteBranch(branch)
+	}
+	return bd.BranchOutcome{Branch: branch, Err: err}, true
 }

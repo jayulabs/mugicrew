@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -152,9 +153,13 @@ func removeFiles(paths ...string) {
 // before the F-key binds so none can overwrite F1, F6 or F10. run-shell sets $TMUX, so
 // tmux there is this server, not the human's outer one. Re-binding replaces, so
 // every Start is safe; root rebinds on a running server land at the next Start.
+//
+// The F1 menu passes -M only when the PATH tmux is known to be 3.5 or later
+// (ADR 0303): older tmux rejects the flag and F1 would do nothing.
 func preamble() []string {
+	mouse := menuMouse()
 	f1 := []string{"bind-key", "-T", hitlTable, "F1", "if-shell", "-F", "#{@autofinish}",
-		cmdline(menuArgv(true)...), cmdline(menuArgv(false)...)}
+		cmdline(menuArgv(true, mouse)...), cmdline(menuArgv(false, mouse)...)}
 	f6 := slices.Concat([]string{"bind-key", "-T", hitlTable, "F6"}, f6Cmd())
 	f10 := slices.Concat([]string{"bind-key", "-T", hitlTable, "F10"}, beadCmd())
 	return slices.Concat([]string{
@@ -185,14 +190,63 @@ func cmdline(argv ...string) string {
 	return strings.Join(q, " ")
 }
 
-// menuArgv is the F1 display-menu (ADR 0296): -M so a click picks with mouse on or
-// off, bottom-right above the bar. display-menu format-expands each entry's command
-// as it opens, so the shared commands are literal()'d to run as the direct bindings
-// do (#{@bead} stays unspliced). Entry names omit the key: tmux appends it.
-func menuArgv(armed bool) []string {
-	a := []string{"display-menu", "-M", "-x", "R", "-y", "S", "-T", "HITL keys",
+// menuProbe runs tmux -V on the PATH tmux; a var so a test can stub it.
+var menuProbe = func() (string, error) {
+	out, err := exec.Command("tmux", "-V").Output()
+	return string(out), err
+}
+
+// menuMouse reports whether the PATH tmux is known to be 3.5 or later, the first
+// release with display-menu -M (ADR 0303). It probes once per process; a var so a
+// test can stub the answer.
+var menuMouse = sync.OnceValue(func() bool { return menuMouseFrom(menuProbe()) })
+
+// menuMouseFrom reads the version field of tmux -V output ("tmux 3.5a" is 3.5). A
+// probe error, a missing field or a version with no leading number (next-3.6,
+// master) is unknown, which counts as false: a wrong -M breaks F1, a missing one
+// only costs mouse-picking (ADR 0303).
+func menuMouseFrom(out string, err error) bool {
+	f := strings.Fields(out)
+	if err != nil || len(f) < 2 {
+		return false
+	}
+	v := verParts(f[1])
+	return len(v) >= 2 && (v[0] > 3 || v[0] == 3 && v[1] >= 5)
+}
+
+// verParts reads the leading dotted numbers of s ("3.7c" is [3 7]).
+func verParts(s string) []int {
+	var p []int
+	for _, f := range strings.Split(s, ".") {
+		n := 0
+		for n < len(f) && f[n] >= '0' && f[n] <= '9' {
+			n++
+		}
+		if n == 0 {
+			break
+		}
+		v, _ := strconv.Atoi(f[:n])
+		p = append(p, v)
+		if n < len(f) {
+			break
+		}
+	}
+	return p
+}
+
+// menuArgv is the F1 display-menu (ADR 0296, ADR 0303): -M, when mouse, so a click
+// picks with mouse on or off; bottom-right above the bar. display-menu
+// format-expands each entry's command as it opens, so the shared commands are
+// literal()'d to run as the direct bindings do (#{@bead} stays unspliced). Entry
+// names omit the key: tmux appends it.
+func menuArgv(armed, mouse bool) []string {
+	a := []string{"display-menu"}
+	if mouse {
+		a = append(a, "-M")
+	}
+	a = append(a, "-x", "R", "-y", "S", "-T", "HITL keys",
 		"Back to TUI", "F6", literal(cmdline(f6Cmd()...)),
-		"Bead pane", "F10", literal(cmdline(beadCmd()...))}
+		"Bead pane", "F10", literal(cmdline(beadCmd()...)))
 	if armed {
 		a = append(a, "", "", "", "Cancel auto-exit", "c", "set-option -u @autofinish")
 	}
@@ -568,10 +622,15 @@ var deleteDrafts = bd.DeleteDrafts
 // recording draft.deleted with b's common attrs and the ids, or draft.failed,
 // then each deleted container Draft's branch outcome.
 // None records nothing.
-func DropDrafts(b bd.Bead) error {
+func DropDrafts(b bd.Bead) error { return DropDraftsWith(b) }
+
+// DropDraftsWith is DropDrafts with extra attrs on every event it records (withdraw
+// and cancel cleanup add the verb's target, Spec mc-5rttm D6).
+func DropDraftsWith(b bd.Bead, extra ...any) error {
+	attrs := append(eventlog.BeadAttrs(b), extra...)
 	ids, branches, err := deleteDrafts(b.ID)
-	err = eventlog.RecordDrafts("draft.deleted", b.ID, ids, err, eventlog.BeadAttrs(b)...)
-	eventlog.RecordBranches(branches, eventlog.BeadAttrs(b)...)
+	err = eventlog.RecordDrafts("draft.deleted", b.ID, ids, err, attrs...)
+	eventlog.RecordBranches(branches, attrs...)
 	return err
 }
 
@@ -595,6 +654,16 @@ func Finish(b bd.Bead) (armed bool, err error) {
 // killSession runs a kill-session argv on the server, a var so Drop's order is
 // testable without tmux.
 var killSession = runTmux
+
+// Kill kills the tmux session named name (an Info.Session) on the mugicrew server,
+// so no agent is left writing in a tree about to be removed.
+func Kill(name string) error {
+	sock, err := serverSocket()
+	if err != nil {
+		return err
+	}
+	return killSession(sock, []string{"kill-session", "-t", exact(name)})
+}
 
 // Drop removes b's session s, alive or exited (ADR 0037 §5): kill-session on
 // the mugicrew server first, so no agent is left writing in the tree, then a forced

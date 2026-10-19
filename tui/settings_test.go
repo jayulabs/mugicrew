@@ -40,8 +40,7 @@ func settingsModel(t *testing.T) (Model, *[]string) {
 		autoExit: loop.AutoExit{D: time.Minute, Source: "default"},
 		kinds: kindProfiles{
 			local: map[string]string{"build": "opus"}, shared: map[string]string{},
-			catalog:  []string{"haiku", "opus", "sonnet"},
-			profiles: map[string]agentprofile.Profile{},
+			profiles: map[string]agentprofile.Entry{"haiku": {}, "opus": {}, "sonnet": {}},
 		},
 	})
 	m, _ = send(t, m, runeKey("*"))
@@ -270,5 +269,74 @@ func TestSettingsGlossExplainsDash(t *testing.T) {
 	m, _ = send(t, m, tea.WindowSizeMsg{Width: 40, Height: 40})
 	if v := strings.Join(lines(m.View()), "\n"); !strings.Contains(v, "…") {
 		t.Errorf("narrow gloss not cut:\n%s", v)
+	}
+}
+
+// kindsModel is settingsModel with the Kind profiles read replaced by kp.
+func kindsModel(t *testing.T, kp kindProfiles) Model {
+	t.Helper()
+	m, _ := settingsModel(t)
+	m, _ = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 80})
+	m, _ = send(t, m, loadedMsg{
+		slowTier: true,
+		pool:     loop.Setting{N: 3, Source: "default"},
+		autoExit: loop.AutoExit{D: time.Minute, Source: "default"},
+		kinds:    kp,
+	})
+	for range firstKindRow {
+		m, _ = send(t, m, runeKey("j"))
+	}
+	return m
+}
+
+// The +/- cycle is every declared name in one alphabetical list, a bad-table
+// name included, and a staged bad-table name shows its reason (ADR 0308 §1-2).
+func TestSettingsCycleIncludesBadTableName(t *testing.T) {
+	why := "declared unusable: unknown key modle (from .mugicrew/config.toml)"
+	m := kindsModel(t, kindProfiles{
+		local: map[string]string{}, shared: map[string]string{},
+		profiles: map[string]agentprofile.Entry{"zed": {}, "bad": {Err: errors.New("x")}, "alpha": {}},
+		reasons:  map[string]string{"bad": why},
+	})
+	var seen []string
+	for range 4 {
+		m, _ = send(t, m, runeKey("+"))
+		seen = append(seen, m.kindStaged[kindRowKey(m.setRow)].to)
+		if m.kindStaged[kindRowKey(m.setRow)].to == "bad" && !strings.Contains(m.View(), "unrunnable: "+why) {
+			t.Errorf("staged bad table lacks its reason:\n%s", m.View())
+		}
+	}
+	if want := []string{"alpha", "bad", "zed", ""}; !slices.Equal(seen, want) {
+		t.Errorf("cycle = %q, want %q", seen, want)
+	}
+}
+
+// A mapped name no file declares reads "not declared".
+func TestProfileReasonsNotDeclared(t *testing.T) {
+	got := profileReasons(nil, kindProfiles{
+		local: map[string]string{"build": "ghost"}, shared: map[string]string{"review": "here"},
+		profiles: map[string]agentprofile.Entry{"here": {}},
+	})
+	if got["ghost"] != "not declared" || len(got) != 1 {
+		t.Errorf("reasons = %v, want only ghost: not declared", got)
+	}
+}
+
+// +/- on an empty merged set with no local key flash the empty-set text; a set
+// holding only a bad table still gives slots.
+func TestSettingsCycleEmptyMergedSetFlash(t *testing.T) {
+	m := kindsModel(t, kindProfiles{local: map[string]string{}, shared: map[string]string{}})
+	m, _ = send(t, m, runeKey("+"))
+	if want := "no profiles declared in config.toml or agent-profiles.toml"; m.status != want {
+		t.Errorf("flash = %q, want %q", m.status, want)
+	}
+	if len(m.kindStaged) != 0 {
+		t.Errorf("staged %v", m.kindStaged)
+	}
+	m = kindsModel(t, kindProfiles{local: map[string]string{}, shared: map[string]string{},
+		profiles: map[string]agentprofile.Entry{"bad": {Err: errors.New("x")}}})
+	m, _ = send(t, m, runeKey("+"))
+	if got := m.kindStaged[kindRowKey(m.setRow)].to; got != "bad" {
+		t.Errorf("staged %q, want bad", got)
 	}
 }

@@ -330,3 +330,39 @@ func TestSumScopeGroupsByKeyAndMembership(t *testing.T) {
 		t.Errorf("Sessions under Scope = %d, want 2", len(got))
 	}
 }
+
+func TestSumMode(t *testing.T) {
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.Local)
+	evs := []eventlog.Event{
+		endEv(at, "session.ended", "mc-a", "", `"session":"s1","dur_ms":1000,"cost_usd":1`),
+		endEv(at, "session.failed", "mc-b", "", `"session":"s2","dur_ms":200,"cost_usd":2`),
+		endEv(at, "hitl.exited", "mc-c", "", `"session":"s3","dur_ms":4000,"cost_usd":4`),
+		endEv(at, "hitl.continued", "mc-c", "", `"session":"s3","tail_ms":500,"cost_usd":0.5`),
+		endEv(at, "hitl.failed", "mc-d", "", `"session":"s4","dur_ms":80,"cost_usd":8`),
+	}
+	for _, c := range []struct {
+		mode     string
+		sessions int
+		failed   int
+		wall     int64
+		cost     float64
+	}{
+		{"", 4, 2, 5780, 15.5},
+		{"afk", 2, 1, 1200, 3},
+		{"hitl", 2, 1, 4580, 12.5},
+		{"bogus", 0, 0, 0, 0},
+	} {
+		total, _ := Sum(evs, Filter{Mode: c.mode})
+		if total.Sessions != c.sessions || total.Failed != c.failed || total.WallMs != c.wall || total.CostUSD != c.cost {
+			t.Errorf("mode %q total = %+v", c.mode, total)
+		}
+		ss := Sessions(evs, Filter{Mode: c.mode})
+		var wall int64
+		for _, s := range ss {
+			wall += s.WallMs
+		}
+		if len(ss) != c.sessions || wall != c.wall {
+			t.Errorf("mode %q sessions = %+v", c.mode, ss)
+		}
+	}
+}

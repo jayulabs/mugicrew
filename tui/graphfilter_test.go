@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 
@@ -512,5 +513,25 @@ func TestGraphHidesDrafts(t *testing.T) {
 	g = g.clearOne()
 	if slices.Contains(all(g), "dsv") {
 		t.Error("clearing the facet leaves Drafts shown")
+	}
+}
+
+// Initiative landed N/M counts a chain only when its Checkpoint closed with a landed: Landing,
+// however old; nothing to land:, obsolete: and open Checkpoints stay in M alone.
+func TestInitiativeProgressCountsOnlyLandedCheckpoints(t *testing.T) {
+	m := sized(t, 120, 40)
+	m, _ = send(t, m, runeKey("4"))
+	old := epoch.Add(-48 * time.Hour)
+	beads := []bd.Bead{
+		{ID: "ini", Kind: contract.KindInitiative, Container: true, Status: "open", Title: "Ship v2", Created: epoch},
+		{ID: "cpa", Kind: contract.KindCheckpoint, Container: true, Status: "closed", Parent: "ini", Created: epoch},
+		{ID: "lda", Kind: contract.KindLanding, Status: "closed", CloseReason: "landed: abc123", Parent: "cpa", Closed: old, Created: epoch},
+		{ID: "cpb", Kind: contract.KindCheckpoint, Container: true, Status: "closed", CloseReason: "nothing to land: Task-only Spec", Parent: "ini", Created: epoch},
+		{ID: "cpc", Kind: contract.KindCheckpoint, Container: true, Status: "closed", CloseReason: "obsolete: pivot", Parent: "ini", Created: epoch},
+		{ID: "cpd", Kind: contract.KindCheckpoint, Container: true, Status: "open", Title: "Live phase", Parent: "ini", Created: epoch},
+	}
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: map[string]session.Info{}})
+	if l, n, live := gr(m).initiativeProgress("ini"); l != 1 || n != 4 {
+		t.Errorf("initiative landed %d/%d (live %q); want 1/4", l, n, live)
 	}
 }

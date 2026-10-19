@@ -5,20 +5,41 @@ Three commands, then fix what doctor reports:
 ```bash
 npm i -g @jayulabs/mugicrew     # or, in a JS repo: npm i -D @jayulabs/mugicrew
 mugicrew init                   # bootstrap your bd store in this clone
-mugicrew doctor                 # repeat, fixing each FAIL from its hint, until it passes
+mugicrew doctor                 # repeat: run mugicrew doctor fix, then each Manual step, until it passes
 ```
 
 mugicrew bundles none of its prerequisites. `mugicrew init` never commits. It
 prompts for an issue prefix (`--prefix <p>` skips the prompt), so use a distinct
 prefix per human.
 
+## First human in a Workspace
+
+`mugicrew init workspace` writes the settings the whole Workspace shares into
+`.mugicrew/config.toml`. It runs once per Workspace, not once per human, and needs
+no bd store. If `mugicrew init` printed the hint or `mugicrew doctor` warned that
+the Workspace is not set up:
+
+1. Pull `main` first: the first human's config may not have merged yet, or this
+   clone is behind. If the hint is gone, you are done.
+2. Otherwise one human cuts a linked worktree, since init refuses on `main`:
+   `git worktree add ../<dir> -b <branch> main`.
+3. In that worktree, run `mugicrew init workspace`. It asks for `land_strategy`,
+   Require Initiatives, the Jira site and Contexts; each question has a flag
+   (`--land-strategy`, `--require-initiatives`, `--external-ref`, `--jira-site`,
+   `--context`). It never commits.
+4. Land `.mugicrew/config.toml` by the steps init prints.
+5. Re-run `mugicrew doctor`.
+
+With no shared config the Workspace is valid and runs on defaults, so the hint
+never blocks.
+
 ## Core
 
-Always checked. Each FAIL names the minimum version and this OS's install command.
+Always checked. Each FAIL's To-fix item names the minimum version and this OS's install command.
 
 - `bd` 1.3.0 or later
 - `dolt` (bd pins 2.2.0; doctor WARNs on 2.3.0 or later)
-- `tmux` 3.5 or later
+- `tmux` 3.4 or later (3.5 or later for mouse-picking in the F1 menu)
 - `claude` 2.1.78 or later
 - `git`
 
@@ -62,9 +83,8 @@ glab config set user <gitlab-username> --host gitlab.com
 The token's scope is `api` alone.
 
 mugicrew needs nothing beyond glab's login and user: it injects glab's helper into
-every git call to the Forge and restarts bd's sql-server once if the Graph push's
-first attempt fails (ADR 0256,
-the-graph-push-runs-under-an-injected-glab-helper…). A global
+every git call to the Forge (ADR 0300,
+bead-graph-data-never-goes-to-a-project-remote…). A global
 `credential.https://<host>.helper` entry is only for your own git over https
 (clone, manual push):
 

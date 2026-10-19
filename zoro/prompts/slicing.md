@@ -7,8 +7,8 @@ execute any code — Franky executes the Builds later.
 Your entire write surface is `bd create` (Build members and the Spec's Tasks)
 and `bd dep add` (their ordering; a `before: land` Task's edge is the one you add
 on the Checkpoint). NEVER close, reopen, reject, or edit the Checkpoint epic or
-the Spec — succession closes the Spec (publishing your Draft Builds with it) once you have
-laid the Builds, and the land closes the Checkpoint. Touching either bead's
+the Spec — succession closes the Spec (publishing your Drafts with it) once you have
+laid Builds or Tasks, and itself closes a Checkpoint left with no Builds. Touching either bead's
 status corrupts the graph.
 
 Spec to slice: %[1]s  (read it with: bd show %[1]s)
@@ -70,17 +70,22 @@ A Spec may end with an optional `## Tasks` section: steps in the external world
 Tasks it lists, and file them BEFORE any Build: a re-run that finds Builds
 already laid skips this session, so Tasks filed after them could be lost.
 
-Enumerate the Tasks a prior run already filed, and file only the titles that
-are missing:
+Enumerate the Tasks a prior run already filed, however they were published or
+closed, by listing the Spec's dependents over the discovered-from edge. Keep only
+rows labelled `kind:task` (ignore any other kind, e.g. an offshoot Signal), compare
+by title, and file only the titles that are missing:
 
-    bd list --all -l kind:task,drafted-by:%[1]s --json
+    bd dep list %[1]s --direction=up -t discovered-from --json
 
 File each missing Task as a free-standing Draft, with NO `--parent`: a Task is
-never a member of the Checkpoint or a child of the Spec. Its description is the
+never a member of the Checkpoint or a child of the Spec. The `--deps
+discovered-from:%[1]s` goes in the same `bd create`, so no Task exists without its
+edge. Its description is the
 entry's Steps body only (crew doc task-body.md's format), with every `after:` /
 `before:` line removed:
 
     bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
+      --deps discovered-from:%[1]s \
       --title "<Task title>" --description "<its ## Steps body>"
 
 Then turn each ordering line into a blocks edge, adding any that is missing:
@@ -88,6 +93,9 @@ Then turn each ordering line into a blocks edge, adding any that is missing:
 - `after: land` → the Task waits for the land: `bd dep add <task> <checkpointID>`
 - `before: land` → the land waits for the Task: `bd dep add <checkpointID> <task>`
 - `after: <T>` → the Task waits for Task T: `bd dep add <task> <T>`
+
+When the slice lays no Builds, every `before: land` line is skipped (no edge on
+the Checkpoint); `after: land` and `after: <T>` stay.
 
 The Tasks publish with your Builds.
 

@@ -1003,3 +1003,22 @@ func TestIntegrateWithoutCutRefAfterRewriteRefusesNoCutPoint(t *testing.T) {
 		t.Errorf("container moved to %s, want it untouched at %s", got, orphan)
 	}
 }
+
+// CommitsSinceCut counts an effort's own commits from its recorded cut point, and
+// reports ok false when there is no cut ref.
+func TestCommitsSinceCut(t *testing.T) {
+	newRepo(t)
+	mustGit(t, "branch", "effort/b1")
+	if _, ok, err := Repo("").CommitsSinceCut("b1", "effort/b1"); ok || err != nil {
+		t.Fatalf("no cut ref: ok = %v, err = %v", ok, err)
+	}
+	if err := recordCut(Repo(""), "b1", "effort/b1"); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, "checkout", "-q", "effort/b1")
+	mustGit(t, "commit", "-q", "--allow-empty", "-m", "one")
+	mustGit(t, "commit", "-q", "--allow-empty", "-m", "two")
+	if n, ok, err := (Repo("")).CommitsSinceCut("b1", "effort/b1"); n != 2 || !ok || err != nil {
+		t.Errorf("CommitsSinceCut = %d, %v, %v; want 2, true, nil", n, ok, err)
+	}
+}

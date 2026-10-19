@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"jayulabs.org/mugicrew/agentprofile"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
@@ -448,6 +449,6 @@ func RefuseProfile(b bd.Bead, name, launch string, err error) error {
 	if err == nil {
 		return nil
 	}
-	slog.Warn("profile.unusable", append(eventlog.BeadAttrs(b), "profile", name, "reason", err.Error(), "launch", launch)...)
+	slog.Warn("profile.unusable", append(append(eventlog.BeadAttrs(b), "profile", name), agentprofile.ReasonAttrs(err, launch)...)...)
 	return fmt.Errorf("profile %s: %w", name, err)
 }

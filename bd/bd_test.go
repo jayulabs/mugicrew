@@ -1217,3 +1217,35 @@ func TestPausedCheckupRanksAfterRecovering(t *testing.T) {
 		t.Errorf("PausedCauses = %v", got)
 	}
 }
+
+// TaskChildren counts a Spec's kind:task dependents over discovered-from in every
+// status, and ignores a non-task row (a Signal) on the same edge.
+func TestTaskChildrenCountsTasksInEveryStatus(t *testing.T) {
+	old := run
+	t.Cleanup(func() { run = old })
+	var got []string
+	run = func(args ...string) (string, error) {
+		got = args
+		return `[
+			{"id":"t1","status":"deferred","labels":["kind:task"]},
+			{"id":"t2","status":"open","labels":["kind:task"]},
+			{"id":"t3","status":"closed","labels":["kind:task"]},
+			{"id":"s1","status":"open","labels":["kind:signal"]}]`, nil
+	}
+	n, err := TaskChildren("spec-1")
+	if err != nil || n != 3 {
+		t.Fatalf("TaskChildren = %d, %v; want 3", n, err)
+	}
+	if want := []string{"dep", "list", "spec-1", "--direction=up", "--json", "-t", "discovered-from"}; !slices.Equal(got, want) {
+		t.Errorf("argv = %v, want %v", got, want)
+	}
+}
+
+func TestTaskChildrenPropagatesListError(t *testing.T) {
+	old := run
+	t.Cleanup(func() { run = old })
+	run = func(...string) (string, error) { return "", errors.New("boom") }
+	if _, err := TaskChildren("spec-1"); err == nil {
+		t.Error("a failing dep list must error")
+	}
+}

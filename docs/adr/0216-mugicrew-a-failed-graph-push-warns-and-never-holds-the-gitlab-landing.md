@@ -1,6 +1,6 @@
 # ADR 0216: A failed Graph push warns and never holds the gitlab Landing
 
-Status: Accepted
+Status: Superseded by ADR 0300
 Date: 2026-10-15
 
 Chart mc-t72m.16 (A personal Bead Graph publishes to its per-username ref on the

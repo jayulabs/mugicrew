@@ -418,22 +418,34 @@ func (g graphData) cpsRows() []eRow {
 	return rows
 }
 
+// landingOf is the index of the Landing that landed Checkpoint cp: a child of it, looked up
+// across the whole graph, closed landed: <sha>. -1 when cp is not a closed Checkpoint with one,
+// so a Checkpoint closed nothing to land: or swept obsolete: never has it. It is the one
+// "Checkpoint landed" test, windowless; landedRows adds its window.
+func (g graphData) landingOf(cp *bd.Bead) int {
+	if cp.Kind != contract.KindCheckpoint || cp.Status != "closed" {
+		return -1
+	}
+	for _, j := range g.children(cp.ID) {
+		l := g.beads[j]
+		if l.Kind == contract.KindLanding && l.Status == "closed" && strings.HasPrefix(l.CloseReason, "landed: ") {
+			return j
+		}
+	}
+	return -1
+}
+
 // landedRows is the closed Checkpoints whose own Landing closed landed: <sha> within 24h, newest
 // first. members[0] is that Landing. Pivot-swept (obsolete:) Checkpoints and Chart Landings never match.
 func (g graphData) landedRows() []eRow {
 	var rows []eRow
 	now := clock()
 	for i, cp := range g.beads {
-		if cp.Kind != contract.KindCheckpoint || cp.Status != "closed" || cp.Event {
+		if cp.Event {
 			continue
 		}
-		for _, j := range g.children(cp.ID) {
-			l := g.beads[j]
-			if l.Kind == contract.KindLanding && l.Status == "closed" &&
-				strings.HasPrefix(l.CloseReason, "landed: ") && now.Sub(l.Closed) <= landedWindow {
-				rows = append(rows, eRow{kind: eLanded, key: landedPrefix + cp.ID, b: &g.beads[i], cp: &g.beads[i], members: []*bd.Bead{&g.beads[j]}, depth: 2})
-				break
-			}
+		if j := g.landingOf(&g.beads[i]); j >= 0 && now.Sub(g.beads[j].Closed) <= landedWindow {
+			rows = append(rows, eRow{kind: eLanded, key: landedPrefix + cp.ID, b: &g.beads[i], cp: &g.beads[i], members: []*bd.Bead{&g.beads[j]}, depth: 2})
 		}
 	}
 	slices.SortStableFunc(rows, func(a, b eRow) int { return b.members[0].Closed.Compare(a.members[0].Closed) })
@@ -792,6 +804,9 @@ func (t execTab) bindings() []key.Binding {
 		bs = append(bs, keyDetail)
 	}
 	if r.b == nil {
+		if r.kind == eSec && isOpenInitiative(r.init) {
+			bs = append(bs, keyCancelKey)
+		}
 		return append(bs, keySection)
 	}
 	if r.b.Status != "closed" {
@@ -799,6 +814,9 @@ func (t execTab) bindings() []key.Binding {
 	}
 	if l := t.g.xHint(r.b); l != "" {
 		bs = append(bs, verbKey("x", l))
+	}
+	if t.g.xOffers(r.b) {
+		bs = append(bs, xBinding(r.b))
 	}
 	bs = append(bs, keyTranscript)
 	if r.b.Status != "closed" {
@@ -820,7 +838,7 @@ func (t execTab) extra() []key.Binding {
 	}
 	cand := []key.Binding{keyLaunch, keyBg}
 	if r.b != nil {
-		cand = append(cand, keyPauseKey, keyDropKey, keyPrio)
+		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
 	}
 	for _, b := range cand {
 		if !shown[b.Keys()[0]] {

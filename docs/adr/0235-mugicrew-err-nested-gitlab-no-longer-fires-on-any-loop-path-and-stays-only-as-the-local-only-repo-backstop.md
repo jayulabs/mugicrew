@@ -12,8 +12,8 @@ made every nested move of mainline under gitlab refuse with `git.ErrNestedGitlab
 1. **Jinbe's Landing refusal is lifted.** `reconcileLandingOnce` runs the gitlab
    Landing path on a nested container's legs: child fetch, Graph-checked child
    landed base, conflict arm, `PinnedGitlab` on the child, then the MR lifecycle
-   against the child's project. The Graph ref is still pushed to the Workspace's
-   project only.
+   against the child's project. ~~The Graph ref is still pushed to the Workspace's
+   project only.~~ (Amended by ADR 0300: no Graph ref is pushed.)
 2. **A nested Rollback runs the revert-MR leg** on the child's repo and project,
    not the Workspace's.
 3. **`ErrNestedGitlab` fires on no path the loop drives.** It remains only as the

@@ -7,8 +7,6 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -63,25 +61,24 @@ var saveAutoExit = func(d time.Duration) error {
 }
 
 // kindProfiles is one refresh's Kind profiles read (ADR 0136): both layers'
-// [kind_profiles] maps, the sorted catalog names (the +/- cycle), and the
-// unrunnable reason of each catalog or mapped name that can't run.
+// [kind_profiles] maps, the merged profiles of the four files (bad tables
+// included, ADR 0308 §1), and the unrunnable reason of each declared or mapped
+// name that can't run.
 type kindProfiles struct {
 	local, shared map[string]string
-	catalog       []string
-	profiles      map[string]agentprofile.Profile // the loaded catalog, for the batch runnable check
-	catalogPath   string                          // the checked-in catalog file, for the empty-catalog flash
-	reasons       map[string]string               // name → ADR 0123 §1 reason; absent = runnable
+	profiles      map[string]agentprofile.Entry // the Winners: every declared name, for the +/- cycle and the batch runnable check
+	root          string                        // the Workspace root, for reasons' relative paths
+	reasons       map[string]string             // name → ADR 0123 §1 reason; absent = runnable
 }
+
+// names are the +/- cycle's slots: every declared name, sorted together.
+func (kp kindProfiles) names() []string { return slices.Sorted(maps.Keys(kp.profiles)) }
 
 // readKindProfiles is the refresh's mapping and catalog read, a var as readPool is.
 var readKindProfiles = func() kindProfiles {
 	root := repoRoot()
-	common, _ := git.CommonDirOf(root) // unresolved ⇒ "" ⇒ a missing local catalog layer
 	local, shared := loop.KindProfiles(root)
-	oe := cmp.Or(os.Getenv("OE_ROOT"), root) // where agentprofile.Load reads the checked-in layer
-	loaded := agentprofile.Load(root, common)
-	return kindProfiles{local: local, shared: shared, catalog: slices.Sorted(maps.Keys(loaded)), profiles: loaded,
-		catalogPath: filepath.Join(oe, "agent-profiles.toml")}
+	return kindProfiles{local: local, shared: shared, profiles: cfglayer.Profiles(root).Winners, root: root}
 }
 
 // saveKindProfile is enter's local [kind_profiles] write ("" name deletes the
@@ -93,19 +90,19 @@ var saveKindProfile = func(key, name string) error {
 
 // profileReasons checks the loaded catalog in one ctx.ProfileReasons call (not
 // RefuseProfile: this is no refusal, so no profile.unusable); a mapped name
-// absent from the catalog is "not in catalog" without a call, profiled ctx or
+// that no file declares is "not declared" without a call, profiled ctx or
 // not. A ctx that isn't profiled runs every catalog name on its own harness, so
 // none of those is unrunnable.
 func profileReasons(ctx contract.Ctx, kp kindProfiles) map[string]string {
 	out := map[string]string{}
 	if p, ok := ctx.(profiled); ok {
-		if r := p.ProfileReasons(kp.profiles); r != nil {
+		if r := p.ProfileReasons(kp.root, kp.profiles); r != nil {
 			out = r
 		}
 	}
 	for _, name := range slices.Concat(slices.Collect(maps.Values(kp.local)), slices.Collect(maps.Values(kp.shared))) {
-		if !slices.Contains(kp.catalog, name) {
-			out[name] = "not in catalog"
+		if _, declared := kp.profiles[name]; !declared {
+			out[name] = "not declared"
 		}
 	}
 	return out
@@ -114,7 +111,7 @@ func profileReasons(ctx contract.Ctx, kp kindProfiles) map[string]string {
 // profiled is main's Ctx (ADR 0125) as far as Settings needs it: the batch
 // runnability check of a loaded catalog. A Ctx that isn't one runs everything.
 type profiled interface {
-	ProfileReasons(catalog map[string]agentprofile.Profile) map[string]string
+	ProfileReasons(root string, declared map[string]agentprofile.Entry) map[string]string
 }
 
 // Settings keys (Spec FR55): enter/esc show only while the selected row is staged (FR56).
@@ -288,7 +285,7 @@ func kindKeys() []string {
 func kindRowKey(setRow int) string { return kindKeys()[setRow-firstKindRow] }
 
 // kindEdit is settingsKey on a Kind profiles row (Spec FR17-24, FR29): +/-
-// step through the sorted catalog plus a trailing (unset) slot, from the staged
+// step through every declared name, sorted, plus a trailing (unset) slot, from the staged
 // value else the local key; back at the local key nothing is staged; esc drops
 // this row's edit only; enter saves it under the row's own pending key.
 func (m Model) kindEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
@@ -296,18 +293,18 @@ func (m Model) kindEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 	local := m.kinds.local[key]
 	switch k {
 	case "+", "-":
-		if len(m.kinds.catalog) == 0 && local == "" {
-			m.setStatus("no profiles in " + m.kinds.catalogPath)
+		if len(m.kinds.profiles) == 0 && local == "" {
+			m.setStatus("no profiles declared in config.toml or agent-profiles.toml")
 			return m, nil, true
 		}
 		st, staged := m.kindStaged[key]
 		if !staged {
 			st = kindStage{to: local, from: m.kindEffective(key)}
 		}
-		slots := append(slices.Clone(m.kinds.catalog), "")
+		slots := append(m.kinds.names(), "")
 		i := slices.Index(slots, st.to)
 		switch {
-		case i < 0 && k == "+": // a name missing from the catalog: + to the first, - to the last slot
+		case i < 0 && k == "+": // an undeclared name: + to the first, - to the last slot
 			i = 0
 		case i < 0:
 			i = len(slots) - 1

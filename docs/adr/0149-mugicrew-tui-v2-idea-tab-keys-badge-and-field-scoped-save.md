@@ -4,6 +4,7 @@ Status: Accepted; §1 hint order superseded by ADR 0229 (…hints-bar-and-key-re
 
 Amended by ADR 0171 (§1: x drop/abort/recover on the Signal row; §4 stands) and ADR 0177 (§4: also counts a listed Initiative whose cut session waits on you).
 Amended by ADR 0258 (§1: E raw is removed from the Idea tab; E is a shell key opening $EXPLORER).
+Amended by ADR 0315 (§1: Backlog also holds each listed P3/P4 Initiative's whole group; §3: its groups come before its flat Signals).
 Date: 2026-10-13
 
 Chart mc-lu2x.5 (Idea tab for the v2 TUI). Settles grilling mc-lu2x.5.5, which

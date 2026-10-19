@@ -158,13 +158,11 @@ var (
 
 // Seams of threadArm (review threads, threads.go).
 var (
-	forgeDiscussions    = forge.Discussions
-	forgeIsBot          = forge.IsBot
-	forgeReply          = forge.Reply
-	forgeResolve        = forge.Resolve
-	graphPush           = bd.GraphPush
-	spawnUnblockingTask = bd.SpawnUnblockingTaskIfAbsent
-	forgeUser           = func() (string, error) {
+	forgeDiscussions = forge.Discussions
+	forgeIsBot       = forge.IsBot
+	forgeReply       = forge.Reply
+	forgeResolve     = forge.Resolve
+	forgeUser        = func() (string, error) {
 		p, err := git.ForgeProject() // the reply-marker account is the Workspace's
 		if err != nil {
 			return "", err
@@ -420,7 +418,6 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 		if err := recordMR(l, lg.mrPath, pending.MR); err != nil {
 			return nested, err
 		}
-		pushGraph(l)
 		return nested, nil
 	}
 	if !errors.Is(err, forge.ErrRateLimited) { // held once by reconcileLanding, not an error per tick (FR 35)
@@ -855,30 +852,6 @@ func flagStalePin(l, cp bd.Bead, branch, sha string, lg legs) error {
 func recordMR(l bd.Bead, path string, iid int) error {
 	_, err := bd.SetLineIfUnset(updateBody, l.ID, l.Description, "MR:", git.MRLine(path, iid))
 	return err
-}
-
-// pushGraph is the Landing's automatic Graph push (ADR 0216): any failure is an
-// event and never an error, so a side ref cannot stop code from landing. A foreign
-// root also files the non-blocking Task.
-func pushGraph(l bd.Bead) {
-	name, err := forgeUser()
-	if err != nil {
-		eventlog.RecordGraphPush(l, "", err)
-		return
-	}
-	_, err = graphPush(name)
-	ref := bd.GraphRefOf(name)
-	eventlog.RecordGraphPush(l, ref, err)
-	var foreign *bd.ForeignGraphRef
-	if errors.As(err, &foreign) {
-		key := fmt.Sprintf("Graph ref: %s\nTheirs: %s\n", foreign.Ref, foreign.Theirs)
-		body := key + fmt.Sprintf("Ours: %s\n\nAnother Bead Graph owns this ref, so the Graph push was refused and nothing was pushed.\n"+
-			"Fix: check the GitLab account (`glab auth status`), or have the ref's owner confirm. mugicrew will not overwrite or delete the ref. Close this Task when settled.\n",
-			foreign.Ours)
-		if _, _, terr := spawnUnblockingTask(key, "Graph ref "+foreign.Ref+" holds another Bead Graph", body); terr != nil {
-			eventlog.RecordGraphPush(l, ref, terr)
-		}
-	}
 }
 
 // landOutcome is eventlog.RecordLandOutcome with the legs' nested attrs (context=/repo=/into=), none for a Workspace land.

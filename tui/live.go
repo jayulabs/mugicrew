@@ -182,7 +182,7 @@ type writeDoneMsg struct {
 // digestNeedles prefilter the full-log scan: every digest event's raw line holds one
 // (slog JSON writes "msg":"…" with no spaces). A prefix needle ends before its tail.
 var digestNeedles = []string{`"msg":"session.ended"`, `"msg":"session.failed"`, `"msg":"hitl.exited"`, `"msg":"hitl.failed"`, `"msg":"hitl.continued"`, `"msg":"usage.read"`,
-	`"msg":"land.`, `"msg":"gate.`, `"msg":"effort.failed"`, `"msg":"effort.paused"`, `"msg":"graph.push`}
+	`"msg":"land.`, `"msg":"gate.`, `"msg":"effort.failed"`, `"msg":"effort.paused"`}
 
 // inDigest reports whether ev is one the full-log readers (Stats, landEvents, the
 // finished-flash) need, so the shell holds only these in full (ADR 0231 §3).
@@ -191,22 +191,7 @@ func inDigest(ev eventlog.Event) bool {
 	case "session.ended", "session.failed", "hitl.exited", "hitl.failed", "hitl.continued", "usage.read", "effort.failed", "effort.paused":
 		return true
 	}
-	return strings.HasPrefix(ev.Msg, "land.") || strings.HasPrefix(ev.Msg, "gate.") || strings.HasPrefix(ev.Msg, "graph.push")
-}
-
-// graphPushWarning is the header's sticky failed-Graph-push segment (ADR 0216): shown
-// while the newest graph.push* event in the log is graph.push_failed, so it survives
-// ticks and TUI restarts and a later graph.push hides it. "" otherwise.
-func (m Model) graphPushWarning() string {
-	for _, ev := range slices.Backward(m.digest) {
-		if strings.HasPrefix(ev.Msg, "graph.push") {
-			if ev.Msg == "graph.push_failed" {
-				return warnSt.Render("graph push failed: run mugicrew graph push") + dimSt.Render(" · ")
-			}
-			break
-		}
-	}
-	return ""
+	return strings.HasPrefix(ev.Msg, "land.") || strings.HasPrefix(ev.Msg, "gate.")
 }
 
 // landEvents indexes the latest land.*, gate.*, effort.failed and effort.paused event
@@ -1063,7 +1048,7 @@ func (m Model) headerRight(w int) string {
 	hitl, afk, paused, waiting := m.crewCounts(func(string) bool { return true }, m.retrying())
 	render := func(counts bool) string {
 		if m.focus.id != "" {
-			return m.graphPushWarning() + m.loopSegment() + m.usageWarning() + " "
+			return m.loopSegment() + m.usageWarning() + " "
 		}
 		var segs []string
 		if counts {
@@ -1075,7 +1060,7 @@ func (m Model) headerRight(w int) string {
 		if paused > 0 {
 			segs = append(segs, waitSt.Render(fmt.Sprintf("%d‖", paused)))
 		}
-		return m.graphPushWarning() + strings.Join(append(segs, m.loopSegment()), dimSt.Render(" · ")) + m.usageWarning() + " "
+		return strings.Join(append(segs, m.loopSegment()), dimSt.Render(" · ")) + m.usageWarning() + " "
 	}
 	s := render(true)
 	if lipgloss.Width(s) > w {

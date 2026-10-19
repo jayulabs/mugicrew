@@ -143,17 +143,6 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	oDisc, oBot, oKids, oThread := forgeDiscussions, forgeIsBot, childrenOfKind, spawnThreadBead
 	botCache.Clear()
 	t.Cleanup(notesSeen.Clear) // a Landing's first tick reads ungated
-	oGPush, oGTask := graphPush, spawnUnblockingTask
-	t.Cleanup(func() { graphPush, spawnUnblockingTask = oGPush, oGTask })
-	// A Graph push must never reach the real bd or Forge; graphPushRec replaces these.
-	graphPush = func(string) (bd.GraphPushResult, error) {
-		t.Errorf("unstubbed Graph push: use graphPushRec")
-		return bd.GraphPushResult{}, nil
-	}
-	spawnUnblockingTask = func(string, string, string) (string, bool, error) {
-		t.Errorf("unstubbed unblocking Task: use graphPushRec")
-		return "", false, nil
-	}
 	oReply, oResolve, oUser, oNewest := forgeReply, forgeResolve, forgeUser, newestByTrailer
 	graphName.name = ""
 	t.Cleanup(func() {
@@ -779,7 +768,6 @@ func TestLandingPendingRecordsTheMROnce(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7, Pushed: true, Opened: true}}
 	stubJinbeSeams(t, r)
-	graphPushRec(t, nil)
 	l := openLanding("cafef00d")
 	if err := reconcileLanding(l); err != nil || len(r.closed) != 0 {
 		t.Fatalf("pending: err %v closed %v", err, r.closed)
@@ -2662,94 +2650,6 @@ func TestCheckpointApprovalCountsOnlyApprovedClose(t *testing.T) {
 	}
 }
 
-// graphPushRec stubs the Graph push legs and returns what they saw.
-func graphPushRec(t *testing.T, err error) (pushes *[]string, tasks *[]string) {
-	t.Helper()
-	pushes, tasks = &[]string{}, &[]string{}
-	oUser, oPush, oTask := forgeUser, graphPush, spawnUnblockingTask
-	t.Cleanup(func() { forgeUser, graphPush, spawnUnblockingTask = oUser, oPush, oTask })
-	forgeUser = func() (string, error) { return "brook", nil }
-	graphPush = func(name string) (bd.GraphPushResult, error) {
-		*pushes = append(*pushes, name)
-		return bd.GraphPushResult{}, err
-	}
-	spawnUnblockingTask = func(key, _, _ string) (string, bool, error) {
-		*tasks = append(*tasks, key)
-		return "ws-gt", true, nil
-	}
-	return pushes, tasks
-}
-
-// A LandPending write leg pushes the Graph ref once the MR is recorded; a failed push
-// is an event, never an error (ADR 0216).
-func TestLandPendingPushesTheGraphAndNeverHolds(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}}
-	stubJinbeSeams(t, r)
-	pushes, tasks := graphPushRec(t, errors.New("network down"))
-	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
-		t.Fatalf("a failed Graph push must not hold the Landing: %v", err)
-	}
-	if len(*pushes) != 1 || (*pushes)[0] != "brook" || len(*tasks) != 0 {
-		t.Errorf("pushes %v tasks %v, want one push for brook and no Task", *pushes, *tasks)
-	}
-	if !slices.Contains(eventlogtest.Names(*evs), "graph.push_failed") {
-		t.Errorf("events %v, want graph.push_failed", eventlogtest.Names(*evs))
-	}
-}
-
-func TestSuccessfulGraphPushIsRecorded(t *testing.T) {
-	evs := eventlogtest.Capture(t)
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}}
-	stubJinbeSeams(t, r)
-	graphPushRec(t, nil)
-	reconcileLanding(openLanding("cafef00d"))
-	if !slices.Contains(eventlogtest.Names(*evs), "graph.push") {
-		t.Errorf("events %v, want graph.push", eventlogtest.Names(*evs))
-	}
-}
-
-// A failed recordMR publishes nothing.
-func TestFailedRecordMRDoesNoGraphPush(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}}
-	stubJinbeSeams(t, r)
-	pushes, _ := graphPushRec(t, nil)
-	updateBody = func(string, []string) error { return errors.New("bd down") }
-	if err := reconcileLanding(openLanding("cafef00d")); err == nil {
-		t.Fatal("recordMR failure must be returned")
-	}
-	if len(*pushes) != 0 {
-		t.Errorf("pushes %v, want none", *pushes)
-	}
-}
-
-// A pending tick (the MR already recorded, mirrorMR) never pushes.
-func TestPendingTickDoesNoGraphPush(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mr: &forge.MR{IID: 7, State: "opened"}}
-	stubJinbeSeams(t, r)
-	pushes, _ := graphPushRec(t, nil)
-	l := openLanding("cafef00d")
-	l.Description += "\nMR: !7"
-	reconcileLanding(l)
-	if len(*pushes) != 0 {
-		t.Errorf("pushes %v, want none", *pushes)
-	}
-}
-
-// The typed foreign-root refusal files the non-blocking Task, keyed on the ref and
-// the foreign Graph id, and still never holds the Landing.
-func TestForeignGraphRefFilesTheTask(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}}
-	stubJinbeSeams(t, r)
-	_, tasks := graphPushRec(t, &bd.ForeignGraphRef{Ref: "refs/mugicrew/graphs/brook", Ours: "aaa", Theirs: "bbb"})
-	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
-		t.Fatalf("foreign ref must not hold the Landing: %v", err)
-	}
-	if want := "Graph ref: refs/mugicrew/graphs/brook\nTheirs: bbb\n"; len(*tasks) != 1 || (*tasks)[0] != want {
-		t.Errorf("tasks %q, want [%q]", *tasks, want)
-	}
-}
-
 // gitlabRollback is a landed target's Rollback under gitlab, as the graph holds it.
 func gitlabRollback() *rollbackRec {
 	return &rollbackRec{gitlab: true, target: "ws-cp", targetSt: "closed", onMain: true, body: "main broke because …"}
@@ -2928,7 +2828,6 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &jinbeSeamRec{head: "cafef00d", approvalBody: tc.approval, landErr: &git.LandPending{MR: 5}}
 			stubJinbeSeams(t, r)
-			graphPushRec(t, nil)
 			approvedAtHead = func(string, string) bool { return true }
 			t.Cleanup(func() { approvedAtHead = git.ApprovedAtHead })
 			showBead = func(string) (bd.Bead, error) {

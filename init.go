@@ -6,14 +6,21 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/x/term"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
+	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
+)
+
+// Seams for the Forge: glab is never live in tests.
+var (
+	forgeProject  = git.ForgeProject
+	forgeUserName = forge.CurrentUser
 )
 
 // Seams for init's tests: bd and the terminal are never live.
@@ -22,12 +29,13 @@ var (
 	initIsTTY = func() bool { return term.IsTerminal(os.Stdin.Fd()) }
 )
 
-const infoBranchKey = "DOLT_REMOTE_INFO_BRANCH"
-
 // runInit is `mugicrew init` (ADR 0243, ADR 0244): bootstrap one human's
 // server-mode bd store in this clone. It runs no git write and never commits.
-// The fixed order is guard, bd init, .env, bd dolt stop. It returns the exit code.
+// The fixed order is guard, bd init. It returns the exit code.
 func runInit(args []string, in io.Reader, w io.Writer) int {
+	if len(args) > 0 && args[0] == "workspace" {
+		return runInitWorkspace(args[1:], in, w)
+	}
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(w)
 	prefix := fs.String("prefix", "", "issue prefix (skips the prompt)")
@@ -44,11 +52,14 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 		fmt.Fprintln(w, "mugicrew init: cannot list tracked paths:", err)
 		return 1
 	} else if len(paths) > 0 {
-		fmt.Fprintf(w, "mugicrew init: the index tracks .beads/ paths: %s\nfix: %s\n", strings.Join(paths, ", "), trackedBeadsFix)
+		s := styleFor(w)
+		r := trackedBeadsResult(paths)
+		fmt.Fprintf(w, "mugicrew init: the index tracks .beads/ paths\n%s\n\n%s\n", s.rollCall(r), s.toFixItem(1, r))
 		return 1
 	}
 
-	dir, gerr := graphDir(root)
+	// only checks that a graph resolves; the dir is unused
+	_, gerr := graphDir(root)
 	fresh := gerr != nil
 	if !fresh && *prefix != "" { // a half-moved store resolves too: bd init would be skipped silently
 		if got, err := initBD(root, "config", "get", "issue_prefix"); err != nil || got != *prefix {
@@ -72,20 +83,8 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 			fmt.Fprintln(w, "mugicrew init:", err)
 			return 1
 		}
-		if dir, err = graphDir(root); err != nil {
+		if _, err := graphDir(root); err != nil {
 			fmt.Fprintln(w, "mugicrew init: bd init ran but no Bead Graph resolves:", err)
-			return 1
-		}
-	}
-
-	changed, err := ensureInfoBranchKey(filepath.Join(dir, ".env"))
-	if err != nil {
-		fmt.Fprintln(w, "mugicrew init:", err)
-		return 1
-	}
-	if changed { // the server reads .env at start: the next bd call restarts it
-		if _, err := initBD(root, "dolt", "stop"); err != nil {
-			fmt.Fprintln(w, "mugicrew init:", err)
 			return 1
 		}
 	}
@@ -95,27 +94,11 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 	} else {
 		fmt.Fprintln(w, "a Bead Graph already resolves; the store was left as is")
 	}
+	if set, _ := cfglayer.WorkspaceSetUp(root); !set {
+		fmt.Fprintln(w, "this Workspace is not set up: the first human runs mugicrew init workspace (docs/install.md#first-human-in-a-workspace)")
+	}
 	fmt.Fprintln(w, "run mugicrew doctor next")
 	return 0
-}
-
-// ensureInfoBranchKey adds `DOLT_REMOTE_INFO_BRANCH=` to the .env at path only
-// when no line sets the key, keeping every other line; it reports whether it wrote.
-func ensureInfoBranchKey(path string) (bool, error) {
-	b, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return false, err
-	}
-	for _, l := range strings.Split(string(b), "\n") {
-		if k, _, ok := strings.Cut(strings.TrimSpace(l), "="); ok && strings.TrimPrefix(k, "export ") == infoBranchKey {
-			return false, nil
-		}
-	}
-	s := string(b)
-	if s != "" && !strings.HasSuffix(s, "\n") {
-		s += "\n"
-	}
-	return true, os.WriteFile(path, []byte(s+infoBranchKey+"=\n"), 0o600)
 }
 
 func promptPrefix(in io.Reader, w io.Writer, def string) string {

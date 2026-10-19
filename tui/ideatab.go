@@ -219,7 +219,31 @@ func (t ideaTab) shaded(f ideaFrame, sel int) map[int]bool {
 	// No Initiative and Backlog start folded, so unfold them for the twin lookup.
 	open := map[string]bool{"i:": true, backlogKey: true}
 	full := slices.Concat(f.exp[:1], t.gate.ideaActionable(t.flip), f.live, ideaTree(f.exp[1:], open))
-	return shadeSet(t.gate.parentOf, f.rows, sel, full, ideaRow.shadeIn)
+	set := shadeSet(t.gate.parentOf, f.rows, sel, full, ideaRow.shadeIn)
+	// shadeSet tracks only the nearest header, so a member nested in a Backlog group
+	// also lights the Backlog header, which is a section above its group (ADR 0179 §5).
+	bi := slices.IndexFunc(f.rows, func(r ideaRow) bool { return r.key == backlogKey })
+	if bi < 0 || sel < 0 || sel >= len(f.rows) {
+		return set
+	}
+	s := f.rows[sel]
+	nested := func(rs []ideaRow, i int) bool {
+		j := slices.IndexFunc(rs, func(r ideaRow) bool { return r.key == backlogKey })
+		return j >= 0 && i > j && rs[i].depth > 1
+	}
+	switch {
+	case s.header() || s.cue || s.place || s.sec:
+	case !s.act:
+		if sel > bi && nested(f.rows, sel) {
+			set[bi] = true
+		}
+	default:
+		id := s.shadeIn().id
+		if i := slices.IndexFunc(full, func(r ideaRow) bool { return !r.act && !r.header() && r.shadeIn().id == id }); i >= 0 && nested(full, i) {
+			set[bi] = true
+		}
+	}
+	return set
 }
 
 // foldable is whether space folds the row: a header, a drained hint row (its header) or
@@ -252,8 +276,64 @@ func (g graphData) noRef(b *bd.Bead) bool {
 const backlogKey = "\x00backlog"
 
 // isBacklog is a listed Signal that is not in triage (in_progress, which ideaList
-// lists only with a session) and sits at P3 or P4.
+// lists only with a session) and sits at P3 or P4. It decides the flat Backlog Signals;
+// a parked Initiative's members are placed by backlogInit.
 func isBacklog(b bd.Bead) bool { return b.Status != "in_progress" && b.Priority >= 3 }
+
+// backlogInit is whether the listed Initiative's whole group sits in the Backlog (ADR 0314,
+// ADR 0315): it is unclosed at P3 or P4, has no cut session that is alive or launching/held
+// (an exited session counts as none), and has no listed member in triage. Over the
+// snapshot, sessions and held set, never over folds. triage is from triageInits.
+func backlogInit(in bd.Bead, sessions map[string]session.Info, held func(string) bool, triage map[string]bool) bool {
+	if in.Kind != contract.KindInitiative || in.Status == "closed" || in.Priority < 3 {
+		return false
+	}
+	return sessions[in.ID].State != session.Alive && (held == nil || !held(in.ID)) && !triage[in.ID]
+}
+
+// triageInits are the Initiatives with a listed member in triage (in_progress), built once
+// per pass so backlogInit stays constant-time per Initiative.
+func triageInits(beads []bd.Bead, sessions map[string]session.Info, held func(string) bool) map[string]bool {
+	out := map[string]bool{}
+	for _, b := range beads {
+		if b.Parent != "" && b.Status == "in_progress" && ideaListed(b, sessions, held) {
+			out[b.Parent] = true
+		}
+	}
+	return out
+}
+
+// listsInit is the one rule for which Initiatives Ideate lists (ADR 0177 §1): one with a
+// listed member, a drained one, or an unclosed one with a cut session.
+func listsInit(in bd.Bead, s session.Info, drained, hasMember bool) bool {
+	return hasMember || drained || hasCutSession(in, s)
+}
+
+// hasCutSession is whether an unclosed Initiative has a cut session, alive or exited.
+func hasCutSession(in bd.Bead, s session.Info) bool {
+	return in.Status != "closed" && s.Has()
+}
+
+// parkedInits are the listed Initiatives whose whole group sits in the Backlog.
+func (g graphData) parkedInits(sessions map[string]session.Info, held func(string) bool) (out []bd.Bead) {
+	triage := triageInits(g.beads, sessions, held)
+	hasMember := map[string]bool{}
+	for _, b := range g.beads {
+		if b.Parent != "" && ideaListed(b, sessions, held) {
+			hasMember[b.Parent] = true
+		}
+	}
+	for _, in := range g.beads {
+		if !backlogInit(in, sessions, held, triage) {
+			continue
+		}
+		drained := bd.StateOf(in, g.beads) == bd.InitiativeDrained
+		if listsInit(in, sessions[in.ID], drained, hasMember[in.ID]) {
+			out = append(out, in)
+		}
+	}
+	return
+}
 
 const noInitiative = "No Initiative"
 
@@ -263,14 +343,19 @@ func ideaFolded(flip map[string]bool, key string) bool {
 	return flip[key] != !isSectionKey(key)
 }
 
-// groupKey is the header key a listed Signal sits under: the Backlog key, i:<parent>
-// under an Initiative, else i: (No Initiative).
+// groupKey is the header key a listed Signal sits under: i:<parent> for a member of an
+// unclosed P3/P4 Initiative (which has its own group, in the Initiatives section or the
+// Backlog), else the Backlog key for a P3/P4 Signal, else i:<parent> under a P0–P2
+// Initiative, else i: (No Initiative).
 func groupKey(g graphData, b bd.Bead) string {
-	if isBacklog(b) {
-		return backlogKey
-	}
-	if j := g.beadIndex(b.Parent); j >= 0 && g.beads[j].Kind == contract.KindInitiative {
+	j := g.beadIndex(b.Parent)
+	init := j >= 0 && g.beads[j].Kind == contract.KindInitiative
+	lowInit := init && g.beads[j].Status != "closed" && g.beads[j].Priority >= 3
+	switch {
+	case init && (!isBacklog(b) || lowInit):
 		return "i:" + b.Parent
+	case isBacklog(b):
+		return backlogKey
 	}
 	return "i:"
 }
@@ -285,8 +370,9 @@ func ideaListed(b bd.Bead, sessions map[string]session.Info, held func(string) b
 
 // ideaList is the Ideate list: the create row, then each Initiative with members
 // (beadCmp) and its Signals (beadCmp), then 'No Initiative', then the Backlog group;
-// a folded group is its header alone. A backlog Signal (isBacklog) is listed only
-// there. A Signal is kept when ideaListed.
+// a folded group is its header alone. The Backlog holds the parked P3/P4 Initiatives
+// (backlogInit) with their whole groups in beadCmp order, then the other P3/P4 Signals
+// not in triage (isBacklog), listed only there. A Signal is kept when ideaListed.
 func ideaList(beads []bd.Bead, sessions map[string]session.Info, flip map[string]bool) []ideaRow {
 	return ideaListHeld(graphData{beads: beads}, sessions, nil, flip)
 }
@@ -335,7 +421,7 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 		ids = append(ids, id) // a drained Initiative has no unclosed member, so no overlap
 	}
 	for id, in := range inits {
-		if in.Status != "closed" && sessions[id].Has() && !drained[id] && len(members[id]) == 0 {
+		if !drained[id] && len(members[id]) == 0 && hasCutSession(*in, sessions[id]) {
 			ids = append(ids, id) // a cut session keeps its Initiative listed
 		}
 	}
@@ -357,25 +443,21 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 		}
 		slices.SortStableFunc(ms, byCmp)
 		for _, b := range ms {
-			r := ideaRow{key: b.ID, b: b, depth: h.depth + 1}
-			if h.backlog {
-				if p, ok := inits[b.Parent]; ok {
-					r.hint = p.Title
-				}
-			}
-			rows = append(rows, r)
+			rows = append(rows, ideaRow{key: b.ID, b: b, depth: h.depth + 1})
 		}
 	}
-	for _, id := range ids {
+	// emitInit emits one Initiative's rows at depth 1: its header, then its members, the
+	// drained hint row, or (a cut session with no members) the bare header.
+	emitInit := func(id string) {
 		h := ideaRow{key: "i:" + id, init: inits[id], head: inits[id].Title, depth: 1}
 		if !drained[id] {
 			h.cut = inits[id].Status != "closed" && sessions[id].Has()
 			if h.cut && len(members[id]) == 0 {
 				rows = append(rows, h) // no Signals, no hint row: nothing to fold
-				continue
+				return
 			}
 			group(h, members[id])
-			continue
+			return
 		}
 		h.drained = true
 		rows = append(rows, h)
@@ -383,8 +465,35 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 			rows = append(rows, ideaRow{key: "h:" + id, init: h.init, drained: true, cue: true, depth: 2})
 		}
 	}
+	var parked []string
+	triage := triageInits(beads, sessions, held)
+	for _, id := range ids {
+		if backlogInit(*inits[id], sessions, held, triage) {
+			parked = append(parked, id)
+			continue
+		}
+		emitInit(id)
+	}
 	group(ideaRow{key: "i:", head: noInitiative, sec: true}, loose)
-	group(ideaRow{key: backlogKey, head: "Backlog", backlog: true, sec: true}, backlog)
+	if n := len(backlog) + len(parked); n > 0 {
+		for _, id := range parked {
+			n += len(members[id]) // a drained hint row is not counted
+		}
+		rows = append(rows, ideaRow{key: backlogKey, head: "Backlog", backlog: true, sec: true, n: n})
+		if !ideaFolded(flip, backlogKey) {
+			for _, id := range parked {
+				emitInit(id)
+			}
+			slices.SortStableFunc(backlog, byCmp)
+			for _, b := range backlog {
+				r := ideaRow{key: b.ID, b: b, depth: 1}
+				if p, ok := inits[b.Parent]; ok {
+					r.hint = p.Title
+				}
+				rows = append(rows, r)
+			}
+		}
+	}
 	return rows
 }
 
@@ -492,14 +601,20 @@ func section(body []ideaRow, flip map[string]bool, h ideaRow, place string, full
 // waiting on the human), then the frontier (open ready Signals above the Backlog, and
 // drained Initiatives with no live cut session), then the paused band (rows carrying their
 // own pause, otherwise ready: open, unblocked, not Live, not launching or held), each in
-// beadCmp order (ADR 0180 §1).
+// beadCmp order (ADR 0180 §1). A P3 or P4 Initiative is placed only in the waiting band,
+// while its cut session waits on the human; a Signal whose Initiative's group sits in the
+// Backlog (backlogInit) is placed nowhere (ADR 0314 §2).
 // Never a function of folds. It doesn't use band(): Initiative rows take their state from
 // the cut session, not leafState.
 func (g graphData) ideaBands() (wait, front, paused []ideaRow) {
+	triage := triageInits(g.beads, g.sessions, g.isHeld)
 	for i := range g.beads {
 		b := &g.beads[i]
 		switch {
 		case ideaListed(*b, g.sessions, g.isHeld) && !isBacklog(*b):
+			if j := g.beadIndex(b.Parent); j >= 0 && backlogInit(g.beads[j], g.sessions, g.isHeld, triage) {
+				continue // its group is in the Backlog
+			}
 			r := ideaRow{key: "act:" + b.ID, b: b, act: true, depth: 1}
 			switch g.leafState(b) {
 			case sTurn, sAsk:
@@ -520,6 +635,7 @@ func (g graphData) ideaBands() (wait, front, paused []ideaRow) {
 			switch {
 			case humanWait(s, false) != "":
 				wait = append(wait, r)
+			case b.Priority >= 3: // parked: neither frontier nor paused (ADR 0314 §2)
 			case s.State != session.Alive && drained:
 				front = append(front, r)
 			case g.ownPausedReady(b):
@@ -593,8 +709,10 @@ func (g graphData) ideaLive(exp []ideaRow, flip map[string]bool) []ideaRow {
 }
 
 // selIndex is the selected row's index. A selected Signal that folded away, or moved
-// into a folded group on refresh, falls back to its group's header; one that left the
-// list (closed, session gone) or is absent falls back to the create row.
+// into a folded group on refresh, falls back to its group's header, or to its section's
+// (the Backlog for a backlogged group) when that header is not shown either; a header
+// i:<id> or hint row h:<id> likewise. One that left the list (closed, session gone) or is
+// absent falls back to the create row.
 func (t ideaTab) selIndex(rows []ideaRow) int {
 	sel := t.sel
 	if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == t.sel }); i >= 0 {
@@ -604,7 +722,10 @@ func (t ideaTab) selIndex(rows []ideaRow) int {
 		if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.header() && r.key == "i:"+id }); i >= 0 {
 			return i
 		}
-		return t.treeFallback(rows)
+		return t.sectionFallback(rows, id)
+	}
+	if id, ok := strings.CutPrefix(t.sel, "i:"); ok && id != "" { // a header folded away under its section
+		return t.sectionFallback(rows, id)
 	}
 	if o := otherSection(t.sel); o != "" { // moved between Actionable and Live
 		if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == o }); i >= 0 {
@@ -622,11 +743,28 @@ func (t ideaTab) selIndex(rows []ideaRow) int {
 		if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.header() && r.key == "i:"+id }); i >= 0 {
 			return i
 		}
+		if j := t.gate.beadIndex(id); j >= 0 && t.beads[j].Kind == contract.KindInitiative {
+			return t.sectionFallback(rows, id) // an Initiative's combined row moved into a folded Backlog
+		}
 		sel = id
 	}
 	if j := t.gate.beadIndex(sel); j >= 0 && ideaListed(t.beads[j], t.sessions, t.gate.isHeld) {
 		g := groupKey(t.gate, t.beads[j])
 		if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.header() && r.key == g }); i >= 0 {
+			return i
+		}
+		if id, ok := strings.CutPrefix(g, "i:"); ok && id != "" {
+			return t.sectionFallback(rows, id)
+		}
+	}
+	return t.treeFallback(rows)
+}
+
+// sectionFallback is where the cursor lands when the header of the group of Initiative id
+// is not shown: the Backlog header for a backlogged group (ADR 0315 §9), else treeFallback.
+func (t ideaTab) sectionFallback(rows []ideaRow, id string) int {
+	if j := t.gate.beadIndex(id); j >= 0 && backlogInit(t.beads[j], t.sessions, t.gate.isHeld, triageInits(t.beads, t.sessions, t.gate.isHeld)) {
+		if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.header() && r.key == backlogKey }); i >= 0 {
 			return i
 		}
 	}
@@ -720,8 +858,11 @@ func (t ideaTab) bindingsAt(c ideaRow) []key.Binding {
 		bs = append(bs, keyShut, keyScroll)
 	}
 	if b == nil {
-		if c.init != nil { // an Initiative row: +/- bumps the Initiative
+		if c.init != nil { // an Initiative row: +/- bumps the Initiative, X cancels it
 			bs = append(bs, keyPrio)
+			if isOpenInitiative(c.init) {
+				bs = append(bs, keyCancelKey)
+			}
 		}
 		return append(bs, keySection)
 	}
@@ -733,6 +874,9 @@ func (t ideaTab) bindingsAt(c ideaRow) []key.Binding {
 	}
 	if l := t.gate.xHint(b); l != "" {
 		bs = append(bs, verbKey("x", l))
+	}
+	if t.gate.xOffers(b) {
+		bs = append(bs, xBinding(b))
 	}
 	bs = append(bs, keyTranscript)
 	bs = append(bs, keyEdit, keyPrio)
@@ -814,11 +958,15 @@ func (m Model) ideaKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	case b == nil && c.init != nil && key.Matches(k, keyPrio): // Initiative rows carry no Signal
 		next, cmd := m.bumpPriority(*c.init, prioDir(k))
 		return next, cmd, true
+	case b == nil && c.init != nil && key.Matches(k, keyWithdrawKey):
+		return m.actionKey(k)
 	case b == nil:
 		return m, nil, false
 	case key.Matches(k, keyLaunch), key.Matches(k, keyBg), key.Matches(k, keyPrio), key.Matches(k, keyPauseKey):
 		return m.actionKey(k)
 	case key.Matches(k, keyDropKey) && m.gateData().xHint(b) != "": // unhinted x does nothing
+		return m.actionKey(k)
+	case key.Matches(k, keyWithdrawKey):
 		return m.actionKey(k)
 	case key.Matches(k, keyEdit), key.Matches(k, keyReject), key.Matches(k, keyAdopt), key.Matches(k, keyRelease):
 		return m.graphKey(k)
@@ -902,7 +1050,7 @@ func (t ideaTab) detailText(c ideaRow) string {
 	case "i:":
 		return c.head + "\n\nThe Signals that belong to no Initiative.\n\nenter does nothing here (space folds)."
 	case backlogKey:
-		return c.head + "\n\nThe P3 and P4 Signals, whatever their Initiative.\n\nenter does nothing here (space folds)."
+		return c.head + "\n\nThe parked P3 and P4 Initiatives with their whole groups, then the other P3 and P4 Signals not in triage.\n\nenter does nothing here (space folds)."
 	}
 	if c.sec {
 		return c.title + "\n\nThe Signals and Initiatives waiting on you.\n\nenter does nothing here (space folds)."
@@ -941,6 +1089,9 @@ func (t ideaTab) gutter(r ideaRow, blockers map[string]bool) string {
 	var hidden []bd.Bead
 	if r.header() && ideaFolded(t.flip, r.key) {
 		hidden = t.listedUnder(r.key)
+		if r.key == backlogKey { // the nested Initiatives are hidden beads too
+			hidden = slices.Concat(hidden, t.gate.parkedInits(t.sessions, t.gate.isHeld))
+		}
 	}
 	id := ""
 	if r.b != nil {
@@ -949,18 +1100,26 @@ func (t ideaTab) gutter(r ideaRow, blockers map[string]bool) string {
 	return blockerGutter(blockers, id, hidden)
 }
 
-// listedUnder are the listed Signals under the header key.
+// listedUnder are the beads a folded header hides: the listed Signals under the header
+// key; for the Backlog, also each nested Initiative's whole subgraph by Parent (the
+// Initiatives themselves, which a header's own trailer does not count, are parkedInits).
 func (t ideaTab) listedUnder(key string) (out []bd.Bead) {
 	for _, b := range t.beads {
 		if ideaListed(b, t.sessions, t.gate.isHeld) && groupKey(t.gate, b) == key {
 			out = append(out, b)
 		}
 	}
+	if key == backlogKey {
+		for _, in := range t.gate.parkedInits(t.sessions, t.gate.isHeld) {
+			out = append(out, subgraph(t.gate, in.ID)...)
+		}
+	}
 	return
 }
 
 // trailer is a folded header's " · N open · M live" (ADR 0179): an Initiative counts its
-// whole open subgraph by Parent, No Initiative and Backlog their listed Signals. A drained
+// whole open subgraph by Parent, No Initiative its listed Signals, Backlog its flat Signals
+// plus each nested Initiative's open subgraph (listedUnder). A drained
 // Initiative reads "drained" for the open part and counts its own session as live.
 func (t ideaTab) trailer(r ideaRow) string {
 	switch {

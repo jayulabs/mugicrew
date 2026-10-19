@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"jayulabs.org/mugicrew/agentprofile"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
@@ -1494,14 +1495,34 @@ func TestAutoClearForeignHold(t *testing.T) {
 
 // profiledCtx is a dispatch.Profiled Ctx whose kinds in bad resolve unrunnable
 // (kind → reason) on the "deepseek" profile, every other kind runnable.
-type profiledCtx struct{ bad map[contract.Kind]string }
+type profiledCtx struct {
+	bad map[contract.Kind]string
+	err error // returned instead of the bad reason, when set
+}
 
 func (profiledCtx) Harness() contract.Harness { return nil }
 func (c profiledCtx) ForKind(k contract.Kind) (contract.Ctx, string, error) {
 	if r, ok := c.bad[k]; ok {
+		if c.err != nil {
+			return nil, "deepseek", c.err
+		}
 		return nil, "deepseek", errors.New(r)
 	}
 	return c, "deepseek", nil
+}
+
+// A refusal that carries its file logs it as profile.unusable's path attr.
+func TestAdmitLogsPathAttr(t *testing.T) {
+	evs := captureEvents(t)
+	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch}
+	ctx := profiledCtx{bad: map[contract.Kind]string{b.Kind: "x"}}
+	ctx.err = &agentprofile.FileError{Path: "/w/c.toml", Err: errors.New("bad (from c.toml)")}
+	if _, err := dispatch.Admit(ctx, b, func(string, string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if e := (*evs)[0]; e.Attrs["path"] != "/w/c.toml" || e.Attrs["reason"] != "bad (from c.toml)" {
+		t.Errorf("profile.unusable = %+v", e)
+	}
 }
 
 // An unrunnable Agent Profile pauses the bead paused:profile before any claim or
@@ -1519,7 +1540,7 @@ func TestUnrunnableProfilePausesBeforeClaim(t *testing.T) {
 	}
 	var pauses []string
 	pauseBead = func(id, cause string) error { pauses = append(pauses, id+" "+cause); return nil }
-	l := &Loop{Ctx: profiledCtx{map[contract.Kind]string{b.Kind: "absent from the catalog"}}, Crew: map[string]contract.Crewmate{ownerOf(b): idleCrew{}}}
+	l := &Loop{Ctx: profiledCtx{bad: map[contract.Kind]string{b.Kind: "not declared"}}, Crew: map[string]contract.Crewmate{ownerOf(b): idleCrew{}}}
 	l.dispatch(b)
 	l.wg.Wait()
 	if !slices.Equal(pauses, []string{"mc-r profile"}) {
@@ -1528,8 +1549,10 @@ func TestUnrunnableProfilePausesBeforeClaim(t *testing.T) {
 	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"profile.unusable", "effort.paused"}) {
 		t.Fatalf("events = %v, want profile.unusable then effort.paused", got)
 	}
-	if e := (*evs)[0]; e.Level != slog.LevelWarn || e.Attrs["bead"] != "mc-r" || e.Attrs["kind"] != string(b.Kind) || e.Attrs["profile"] != "deepseek" || e.Attrs["reason"] != "absent from the catalog" || e.Attrs["launch"] != "afk" {
+	if e := (*evs)[0]; e.Level != slog.LevelWarn || e.Attrs["bead"] != "mc-r" || e.Attrs["kind"] != string(b.Kind) || e.Attrs["profile"] != "deepseek" || e.Attrs["reason"] != "not declared" || e.Attrs["launch"] != "afk" {
 		t.Errorf("profile.unusable = %+v", e)
+	} else if _, ok := e.Attrs["path"]; ok {
+		t.Errorf("undeclared profile.unusable carries path %v", e.Attrs["path"])
 	}
 	if e := (*evs)[1]; e.Level != slog.LevelWarn || e.Attrs["cause"] != bd.PausedProfile || e.Attrs["bead"] != "mc-r" {
 		t.Errorf("effort.paused = %+v", e)
@@ -1566,7 +1589,7 @@ func TestAutoClearProfile(t *testing.T) {
 	var lifted []string
 	unpauseBead = func(id, cause string) error { lifted = append(lifted, id+" "+cause); return nil }
 
-	l := &Loop{Ctx: profiledCtx{map[contract.Kind]string{s: "claude not on PATH"}}}
+	l := &Loop{Ctx: profiledCtx{bad: map[contract.Kind]string{s: "claude not on PATH"}}}
 	if err := l.tick(); err != nil {
 		t.Fatal(err)
 	}

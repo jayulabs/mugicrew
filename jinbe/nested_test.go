@@ -437,7 +437,7 @@ func TestNestedGitlabRollbackInvalidCloseLogsNestedAttrs(t *testing.T) {
 
 // nestedGitlab wires a nested Landing under gitlab on the real strategy: the child
 // fetches, the pending Landing names the child's project and its MR line is qualified.
-func nestedGitlab(t *testing.T, r *jinbeSeamRec) (tip string, pushes *[]string, child git.Repo, g func(dir string, args ...string) string) {
+func nestedGitlab(t *testing.T, r *jinbeSeamRec) (tip string, child git.Repo, g func(dir string, args ...string) string) {
 	t.Helper()
 	child, g = nestedWS(t)
 	nestedSeams(t, r, "repo:child")
@@ -454,16 +454,15 @@ func nestedGitlab(t *testing.T, r *jinbeSeamRec) (tip string, pushes *[]string, 
 		r.fetchRepos = append(r.fetchRepos, repo) // marks the repo the push strategy is bound to
 		return func(string, string) (string, error) { return "", r.landErr }
 	}
-	pushes, _ = graphPushRec(t, nil)
-	return tip, pushes, child, g
+	return tip, child, g
 }
 
 // A nested Landing under gitlab fetches the child, records MR: <group/proj>!<iid>, logs
-// the nested attrs and pushes the Graph ref once, from the Workspace (D6, D12, FR 1, 24, 30).
+// the nested attrs, running its legs and no Graph push (D6, D12, FR 1, 24, 30).
 func TestGitlabNestedLandingIsPendingOnTheChildsProject(t *testing.T) {
 	r := &jinbeSeamRec{landErr: &git.LandPending{MR: 5, Pushed: true, Opened: true}}
 	evs := eventlogtest.Capture(t)
-	tip, pushes, _, _ := nestedGitlab(t, r)
+	tip, _, _ := nestedGitlab(t, r)
 	r.head = tip
 	if err := reconcileLanding(openLanding(tip)); err != nil {
 		t.Fatal(err)
@@ -473,9 +472,6 @@ func TestGitlabNestedLandingIsPendingOnTheChildsProject(t *testing.T) {
 	}
 	if len(r.bodies) != 1 || !strings.Contains(r.bodies[0], "MR: ns/child!5") {
 		t.Errorf("bodies %q, want MR: ns/child!5", r.bodies)
-	}
-	if len(*pushes) != 1 {
-		t.Errorf("Graph pushes %v, want one (the Workspace's)", *pushes)
 	}
 	if r.presentation.Title == "" {
 		t.Errorf("nested Landing got presentation %+v, want the container's title", r.presentation)
@@ -494,7 +490,7 @@ func TestGitlabNestedLandingIsPendingOnTheChildsProject(t *testing.T) {
 // With both projects holding an open !5, a nested arm touches only the child's.
 func TestGitlabNestedArmsTouchOnlyTheChildsMR(t *testing.T) {
 	r := &jinbeSeamRec{mr: &forge.MR{IID: 5, State: "opened", HeadPipeline: &forge.Pipeline{ID: 9, Status: forge.StatusFailed, SHA: "x"}}}
-	tip, _, _, _ := nestedGitlab(t, r)
+	tip, _, _ := nestedGitlab(t, r)
 	r.head = tip
 	l := openLanding(tip)
 	l.Description += "\nMR: ns/child!5\nChecked: forgesha\n"
@@ -509,7 +505,7 @@ func TestGitlabNestedArmsTouchOnlyTheChildsMR(t *testing.T) {
 // A child remote on another host refuses with the typed error before any fetch or MR call.
 func TestGitlabNestedLandingRefusesAChildOnAnotherHost(t *testing.T) {
 	r := &jinbeSeamRec{}
-	tip, _, _, _ := nestedGitlab(t, r)
+	tip, _, _ := nestedGitlab(t, r)
 	oProj := projectOf
 	t.Cleanup(func() { projectOf = oProj })
 	projectOf = func(repo git.Repo) (forge.Project, error) {
@@ -531,7 +527,7 @@ func TestGitlabNestedLandingRefusesAChildOnAnotherHost(t *testing.T) {
 // of landing or closing it (ADR 0187, FR 8, 9).
 func TestGitlabNestedForeignLandHoldsOnATask(t *testing.T) {
 	r := &jinbeSeamRec{}
-	tip, _, child, g := nestedGitlab(t, r)
+	tip, child, g := nestedGitlab(t, r)
 	r.head = tip
 	oName := git.LandStrategyName
 	t.Cleanup(func() { git.LandStrategyName = oName })
@@ -561,7 +557,7 @@ func TestNestedRateLimitedCarriesNestedAttrs(t *testing.T) {
 	t.Run("landing", func(t *testing.T) {
 		r := &jinbeSeamRec{mrErr: forge.ErrRateLimited}
 		evs := eventlogtest.Capture(t)
-		tip, _, _, _ := nestedGitlab(t, r)
+		tip, _, _ := nestedGitlab(t, r)
 		r.head = tip
 		l := openLanding(tip)
 		l.Description += "\nMR: ns/child!5\n"

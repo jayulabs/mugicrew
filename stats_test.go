@@ -183,7 +183,7 @@ func TestStatsEmpty(t *testing.T) {
 
 func TestStatsUsage(t *testing.T) {
 	stubStatsLog(t)
-	for _, argv := range [][]string{{"--bogus"}, {"--since"}, {"--since", "yesterday"}, {"a", "b"}} {
+	for _, argv := range [][]string{{"--bogus"}, {"--since"}, {"--since", "yesterday"}, {"a", "b"}, {"--mode"}, {"--mode", "bogus"}, {"--mode", "afk", "--mode", "hitl"}} {
 		if err := runStats(argv, &bytes.Buffer{}); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
 			t.Errorf("stats %v err = %v, want usage", argv, err)
 		}
@@ -441,5 +441,33 @@ func TestStatsSpineErrors(t *testing.T) {
 	statsLineage = func() (*bd.Lineage, error) { t.Fatal("no bead must not read bd"); return nil, nil }
 	if err := runStats(nil, &bytes.Buffer{}); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestStatsMode(t *testing.T) {
+	now := time.Now()
+	stubStatsLog(t,
+		endEv(now, "session.ended", "mc-a", "", `"kind":"build",`+cost1),
+		endEv(now, "session.failed", "mc-a", "", `"kind":"build","dur_ms":1000`),
+		endEv(now.Add(-100*time.Hour), "session.ended", "mc-a", "", `"kind":"build",`+cost1),
+		endEv(now, "hitl.exited", "mc-b", "", `"kind":"grill","dur_ms":3600000,"cost_usd":2`),
+	)
+	for _, c := range []struct {
+		argv     []string
+		sessions float64
+		cost     float64
+	}{
+		{nil, 4, 5},
+		{[]string{"--mode", "afk"}, 3, 3},
+		{[]string{"--mode", "hitl"}, 1, 2},
+		{[]string{"--mode", "afk", "--since", "72h", "--kind", "build", "--by", "kind"}, 2, 1.5},
+		{[]string{"--mode", "hitl", "--kind", "build"}, 0, 0},
+	} {
+		if got := runStatsJSON(t, c.argv...); got.Total["sessions"] != c.sessions || got.Total["cost_usd"] != c.cost {
+			t.Errorf("stats %v total = %v", c.argv, got.Total)
+		}
+	}
+	if !strings.Contains(statsUsage, "[--mode afk|hitl]") {
+		t.Errorf("usage = %q", statsUsage)
 	}
 }

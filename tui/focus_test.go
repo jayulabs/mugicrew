@@ -334,7 +334,7 @@ func TestFocusKeys(t *testing.T) {
 	m, calls := focusModel(t, 160, 40, focusFixture(), sess, map[string]bool{})
 	f := ideaFocus(t, m)
 
-	if h := hintsOf(f); h != "enter launch · b bg · d detail · c checkup · t transcript · r retrospective · esc back" {
+	if h := hintsOf(f); h != "enter launch · b bg · d detail · X cancel · c checkup · t transcript · r retrospective · esc back" {
 		t.Errorf("header hints = %q", h)
 	}
 	n, cmd := send(t, f, enterKey())
@@ -371,7 +371,7 @@ func TestFocusKeys(t *testing.T) {
 			t.Errorf("bar %q does not end esc back | ? keys", bar)
 		}
 	}
-	if h := hintsOf(s1); h != "enter triage · d detail · z reject · p pause · x drop · t transcript · e edit · +/- prio · c checkup · r retrospective · esc back" {
+	if h := hintsOf(s1); h != "enter triage · d detail · z reject · p pause · x drop · t transcript · e edit · +/- prio · X withdraw · c checkup · r retrospective · esc back" {
 		t.Errorf("Signal hints = %q", h)
 	}
 	for k, want := range map[string]string{"e": "Edit", "z": "Reject"} {

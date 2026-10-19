@@ -76,14 +76,25 @@ func TestLaunchDiscussionComposesReadOnlySession(t *testing.T) {
 		"drafted-by:ws-disc",
 		"signal-filing.md",
 		"bd update ws-disc --title",
-		"bd update --title, --description and --notes on a Draft\nlabelled drafted-by:ws-disc, only on the human's yes",
+		"Without asking, on a bead labelled drafted-by:ws-disc: bd update --title,\n--description and --notes, and bd delete <id> --force",
+		"rewrite the survivor",
+		"combine their Sources lines",
+		"bd delete <id> --force on the rest",
+		"Report every edit, merge and discard in chat, naming the Draft by title",
+		"bd create for a new Signal Draft only on the human's explicit yes",
 		"changing a Draft's status or labels",
-		"propose\nthe edit in chat",
+		"priority, type or edges",
+		"writing to or deleting any bead not labelled drafted-by:ws-disc",
 		"bd close ws-disc",
 		contract.ClosingLine(),
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
+		}
+	}
+	for _, gone := range []string{"only on the human's yes", "propose\nthe edit in chat"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("prompt still contains %q", gone)
 		}
 	}
 	if n := len(p); n > 16<<10 {

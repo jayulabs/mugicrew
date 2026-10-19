@@ -1,6 +1,6 @@
 # ADR 0257: Doctor probes the Graph push credential with the push's injected helper, from outside the repo
 
-Status: Accepted
+Status: Superseded by ADR 0300
 
 Amended 2026-10-17: its two credential lines are collapsed into one FAIL line once the Land push is injected, as its Considered Options foresaw; see Spec 'Every Forge git call authenticates through the injected glab helper, and doctor checks one credential line'.
 Date: 2026-10-17

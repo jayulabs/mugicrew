@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"jayulabs.org/mugicrew/agentprofile"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/claudecode"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
@@ -74,11 +75,11 @@ func TestCtxForKindResolution(t *testing.T) {
 		{"built-in with a catalog but no mapping", deepseekCatalog, "", "", &claudecode.Backend{}, ""},
 		{"runnable, env expanded", deepseekCatalog, "[kind_profiles]\nbuild = \"deepseek\"\n", "deepseek", deepseek, ""},
 		{"default names the profile", deepseekCatalog, "[kind_profiles]\ndefault = \"deepseek\"\n", "deepseek", deepseek, ""},
-		{"absent profile", deepseekCatalog, "[kind_profiles]\nbuild = \"opus\"\n", "", nil, "absent"},
-		{"empty catalog", "", "[kind_profiles]\nbuild = \"deepseek\"\n", "", nil, "absent"},
-		{"dropped layer", deepseekCatalog + "typo = 1\n", "[kind_profiles]\nbuild = \"deepseek\"\n", "", nil, "absent"},
+		{"absent profile", deepseekCatalog, "[kind_profiles]\nbuild = \"opus\"\n", "", nil, "not declared"},
+		{"empty catalog", "", "[kind_profiles]\nbuild = \"deepseek\"\n", "", nil, "not declared"},
+		{"dropped layer", deepseekCatalog + "typo = 1\n", "[kind_profiles]\nbuild = \"deepseek\"\n", "", nil, "not declared"},
 		{"unsupported harness", deepseekCatalog, "[kind_profiles]\nbuild = \"pi\"\n", "", nil, "unsupported harness"},
-		{"no fallback to default", deepseekCatalog, "[kind_profiles]\nbuild = \"opus\"\ndefault = \"deepseek\"\n", "", nil, "absent"},
+		{"no fallback to default", deepseekCatalog, "[kind_profiles]\nbuild = \"opus\"\ndefault = \"deepseek\"\n", "", nil, "not declared"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := profileWorkspace(t, tc.catalog, tc.mapping)
@@ -175,18 +176,74 @@ func TestCtxForProfile(t *testing.T) {
 	}
 }
 
-// profileReasons checks a loaded catalog in one pass with the per-profile
-// checks: unset ${VAR}, unsupported harness; runnable names are absent.
+// profileReasons checks a merged set in one pass with the per-profile checks:
+// unset ${VAR}, unsupported harness, bad table; runnable names are absent, and
+// each reason ends (from <file>).
 func TestProfileReasons(t *testing.T) {
 	os.Unsetenv("DEEPSEEK_API_KEY")
 	lookPath = func(string) (string, error) { return "claude", nil }
 	t.Cleanup(func() { lookPath = exec.LookPath })
-	got := profileReasons(map[string]agentprofile.Profile{
-		"ok":  {Name: "ok", Harness: "claudecode"},
-		"env": {Name: "env", Harness: "claudecode", Env: map[string]string{"K": "${DEEPSEEK_API_KEY}"}},
-		"odd": {Name: "odd", Harness: "codex"},
+	got := profileReasons("/ws", map[string]agentprofile.Entry{
+		"ok":  {Profile: agentprofile.Profile{Name: "ok", Harness: "claudecode"}, Path: "/ws/agent-profiles.toml"},
+		"env": {Profile: agentprofile.Profile{Name: "env", Harness: "claudecode", Env: map[string]string{"K": "${DEEPSEEK_API_KEY}"}}, Path: "/ws/.mugicrew/config.toml"},
+		"odd": {Profile: agentprofile.Profile{Name: "odd", Harness: "codex"}, Path: "/elsewhere/agent-profiles.toml"},
+		"bad": {Profile: agentprofile.Profile{Name: "bad"}, Path: "/ws/.mugicrew/config.toml", Err: errors.New("unknown key modle")},
 	})
-	if len(got) != 2 || !strings.Contains(got["env"], "DEEPSEEK_API_KEY") || got["odd"] != "unsupported harness codex" {
+	if len(got) != 3 || !strings.Contains(got["env"], "DEEPSEEK_API_KEY") || !strings.HasSuffix(got["env"], " (from .mugicrew/config.toml)") ||
+		got["odd"] != "unsupported harness codex (from /elsewhere/agent-profiles.toml)" ||
+		got["bad"] != "declared unusable: unknown key modle (from .mugicrew/config.toml)" {
 		t.Errorf("reasons = %v", got)
+	}
+}
+
+// A profile declared in config.toml resolves through the four-file merge; the
+// local config.toml beats the OE local; a bad table is refused naming its file;
+// an undeclared name is "not declared" with no file.
+func TestResolveRecordedConfigToml(t *testing.T) {
+	root := profileWorkspace(t, "[profiles.cfg]\nharness = \"claudecode\"\nmodel = \"oe\"\n",
+		"[profiles.cfg]\nharness = \"claudecode\"\nmodel = \"shared\"\n[profiles.bad]\nharness = \"claudecode\"\nmodle = \"x\"\n")
+	if got, err := resolveRecorded(root, "cfg"); err != nil || got.Model != "shared" {
+		t.Errorf("cfg = %+v, %v; want the config.toml table over the OE one", got, err)
+	}
+	if _, err := resolveRecorded(root, "bad"); err == nil || err.Error() != "declared unusable: unknown key modle (from .mugicrew/config.toml)" {
+		t.Errorf("bad err = %v", err)
+	}
+	if _, err := resolveRecorded(root, "nope"); err == nil || err.Error() != "not declared" {
+		t.Errorf("nope err = %v, want not declared", err)
+	}
+}
+
+// The resolver's error carries the winning file's path for the profile.unusable
+// path attr (ADR 0306 §4); an undeclared name carries none.
+func TestResolveRecordedErrorCarriesPath(t *testing.T) {
+	root := profileWorkspace(t, "", "[profiles.bad]\nharness = \"claudecode\"\nmodle = \"x\"\n[profiles.odd]\nharness = \"codex\"\n")
+	for _, name := range []string{"bad", "odd"} {
+		_, err := resolveRecorded(root, name)
+		if got := agentprofile.ErrPath(err); got != cfglayer.SharedPath(root) {
+			t.Errorf("%s: path = %q, want %q (err %v)", name, got, cfglayer.SharedPath(root), err)
+		}
+	}
+	if _, err := resolveRecorded(root, "nope"); agentprofile.ErrPath(err) != "" {
+		t.Errorf("nope carries path %q", agentprofile.ErrPath(err))
+	}
+}
+
+func TestResolveRecordedLocalConfigBeatsOELocal(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OE_ROOT", "")
+	eventlogtest.Capture(t)
+	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	for path, model := range map[string]string{".git/mugicrew/config.toml": "mc-local", ".git/agent-profiles.toml": "oe-local"} {
+		full := filepath.Join(root, path)
+		os.MkdirAll(filepath.Dir(full), 0o755)
+		os.WriteFile(full, []byte("[profiles.p]\nharness = \"claudecode\"\nmodel = \""+model+"\"\n"), 0o644)
+	}
+	orig := lookPath
+	lookPath = func(string) (string, error) { return "claude", nil }
+	t.Cleanup(func() { lookPath = orig })
+	if got, err := resolveRecorded(root, "p"); err != nil || got.Model != "mc-local" {
+		t.Errorf("p = %+v, %v; want mugicrew local", got, err)
 	}
 }

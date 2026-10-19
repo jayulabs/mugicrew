@@ -1,6 +1,7 @@
 # ADR 0245: Install is doctor-led from a thin install doc with per-feature sections, and the runbook stays a dry-run script
 
 Status: Accepted
+Amended by ADR 0302 (§2: doctor's To-fix items carry the fix).
 Date: 2026-10-16
 
 Chart mc-uqpj.2 (Standalone install and bootstrap of mugicrew in a client
@@ -14,10 +15,12 @@ Workspace). Settles grilling mc-uqpj.2.9.
    each FAIL from its hint until doctor passes. The doc holds only what doctor
    cannot: the npm line, the credential steps, and a short list of what doctor
    checks.
-2. **Doctor's hints carry the fix.** Each prerequisite FAIL names the minimum
+2. ~~**Doctor's hints carry the fix.** Each prerequisite FAIL names the minimum
    version and the install command for the running OS. A missing bead graph says
    `run mugicrew init`. A hint too long for one line links to its install.md
-   section by anchor.
+   section by anchor.~~
+   (Amended by ADR 0302 (doctor-s-to-fix-items-carry-the-fix…): doctor's To-fix
+   items carry the fix, classed Safe or Manual, with a `More:` anchor.)
 3. **Prerequisites are core plus per feature.** Core (always): bd, dolt, tmux,
    claude, git. `land_strategy = "gitlab"` adds glab and the GitLab https
    credential steps. `[jira]` adds acli and `acli jira auth login`. install.md

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"jayulabs.org/mugicrew/eventlog"
@@ -18,6 +19,7 @@ type Filter struct {
 	Scope map[string]string // event bead id -> row key; only these beads count (nil = every bead)
 	Since time.Time         // zero = the whole log
 	Kind  string            // only sessions whose kind attr equals it; "" = every kind
+	Mode  string            // "" = both | "afk" | "hitl"; any other value matches nothing
 	By    string            // "" (per bead) | "crewmate" | "model" | "profile" | "kind" | "day"
 }
 
@@ -29,6 +31,10 @@ func (f Filter) match(ev eventlog.Event) bool {
 		return false
 	}
 	if _, in := f.Scope[ev.Bead]; (f.Scope != nil && !in) || ev.Time.Before(f.Since) {
+		return false
+	}
+	hitl := strings.HasPrefix(ev.Msg, "hitl.")
+	if (f.Mode == "afk" && hitl) || (f.Mode == "hitl" && !hitl) || (f.Mode != "" && f.Mode != "afk" && f.Mode != "hitl") {
 		return false
 	}
 	kind, _ := ev.Raw["kind"].(string)

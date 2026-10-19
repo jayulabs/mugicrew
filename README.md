@@ -10,6 +10,11 @@ npm i -g @jayulabs/mugicrew
 ```
 
 Then run `mugicrew init` and `mugicrew doctor`; see [docs/install.md](docs/install.md).
+The first human in a Workspace also runs `mugicrew init workspace`, which writes the
+shared `.mugicrew/config.toml`; see
+[First human in a Workspace](docs/install.md#first-human-in-a-workspace).
+
+To cut an npm release, see [docs/release.md](docs/release.md).
 
 ## Build
 
@@ -44,8 +49,8 @@ is `on` or `external`.
 
 ## Bd store mode
 
-Cap > 1 wants a server-mode bd store. A new Workspace runs `mugicrew init`,
-which creates one, and `mugicrew doctor` FAILs on an embedded store.
+Cap > 1 wants a server-mode bd store. Each human runs `mugicrew init` in their own
+clone, which creates one, and `mugicrew doctor` FAILs on an embedded store.
 
 To move an existing embedded store to server mode, from the Workspace root:
 
@@ -54,15 +59,17 @@ To move an existing embedded store to server mode, from the Workspace root:
 3. Move `.beads/embeddeddolt/` aside.
 4. `bd init --server --prefix <p> --stealth` with the same prefix (`mugicrew init`
    would skip it, since the leftover `.beads/metadata.json` still resolves).
-5. `mugicrew init`, to persist the `.env` key.
-6. `bd backup restore --force <dir>`.
-7. Verify with `bd count`, `bd dolt status` and a fast `bd show <id>`.
+5. `bd backup restore --force <dir>`.
+6. Verify with `bd count`, `bd dolt status` and a fast `bd show <id>`.
 
 bd autostarts a detached per-repo Dolt server on the first call, and all linked
 worktrees share it. mugicrew neither starts nor stops it, and works on embedded
 stores too.
 
 ## GitLab land strategy
+
+`mugicrew init workspace --land-strategy gitlab` writes `land_strategy`; the TOML
+below is the reference for hand edits.
 
 Under `land_strategy=gitlab`, everyone who lands on the shared mainline needs
 their own `issue_prefix` (`mugicrew init --prefix <p>`, or `bd rename-prefix <p>`).
@@ -96,40 +103,20 @@ mugicrew opens the MR and never merges or arms auto-merge. You merge it on the
 Forge, or arm auto-merge yourself. The MR's pipeline, not the local nix gate, is
 the land gate (ADR 0150, ADR 0189).
 
-### Graph ref
+### Bead Graph data and project remotes
 
-Under the gitlab strategy your Bead Graph can live on the Forge as a **Graph
-ref**: `refs/mugicrew/graphs/<your GitLab username>`, holding the graph's real
-Dolt data with full history (a clone has the same root commit as your Graph id).
-It sits beside bd's own sync and never touches `sync.remote` or
-`refs/dolt/data`.
+A Bead Graph never goes to a project remote: no mugicrew path pushes it, and
+mugicrew deletes no remote ref (ADR 0300). Back up or sync a graph only to a
+destination you name, with `bd backup` or `bd sync`.
 
-- After each gitlab Landing's write leg (branch pushed, MR recorded) mugicrew
-  pushes it for you, so the ref shows the Landing with its `MR: !<iid>` line. A
-  failed push is logged (`graph.push_failed`) and never holds the Landing; the
-  next Landing or `graph push` catches up. If the ref holds another graph,
-  mugicrew files one non-blocking Task naming both Graph ids.
-- `mugicrew graph push` pushes it by hand. It refuses outside
-  `land_strategy=gitlab`, without a `glab auth login`, and when the ref already
-  holds a different graph (it names both Graph ids and pushes nothing; there is
-  no override). It never deletes a ref on the Forge.
-- `mugicrew graph fetch <username> [<dir>]` clones that person's Graph ref into a
-  disposable **Scratch graph** (default
-  `$XDG_CACHE_HOME/mugicrew/graphs/<username>/`, else `~/.cache`) and prints
-  `BEADS_DIR=<dir>/.beads bd list` to read it. It refuses a dir that is, or sits
-  inside, your Workspace or current `BEADS_DIR`; a dir an earlier fetch made is
-  removed and re-cloned, any other non-empty dir is refused. The scratch bd
-  server runs only during the fetch. The Scratch graph is read-only: bd refuses
-  writes to it, so nothing done there is lost silently (read-only bd does not
-  auto-start a server: run `bd dolt start` there, read, then `bd dolt stop`). A username with no Graph ref is refused,
-  naming the `git ls-remote` below.
-- `mugicrew init` persists `DOLT_REMOTE_INFO_BRANCH=` (empty) in `.beads/.env`, so
-  your bd server does not create the shared `refs/heads/__dolt_remote_info__` branch on the
-  Forge. `graph push` warns when that branch exists.
-- Find whose graphs exist with `git ls-remote <forge> 'refs/mugicrew/graphs/*'`.
-- Size: Dolt splits table files into blobs of at most 50 MiB, under GitLab.com
-  Free's 100 MiB file limit. The ref's history only grows toward the 10 GB repo
-  limit; `bd compact` plus the next push trims it.
+- On a user-named git remote bd creates a `__dolt_remote_info__` marker branch
+  (`refs/heads/__dolt_remote_info__`). Set `DOLT_REMOTE_INFO_BRANCH=` (empty) in a
+  shell export or `.env` line to suppress it. An existing
+  `DOLT_REMOTE_INFO_BRANCH=` line in `.beads/.env` is harmless and may be deleted.
+- Refs an older mugicrew pushed are yours to delete: find them with
+  `git ls-remote <forge> 'refs/mugicrew/graphs/*'`, then
+  `git push <forge> --delete refs/mugicrew/graphs/<you>`. For the old GitHub
+  sync, delete `refs/dolt/data` and, if present, `refs/heads/__dolt_remote_info__`.
 
 ## Latch poll intervals
 
@@ -139,12 +126,15 @@ merge request. Each is a Go duration (default `15m`, minimum `1m`) in the layere
 `config.toml`; an unparseable or under-minimum value logs `config.unusable` and
 uses the default. Both are read once per loop start.
 
+The `[jira] site` they poll is written by `mugicrew init workspace --jira-site <host>`
+(a bare host, empty clears it); hand edits go in `[jira]` of `config.toml`.
+
 ## Agent Profiles
 
 By default every AFK run and HITL session runs `claude` with no `--model`. To
 run a bead kind on a different model or endpoint, declare Agent Profiles in
-the OE's catalog and map kinds to them (root ADR 0093, ADR 0122, ADR 0123,
-ADR 0125). If you map nothing, nothing changes.
+the OE's catalog or in mugicrew's `config.toml` and map kinds to them (root
+ADR 0093, ADR 0122, ADR 0123, ADR 0125, ADR 0309). If you map nothing, nothing changes.
 
 ### The catalog
 
@@ -201,11 +191,61 @@ env     = { ANTHROPIC_BASE_URL   = "https://api.deepseek.com/anthropic",
             CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING  = "1" }
 ```
 
+### Profiles in config.toml
+
+*Catalog* means only the two `agent-profiles.toml` files above. mugicrew's
+`config.toml` layers may also declare `[profiles.<name>]` tables, read by
+mugicrew alone (ADR 0309):
+
+1. the machine-local `<git-common-dir>/mugicrew/config.toml`
+2. the checked-in `.mugicrew/config.toml`
+
+mugicrew reads four files, in this order, and the **first** one that declares a
+name wins it whole, with no field or `env` merge (ADR 0304):
+
+1. mugicrew local `config.toml`
+2. OE local `<git-common-dir>/agent-profiles.toml`
+3. mugicrew shared `.mugicrew/config.toml`
+4. OE shared `$OE_ROOT/agent-profiles.toml`
+
+A profile in the machine-local `config.toml` never leaves the machine. One in
+`.mugicrew/config.toml` travels with that file. A profile other Applications
+should share belongs in the OE catalog.
+
+```toml
+[kind_profiles]
+build = "local-llama"
+
+[profiles.local-llama]
+harness = "claudecode"
+model   = "llama-3-70b"
+env     = { ANTHROPIC_BASE_URL = "http://localhost:4000" }
+```
+
+The bad-table rule differs from the catalog's. A malformed OE file drops its
+whole layer and logs `agent-profiles.unusable`. A bad `[profiles.<name>]` table
+in a `config.toml` (an unknown key, no `harness`, a field of the wrong type)
+affects only its own name, which becomes unrunnable and shadows a same-name
+profile in a lower file. It logs `config.unusable {path, key:
+"profiles.<name>", reason}` on every read, and the file's other settings still
+apply. A launch that resolves to it is refused with `declared unusable:
+<defect> (from <path>)`. A name that no file declares reads `not declared`.
+
+`mugicrew doctor` prints one line per declared name, OK or WARN, naming the file
+whose table won. It adds a WARN for each mapped name that is `not declared`,
+for each bad table that a higher file outranks, and for each dropped OE layer.
+With nothing declared anywhere it prints `agent profiles  none declared`,
+listing the four paths it read.
+
+As with `[context.*]` below, put `[profiles.*]` tables last in `config.toml`: a
+top-level key written after one (such as `concurrency`) is absorbed into that
+table, not read as a setting.
+
 ### Mapping kinds to profiles
 
 The mapping lives in a `[kind_profiles]` table in mugicrew's `config.toml`.
 Keys are routing kinds as the registry spells them, plus `default`. Values
-are catalog profile names:
+are declared profile names:
 
 ```toml
 [kind_profiles]
@@ -235,14 +275,17 @@ changes only by landing a commit. Editing it in the main worktree makes main
 dirty, and every land, anchor and revert is refused until main is clean.
 
 A HITL session records its profile name (tmux `@profile`). Resume looks that
-name up in the current catalog and ignores the mapping, so a resumed
-transcript stays on the profile that wrote it. A catalog edit to that profile
+name up among the declared profiles and ignores the mapping, so a resumed
+transcript stays on the profile that wrote it. An edit to that profile
 applies on the next resume.
 
 `mugicrew stats --by profile` (and the profile group in the TUI Stats tab)
 compares spend and failures per profile. The built-in shows as `(built-in)`.
 
 ### Declaring contexts
+
+`mugicrew init workspace --context <name>=[repo:|path:]<dir>` (repeatable) declares
+them; the TOML below is the reference for hand edits.
 
 A Workspace can declare Contexts, named subtrees a Chart or Checkpoint targets,
 as `[context.<name>]` tables with a `path` key. No table means no contexts. The
@@ -277,6 +320,9 @@ repo = "vendor/lib"
 
 ### Require Initiatives
 
+`mugicrew init workspace --require-initiatives true [--external-ref true]` writes
+these; the TOML below is the reference for hand edits.
+
 Two opt-in settings live in an `[initiatives]` table of the checked-in
 `.mugicrew/config.toml` only (the machine-local layer is ignored, so no machine
 opts out of a shared rule):
@@ -307,8 +353,8 @@ is an infra failure: the Landing stays open and retries (`gate.infra`).
 A mapped profile that can't run is refused. mugicrew **never falls back** to
 another layer, to `default` or to the built-in. A profile can't run when:
 
-- its name is absent from the catalog (no file, an empty catalog, or a
-  dropped layer),
+- its name is not declared in any of the four files (a dropped OE layer
+  declares nothing), or it is declared by a bad `[profiles.<name>]` table,
 - its `harness` is not `claudecode`, or `claude` is not on `PATH`, or
 - an `env` value names an unset `${VAR}`.
 
@@ -321,7 +367,7 @@ What a refusal does depends on the launch:
 - **HITL launch:** the TUI flashes `profile <name>: <reason>`. The bead is
   neither claimed nor paused.
 - **HITL resume:** the TUI flashes the same way and spawns nothing. The
-  session is kept, so resume works once the catalog is fixed.
+  session is kept, so resume works once the profile is fixed.
 
 Each refusal logs `profile.unusable` at Warn
 `{bead, kind, profile, reason, launch=afk|hitl|resume}`. On AFK it also logs

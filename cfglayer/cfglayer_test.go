@@ -1,6 +1,8 @@
 package cfglayer
 
 import (
+	"fmt"
+	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"slices"
 	"strings"
 	"time"
@@ -275,5 +277,99 @@ func TestGitlabPollInterval(t *testing.T) {
 		if got := GitlabPollInterval(workspace(t, tc.shared, tc.local)); got != tc.want {
 			t.Errorf("%s: GitlabPollInterval = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+const pTable = "[profiles.p]\nharness = \"claudecode\"\nmodel = \"%s\"\n"
+
+func writeAt(t *testing.T, path, body string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Profiles merges four files first-wins: mugicrew local, OE local, mugicrew
+// shared, OE shared; the winning table replaces the lower ones whole.
+func TestProfilesPrecedence(t *testing.T) {
+	t.Setenv("OE_ROOT", "")
+	files := []string{".git/mugicrew/config.toml", ".git/agent-profiles.toml", ".mugicrew/config.toml", "agent-profiles.toml"}
+	for n := range files {
+		root := workspace(t, "", "")
+		for i := n; i < len(files); i++ {
+			writeAt(t, filepath.Join(root, files[i]), fmt.Sprintf(pTable, files[i]))
+		}
+		e := Profiles(root).Winners["p"]
+		if e.Profile.Model != files[n] || e.Path != filepath.Join(root, files[n]) || e.Err != nil {
+			t.Errorf("with %v winner = %+v, want %s", files[n:], e, files[n])
+		}
+	}
+}
+
+func TestProfilesDefects(t *testing.T) {
+	t.Setenv("OE_ROOT", "")
+	root := workspace(t, "[profiles.p]\nharness = \"claudecode\"\n[profiles.q]\nharness = \"claudecode\"\nmodle = \"x\"\n", "[profiles.p]\nmodel = \"x\"\n")
+	writeAt(t, filepath.Join(root, "agent-profiles.toml"), "[profiles.q]\nbogus = 1\n")
+	evs := eventlogtest.Capture(t)
+	c := Profiles(root)
+	if e := c.Winners["p"]; e.Err == nil || e.Path != LocalPath(root) || e.Profile.Name != "p" {
+		t.Errorf("p = %+v, want local's bad table shadowing the good shared one", e)
+	}
+	if e := c.Winners["q"]; e.Err == nil || e.Path != SharedPath(root) {
+		t.Errorf("q = %+v, want the shared bad table", e)
+	}
+	var got []string
+	for _, d := range c.Unusable {
+		got = append(got, filepath.Base(d.Path)+":"+d.Name)
+	}
+	if want := []string{"config.toml:p", "config.toml:q", "agent-profiles.toml:"}; !slices.Equal(got, want) {
+		t.Errorf("Unusable = %v, want %v", got, want)
+	}
+	if names := eventlogtest.Names(*evs); !slices.Equal(names, []string{"config.unusable", "config.unusable", "agent-profiles.unusable"}) {
+		t.Fatalf("events = %v", names)
+	}
+	if a := (*evs)[0].Attrs; a["path"] != LocalPath(root) || a["key"] != "profiles.p" || a["reason"] != "no harness" {
+		t.Errorf("first attrs = %v", a)
+	}
+	if a := (*evs)[2].Attrs; a["file"] != filepath.Join(root, "agent-profiles.toml") || a["reason"] == "" {
+		t.Errorf("dropped layer attrs = %v", a)
+	}
+}
+
+func TestProfilesNonTableAndMalformed(t *testing.T) {
+	t.Setenv("OE_ROOT", "")
+	root := workspace(t, "profiles = 3\n", "[profiles.p\n")
+	writeAt(t, filepath.Join(root, "agent-profiles.toml"), "[profiles.o]\nharness = \"claudecode\"\n")
+	evs := eventlogtest.Capture(t)
+	c := Profiles(root)
+	if len(c.Winners) != 1 || c.Winners["o"].Path != filepath.Join(root, "agent-profiles.toml") {
+		t.Errorf("Winners = %+v, want only the OE one", c.Winners)
+	}
+	if len(c.Unusable) != 1 || c.Unusable[0].Name != "" || c.Unusable[0].Path != SharedPath(root) {
+		t.Errorf("Unusable = %+v, want the non-table profiles file", c.Unusable)
+	}
+	if a := (*evs)[0].Attrs; (*evs)[0].Name != "config.unusable" || a["path"] != LocalPath(root) || a["err"] == nil {
+		t.Errorf("malformed event = %+v", (*evs)[0])
+	}
+	if a := (*evs)[1].Attrs; a["path"] != SharedPath(root) || a["key"] != "profiles" {
+		t.Errorf("non-table event = %+v", (*evs)[1])
+	}
+}
+
+// From a linked worktree the local layers resolve to the main repo's common dir.
+func TestProfilesFromLinkedWorktree(t *testing.T) {
+	t.Setenv("OE_ROOT", "")
+	root := t.TempDir()
+	for _, a := range [][]string{{"init", "-q", root}, {"-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"}, {"-C", root, "worktree", "add", "-q", filepath.Join(root, "wt")}} {
+		if out, err := exec.Command("git", a...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", a, err, out)
+		}
+	}
+	writeAt(t, filepath.Join(root, ".git", "mugicrew", "config.toml"), fmt.Sprintf(pTable, "m"))
+	writeAt(t, filepath.Join(root, ".git", "agent-profiles.toml"), "[profiles.oel]\nharness = \"claudecode\"\n")
+	c := Profiles(filepath.Join(root, "wt"))
+	if c.Winners["p"].Path != filepath.Join(root, ".git", "mugicrew", "config.toml") || c.Winners["oel"].Path != filepath.Join(root, ".git", "agent-profiles.toml") {
+		t.Errorf("Winners = %+v", c.Winners)
 	}
 }

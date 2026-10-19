@@ -46,8 +46,8 @@
           # sha256 of the go.sum vendorHash was computed against; they move
           # together, and vendorstamp_test.go fails when go.sum drifts from it.
           proxyVendor = true;
-          vendorHash = "sha256-7KM9hm0tC27/duTAyV/fQKibDholul50SCXM1FhpOVs=";
-          # go.sum sha256: 4ae2c0b4472af3e6c976ce202b0d90f4b9f3d813d8b769cd38e95d0b3f3d0ae8
+          vendorHash = "sha256-jYihV4QNbn7gYmssrBlYWpIvHFOdu8IppIXM7a0x5jE=";
+          # go.sum sha256: a751cb4404729c610ed4a20c5d8380d0d7ce108c8fe72fd6fcc0f59c7daa7a9b
           env.CGO_ENABLED = "0";
           # The git package's tests shell out to a real `git`; without it in the
           # check sandbox `go test ./...` fails and the build never produces a

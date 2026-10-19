@@ -376,12 +376,12 @@ func TestGraphHintsListApplicableVerbs(t *testing.T) {
 	const edit = "e edit"
 	const find = "/ search · s status · f kind · "
 	for _, c := range []struct{ id, want string }{
-		{"sig", "enter launch · b bg · d detail · " + find + "p pause · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
-		{"pz", "enter launch · b bg · d detail · " + find + "p unpause · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
+		{"sig", "enter launch · b bg · d detail · " + find + "p pause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
+		{"pz", "enter launch · b bg · d detail · " + find + "p unpause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
 		{"done", "d detail · " + find + "t transcript · " + edit + " · c checkup"},
-		{"ini", "enter launch · b bg · d detail · " + find + "p pause · t transcript · " + edit + " · +/- prio · c checkup · B add blocker · r retrospective"},
+		{"ini", "enter launch · b bg · d detail · " + find + "p pause · X cancel · t transcript · " + edit + " · +/- prio · c checkup · B add blocker · r retrospective"},
 		{"res", "enter run · d detail · " + find + "p pause · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
-		{"sess", "enter attach · d detail · " + find + "p pause · x drop · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
+		{"sess", "enter attach · d detail · " + find + "p pause · x drop · X withdraw · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
 		{"live", "d detail · " + find + "p pause · x abort · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"dead", "d detail · " + find + "p pause · x recover · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 	} {

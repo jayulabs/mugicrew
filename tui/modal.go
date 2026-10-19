@@ -22,6 +22,7 @@ const (
 	form                       // the Signal form: enter does not submit
 	surgery                    // the New Surgery form: a title and a target list
 	loopMenu                   // the o menu: body and options come from the model's loop
+	xdialog                    // X: the withdraw dialog, a tree of what closes and what it loses
 )
 
 // dialog is one modal. id is the bead pinned when it opened: act works on it, not
@@ -56,6 +57,7 @@ type dialog struct {
 	opts        []key.Binding                            // picker: the goto menu's option keys
 	sg          surgeryForm                              // surgery: the target list and its pick
 	dropAct     func(m Model, d dialog) (Model, tea.Cmd) // picker: discussion-drop key on the highlighted row, behind its own dialog
+	xs          xState                                   // xdialog
 }
 
 func confirmDialog(title string, body []string, id string, act func(Model, dialog) (Model, tea.Cmd)) dialog {
@@ -148,6 +150,8 @@ func (d dialog) bindings() []key.Binding {
 			return []key.Binding{keyDown, keyUp, keyPick, keyDiscussionDrop, keyDiscussionsClose}
 		}
 		return []key.Binding{keyDown, keyUp, keyPick, keyCancel}
+	case xdialog:
+		return d.xBindings()
 	case loopMenu:
 		return []key.Binding{keyCancel} // the options come from loopOpts (modalView's hint)
 	case surgery:
@@ -201,6 +205,8 @@ func (m Model) modalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return act(m, d)
 	}
 	switch d.kind {
+	case xdialog:
+		return m.xKey(d, k)
 	case form:
 		return m.formKey(d, k)
 	case loopMenu:
@@ -271,6 +277,9 @@ func (m Model) modalView() string {
 	d := m.modals[len(m.modals)-1]
 	if d.kind == surgery {
 		return m.surgeryView(d)
+	}
+	if d.kind == xdialog {
+		return m.xView(d)
 	}
 	styleW := m.dialogWidth() - 2 // the outer width less the border; styleW-2 is the inner width
 	if d.kind == form {

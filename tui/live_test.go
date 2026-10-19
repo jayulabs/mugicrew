@@ -781,34 +781,15 @@ func withIDs(from []bd.Bead, want []string) []bd.Bead {
 	return out
 }
 
-// A newest graph.push_failed in the digest shows the sticky warning; a later graph.push hides it.
-func TestHeaderGraphPushFailedIsStickyUntilNewerPush(t *testing.T) {
-	ev := func(msg string, n int) eventlog.Event {
-		return eventlog.Event{Msg: msg, Time: time.Unix(int64(n), 0), Raw: map[string]any{}}
+// An old log whose newest graph.push* line is graph.push_failed shows no warning and drops out of the digest.
+func TestHeaderIgnoresOldGraphPushFailed(t *testing.T) {
+	ev := eventlog.Event{Msg: "graph.push_failed", Time: time.Unix(1, 0), Raw: map[string]any{}}
+	if inDigest(ev) {
+		t.Error("graph.push_failed must not be in the digest")
 	}
-	has := func(m Model) bool { return strings.Contains(header(m), "graph push failed: run mugicrew graph push") }
 	m := sized(t, 160, 30)
-	if has(m) {
-		t.Fatal("no graph.push* event: want no warning")
-	}
-	m.digest = []eventlog.Event{ev("graph.push", 1), ev("graph.push_failed", 2)}
-	if !has(m) {
-		t.Errorf("newest graph.push_failed: header %q lacks the warning", header(m))
-	}
-	m.digest = append(m.digest, ev("land.done", 3))
-	if !has(m) {
-		t.Error("a later non-push event must not clear it")
-	}
-	m.digest = append(m.digest, ev("graph.push", 4))
-	if has(m) {
-		t.Error("a later graph.push must hide it")
-	}
-}
-
-func TestInDigestKeepsGraphPushEvents(t *testing.T) {
-	for _, msg := range []string{"graph.push", "graph.push_failed"} {
-		if !inDigest(eventlog.Event{Msg: msg}) {
-			t.Errorf("%s not in digest: a TUI restart would lose the warning", msg)
-		}
+	m.digest = []eventlog.Event{ev}
+	if strings.Contains(header(m), "graph push failed") {
+		t.Errorf("header %q warns of an old graph.push_failed", header(m))
 	}
 }

@@ -255,3 +255,50 @@ func TestIdeateShadeLightsLooseAndBacklogHeaders(t *testing.T) {
 		}
 	}
 }
+
+// A member nested in a parked Initiative shades its group header and the Backlog header.
+func TestIdeateShadeNestedBacklogMember(t *testing.T) {
+	m := ideaModelFresh(t, 100, 30, []bd.Bead{ini("p", "open", "Park", 3), sig("m1", "open", 1, "p")}, nil)
+	m = treesOpen(m)
+	ide := m.tabs[tabIdeate].(ideaTab)
+	ide.flip[backlogKey], ide.flip["i:p"] = true, true
+	m.tabs[tabIdeate] = ide
+	shaded := func(sel, k string) bool {
+		m := ideaAt(t, m, sel)
+		tab := m.tabAt(tabIdeate).(ideaTab)
+		rows := tab.rows()
+		i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == k })
+		if i < 0 {
+			t.Fatalf("no row %q: %v", k, shape(rows))
+		}
+		return tab.shaded(tab.frame(), tab.selIndex(rows))[i]
+	}
+	if !shaded("m1", "i:p") || !shaded("m1", backlogKey) {
+		t.Errorf("nested member should shade its group and the Backlog header")
+	}
+	if shaded(backlogKey, "m1") || shaded(backlogKey, "i:p") {
+		t.Errorf("selected Backlog header shaded its members")
+	}
+}
+
+// A working P3 cut session lists in Live with no hint; its header twin is in Initiatives.
+func TestIdeateLiveParkedInitiativeNoHint(t *testing.T) {
+	beads := []bd.Bead{ini("pi", "open", "Parked", 3), sig("m", "open", 1, "pi")}
+	m := ideaModel(t, 100, 30, beads, map[string]session.Info{"pi": {State: session.Alive}})
+	rows := m.tabAt(tabIdeate).(ideaTab).rows()
+	i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == "live:pi" })
+	if i < 0 || rows[i].hint != "" {
+		t.Fatalf("live row: %v", shape(rows))
+	}
+	ti, hi := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == treeKey }), slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == "i:pi" })
+	bi := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == backlogKey })
+	if ti < 0 || hi < ti || bi >= 0 && hi > bi {
+		t.Errorf("header twin not in Initiatives: %v", shape(rows))
+	}
+	// a Live P3 Signal of a P0–P2 Initiative keeps its hint
+	m = ideaModel(t, 100, 30, []bd.Bead{ini("ini", "open", "Ship", 1), sig("b", "open", 4, "ini")}, map[string]session.Info{"b": {State: session.Alive}})
+	rows = m.tabAt(tabIdeate).(ideaTab).rows()
+	if i := slices.IndexFunc(rows, func(r ideaRow) bool { return r.key == "live:b" }); i < 0 || rows[i].hint != "Ship" {
+		t.Errorf("hint lost: %v", shape(rows))
+	}
+}

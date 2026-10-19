@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/jira"
@@ -74,6 +74,7 @@ func doctorRun(t *testing.T) (string, int) {
 
 func TestDoctorAllHealthy(t *testing.T) {
 	dir := doctorWS(t)
+	writeCfg(t, filepath.Join(dir, ".mugicrew", "config.toml"), "land_strategy = \"local\"\n[initiatives]\nrequired = false\n")
 	out, code := doctorRun(t)
 	if code != 0 || strings.Contains(out, "FAIL") || strings.Contains(out, "warn") || !strings.Contains(out, "ok  bead graph: issue prefix mc · in-tree · "+dir) {
 		t.Errorf("code %d out %q", code, out)
@@ -221,7 +222,7 @@ func TestDoctorUnparsableLayersFailNamingPaths(t *testing.T) {
 func TestDoctorMissingLayersOK(t *testing.T) {
 	doctorWS(t)
 	out, code := doctorRun(t)
-	if code != 0 || !strings.Contains(out, "ok  config shared: not present") || !strings.Contains(out, "ok  config local: not present") || !strings.Contains(out, "ok  contexts: none declared") || strings.Contains(out, "nix") {
+	if code != 0 || !strings.Contains(out, "ok  config shared: not present") || !strings.Contains(out, "ok  config local: not present") || !strings.Contains(out, "ok  contexts: none declared") || strings.Contains(out, "nix:") {
 		t.Errorf("code %d out %q", code, out)
 	}
 }
@@ -276,7 +277,7 @@ repo = "child"
 func TestDoctorGateNeedsNix(t *testing.T) {
 	dir := doctorWS(t, "nix")
 	out, code := doctorRun(t)
-	if code != 0 || strings.Contains(out, "nix") {
+	if code != 0 || strings.Contains(out, "nix:") {
 		t.Errorf("no gate: code %d out %q", code, out)
 	}
 	cfg := filepath.Join(dir, ".mugicrew", "config.toml")
@@ -298,7 +299,6 @@ func TestDoctorGateNeedsNix(t *testing.T) {
 }
 
 func TestDoctorBdStore(t *testing.T) {
-	const hint = `the TUI and loop need server mode: on a fresh clone run mugicrew init; else see README "Bd store mode" to migrate`
 	ctx := func(mode string) func(string, ...string) (string, error) {
 		return func(_ string, args ...string) (string, error) {
 			if strings.Join(args, " ") != "context --json" {
@@ -308,22 +308,23 @@ func TestDoctorBdStore(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name         string
-		bd           func(string, ...string) (string, error)
-		concurrency  string
-		noRepo       bool
-		st           status
-		detail, hint string
+		name        string
+		bd          func(string, ...string) (string, error)
+		concurrency string
+		noRepo      bool
+		st          status
+		detail      string
+		wantFix     bool
 	}{
-		{"server", ctx(`{"dolt_mode":"server"}`), "", false, stOK, "server", ""},
-		{"embedded pool 1", ctx(`{"dolt_mode":"embedded"}`), "concurrency = 1\n", false, stFail, "embedded, AFK pool 1", hint},
-		{"embedded default pool", ctx(`{"dolt_mode":"embedded"}`), "", false, stFail, "embedded, AFK pool 3", hint},
-		{"embedded explicit pool", ctx(`{"dolt_mode":"embedded"}`), "concurrency = 5\n", false, stFail, "embedded, AFK pool 5", hint},
-		{"bd error", func(string, ...string) (string, error) { return "", errors.New("exit 1") }, "", false, stSkip, "mode unknown", ""},
-		{"unreadable json", ctx(`nope`), "", false, stSkip, "mode unknown", ""},
-		{"missing dolt_mode", ctx(`{}`), "", false, stSkip, "mode unknown", ""},
-		{"unknown dolt_mode", ctx(`{"dolt_mode":"sqlite"}`), "", false, stSkip, "mode unknown", ""},
-		{"no git repo", ctx(`{"dolt_mode":"server"}`), "", true, stSkip, "no git repo", ""},
+		{"server", ctx(`{"dolt_mode":"server"}`), "", false, stOK, "server", false},
+		{"embedded pool 1", ctx(`{"dolt_mode":"embedded"}`), "concurrency = 1\n", false, stFail, "embedded, AFK pool 1", true},
+		{"embedded default pool", ctx(`{"dolt_mode":"embedded"}`), "", false, stFail, "embedded, AFK pool 3", true},
+		{"embedded explicit pool", ctx(`{"dolt_mode":"embedded"}`), "concurrency = 5\n", false, stFail, "embedded, AFK pool 5", true},
+		{"bd error", func(string, ...string) (string, error) { return "", errors.New("exit 1") }, "", false, stSkip, "mode unknown", false},
+		{"unreadable json", ctx(`nope`), "", false, stSkip, "mode unknown", false},
+		{"missing dolt_mode", ctx(`{}`), "", false, stSkip, "mode unknown", false},
+		{"unknown dolt_mode", ctx(`{"dolt_mode":"sqlite"}`), "", false, stSkip, "mode unknown", false},
+		{"no git repo", ctx(`{"dolt_mode":"server"}`), "", true, stSkip, "no git repo", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := doctorWS(t)
@@ -336,9 +337,15 @@ func TestDoctorBdStore(t *testing.T) {
 				root = ""
 			}
 			got := checkBdStore(root)
-			want := []result{{tc.st, "bd store", tc.detail, tc.hint}}
-			if len(got) != 1 || got[0] != want[0] {
-				t.Errorf("got %v, want %v", got, want)
+			if len(got) != 1 || plainStyle.rollCall(got[0]) != fmt.Sprintf("%s  bd store: %s", tc.st, tc.detail) {
+				t.Fatalf("got %v", got)
+			}
+			item := plainStyle.report(got)
+			if has := strings.Contains(item, "To fix"); has != tc.wantFix {
+				t.Errorf("To fix = %v, want %v:\n%s", has, tc.wantFix, item)
+			}
+			if tc.wantFix && (!strings.Contains(item, "• on a fresh clone run `mugicrew init`") || !strings.Contains(item, `• otherwise see README "Bd store mode" to migrate`)) {
+				t.Errorf("fix steps missing:\n%s", item)
 			}
 		})
 	}
@@ -413,8 +420,8 @@ func TestDoctorBeadGraphSource(t *testing.T) {
 				return "mc", nil
 			}
 			got := checkBeadGraph(dir)
-			want := result{stOK, "bead graph", "issue prefix mc · " + tc.source + " · " + path, ""}
-			if len(got) != 1 || got[0] != want {
+			want := "ok  bead graph: issue prefix mc · " + tc.source + " · " + path
+			if len(got) != 1 || plainStyle.rollCall(got[0]) != want {
 				t.Errorf("got %v, want %v", got, want)
 			}
 		})
@@ -458,9 +465,11 @@ func TestDoctorBeadGraphUnresolvable(t *testing.T) {
 			dir := doctorWS(t)
 			doctorBD = bd
 			got := checkBeadGraph(dir)
-			want := result{stFail, "bead graph", "not initialized or not resolvable", "run mugicrew init"}
-			if len(got) != 1 || got[0] != want {
-				t.Errorf("got %v, want %v", got, want)
+			out := plainStyle.report(got)
+			for _, want := range []string{"FAIL  bead graph: not initialized or not resolvable", "1. FAIL bead graph", "Manual — do it yourself:", "• run `mugicrew init`"} {
+				if len(got) != 1 || !strings.Contains(out, want) {
+					t.Errorf("missing %q in %q", want, out)
+				}
 			}
 		})
 	}
@@ -495,31 +504,6 @@ func TestDoctorSequences(t *testing.T) {
 	}
 }
 
-func TestDoctorDoltRemoteInfo(t *testing.T) {
-	oStrat, oHas := git.LandStrategyName, doctorForgeHasRef
-	t.Cleanup(func() { git.LandStrategyName, doctorForgeHasRef = oStrat, oHas })
-	for _, tc := range []struct {
-		name, strategy string
-		has            bool
-		want, not      string
-	}{
-		{"present", git.LandStrategyGitlab, true, "warn  graph ref: refs/heads/__dolt_remote_info__ on the Forge — set DOLT_REMOTE_INFO_BRANCH= in .beads/.env (run mugicrew init)", ""},
-		{"absent", git.LandStrategyGitlab, false, "ok  graph ref:", "warn"},
-		{"local", git.LandStrategyLocal, true, "", "graph ref"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			doctorWS(t)
-			git.LandStrategyName = func() (string, error) { return tc.strategy, nil }
-			stubGitlab(t, nil, nil, nil)
-			doctorForgeHasRef = func(ref string) (bool, error) { return tc.has && ref == bd.DoltInfoRef, nil }
-			out, code := doctorRun(t)
-			if code != 0 || !strings.Contains(out, tc.want) || (tc.not != "" && strings.Contains(out, tc.not)) {
-				t.Errorf("code %d out %q", code, out)
-			}
-		})
-	}
-}
-
 func TestDoctorBrowserWarnsNeverFails(t *testing.T) {
 	for _, c := range []struct {
 		env     string
@@ -539,7 +523,7 @@ func TestDoctorBrowserWarnsNeverFails(t *testing.T) {
 		if code != 0 || !strings.Contains(out, c.want) || strings.Contains(out, "FAIL") {
 			t.Errorf("env %q: code %d out %q", c.env, code, out)
 		}
-		if strings.HasPrefix(c.want, "warn") && !strings.Contains(out, "prototype hand-over prints the target only; set BROWSER") {
+		if strings.HasPrefix(c.want, "warn") && (!strings.Contains(out, "• set BROWSER") || !strings.Contains(out, "prototype hand-over prints the target only")) {
 			t.Errorf("env %q: no hint in %q", c.env, out)
 		}
 	}
@@ -547,6 +531,7 @@ func TestDoctorBrowserWarnsNeverFails(t *testing.T) {
 
 func TestDoctorTrackedBeads(t *testing.T) {
 	dir := doctorWS(t)
+	writeCfg(t, filepath.Join(dir, ".mugicrew", "config.toml"), "land_strategy = \"local\"\n[initiatives]\nrequired = false\n")
 	out, code := doctorRun(t)
 	if code != 0 || !strings.Contains(out, "ok  beads untracked") {
 		t.Errorf("untracked: code %d out %q", code, out)
@@ -561,13 +546,29 @@ func TestDoctorTrackedBeads(t *testing.T) {
 		t.Fatalf("%v %s", err, o)
 	}
 	out, code = doctorRun(t)
-	for _, want := range []string{"FAIL  beads tracked", ".beads/metadata.json", trackedBeadsFix} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in %q", want, out)
+	// the roll-call line, then the five Manual bullets in order, no More: line
+	at := 0
+	for _, want := range []string{"FAIL  beads tracked: .beads/metadata.json", "1. FAIL beads tracked", "Expected: git's index tracks no path under .beads/.",
+		"• on a branch run `git rm -r --cached .beads`", "• merge it through the Workspace's usual MR or land flow", "• re-run `mugicrew init`",
+		"• every other clone re-runs `mugicrew init` after it pulls", "• optional, in the same MR: the bd block"} {
+		i := strings.Index(out[at:], want)
+		if i < 0 {
+			t.Fatalf("missing or out of order %q in %q", want, out)
 		}
+		at += i + len(want)
+	}
+	if got := strings.Count(out[strings.Index(out, "1. FAIL beads tracked"):], "•"); got != 5 {
+		t.Errorf("%d bullets, want 5 in %q", got, out)
+	}
+	if strings.Contains(out, "More:") {
+		t.Errorf("beads tracked has no More: line: %q", out)
 	}
 	if code != 1 {
 		t.Errorf("code %d", code)
+	}
+	// init prints this very block (ADR 0244)
+	if item := plainStyle.toFixItem(1, trackedBeadsResult([]string{".beads/metadata.json"})); !strings.Contains(out, item) {
+		t.Errorf("doctor lacks the shared item %q in %q", item, out)
 	}
 }
 
@@ -597,14 +598,14 @@ func TestDoctorGitlabGroup(t *testing.T) {
 		{Project: forge.Project{Host: "gl.example.com", ID: "ns/p"}},
 		{Context: "c", Project: forge.Project{Host: "gl.example.com", ID: "ns/c"}},
 	}
-	refuse := map[string]error{"ns/c": &forge.ProjectRefusal{Field: "squash_option", Value: "default_off", Fix: "set Always"}}
+	refuse := map[string]error{"ns/c": &forge.ProjectRefusal{Field: "squash_option", Value: "default_off", Fix: "set Squash commits to Require"}}
 	for _, tc := range []struct {
 		name, strategy string
 		authErr        error
 		want, not      []string
 	}{
-		{"ok", git.LandStrategyGitlab, nil, []string{"ok  glab user: ana", "ok  squash settings ns/p: ok", "ok  git credential: credential available", "FAIL  squash settings ns/c (context c): forge: project squash_option is \"default_off\""}, nil},
-		{"auth", git.LandStrategyGitlab, errors.New("no login"), []string{"FAIL  glab user: not authenticated for gl.example.com: no login — run one interactive web glab auth login (docs/install.md"}, []string{"squash settings"}},
+		{"ok", git.LandStrategyGitlab, nil, []string{"ok  glab user: ana", "ok  squash settings ns/p: ok", "ok  git credential: credential available", "FAIL  squash settings ns/c (context c): project squash_option is \"default_off\"", "• set Squash commits to Require"}, []string{"README", "forge: project"}},
+		{"auth", git.LandStrategyGitlab, errors.New("no login"), []string{"FAIL  glab user: not authenticated for gl.example.com: no login", "• run one interactive web `glab auth login`", "More: docs/install.md#gitlab"}, []string{"squash settings"}},
 		{"local", git.LandStrategyLocal, nil, nil, []string{"glab user", "squash settings", "git credential"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -651,12 +652,12 @@ func TestDoctorJiraSite(t *testing.T) {
 	for _, c := range []struct {
 		name, cfg, active string
 		err               error
-		want              string
+		want              []string
 	}{
-		{"match", "acme.atlassian.net", "acme.atlassian.net", nil, "ok  acli site: acme.atlassian.net"},
-		{"mismatch", "acme.atlassian.net", "other.atlassian.net", nil, "FAIL  acli site: acli is on other.atlassian.net, [jira] site is acme.atlassian.net — acli jira auth switch --site acme.atlassian.net"},
-		{"not logged in", "acme.atlassian.net", "", jira.ErrNotLoggedIn, "FAIL  acli site: not logged in — acli jira auth login"},
-		{"malformed", "https://acme.atlassian.net", "", nil, "FAIL  jira site: https://acme.atlassian.net"},
+		{"match", "acme.atlassian.net", "acme.atlassian.net", nil, []string{"ok  acli site: acme.atlassian.net"}},
+		{"mismatch", "acme.atlassian.net", "other.atlassian.net", nil, []string{"FAIL  acli site: acli is on other.atlassian.net, [jira] site is acme.atlassian.net", "Expected: acli's active site is [jira] site (acme.atlassian.net).", "Safe — doctor fix runs:", "acli jira auth switch --site acme.atlassian.net", "More: docs/install.md#acli"}},
+		{"not logged in", "acme.atlassian.net", "", jira.ErrNotLoggedIn, []string{"FAIL  acli site: not logged in", "• run `acli jira auth login`", "More: docs/install.md#jira"}},
+		{"malformed", "https://acme.atlassian.net", "", nil, []string{"FAIL  jira site: https://acme.atlassian.net", "Expected: [jira] site is a bare host", "• set `[jira] site` in"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := doctorWS(t)
@@ -665,8 +666,10 @@ func TestDoctorJiraSite(t *testing.T) {
 			doctorACLISite = func() (string, error) { return c.active, c.err }
 			writeCfg(t, filepath.Join(dir, ".mugicrew", "config.toml"), "[jira]\nsite = \""+c.cfg+"\"\n")
 			out, _ := doctorRun(t)
-			if !strings.Contains(out, c.want) {
-				t.Errorf("out %q", out)
+			for _, w := range c.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("missing %q in %q", w, out)
+				}
 			}
 		})
 	}
@@ -707,7 +710,8 @@ func TestDoctorToolVersions(t *testing.T) {
 		{"bd", "bd version 1.3.0 (dev)", "ok  bd: 1.3.0"},
 		{"bd", "bd version 1.2.1 (dev)", "FAIL  bd: 1.2.1 is below 1.3.0"},
 		{"tmux", "tmux 3.7c", "ok  tmux: 3.7c"},
-		{"tmux", "tmux 3.4", "FAIL  tmux: 3.4 is below 3.5"},
+		{"tmux", "tmux 3.4", "warn  tmux:"},
+		{"tmux", "tmux 3.3a", "FAIL  tmux: 3.3a is below 3.4"},
 		{"tmux", "tmux 3.5a", "ok  tmux: 3.5a"},
 		{"claude", "2.1.301 (Claude Code)", "ok  claude: 2.1.301"},
 		{"claude", "2.1.77 (Claude Code)", "FAIL  claude: 2.1.77 is below 2.1.78"},
@@ -736,13 +740,29 @@ func TestDoctorToolVersions(t *testing.T) {
 	}
 }
 
+func TestDoctorTmuxBelow35WarnHint(t *testing.T) {
+	doctorWS(t)
+	old := doctorToolVersion
+	t.Cleanup(func() { doctorToolVersion = old })
+	doctorToolVersion = func(bin string, _ ...string) (string, error) {
+		if bin == "tmux" {
+			return "tmux 3.4", nil
+		}
+		return old(bin)
+	}
+	out, code := doctorRun(t)
+	if code != 0 || !strings.Contains(out, "below 3.5") || !strings.Contains(out, "F1 menu ignores the mouse") || !strings.Contains(out, "build tmux from source") || !strings.Contains(out, "newer distro release") {
+		t.Errorf("code %d out %q", code, out)
+	}
+}
+
 func TestDoctorAbsentToolHintHasFloor(t *testing.T) {
-	for goos, hint := range map[string]string{"linux": "distro package may be older than 3.5", "darwin": "brew install tmux"} {
+	for goos, hint := range map[string]string{"linux": "mouse-picking in the F1 menu needs a source build", "darwin": "brew install tmux"} {
 		t.Run(goos, func(t *testing.T) {
 			doctorWS(t, "tmux", "dolt")
 			doctorOS = goos
 			out, code := doctorRun(t)
-			if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH — need ≥ 3.5: install ") || !strings.Contains(out, hint) || !strings.Contains(out, "FAIL  dolt: not on PATH — install pinned 2.2.0 tarball, see docs/install.md#dolt") {
+			if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH") || !strings.Contains(out, "• need ≥ 3.4: install ") || !strings.Contains(out, hint) || !strings.Contains(out, "FAIL  dolt: not on PATH") || !strings.Contains(out, "• install pinned 2.2.0 tarball, see docs/install.md#dolt") {
 				t.Errorf("code %d out %q", code, out)
 			}
 		})
@@ -789,16 +809,84 @@ func TestDoctorBinaryLine(t *testing.T) {
 	}
 }
 
+func TestDoctorGitCredentialSafeGating(t *testing.T) {
+	oStrat := git.LandStrategyName
+	t.Cleanup(func() { git.LandStrategyName = oStrat })
+	const safe = "Safe — doctor fix runs:"
+	for _, tc := range []struct {
+		name, env string
+		authErr   error
+		safe      bool
+	}{
+		{"no token", "", nil, true},
+		{"GITLAB_TOKEN", "GITLAB_TOKEN", nil, false},
+		{"GITLAB_ACCESS_TOKEN", "GITLAB_ACCESS_TOKEN", nil, false},
+		{"OAUTH_TOKEN", "OAUTH_TOKEN", nil, false},
+		{"user row fails", "", errors.New("no login"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doctorWS(t)
+			for _, v := range []string{"GITLAB_TOKEN", "GITLAB_ACCESS_TOKEN", "OAUTH_TOKEN"} {
+				t.Setenv(v, "")
+			}
+			if tc.env != "" {
+				t.Setenv(tc.env, "x")
+			}
+			git.LandStrategyName = func() (string, error) { return git.LandStrategyGitlab, nil }
+			stubGitlab(t, nil, tc.authErr, nil)
+			doctorCredentialFill = func(string, string, []string) error { return errors.New("no user") }
+			out, _ := doctorRun(t)
+			if got := strings.Contains(out, safe); got != tc.safe {
+				t.Errorf("safe=%v want %v in %q", got, tc.safe, out)
+			}
+			if tc.safe && !strings.Contains(out, "glab config set user ana --host gl.example.com") {
+				t.Errorf("missing safe command in %q", out)
+			}
+			if !tc.safe && !strings.Contains(out, "Manual —") {
+				t.Errorf("want Manual in %q", out)
+			}
+			if !strings.Contains(out, "More: docs/install.md#gitlab") {
+				t.Errorf("More missing in %q", out)
+			}
+			if !tc.safe && !strings.Contains(out, "• set glab's user, or re-run `glab auth login`") {
+				t.Errorf("manual steps missing in %q", out)
+			}
+		})
+	}
+}
+
+func TestDoctorSquashSettingsDetailAndSteps(t *testing.T) {
+	oStrat := git.LandStrategyName
+	t.Cleanup(func() { git.LandStrategyName = oStrat })
+	for _, tc := range []struct {
+		err  error
+		step string
+	}{
+		{&forge.ProjectRefusal{Field: "squash_option", Value: "default_off", Fix: "set Squash commits to Require"}, "• set Squash commits to Require"},
+		{&forge.ProjectRefusal{Field: "squash_commit_template", Value: "%{title}", Fix: "make it ..."}, "• put %{description} on its own line of the template"},
+	} {
+		doctorWS(t)
+		git.LandStrategyName = func() (string, error) { return git.LandStrategyGitlab, nil }
+		stubGitlab(t, nil, nil, map[string]error{"ns/p": tc.err})
+		out, _ := doctorRun(t)
+		if !strings.Contains(out, tc.step) {
+			t.Errorf("missing %q in %q", tc.step, out)
+		}
+		if strings.Contains(out, "make it") || strings.Contains(out, "README") || strings.Contains(out, "set Squash commits to Require (") {
+			t.Errorf("detail carries the fix: %q", out)
+		}
+	}
+}
+
 func TestDoctorGitCredential(t *testing.T) {
 	oStrat := git.LandStrategyName
 	t.Cleanup(func() { git.LandStrategyName = oStrat })
-	hint := "glab cannot answer git for gl.example.com: set glab's user (glab config set user <name> --host gl.example.com) or re-run glab auth login (docs/install.md, GitLab section)"
 	for _, tc := range []struct {
 		name, want string
 		err        error
 	}{
 		{"ok", "ok  git credential: credential available", nil},
-		{"fail", "FAIL  git credential: git credential fill: exit status 128: no user — " + hint, errors.New("git credential fill: exit status 128: no user")},
+		{"fail", "FAIL  git credential: git credential fill: exit status 128: no user", errors.New("git credential fill: exit status 128: no user")},
 		{"skip", "skip  git credential: ssh remote", git.ErrCredentialNA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -819,6 +907,13 @@ func TestDoctorGitCredential(t *testing.T) {
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("missing %q in %q", tc.want, out)
 			}
+			if tc.err != nil && !errors.Is(tc.err, git.ErrCredentialNA) {
+				for _, w := range []string{"Safe — doctor fix runs:", "glab config set user ana --host gl.example.com", "More: docs/install.md#gitlab", "1 safe fix: run mugicrew doctor fix"} {
+					if !strings.Contains(out, w) {
+						t.Errorf("missing %q in %q", w, out)
+					}
+				}
+			}
 			if strings.Contains(out, "graph push credential") {
 				t.Errorf("graph push credential line remains: %q", out)
 			}
@@ -829,5 +924,115 @@ func TestDoctorGitCredential(t *testing.T) {
 				t.Errorf("fill ran in %q with env %v", dir, env)
 			}
 		})
+	}
+}
+
+// plainStyle is the piped-output style: no colour, 80 columns.
+var plainStyle = style{width: plainWidth}
+
+// toFixBlock is the To-fix item numbered 1 in out, up to its blank line.
+func toFixBlock(out string) string {
+	i := strings.Index(out, "1. FAIL beads tracked")
+	if i < 0 {
+		return ""
+	}
+	blk := out[i:]
+	if j := strings.Index(blk, "\n\n"); j >= 0 {
+		blk = blk[:j]
+	}
+	return strings.TrimRight(blk, "\n")
+}
+
+func TestDoctorAndInitPrintTheSameTrackedBeadsToFix(t *testing.T) {
+	dir := doctorWS(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := exec.Command("git", "-C", dir, "add", "-f", ".beads/metadata.json").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, o)
+	}
+	dout, _ := doctorRun(t)
+	var b bytes.Buffer
+	if code := runInit([]string{"--prefix", "ab"}, strings.NewReader(""), &b); code != 1 {
+		t.Fatalf("init code %d", code)
+	}
+	d, i := toFixBlock(dout), toFixBlock(b.String())
+	if d == "" || d != i {
+		t.Errorf("To-fix blocks differ:\ndoctor: %q\ninit:   %q", d, i)
+	}
+}
+
+func TestDoctorProfileRollCall(t *testing.T) {
+	dir := doctorWS(t)
+	t.Setenv("OE_ROOT", "")
+	local := filepath.Join(dir, ".git", "mugicrew", "config.toml")
+	shared := filepath.Join(dir, ".mugicrew", "config.toml")
+	writeCfg(t, local, "[kind_profiles]\nbuild = \"ghost\"\n[profiles.bad]\nharness = 3\n")
+	writeCfg(t, shared, "[profiles.good]\nharness = \"claudecode\"\n[profiles.bad]\nharness = \"claudecode\"\n[profiles.nope]\nharness = \"nope\"\n")
+	writeCfg(t, filepath.Join(dir, "agent-profiles.toml"), "bogus = 1\n")
+	out, code := doctorRun(t)
+	for _, want := range []string{
+		"ok  agent profile good: from .mugicrew/config.toml",
+		"warn  agent profile nope: unsupported harness nope (from .mugicrew/config.toml)",
+		"warn  agent profile ghost: not declared (no file)",
+		"warn  agent profile bad:",
+		"(from .git/mugicrew/config.toml)",
+		"warn  agent profiles:",
+		"(from agent-profiles.toml)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if code != 0 {
+		t.Errorf("code %d", code)
+	}
+	if strings.Contains(out, "agent profiles: none declared") {
+		t.Errorf("out %q", out)
+	}
+}
+
+func TestDoctorProfileNoneDeclared(t *testing.T) {
+	doctorWS(t)
+	t.Setenv("OE_ROOT", "")
+	out, _ := doctorRun(t)
+	want := "ok  agent profiles: none declared (read .git/mugicrew/config.toml, .git/agent-profiles.toml, .mugicrew/config.toml, agent-profiles.toml)"
+	if !strings.Contains(out, want) {
+		t.Errorf("want %q in %q", want, out)
+	}
+}
+
+func TestDoctorProfileReasonMatchesLaunch(t *testing.T) {
+	dir := doctorWS(t)
+	t.Setenv("OE_ROOT", "")
+	writeCfg(t, filepath.Join(dir, ".mugicrew", "config.toml"), "[profiles.p]\nharness = \"nope\"\n")
+	_, err := resolveRecorded(dir, "p")
+	out, _ := doctorRun(t)
+	if err == nil || !strings.Contains(out, "warn  agent profile p: "+err.Error()) {
+		t.Errorf("err %v out %q", err, out)
+	}
+}
+
+func TestDoctorWorkspaceSetUpRow(t *testing.T) {
+	dir := doctorWS(t)
+	shared := filepath.Join(dir, ".mugicrew", "config.toml")
+	out, code := doctorRun(t)
+	if code != 0 || !strings.Contains(out, "warn  workspace setup") || !strings.Contains(out, "mugicrew init workspace") || !strings.Contains(out, "docs/install.md#first-human-in-a-workspace") {
+		t.Errorf("missing: code %d out %q", code, out)
+	}
+	writeCfg(t, shared, "land_strategy = \"local\"\n[initiatives]\nrequired = false\n")
+	if out, code = doctorRun(t); code != 0 || strings.Contains(out, "warn  workspace setup") || !strings.Contains(out, "ok  workspace setup") {
+		t.Errorf("set: code %d out %q", code, out)
+	}
+	writeCfg(t, shared, "land_strategy = \"local\"\n")
+	if out, code = doctorRun(t); code != 0 || !strings.Contains(out, "warn  workspace setup") {
+		t.Errorf("partial: code %d out %q", code, out)
+	}
+	writeCfg(t, shared, "= bad")
+	if out, _ = doctorRun(t); !strings.Contains(out, "FAIL  config shared") || strings.Contains(out, "warn  workspace setup") || !strings.Contains(out, "skip  workspace setup") {
+		t.Errorf("unusable: out %q", out)
 	}
 }

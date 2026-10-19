@@ -22,7 +22,7 @@ var statsLog = eventlog.Resolve
 // tests inject a fixture graph.
 var statsLineage = bd.LoadLineage
 
-const statsUsage = "usage: mugicrew stats [<bead>] [--spine] [--since <dur|date>] [--by crewmate|model|profile|kind|day] [--kind <kind>] [--json]"
+const statsUsage = "usage: mugicrew stats [<bead>] [--spine] [--since <dur|date>] [--by crewmate|model|profile|kind|day] [--kind <kind>] [--mode afk|hitl] [--json]"
 
 // exitCode is an error main exits with code (default 1): 2 is --spine without a
 // bead or a bead that is not on a spine; other usage errors exit 1.
@@ -34,7 +34,7 @@ type exitCode struct {
 func (e exitCode) Unwrap() error { return e.error }
 
 // runStats is `mugicrew stats [<bead>] [--spine] [--since <dur|date>] [--by
-// crewmate|model|profile|kind|day] [--kind <kind>] [--json]`: Session cost and
+// crewmate|model|profile|kind|day] [--kind <kind>] [--mode afk|hitl] [--json]`: Session cost and
 // Agent time per bead (or per --by key), optionally of one bead kind, summed
 // from the event log's session end events (ADR 0061). A bead scopes to its whole
 // parent subtree, closed beads included, read from bd (ADR 0286), so a Chart counts
@@ -42,7 +42,7 @@ func (e exitCode) Unwrap() error { return e.error }
 // stage in spine order with a KIND column (ADR 0283, ADR 0284). No bead reads no bd.
 // Observe-only (ADR 0033): it reads the retained log and writes nothing.
 func runStats(argv []string, w io.Writer) error {
-	var bead, by, kind string
+	var bead, by, kind, mode string
 	var since time.Time
 	asJSON, spine := false, false
 	for i := 0; i < len(argv); i++ {
@@ -71,6 +71,9 @@ func runStats(argv []string, w io.Writer) error {
 			// Not checked against the registry: an unknown kind matches nothing.
 			i++
 			kind = argv[i]
+		case a == "--mode" && mode == "" && i+1 < len(argv) && (argv[i+1] == "afk" || argv[i+1] == "hitl"):
+			i++
+			mode = argv[i]
 		case bead == "" && len(a) > 0 && a[0] != '-':
 			bead = a
 		default:
@@ -108,7 +111,7 @@ func runStats(argv []string, w io.Writer) error {
 			}
 		}
 	}
-	total, rows := stats.Sum(evs, stats.Filter{Scope: scope, Since: since, Kind: kind, By: by})
+	total, rows := stats.Sum(evs, stats.Filter{Scope: scope, Since: since, Kind: kind, Mode: mode, By: by})
 	var kinds []string // per row, under --spine without --by
 	if spine && by == "" {
 		have := map[string]stats.Row{}

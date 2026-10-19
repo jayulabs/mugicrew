@@ -26,7 +26,7 @@ type spineRow struct{ from, to, typ, fromStatus, toStatus, fromLabel, toLabel st
 // Spine is target's spine (ADR 0281): every bead id on it, sorted, and whether
 // any is unclosed (a Draft or blocked bead counts, as Unclosed does).
 func Spine(target string) (ids []string, open bool, err error) {
-	rows, err := sqlRows(nil, fmt.Sprintf(spineEdgesSQL, strings.ReplaceAll(target, "'", "''")))
+	rows, err := sqlRows(fmt.Sprintf(spineEdgesSQL, strings.ReplaceAll(target, "'", "''")))
 	if err != nil {
 		return nil, false, fmt.Errorf("bd: read spine edges: %w", err)
 	}

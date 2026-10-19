@@ -1640,6 +1640,23 @@ func TestDropDraftsRecordsBranches(t *testing.T) {
 	}
 }
 
+// DropDraftsWith carries its extra attrs on draft.deleted and the branch events.
+func TestDropDraftsWithAddsAttrs(t *testing.T) {
+	stubDrafts(t, nil)
+	deleteDrafts = func(string) ([]string, []bd.BranchOutcome, error) {
+		return []string{"mc-c"}, []bd.BranchOutcome{{Branch: "chart/mc-c"}}, nil
+	}
+	capt := eventlogtest.Capture(t)
+	if err := DropDraftsWith(bd.Bead{ID: "mc-s", Kind: contract.KindSignal}, "target", "mc-t"); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range *capt {
+		if e.Attrs["target"] != "mc-t" || e.Attrs["bead"] != "mc-s" {
+			t.Errorf("%s attrs = %v", e.Name, e.Attrs)
+		}
+	}
+}
+
 // A clean HITL exit on an effort tree runs the backstop before the tree goes
 // (Spec D6, FR 20): integrated, the tree is removed and then effort/<id>
 // deleted; a conflict keeps both for the human (the orphan confirm relaunches it,
@@ -1954,5 +1971,56 @@ func TestHitlRunRecordsContinuedIn(t *testing.T) {
 				t.Errorf("continued_in = %v", a["continued_in"])
 			}
 		})
+	}
+}
+
+// The F1 menu carries -M only when asked, armed or not (ADR 0303).
+func TestMenuArgvMouse(t *testing.T) {
+	for _, armed := range []bool{false, true} {
+		if got := slices.Contains(menuArgv(armed, true), "-M"); !got {
+			t.Errorf("menuArgv(%v, true) lacks -M", armed)
+		}
+		if got := slices.Contains(menuArgv(armed, false), "-M"); got {
+			t.Errorf("menuArgv(%v, false) has -M", armed)
+		}
+	}
+}
+
+func stubMenuMouse(t *testing.T, v bool) {
+	old := menuMouse
+	menuMouse = func() bool { return v }
+	t.Cleanup(func() { menuMouse = old })
+}
+
+func TestPreambleMouseGate(t *testing.T) {
+	stubMenuMouse(t, true)
+	if pre := strings.Join(preamble(), " "); strings.Count(pre, "'-M'") != 2 {
+		t.Errorf("preamble on tmux >= 3.5 lacks -M on both menus: %q", pre)
+	}
+	stubMenuMouse(t, false)
+	if pre := strings.Join(preamble(), " "); !strings.Contains(pre, "'display-menu'") || strings.Contains(pre, "'-M'") {
+		t.Errorf("preamble on tmux < 3.5 or unknown has -M: %q", pre)
+	}
+}
+
+func TestMenuMouseFrom(t *testing.T) {
+	for _, c := range []struct {
+		out  string
+		err  error
+		want bool
+	}{
+		{"tmux 3.4\n", nil, false},
+		{"tmux 3.5\n", nil, true},
+		{"tmux 3.5a\n", nil, true},
+		{"tmux 3.7c\n", nil, true},
+		{"tmux 4.0\n", nil, true},
+		{"tmux next-3.6\n", nil, false},
+		{"tmux master\n", nil, false},
+		{"", nil, false},
+		{"tmux 3.5\n", errors.New("boom"), false},
+	} {
+		if got := menuMouseFrom(c.out, c.err); got != c.want {
+			t.Errorf("menuMouseFrom(%q, %v) = %v, want %v", c.out, c.err, got, c.want)
+		}
 	}
 }

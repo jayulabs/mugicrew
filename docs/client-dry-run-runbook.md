@@ -82,15 +82,22 @@ For each account, in its own clone and `BEADS_DIR` (install and prerequisites:
 
 1. Clone `<root>`, then clone `proj-a` and `proj-b` inside it and add both dirs to
    the root's `.gitignore`.
-2. Declare each as a context and set the strategy, as in
-   [Declaring contexts](../README.md#declaring-contexts); top-level keys go before
-   any table. Edit the checked-in `.mugicrew/config.toml` (the shared file, not
-   the machine-local `<git-common-dir>/mugicrew/config.toml`); commit and push it
-   from `shawnlee_toptal`'s clone so `shawnlee_minerva` gets it on clone. The
-   whole file:
+2. Declare each as a context and set the strategy. In a linked worktree of
+   `shawnlee_toptal`'s clone only, run
+   `mugicrew init workspace --land-strategy gitlab --jira-site <site> --context proj-a=repo:proj-a --context proj-b=repo:proj-b`,
+   answer its Require Initiatives prompt (default no) and land `.mugicrew/config.toml` through an MR, so `shawnlee_minerva` gets it
+   on clone or pull (see [First human in a Workspace](install.md#first-human-in-a-workspace)).
+   The file is the shared one, not the machine-local
+   `<git-common-dir>/mugicrew/config.toml`; for hand edits see
+   [Declaring contexts](../README.md#declaring-contexts). Check the whole file
+   reads:
 
    ```toml
    land_strategy = "gitlab"
+
+   [initiatives]
+   required = false
+   external_ref = false
 
    [jira]
    site = "<site>"
@@ -111,7 +118,7 @@ For each account, in its own clone and `BEADS_DIR` (install and prerequisites:
    that clone's shell only (ADR 0247,
    gitlab-https-credentials-are-glab-s-helper-with-its-user-set…). mugicrew
    needs no global credential entry: it injects glab's helper into every Forge
-   git call itself (ADR 0256). The entry is only for your own git over https.
+   git call itself (ADR 0300). The entry is only for your own git over https.
 
 Check: `mugicrew doctor` passes in each clone, and `bd config get issue_prefix`
 differs between the two.
@@ -131,22 +138,11 @@ touched repo shows the land.
 
 ## Handoff
 
-[Task step 8]
-
-As `shawnlee_minerva`, run `mugicrew graph fetch shawnlee_toptal` and read the
-printed `BEADS_DIR=<dir>/.beads bd list`. Try to continue an open bead of the
-first human's work. `mugicrew graph push` (and the automatic push after a Land)
-needs no global credential entry: it injects glab's helper and restarts bd's
-sql-server once on a failed fetch or push.
-
-**Expected result:** a "can't continue someone else's work" blocker. The fetched
-graph is a read-only Scratch graph ([ADR 0218](adr/0218-mugicrew-graph-push-and-graph-fetch-are-a-graph-noun-and-fetch-clones-into-a-cache-scratch-graph.md)), so this is a result
-of the run, not a failure of it. Record the outcome (continued, or what stopped
-it) as a filed blocker or a note.
+Handoff between users isn't supported by design.
 
 ## Filing blockers
 
-[Task step 9]
+[Task step 8]
 
 File each blocker as an offshoot Signal (crew doc `signal-filing.md`):
 
@@ -174,7 +170,7 @@ Signal lists one discovered-from offshoot per blocker.
 
 ## Teardown
 
-[Task step 10, irreversible]
+[Task step 9, irreversible]
 
 Delete the GitLab group `<group>` (Settings > General > Advanced > Delete group)
 and the Jira site `<site>` (Atlassian admin > Billing/Manage subscriptions >

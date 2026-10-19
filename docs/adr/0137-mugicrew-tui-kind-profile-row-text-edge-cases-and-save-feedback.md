@@ -42,6 +42,13 @@ section. Applies ADR 0109 §5 (file changes under a staged row) and ADR 0110 §4
    catalog leaves only `(unset)` in the cycle. If the row has a local key,
    `+`/`-` stage unset. If it has none, they flash `no profiles in <catalog
    path>`.
+
+   > **Amended by ADR 0306 (doctor-and-refusal-reasons-name-the-file…) §5 and
+   > ADR 0308 (the-settings-cycle-is-every-declared-profile-name…) §4:** the
+   > flash reads `no profiles declared in config.toml or agent-profiles.toml`,
+   > and a name no file declares reads `unrunnable: not declared`, not `not in
+   > catalog`. A name shadowed by a bad table is declared and shows its
+   > `declared unusable: <defect> (from <path>)` reason.
 7. **A file change under a staged row** compares the row's effective value, so
    an edit to the shared key or to `default` also counts. It reads as in ADR 0109
    §5: `opus → sonnet (unsaved; file now haiku)`, cut with `…` when too wide.

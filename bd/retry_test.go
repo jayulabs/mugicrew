@@ -122,23 +122,3 @@ func TestRunBatchRetry(t *testing.T) {
 		})
 	}
 }
-
-func TestRunEnvRetry(t *testing.T) {
-	sleep = func(time.Duration) {}
-	orig := runEnvOnce
-	defer func() { runEnvOnce, sleep = orig, time.Sleep }()
-	calls := 0
-	runEnvOnce = func(env []string, args ...string) (string, error) {
-		calls++
-		if len(env) != 1 {
-			t.Fatalf("env dropped: %v", env)
-		}
-		if calls == 1 {
-			return "", exitErr("dial: connection refused")
-		}
-		return "ok", nil
-	}
-	if out, err := runEnv([]string{"A=b"}, "sql"); err != nil || out != "ok" || calls != 2 {
-		t.Fatalf("out=%q err=%v calls=%d", out, err, calls)
-	}
-}

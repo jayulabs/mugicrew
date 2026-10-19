@@ -3,6 +3,7 @@
 Status: Accepted
 
 Amended by ADR 0177 (§3: an Initiative is also listed when drained or while its cut session exists).
+Amended by ADR 0315 (§3: the fold-away fallback covers any selected row, an Initiative included).
 Amended by ADR 0178 (§1, §3: enter launches or attaches the cut session on a drained Initiative header, or one with a cut session; the drained hint row and its fold).
 Date: 2026-10-13
 

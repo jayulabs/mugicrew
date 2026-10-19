@@ -91,23 +91,29 @@ func TestInitRefusesTrackedBeadsWithoutRunningBd(t *testing.T) {
 	if code == 0 || len(e.calls) != 0 {
 		t.Fatalf("code=%d calls=%v", code, e.calls)
 	}
-	if !strings.Contains(out, ".beads/metadata.json") || !strings.Contains(out, "git rm -r --cached .beads") {
-		t.Fatalf("guidance missing: %s", out)
+	open, roll, item1 := "mugicrew init: the index tracks .beads/ paths\n", "FAIL  beads tracked: .beads/metadata.json\n", "1. FAIL beads tracked\n"
+	a, b, c := strings.Index(out, open), strings.Index(out, roll), strings.Index(out, item1)
+	if a != 0 || b <= a || c <= b || strings.Contains(out, "FAIL,") {
+		t.Fatalf("want opening line, roll-call line, To-fix item, no summary: %s", out)
+	}
+	item := plainStyle.toFixItem(1, trackedBeadsResult([]string{".beads/metadata.json"}))
+	if !strings.Contains(out, item) || strings.Contains(out, "FAIL,") || strings.Contains(out, "fix:") {
+		t.Fatalf("to-fix item missing or summary/old fix line present: %s", out)
 	}
 }
 
-func TestInitRunsExactBdInitThenEnvThenStop(t *testing.T) {
+func TestInitRunsExactBdInitOnly(t *testing.T) {
 	e := initWS(t)
 	out, code := e.run(t, "", "--prefix", "ab")
 	if code != 0 {
 		t.Fatalf("code %d: %s", code, out)
 	}
-	want := []string{"init --server --non-interactive --stealth --prefix ab", "dolt stop"}
+	want := []string{"init --server --non-interactive --stealth --prefix ab"}
 	if got := e.bdVerbs(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("bd calls %v, want %v", got, want)
 	}
 	env, _ := os.ReadFile(filepath.Join(e.dir, ".beads", ".env"))
-	if string(env) != "DOLT_REMOTE_INFO_BRANCH=\n" {
+	if strings.Contains(string(env), "DOLT_REMOTE_INFO_BRANCH") {
 		t.Fatalf(".env = %q", env)
 	}
 	if s := e.status(t); s != "" {
@@ -118,7 +124,7 @@ func TestInitRunsExactBdInitThenEnvThenStop(t *testing.T) {
 	}
 }
 
-func TestInitEnvMergeKeepsLinesAndIsIdempotent(t *testing.T) {
+func TestInitLeavesEnvUntouchedAndIsIdempotent(t *testing.T) {
 	e := initWS(t)
 	e.graph = true
 	os.MkdirAll(filepath.Join(e.dir, ".beads"), 0o755)
@@ -128,11 +134,11 @@ func TestInitEnvMergeKeepsLinesAndIsIdempotent(t *testing.T) {
 		t.Fatal(code)
 	}
 	b, _ := os.ReadFile(p)
-	if string(b) != "BEADS_DOLT_PASSWORD=x\nDOLT_REMOTE_INFO_BRANCH=\n" {
+	if string(b) != "BEADS_DOLT_PASSWORD=x" {
 		t.Fatalf(".env = %q", b)
 	}
-	if got := e.bdVerbs(); len(got) != 1 || got[0] != "dolt stop" {
-		t.Fatalf("calls %v", got) // bootstrapped: no bd init
+	if len(e.calls) != 0 {
+		t.Fatalf("calls %v", e.calls) // bootstrapped: no bd init, no stop
 	}
 	e.calls = nil
 	out, code := e.run(t, "")
@@ -225,7 +231,7 @@ func TestInitSamePrefixOnResolvingGraphIsARerun(t *testing.T) {
 	os.MkdirAll(filepath.Join(e.dir, ".beads"), 0o755)
 	out, code := e.run(t, "", "--prefix", "p")
 	env, _ := os.ReadFile(filepath.Join(e.dir, ".beads", ".env"))
-	if code != 0 || !strings.Contains(out, "left as is") || !strings.Contains(string(env), "DOLT_REMOTE_INFO_BRANCH=") {
+	if code != 0 || !strings.Contains(out, "left as is") || strings.Contains(string(env), "DOLT_REMOTE_INFO_BRANCH") {
 		t.Fatalf("code=%d out=%s env=%q", code, out, env)
 	}
 	for _, c := range e.calls {
@@ -250,5 +256,24 @@ func TestInitDifferentOrUnreadablePrefixOnResolvingGraphRefuses(t *testing.T) {
 				t.Fatalf("code=%d calls=%v out=%s", code, e.calls, out)
 			}
 		})
+	}
+}
+
+func TestInitHintsWorkspaceSetUp(t *testing.T) {
+	e := initWS(t)
+	out, code := e.run(t, "", "--prefix", "ab")
+	hint := "mugicrew init workspace"
+	if code != 0 || !strings.Contains(out, hint) || !strings.Contains(out, "docs/install.md#first-human-in-a-workspace") || strings.Index(out, hint) > strings.Index(out, "run mugicrew doctor next") {
+		t.Fatalf("code %d: %s", code, out)
+	}
+	if got := e.bdVerbs(); len(got) != 1 {
+		t.Fatalf("bd calls %v", got)
+	}
+	e = initWS(t)
+	os.MkdirAll(filepath.Join(e.dir, ".mugicrew"), 0o755)
+	os.WriteFile(filepath.Join(e.dir, ".mugicrew", "config.toml"), []byte("land_strategy = \"local\"\n[initiatives]\nrequired = true\n"), 0o644)
+	out, code = e.run(t, "", "--prefix", "ab")
+	if code != 0 || strings.Contains(out, hint) || len(e.bdVerbs()) != 1 {
+		t.Fatalf("code %d: %s", code, out)
 	}
 }

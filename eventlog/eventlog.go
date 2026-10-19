@@ -353,27 +353,6 @@ func RecordLandPending(b bd.Bead, branch string, mr int, pushed, opened bool, ne
 	slog.Info("land.pending", append(landAttrs(b, branch, nested), "mr", mr, "pushed", pushed, "opened", opened)...)
 }
 
-// RecordGraphPush records an automatic Graph push at a Landing: graph.push at Info,
-// or graph.push_failed at Warn with the error. It never holds the Landing (ADR 0216).
-func RecordGraphPush(b bd.Bead, ref string, err error) {
-	if err != nil {
-		slog.Warn("graph.push_failed", append(BeadAttrs(b), "ref", ref, "err", err.Error())...)
-		return
-	}
-	slog.Info("graph.push", append(BeadAttrs(b), "ref", ref)...)
-}
-
-// RecordManualGraphPush records a `mugicrew graph push` by hand, which has no
-// Landing and so no bead: the same graph.push / graph.push_failed events, so a manual
-// success clears the TUI's failed-push warning.
-func RecordManualGraphPush(ref string, err error) {
-	if err != nil {
-		slog.Warn("graph.push_failed", "ref", ref, "err", err.Error())
-		return
-	}
-	slog.Info("graph.push", "ref", ref)
-}
-
 // landAttrs is a land event's bead and branch attrs plus nested, or the Workspace's
 // into= when nested is empty.
 func landAttrs(b bd.Bead, branch string, nested []any) []any {

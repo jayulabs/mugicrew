@@ -344,10 +344,10 @@ func TestExecHints(t *testing.T) {
 		{"act:ap", "enter launch · b bg · d detail · p pause · t transcript · +/- prio · J/K section"},
 		{"lv", "enter attach · d detail · p pause · x drop · t transcript · +/- prio · J/K section"},
 		{"blk", "d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"sp", "enter run · d detail · p pause · t transcript · +/- prio · J/K section · r retrospective"},
-		{"cpA", "space fold · d detail · p pause · t transcript · +/- prio · J/K section · r retrospective"},
+		{"sp", "enter run · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
+		{"cpA", "space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
 		{actKey, "space fold · d detail · J/K section"},
-		{"i:i1", "space fold · d detail · J/K section"},
+		{"i:i1", "space fold · d detail · X cancel · J/K section"},
 		{"cpA/closed", "space fold · d detail · J/K section"},
 		{"cl", "d detail · t transcript · J/K section"},
 	} {

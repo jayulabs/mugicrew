@@ -32,7 +32,7 @@ func integrateRepo(t *testing.T) (root string) {
 }
 
 func integrateB1() (string, int, error) {
-	return Integrate(integCP, "b1", "Build: b1")
+	return Integrate(integCP, "b1", "feat: b1 work [b1]", "Build: b1")
 }
 
 // siblingMoves puts one commit on the container, ref-only, as a sibling's
@@ -80,7 +80,7 @@ func wantIntegrateConflict(t *testing.T, err error, reason ConflictReason) {
 }
 
 // The effort's commits land as exactly one squash on the container: subject
-// "integrate <id>", the bead's trailer, the effort's tree, parented on the old
+// as passed, the bead's trailer, the effort's tree, parented on the old
 // tip. A re-run (the crash between CAS and close) finds the trailer and writes
 // nothing, even though replaying the effort's commits onto the squash would
 // conflict.
@@ -105,8 +105,8 @@ func TestIntegrateSquashesWithTrailerAndIsIdempotent(t *testing.T) {
 	if p := mustGit(t, "rev-parse", sha+"^"); p != sibTip {
 		t.Errorf("squash parent %s, want the container tip %s", p, sibTip)
 	}
-	if msg := mustGit(t, "log", "-1", "--format=%B", sha); !strings.HasPrefix(msg, "integrate b1\n") || !strings.Contains(msg, "\nBuild: b1") {
-		t.Errorf("squash message = %q, want subject \"integrate b1\" and trailer \"Build: b1\"", msg)
+	if msg := mustGit(t, "log", "-1", "--format=%B", sha); msg != "feat: b1 work [b1]\n\nBuild: b1" {
+		t.Errorf("squash message = %q, want the passed subject, then the trailer \"Build: b1\"", msg)
 	}
 	for f, want := range map[string]string{"work.txt": "two", "sib.txt": "sib"} {
 		if got := mustGit(t, "show", sha+":"+f); got != want {
@@ -410,8 +410,8 @@ func TestBuildEffortEndsAsOneIntegrateCommit(t *testing.T) {
 	if err := DeleteBranch(EffortBranch("b1")); err != nil {
 		t.Fatalf("delete effort branch: %v", err)
 	}
-	if got := mustGit(t, "log", "--format=%s", tip+".."+integCP); got != "integrate b1" {
-		t.Errorf("container gained %q, want one \"integrate b1\" commit", got)
+	if got := mustGit(t, "log", "--format=%s", tip+".."+integCP); got != "feat: b1 work [b1]" {
+		t.Errorf("container gained %q, want one \"feat: b1 work [b1]\" commit", got)
 	}
 	if refs, err := EffortRefs(); err != nil || len(refs) != 0 {
 		t.Errorf("effort refs left = %v (%v), want none", refs, err)
@@ -445,7 +445,7 @@ func TestPrototypeEffortIntegratesADRNotThrowaway(t *testing.T) {
 	mustGit(t, "-C", scratch, "update-ref", side, "HEAD")
 	mustGit(t, "-C", wt, "worktree", "remove", "--force", scratch)
 	t.Chdir(wt)
-	if _, _, err := Integrate(chart, "p1", "Prototype: p1"); err != nil {
+	if _, _, err := Integrate(chart, "p1", "docs: p1 [p1]", "Prototype: p1"); err != nil {
 		t.Fatalf("Integrate: %v", err)
 	}
 	files := mustGit(t, "ls-tree", "--name-only", chart)
@@ -678,7 +678,7 @@ func TestRaceHelper(t *testing.T) {
 		}
 		sha, err = Land(integCP, "Checkpoint: cp", LandLocal)
 	} else {
-		sha, _, err = Integrate(integCP, who, "Build: "+who)
+		sha, _, err = Integrate(integCP, who, "feat: "+who+" ["+who+"]", "Build: "+who)
 	}
 	var c *IntegrateConflict
 	switch {
@@ -1020,5 +1020,28 @@ func TestCommitsSinceCut(t *testing.T) {
 	mustGit(t, "commit", "-q", "--allow-empty", "-m", "two")
 	if n, ok, err := (Repo("")).CommitsSinceCut("b1", "effort/b1"); n != 2 || !ok || err != nil {
 		t.Errorf("CommitsSinceCut = %d, %v, %v; want 2, true, nil", n, ok, err)
+	}
+}
+
+func TestIntegrateSubject(t *testing.T) {
+	cases := []struct{ name, kind, title, context, want string }{
+		{"survey", "survey", "Map it", "app", "docs(app): Map it [b1]"},
+		{"grilling", "grilling", "Q", "app", "docs(app): Q [b1]"},
+		{"research", "research", "R", "app", "docs(app): R [b1]"},
+		{"prototype", "prototype", "P", "app", "docs(app): P [b1]"},
+		{"build", "build", "Add It", "app", "feat(app): Add It [b1]"},
+		{"critique", "critique", "Bad thing.", "app", "fix(app): Bad thing. [b1]"},
+		{"surgery", "surgery", "Fix", "app", "fix(app): Fix [b1]"},
+		{"other kind", "widget", "W", "app", "chore(app): W [b1]"},
+		{"no context", "build", "Add", "", "feat: Add [b1]"},
+		{"empty title", "build", "", "app", "integrate b1"},
+		{"blank title", "build", " \t", "", "integrate b1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IntegrateSubject(c.kind, "b1", c.title, c.context); got != c.want {
+				t.Errorf("IntegrateSubject = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

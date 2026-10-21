@@ -2387,7 +2387,7 @@ func TestIntegrateFromTheHostIntegratesTheOneChild(t *testing.T) {
 		t.Fatalf("runIntegrate = %d, want 0", rc)
 	}
 	out, _ := exec.Command("git", "-C", filepath.Join(host, "child"), "log", "-1", "--format=%s", "checkpoint/cp").Output()
-	if got := strings.TrimSpace(string(out)); got != "integrate b1" {
+	if got := strings.TrimSpace(string(out)); got != "feat: leaf [b1]" {
 		t.Errorf("child checkpoint/cp tip = %q, want the squash", got)
 	}
 }

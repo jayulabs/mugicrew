@@ -646,6 +646,30 @@ func TrailerFor(kind, id string) string {
 	return strings.ToUpper(kind[:1]) + kind[1:] + ": " + id
 }
 
+// IntegrateSubject is a squash integrate's commit subject:
+// "<type>(<context>): <title> [<id>]", the scope dropped when context is "". The
+// type comes from the bead's kind (docs for the charting leaves, feat for a build,
+// fix for a critique or surgery, chore for any other), the title is used as is, and
+// a title empty after trimming falls back to "integrate <id>". Pure.
+func IntegrateSubject(kind, id, title, context string) string {
+	if strings.TrimSpace(title) == "" {
+		return "integrate " + id
+	}
+	typ := "chore"
+	switch kind {
+	case "survey", "grilling", "research", "prototype":
+		typ = "docs"
+	case "build":
+		typ = "feat"
+	case "critique", "surgery":
+		typ = "fix"
+	}
+	if context != "" {
+		typ += "(" + context + ")"
+	}
+	return typ + ": " + title + " [" + id + "]"
+}
+
 // TrailerBlock is the one trailer block every land commit carries under every
 // strategy (ADR 0187 §1): "Tip: <tip>" (omitted when tip is ""), the "<Kind>: <id>"
 // trailer, then "Graph: <graph>", as whole LF lines. Pure.
@@ -2305,20 +2329,20 @@ var errMoved = errors.New("git: container moved")
 // Integrate squashes the cwd's effort branch onto container (Spec D3, ADR
 // 0102 §3, the prototype's loop): it rebases onto the container tip
 // outside the land lock, then under it refuses a held or landed container and
-// CAS-moves the container onto one commit-tree squash, subject "integrate <id>"
-// plus trailer (the bead's TrailerFor). A moved tip re-rebases, up to
+// CAS-moves the container onto one commit-tree squash, the caller's subject
+// (IntegrateSubject) plus trailer (the bead's TrailerFor). A moved tip re-rebases, up to
 // integrateRetries times, then ErrContended. It returns the squash, "" when
 // nothing is ahead or the effort adds nothing past its last squash (idempotent,
 // integratedThrough); commits made after an earlier integrate squash as a further
-// "integrate <id>". A rebase conflict is left stopped in the tree as
+// commit under the same subject. A rebase conflict is left stopped in the tree as
 // *IntegrateConflict, and a re-run over that stopped rebase returns the same conflict.
-func Integrate(container, id, trailer string) (sha string, retries int, err error) {
-	return Repo("").Integrate(container, id, trailer)
+func Integrate(container, id, subject, trailer string) (sha string, retries int, err error) {
+	return Repo("").Integrate(container, id, subject, trailer)
 }
 
 // Integrate is the package Integrate in the child worktree r (tree-scoped); the land
 // lock stays the Workspace's.
-func (r Repo) Integrate(container, id, trailer string) (sha string, retries int, err error) {
+func (r Repo) Integrate(container, id, subject, trailer string) (sha string, retries int, err error) {
 	return r.integrateLoop(container, func(tip string) (string, error) {
 		cut, err := r.run("rev-parse", "--verify", "--quiet", cutRefPrefix+id)
 		upstream := cut
@@ -2346,7 +2370,7 @@ func (r Repo) Integrate(container, id, trailer string) (sha string, retries int,
 		if err == nil && head != tip {
 			// an unmoved tip under the lock keeps integratedThrough's verdict
 			sha, err = r.casLocked(container, tip, func() (string, error) {
-				return r.run("commit-tree", head+"^{tree}", "-p", tip, "-m", "integrate "+id, "-m", trailer)
+				return r.run("commit-tree", head+"^{tree}", "-p", tip, "-m", subject, "-m", trailer)
 			})
 			if err == nil { // only a won CAS moves the cut ref; a pre-ADR-0264 branch gets one here
 				// ponytail: the container already moved, so a failed write is not an integrate

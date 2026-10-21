@@ -18,15 +18,15 @@ func stubIntegrate(t *testing.T, sha string, err error) (args *[]string, unpause
 	origGit, origUnpause := integrateGit, unpause
 	t.Cleanup(func() { integrateGit, unpause = origGit, origUnpause })
 	args, unpaused = new([]string), new([]string)
-	integrateGit = func(_ git.Repo, container, id, trailer string) (string, int, error) {
-		*args = []string{container, id, trailer}
+	integrateGit = func(_ git.Repo, container, id, subject, trailer string) (string, int, error) {
+		*args = []string{container, id, subject, trailer}
 		return sha, 0, err
 	}
 	unpause = func(id, cause string) error { *unpaused = append(*unpaused, id+" "+cause); return nil }
 	return args, unpaused
 }
 
-var pausedBuild = bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Labels: []string{"paused:" + bd.PausedIntegrateConflict}}
+var pausedBuild = bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Title: "Add it", Labels: []string{"context:app", "paused:" + bd.PausedIntegrateConflict}}
 
 // The verb's exit code says what happened (FR10): 0 integrated or nothing ahead,
 // 2 a conflict (rebase, held), 3 landed, 1 transient (spent retries included). Only
@@ -54,11 +54,49 @@ func TestIntegrateExitCodesAndPauseLift(t *testing.T) {
 			if code := Integrate(pausedBuild, "agent", &out); code != c.code {
 				t.Errorf("exit = %d, want %d (output %q)", code, c.code, out.String())
 			}
-			if want := []string{"checkpoint/ws-cp", "mc-b", "Build: mc-b"}; strings.Join(*args, "|") != strings.Join(want, "|") {
+			if want := []string{"checkpoint/ws-cp", "mc-b", "feat(app): Add it [mc-b]", "Build: mc-b"}; strings.Join(*args, "|") != strings.Join(want, "|") {
 				t.Errorf("git.Integrate args = %q, want %q", *args, want)
 			}
 			if lifted := len(*unpaused) == 1 && (*unpaused)[0] == "mc-b "+bd.PausedIntegrateConflict; lifted != c.lifted {
 				t.Errorf("unpaused = %q, want lifted %v", *unpaused, c.lifted)
+			}
+		})
+	}
+}
+
+// The subject's scope is the bead's own context, else its container's, else none;
+// a bead with its own context triggers no container lookup, and a failed lookup
+// still integrates, unscoped.
+func TestIntegrateSubjectScopeFallsBackToTheContainersContext(t *testing.T) {
+	cases := []struct {
+		name      string
+		labels    []string
+		container bd.Bead
+		showErr   error
+		want      string
+		looked    bool
+	}{
+		{"own context wins", []string{"context:own"}, bd.Bead{Labels: []string{"context:box"}}, nil, "feat(own): Add it [mc-b]", false},
+		{"container context", nil, bd.Bead{Labels: []string{"context:box"}}, nil, "feat(box): Add it [mc-b]", true},
+		{"neither", nil, bd.Bead{}, nil, "feat: Add it [mc-b]", true},
+		{"lookup fails", nil, bd.Bead{}, errors.New("bd down"), "feat: Add it [mc-b]", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args, _ := stubIntegrate(t, "sq1", nil)
+			origShow := showBead
+			t.Cleanup(func() { showBead = origShow })
+			looked := ""
+			showBead = func(id string) (bd.Bead, error) { looked = id; return c.container, c.showErr }
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Title: "Add it", Labels: c.labels}
+			if code := Integrate(b, "agent", io.Discard); code != 0 {
+				t.Fatalf("exit = %d, want 0", code)
+			}
+			if got := (*args)[2]; got != c.want {
+				t.Errorf("subject = %q, want %q", got, c.want)
+			}
+			if (looked != "") != c.looked || (c.looked && looked != "ws-cp") {
+				t.Errorf("container lookup = %q, want looked %v of ws-cp", looked, c.looked)
 			}
 		})
 	}

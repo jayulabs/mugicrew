@@ -160,14 +160,14 @@ func TestRepoIntegrateSquashesInTheChildTree(t *testing.T) {
 	if _, err := tree.run("commit", "--allow-empty", "-m", "work"); err != nil {
 		t.Fatal(err)
 	}
-	sha, _, err := tree.Integrate("checkpoint/cp", "b1", TrailerFor("task", "b1"))
+	sha, _, err := tree.Integrate("checkpoint/cp", "b1", "chore: x [b1]", TrailerFor("task", "b1"))
 	if err != nil || sha == "" {
 		t.Fatalf("Integrate = (%q, %v), want a squash", sha, err)
 	}
 	if got, _ := child.Head("checkpoint/cp"); got != sha {
 		t.Errorf("child container at %s, want the squash %s", got, sha)
 	}
-	if again, _, err := tree.Integrate("checkpoint/cp", "b1", TrailerFor("task", "b1")); err != nil || again != "" {
+	if again, _, err := tree.Integrate("checkpoint/cp", "b1", "chore: x [b1]", TrailerFor("task", "b1")); err != nil || again != "" {
 		t.Errorf("second Integrate = (%q, %v), want nothing", again, err)
 	}
 	if mustGit(t, "rev-parse", "main") != wsMain {

@@ -82,7 +82,7 @@ func IntegrateIn(c Child, b bd.Bead, by eventlog.IntegrateBy, w io.Writer) int {
 		}
 		sha, retries, err = integrateReplace(c.Repo, d.Container, d.Tip)
 	} else {
-		sha, retries, err = integrateGit(c.Repo, d.Container, b.ID, git.TrailerFor(string(b.Kind), b.ID))
+		sha, retries, err = integrateGit(c.Repo, d.Container, b.ID, git.IntegrateSubject(string(b.Kind), b.ID, b.Title, subjectContext(b)), git.TrailerFor(string(b.Kind), b.ID))
 	}
 	eventlog.RecordIntegrate(b, d.Container, sha, retries, by, err, c.attrs()...)
 	var conflict *git.IntegrateConflict
@@ -129,6 +129,20 @@ func IntegrateIn(c Child, b bd.Bead, by eventlog.IntegrateBy, w io.Writer) int {
 		fmt.Fprintf(w, "integrated %s onto %s\n", sha, d.Container)
 	}
 	return ExitIntegrated
+}
+
+// subjectContext is the scope of b's integrate subject: its own context: label,
+// else its container's. A failed lookup is no scope: a subject cosmetic never
+// blocks an integrate.
+func subjectContext(b bd.Bead) string {
+	if c := bd.ContextOf(b); c != "" || b.Parent == "" {
+		return c
+	}
+	parent, err := showBead(b.Parent)
+	if err != nil {
+		return ""
+	}
+	return bd.ContextOf(parent)
 }
 
 // Child is the nested repo an integrate acts in: the zero value is the cwd's own

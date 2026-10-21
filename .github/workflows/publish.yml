@@ -15,7 +15,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
       # the floor is tmux 3.4 (ADR 0303): Linux tests apt's tmux 3.4 (no display-menu -M), macOS
-      # brew's tmux (3.5 or later) so TestF1MenuMouse runs somewhere
+      # brew's tmux (3.5 or later) so TestF1MenuMouse runs somewhere. The Linux entry is pinned to
+      # ubuntu-24.04 because its apt tmux is the 3.4 floor; ubuntu-latest (Ubuntu 26) ships 3.6, so
+      # don't move it back to ubuntu-latest without accounting for that.
       - name: Install tmux
         run: |
           set -euo pipefail

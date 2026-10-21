@@ -150,6 +150,9 @@ func (t defogTab) rowText(r dRow) string {
 		owner = e.Owner
 	}
 	field(&h, "owner", owner+" · "+mode)
+	for _, f := range forgeReviewFields(b) {
+		field(&h, f[0], f[1])
+	}
 	switch {
 	case b.Status == "closed": // no state field: the close line lives in beadBody
 	case r.leaf():

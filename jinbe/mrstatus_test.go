@@ -92,12 +92,6 @@ func TestMRStatusNotWrittenWhenTheTickClosesTheLanding(t *testing.T) {
 			t.Errorf("%s: wrote %q", name, r.bodies)
 		}
 	}
-	notesSeen.Delete("ws-land") // a first tick
-	r := &jinbeSeamRec{discussions: []forge.Discussion{thread(disc1, note(11, 5, "rename this"))}}
-	mrStatusTick(t, forge.MR{IID: 7, State: "opened", DetailedMergeStatus: "discussions_not_resolved"}, "", r)
-	if len(r.threadSpawned) != 1 || countStatus(r.bodies) != 0 {
-		t.Errorf("thread: spawned %d bodies %q", len(r.threadSpawned), r.bodies)
-	}
 	m := &jinbeSeamRec{trailerLanded: true}
 	mrStatusTick(t, forge.MR{IID: 7, State: "merged", DetailedMergeStatus: "mergeable"}, "", m)
 	if countStatus(m.bodies) != 0 {

@@ -73,7 +73,8 @@ var (
 		// hitl misc
 		contract.KindTask: "248", contract.KindDiscussion: "246", contract.KindCheckup: "246",
 		// formerly fallback, now their own
-		contract.KindSurgery: "93", contract.KindInitiative: "255", contract.KindLanding: "209",
+		contract.KindSurgery: "93", contract.KindInitiative: "255", contract.KindLanding: "209", contract.KindMRWatch: "209",
+		contract.KindForgeReview: "109",
 	}
 )
 
@@ -132,7 +133,7 @@ func (g graphData) stateGlyph(b *bd.Bead) string {
 // blocked reports whether b is status=blocked, or not closed with an Ordering
 // blocker still open.
 func (g graphData) blocked(b *bd.Bead) bool {
-	return b.Status == "blocked" || (b.Status != "closed" && len(g.heldBy(b)) > 0)
+	return b.Status == "blocked" || (b.Unclosed() && len(g.heldBy(b)) > 0)
 }
 
 // heldBy is b's own open blockers plus the open blockers of its nearest ancestor
@@ -145,7 +146,7 @@ func (g graphData) heldBy(b *bd.Bead) []*bd.Bead {
 	for id := b.Parent; id != "" && !seen[id]; {
 		seen[id] = true
 		anc := g.beadByID(id)
-		if anc.Status != "closed" {
+		if anc.Unclosed() {
 			for _, h := range g.openBlockers(anc) {
 				if anc.Kind == contract.KindChart || (anc.Kind == contract.KindCheckpoint && !h.Kind.AdmitsLandOnlyHold()) {
 					return append(out, h)
@@ -164,7 +165,7 @@ func (g graphData) heldBy(b *bd.Bead) []*bd.Bead {
 func (g graphData) openBlockers(b *bd.Bead) []*bd.Bead {
 	var out []*bd.Bead
 	for _, id := range b.BlockedBy {
-		if i := g.beadIndex(id); i >= 0 && g.beads[i].Status != "closed" {
+		if i := g.beadIndex(id); i >= 0 && g.beads[i].Unclosed() {
 			out = append(out, &g.beads[i])
 		}
 	}
@@ -778,6 +779,45 @@ func (g graphData) beadBody(b *bd.Bead, desc bool) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// forgeReviewFields is the d lines of the Forge Review feature (ADR 0320 (a-forge-review-surfaces…)). A Forge
+// Review shows its Merge Request, the Read through note: mark, and once closed the filed,
+// folded and skipped counts; a container its pending close-outs; a filed Critique or
+// grilling its Source: lines. Each value shows only when the bead records it.
+func forgeReviewFields(b *bd.Bead) [][2]string {
+	var out [][2]string
+	switch b.Kind {
+	case contract.KindForgeReview:
+		if iid := git.RecordedMR(b.Description); iid != 0 {
+			out = append(out, [2]string{"mr", fmt.Sprintf("!%d", iid)})
+		}
+		if mark, ok := git.ParseLine(b.Description, "Read through note:"); ok {
+			out = append(out, [2]string{"read through", mark})
+		}
+		if c, ok := contract.ParseForgeReviewCounts(b.CloseReason); ok && !b.Unclosed() {
+			out = append(out, [2]string{"counts", fmt.Sprintf("filed %d · folded %d · skipped %d", c.Filed, c.Folded, c.Skipped)})
+		}
+	case contract.KindCheckpoint, contract.KindChart:
+		due, hasDue := git.ParseLine(b.Description, strings.TrimSpace(contract.CloseOutsDuePrefix))
+		failing, hasFail := git.ParseLine(b.Description, strings.TrimSpace(contract.CloseOutsFailingPrefix))
+		var parts []string
+		if hasDue {
+			parts = append(parts, due+" due (await push)")
+		}
+		if hasFail {
+			n, err, _ := strings.Cut(failing, ": ")
+			parts = append(parts, fmt.Sprintf("(%s failing: %s)", n, err))
+		}
+		if len(parts) > 0 {
+			out = append(out, [2]string{"close-outs", strings.Join(parts, " ")})
+		}
+	case contract.KindCritique, contract.KindGrilling:
+		for _, src := range contract.SourcesOf(b.Description + "\n" + b.Notes) {
+			out = append(out, [2]string{"source", src.String()})
+		}
+	}
+	return out
+}
+
 // oneLine is err's text on one line, runs of whitespace collapsed.
 func oneLine(err error) string { return strings.Join(strings.Fields(err.Error()), " ") }
 
@@ -804,7 +844,7 @@ func (g graphData) pauseLine(b *bd.Bead) string {
 	for _, c := range bd.PausedCauses(*b) {
 		vs = append(vs, pauseSty[c].Render(contexts.PauseNote(*b, c)))
 	}
-	if b.Status != "closed" {
+	if b.Unclosed() {
 		if anc := g.inheritedPause(b); anc != "" {
 			vs = append(vs, inheritSty.Render("manual via "+anc))
 		}

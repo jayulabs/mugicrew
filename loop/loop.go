@@ -70,6 +70,7 @@ type Loop struct {
 	Bin, SourceDir, CommonDir string
 	JiraPoll                  time.Duration // [jira] poll_interval, read by Run once per loop start: a jira latch checked sooner is not a candidate (Spec mc-8ymw.9 D5)
 	GitlabPoll                time.Duration // [gitlab] poll_interval, read with JiraPoll: the same for an mr latch (Spec mc-zfce.5 FR 19)
+	LandingPoll               time.Duration // [gitlab] landing_poll_interval, read with JiraPoll: a Landing whose effort ended sooner is not a candidate
 	Watch                     bool          // --watch: follow source lands; unwatched never checks for a build (ADR 0090 §4)
 
 	wg        sync.WaitGroup
@@ -90,7 +91,7 @@ type Loop struct {
 	asks      chan struct{}       // SIGUSR2 requests, one slot so repeats merge; answered by request
 	restartTo string              // set while draining for a restart; a stop clears it (ADR 0062 §6), a cancel of that stop drain sets it again (ADR 0236 §3)
 
-	checked map[string]time.Time // latch id → last dispatch (Spec mc-8ymw.9 D5); memory only, so a restart makes every latch due once
+	checked map[string]time.Time // latch or Landing id → last effort end (Spec mc-8ymw.9 D5); memory only, so a restart makes every latch due once
 
 	limitedUntil time.Time      // a Plan usage limit hit holds claude dispatch until then (reset + 1m); zero: no hold. Memory only
 	limit        contract.Limit // the hold's latest reset and where it came from
@@ -154,6 +155,7 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 	l.onState = onState
 	l.JiraPoll = cfglayer.JiraPollInterval(".")
 	l.GitlabPoll = cfglayer.GitlabPollInterval(".")
+	l.LandingPoll = cfglayer.LandingPollInterval(".")
 	l.report(State{State: looplock.On, Rev: l.Rev})
 	interval := l.Interval
 	if interval <= 0 {
@@ -837,7 +839,7 @@ func (l *Loop) candidates(ready, known []bd.Bead) ([]bd.Bead, error) {
 		switch {
 		case anc != "": // inherited pause: skipped
 		case IsAFKLeaf(b):
-			if l.latchNotDue(b) {
+			if l.paceNotDue(b) {
 				continue
 			}
 			if held, err := SurgeryHold(b); err != nil {
@@ -894,20 +896,27 @@ func (l *Loop) pruneChecked(ready []bd.Bead) {
 	}
 }
 
-// latchNotDue is whether b is a latch last dispatched within its system's poll
-// interval (GitlabPoll for mr, else JiraPoll, including an unparseable body, whose
-// check then errors and pauses). Decided only here, never in Run: a skip must not reset the consecutive-failure count.
-func (l *Loop) latchNotDue(b bd.Bead) bool {
-	if b.Kind != contract.KindLatch {
+// paceNotDue is whether b is a latch, Landing or MR Watch whose last effort ended within its
+// poll interval: a latch by its system's (GitlabPoll for mr, else JiraPoll,
+// including an unparseable body, whose check then errors and pauses), a Landing or MR Watch by
+// LandingPoll. Decided only here, never in Run: a skip must not reset the
+// consecutive-failure count.
+func (l *Loop) paceNotDue(b bd.Bead) bool {
+	var poll time.Duration
+	switch b.Kind {
+	case contract.KindLatch:
+		poll = l.JiraPoll
+		if sys, _, err := brook.Watches(b.Description); err == nil && sys == "mr" {
+			poll = l.GitlabPoll
+		}
+	case contract.KindLanding, contract.KindMRWatch:
+		poll = l.LandingPoll
+	default:
 		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	at, ok := l.checked[b.ID]
-	poll := l.JiraPoll
-	if sys, _, err := brook.Watches(b.Description); err == nil && sys == "mr" {
-		poll = l.GitlabPoll
-	}
 	return ok && now().Sub(at) < poll
 }
 
@@ -994,9 +1003,9 @@ func (l *Loop) dispatch(b bd.Bead) {
 	}()
 }
 
-// stampChecked records a latch's dispatch, pass or fail, as its last check.
+// stampChecked records a latch's, Landing's or MR Watch's effort end, pass or fail, as its last check.
 func (l *Loop) stampChecked(b bd.Bead) {
-	if b.Kind != contract.KindLatch {
+	if b.Kind != contract.KindLatch && !b.Kind.PacedLeaf() {
 		return
 	}
 	l.mu.Lock()

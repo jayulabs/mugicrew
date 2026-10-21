@@ -111,7 +111,7 @@ func rollbackBadges(cs []git.MainlineCommit, beads []bd.Bead, kinds map[string]c
 		switch {
 		case b.Status == "closed" && strings.HasPrefix(b.CloseReason, bd.FixForwardReason):
 			badges[target] = badgeFixedForward
-		case b.Status != "closed" && badges[target] == "": // any non-closed status, blocked included
+		case b.Unclosed() && badges[target] == "": // any non-closed status, blocked included
 			badges[target] = badgePending
 		}
 	}

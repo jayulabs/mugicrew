@@ -373,3 +373,35 @@ func TestProfilesFromLinkedWorktree(t *testing.T) {
 		t.Errorf("Winners = %+v", c.Winners)
 	}
 }
+
+func TestLandingPollInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name, shared, local string
+		want                time.Duration
+	}{
+		{"unset", "[gitlab]\npoll_interval = \"5m\"\n", "", DefaultLandingPollInterval},
+		{"no table", "gate = \"x\"\n", "", DefaultLandingPollInterval},
+		{"parses", "[gitlab]\nlanding_poll_interval = \"2m\"\n", "", 2 * time.Minute},
+		{"at minimum", "[gitlab]\nlanding_poll_interval = \"15s\"\n", "", MinLandingPollInterval},
+		{"under minimum", "[gitlab]\nlanding_poll_interval = \"10s\"\n", "", DefaultLandingPollInterval},
+		{"unparseable", "[gitlab]\nlanding_poll_interval = \"soon\"\n", "", DefaultLandingPollInterval},
+		{"local beats shared", "[gitlab]\nlanding_poll_interval = \"5m\"\n", "[gitlab]\nlanding_poll_interval = \"30s\"\n", 30 * time.Second},
+		{"local table without key masks shared", "[gitlab]\nlanding_poll_interval = \"5m\"\n", "[gitlab]\n", DefaultLandingPollInterval},
+	} {
+		if got := LandingPollInterval(workspace(t, tc.shared, tc.local)); got != tc.want {
+			t.Errorf("%s: LandingPollInterval = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLandingPollIntervalWarnsUnusable(t *testing.T) {
+	for _, body := range []string{"landing_poll_interval = \"soon\"", "landing_poll_interval = \"10s\""} {
+		evs := eventlogtest.Capture(t)
+		if got := LandingPollInterval(workspace(t, "[gitlab]\n"+body+"\n", "")); got != DefaultLandingPollInterval {
+			t.Errorf("%s: got %v, want default", body, got)
+		}
+		if len(*evs) != 1 || (*evs)[0].Name != "config.unusable" || (*evs)[0].Attrs["key"] != "gitlab.landing_poll_interval" {
+			t.Errorf("%s: events = %v, want one config.unusable key=gitlab.landing_poll_interval", body, *evs)
+		}
+	}
+}

@@ -371,28 +371,46 @@ const (
 	LandClosed         LandOutcome = "closed"
 	LandPipelineFailed LandOutcome = "pipeline_failed"
 	LandLanded         LandOutcome = "landed"
-	LandStalled        LandOutcome = "stalled"         // a failed pipeline on an older head, the new head with none
-	LandReviewComment  LandOutcome = "review_comment"  // review threads filed as beads on the container
-	LandThreadReplied  LandOutcome = "thread_replied"  // Jinbe replied on a review thread whose bead closed
-	LandThreadResolved LandOutcome = "thread_resolved" // Jinbe resolved a review thread
-	LandThreadSkipped  LandOutcome = "thread_skipped"  // a 403/404 on a thread's reply or resolve
+	LandStalled        LandOutcome = "stalled" // a failed pipeline on an older head, the new head with none
 )
 
 // RecordLandOutcome records a gitlab Forge outcome of a Landing as land.<outcome>
-// (retried, conflict, closed, pipeline_failed, landed, stalled, review_comment,
-// thread_replied, thread_resolved, thread_skipped) with the MR iid when it has one
-// (mr 0 omits it). retried, landed, thread_replied and thread_resolved are Info; the
-// rest, which end or hold the Landing, are Warn.
+// (retried, conflict, closed, pipeline_failed, landed, stalled) with the MR iid when it
+// has one (mr 0 omits it). retried and landed are Info; the rest, which end or hold the
+// Landing, are Warn.
 func RecordLandOutcome(b bd.Bead, outcome LandOutcome, mr int, extra ...any) {
 	attrs := BeadAttrs(b)
 	if mr != 0 {
 		attrs = append(attrs, "mr", mr)
 	}
 	level := slog.LevelWarn
-	if outcome == LandRetried || outcome == LandLanded || outcome == LandThreadReplied || outcome == LandThreadResolved {
+	if outcome == LandRetried || outcome == LandLanded {
 		level = slog.LevelInfo
 	}
 	slog.Log(context.Background(), level, "land."+string(outcome), append(attrs, extra...)...)
+}
+
+// ForgeReviewEvent is the suffix of a forge_review.<event> event Jinbe emits.
+type ForgeReviewEvent string
+
+const (
+	ForgeReviewSpawned        ForgeReviewEvent = "spawned"
+	ForgeReviewAwardFailed    ForgeReviewEvent = "award_failed"
+	ForgeReviewClosedOut      ForgeReviewEvent = "closed_out"
+	ForgeReviewCloseOutFailed ForgeReviewEvent = "close_out_failed"
+)
+
+// RecordForgeReview records a forge_review.<event> on bead b, the one it concerns: a
+// Forge Review for spawned, award_failed and the like, a filed bead for closed_out and
+// close_out_failed (spawned, closed_out, award_failed, close_out_failed; Usopp emits
+// filed and empty with slog directly), never land.* (ADR 0320 (a-forge-review-surfaces…)).
+// award_failed and close_out_failed are Warn, the rest Info.
+func RecordForgeReview(b bd.Bead, event ForgeReviewEvent, extra ...any) {
+	level := slog.LevelInfo
+	if event == ForgeReviewAwardFailed || event == ForgeReviewCloseOutFailed {
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, "forge_review."+string(event), append(BeadAttrs(b), extra...)...)
 }
 
 // RecordGate records a gate.* event of a Checkpoint Landing's pre-land build (ADR

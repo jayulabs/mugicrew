@@ -291,7 +291,8 @@ func JiraPollInterval(root string) time.Duration {
 
 type gitlabLayer struct {
 	Gitlab *struct {
-		PollInterval string `toml:"poll_interval"`
+		PollInterval        string `toml:"poll_interval"`
+		LandingPollInterval string `toml:"landing_poll_interval"`
 	}
 }
 
@@ -317,6 +318,39 @@ func GitlabPollInterval(root string) time.Duration {
 		return d
 	}
 	return DefaultJiraPollInterval
+}
+
+// DefaultLandingPollInterval is how often a pending Landing is re-checked;
+// MinLandingPollInterval floors it at the loop tick.
+const (
+	DefaultLandingPollInterval = time.Minute
+	MinLandingPollInterval     = 15 * time.Second
+)
+
+// LandingPollInterval is [gitlab] landing_poll_interval, a Go duration: how long a
+// Landing waits after its last effort ended before the next. GitlabPollInterval's
+// layered lookup, with its own default and floor; an unparseable or sub-minimum
+// value warns config.unusable and yields the default.
+func LandingPollInterval(root string) time.Duration {
+	for _, p := range []string{LocalPath(root), SharedPath(root)} {
+		var l gitlabLayer
+		if Decode(p, &l) != Set || l.Gitlab == nil {
+			continue
+		}
+		if l.Gitlab.LandingPollInterval == "" {
+			return DefaultLandingPollInterval
+		}
+		d, err := time.ParseDuration(l.Gitlab.LandingPollInterval)
+		if err == nil && d < MinLandingPollInterval {
+			err = fmt.Errorf("under the %v minimum", MinLandingPollInterval)
+		}
+		if err != nil {
+			slog.Warn("config.unusable", "path", p, "key", "gitlab.landing_poll_interval", "err", err.Error())
+			return DefaultLandingPollInterval
+		}
+		return d
+	}
+	return DefaultLandingPollInterval
 }
 
 // JiraSite is [jira] site, the Jira Cloud host intake builds browse links from;

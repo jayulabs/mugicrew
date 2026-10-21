@@ -215,6 +215,12 @@ var (
 	shellKeys   = []key.Binding{keyJump, keyNext, keyPrev, keyLoop, keyExplorer, keyYank, keyF5, keyRecents, keyDiscussions, keySessions, keyQuit, keyRef}
 )
 
+// The nested flag and the private server's prefix2 reader, test seams so ? needs no tmux.
+var (
+	tuiNested   = func() bool { return os.Getenv(session.NestedEnv) == "1" }
+	readPrefix2 = session.Prefix2
+)
+
 // Model is the TUI shell: it owns the tab index, the live crew data, the modal
 // stack and the ? reference, and routes a key to the topmost modal first, then the
 // shell keys, then the active tab.
@@ -223,11 +229,12 @@ type Model struct {
 	crew       map[string]contract.Crewmate
 	tabs       []component
 	tab        int
-	jiraSet    bool // the [jira] site was set when the slow tier last loaded
-	surgerySet bool // some Surgery target existed then
-	ref        bool // the ? key reference is open
-	refOff     int  // its first visible line (Spec mc-bruk D7)
-	focus           // the Initiative focus drilldown over the active tab (ADR 0173); id "" is off
+	jiraSet    bool   // the [jira] site was set when the slow tier last loaded
+	surgerySet bool   // some Surgery target existed then
+	ref        bool   // the ? key reference is open
+	refOff     int    // its first visible line (Spec mc-bruk D7)
+	prefix2    string // the nested tmux prefix ? read on opening; "" shows no line
+	focus             // the Initiative focus drilldown over the active tab (ADR 0173); id "" is off
 	w, h       int
 
 	settingsState // the Settings tab's cache and staged edits (FR54–56)
@@ -469,7 +476,7 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case key.Matches(k, keyRef):
 		m = m.scanNew()
-		m.ref, m.refOff = true, 0
+		m.ref, m.refOff, m.prefix2 = true, 0, nestedPrefix2()
 	case key.Matches(k, keyNext):
 		return m.enter((m.tab + 1) % len(m.tabs))
 	case key.Matches(k, keyPrev):

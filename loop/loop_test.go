@@ -2837,9 +2837,41 @@ func TestLatchNotDueUsesWatchedSystemInterval(t *testing.T) {
 	} {
 		l.checked = map[string]time.Time{"x": t0.Add(-tc.age)}
 		b := bd.Bead{ID: "x", Kind: contract.KindLatch, Description: tc.body}
-		if got := l.latchNotDue(b); got != tc.want {
-			t.Errorf("%s: latchNotDue = %v, want %v", tc.name, got, tc.want)
+		if got := l.paceNotDue(b); got != tc.want {
+			t.Errorf("%s: paceNotDue = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// An MR Watch is paced on LandingPoll, counted from its last effort's end, and a
+// stamp-less one is due at once.
+func TestMRWatchPacedOnLandingPoll(t *testing.T) {
+	oNow := now
+	t.Cleanup(func() { now = oNow })
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return t0 }
+	l := &Loop{JiraPoll: 15 * time.Minute, GitlabPoll: 2 * time.Minute, LandingPoll: time.Minute}
+	b := bd.Bead{ID: "w", Kind: contract.KindMRWatch, Parent: "mc-c"}
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want bool
+	}{
+		{"inside landing poll", 30 * time.Second, true},
+		{"past landing poll", 2 * time.Minute, false},
+	} {
+		l.checked = map[string]time.Time{"w": t0.Add(-tc.age)}
+		if got := l.paceNotDue(b); got != tc.want {
+			t.Errorf("%s: paceNotDue = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	l.checked = nil
+	if l.paceNotDue(b) {
+		t.Error("unstamped MR Watch must be due")
+	}
+	l.stampChecked(b)
+	if !l.paceNotDue(b) {
+		t.Error("stampChecked must pace an MR Watch")
 	}
 }
 
@@ -3339,5 +3371,97 @@ func TestStopCancelsAskedBuild(t *testing.T) {
 	sig <- syscall.SIGTERM
 	if got := waitRes(t, res); got.r != nil || got.err != nil {
 		t.Fatalf("Run = %+v; want nil, nil", got)
+	}
+}
+
+// landingLoop is a Loop with a faked clock and a stub effort for one Landing.
+func landingLoop(t *testing.T, clock *time.Time, steps ...step) (*Loop, bd.Bead, *[]string) {
+	t.Helper()
+	oNow := now
+	t.Cleanup(func() { now = oNow })
+	now = func() time.Time { return *clock }
+	l, b, pauses := failLoop(t, steps...)
+	b.Kind = contract.KindLanding
+	l.Crew = map[string]contract.Crewmate{ownerOf(b): idleCrew{}}
+	l.LandingPoll = time.Minute
+	return l, b, pauses
+}
+
+// dispatched is the ids a tick would dispatch from ready.
+func dispatched(t *testing.T, l *Loop, ready ...bd.Bead) []string {
+	t.Helper()
+	cands, err := l.candidates(ready, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bd.IDs(cands)
+}
+
+// A Landing is a candidate when unstamped, or when its last effort ended over
+// LandingPoll ago; the stamp is taken at effort end, pass or fail.
+func TestLandingPacedFromEffortEnd(t *testing.T) {
+	for name, st := range map[string]step{"passed": stepFailed, "failed": stepCutErr} {
+		t0 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+		clock := t0
+		l, b, _ := landingLoop(t, &clock, st)
+		if got := dispatched(t, l, b); !slices.Equal(got, []string{b.ID}) {
+			t.Fatalf("%s: unstamped Landing candidates = %v, want it dispatched", name, got)
+		}
+		// the effort runs a long time: the clock moves while it runs
+		runEffort = func(contract.Ctx, contract.Crewmate, bd.Bead, io.Writer, string, dispatch.InflightFunc) (dispatch.Outcome, error) {
+			clock = clock.Add(10 * time.Minute)
+			return dispatch.Outcome{Cut: st.cut}, st.err
+		}
+		l.dispatch(b)
+		l.wg.Wait()
+		clock = clock.Add(30 * time.Second)
+		if got := dispatched(t, l, b); len(got) != 0 {
+			t.Errorf("%s: 30s after effort end candidates = %v, want none", name, got)
+		}
+		clock = clock.Add(31 * time.Second)
+		if got := dispatched(t, l, b); !slices.Equal(got, []string{b.ID}) {
+			t.Errorf("%s: 61s after effort end candidates = %v, want the Landing", name, got)
+		}
+	}
+}
+
+// Paced-out ticks never advance the failure count: three failed efforts, each
+// separated by skipped ticks, pause the Landing exactly once.
+func TestLandingPacedSkipLeavesFailureCount(t *testing.T) {
+	t0 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	clock := t0
+	l, b, pauses := landingLoop(t, &clock, stepCutErr, stepCutErr, stepFailed)
+	for _, step := range []time.Duration{0, 15, 15, 31, 15, 46} { // seconds: due, skip, skip, due, skip, due
+		clock = clock.Add(step * time.Second)
+		for _, id := range dispatched(t, l, b) {
+			if id != b.ID {
+				t.Fatalf("unexpected candidate %s", id)
+			}
+			l.dispatch(b)
+			l.wg.Wait()
+		}
+	}
+	if want := []string{b.ID + " failing"}; !slices.Equal(*pauses, want) {
+		t.Fatalf("pauses = %q, want %q", *pauses, want)
+	}
+}
+
+// Landing pacing leaves latches (own interval) and other kinds unpaced.
+func TestLandingPacingLeavesOtherKinds(t *testing.T) {
+	oNow := now
+	t.Cleanup(func() { now = oNow })
+	t0 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return t0 }
+	l := &Loop{LandingPoll: time.Hour, JiraPoll: time.Second}
+	l.checked = map[string]time.Time{
+		"latch": t0.Add(-time.Minute),
+		"res":   t0,
+	}
+	got := dispatched(t, l,
+		bd.Bead{ID: "latch", Kind: contract.KindLatch},
+		bd.Bead{ID: "res", Kind: contract.KindResearch, Parent: "mc-c"},
+	)
+	if want := []string{"latch", "res"}; !slices.Equal(got, want) {
+		t.Errorf("candidates = %v, want %v", got, want)
 	}
 }

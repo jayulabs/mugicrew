@@ -118,13 +118,20 @@ destination you name, with `bd backup` or `bd sync`.
   `git push <forge> --delete refs/mugicrew/graphs/<you>`. For the old GitHub
   sync, delete `refs/dolt/data` and, if present, `refs/heads/__dolt_remote_info__`.
 
-## Latch poll intervals
+## Poll intervals
 
 An open Latch is re-checked on the interval of the system it watches:
 `[jira] poll_interval` for a Jira ticket, `[gitlab] poll_interval` for a GitLab
 merge request. Each is a Go duration (default `15m`, minimum `1m`) in the layered
 `config.toml`; an unparseable or under-minimum value logs `config.unusable` and
 uses the default. Both are read once per loop start.
+
+A pending Landing is re-checked on `[gitlab] landing_poll_interval`, measured from
+when its previous effort ended, pass or fail. It is a Go duration in the same
+layered `config.toml` (default `60s`, minimum `15s`); an unparseable or
+under-minimum value logs `config.unusable` with `key=gitlab.landing_poll_interval`
+and uses `60s`. It is read once per loop start. A Landing the loop has not run
+since it started is due at once, so a restart re-checks every Landing once.
 
 The `[jira] site` they poll is written by `mugicrew init workspace --jira-site <host>`
 (a bare host, empty clears it); hand edits go in `[jira]` of `config.toml`.

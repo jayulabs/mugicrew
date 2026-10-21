@@ -54,7 +54,7 @@ func (q query) statusOK(b bd.Bead, sessions map[string]session.Info) bool {
 		return true
 	case "unclosed":
 		// Words at the baseline search every bead (Spec "Graph search at the default status matches closed beads" §1).
-		return strings.TrimSpace(q.words) != "" || b.Status != "closed" || sessions[b.ID].Has()
+		return strings.TrimSpace(q.words) != "" || b.Unclosed() || sessions[b.ID].Has()
 	}
 	return b.Status == q.status || sessions[b.ID].Has()
 }

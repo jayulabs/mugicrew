@@ -35,8 +35,8 @@ assumption at the top of the prototype.
    structure.
 2. **Trivial to run.** A UI prototype starts from one command in the project's
    task runner: `pnpm <name>`, `python <path>`, `bun <path>`, etc. A logic demo
-   is a single HTML file the human double-clicks. Either way, no thinking
-   required to start it.
+   is a single self-contained HTML file opened through a static server at
+   hand-over. Either way, no thinking required to start it.
 3. **No persistence by default.** State lives in memory. Persistence is the thing
    the prototype is _checking_, not something it should depend on. If the
    question explicitly involves a database, hit a scratch DB or a local file with

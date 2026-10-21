@@ -155,10 +155,10 @@ func (m Model) recentsOpen() (tea.Model, tea.Cmd) {
 
 // homeTab is the queue tab that lists a bead of kind k (ADR 0183): Signals on Ideate,
 // the Chart and its defog leaves on Defog, Initiatives on Initiatives, the rest of the
-// spine on Execute. A Landing follows its container: a Chart's on Defog, a Checkpoint's on Execute.
+// spine on Execute. A Landing or Forge Review follows its container: a Chart's on Defog, a Checkpoint's on Execute.
 func homeTab(b bd.Bead, beads []bd.Bead) int {
 	switch b.Kind {
-	case contract.KindLanding:
+	case contract.KindLanding, contract.KindMRWatch, contract.KindForgeReview:
 		if i := beadIndex(beads, b.Parent); i >= 0 && beads[i].Kind == contract.KindChart {
 			return tabDefog
 		}

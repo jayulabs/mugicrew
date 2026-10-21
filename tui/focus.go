@@ -94,7 +94,7 @@ func (f focus) folded(r fRow) bool {
 
 // foldable is a row space toggles: a section, a '▸ N closed' or an open container.
 func (r fRow) foldable() bool {
-	return r.kind == fSec || r.kind == fSum || (r.kind == fBead && (r.b.Container || r.b.Kind == contract.KindCheckpoint) && r.b.Status != "closed")
+	return r.kind == fSec || r.kind == fSum || (r.kind == fBead && (r.b.Container || r.b.Kind == contract.KindCheckpoint) && r.b.Unclosed())
 }
 
 // focusRows builds the Initiative's rows; nil when it is not in the snapshot.
@@ -197,7 +197,7 @@ func (r fRow) defogRow() dRow {
 		d.kind, d.members = dSum, r.members
 	case r.leaf:
 		d.kind = dLeaf
-	case r.b.Kind == contract.KindChart && r.b.Status != "closed":
+	case r.b.Kind == contract.KindChart && r.b.Unclosed():
 		d.kind = dChart
 	}
 	return d
@@ -617,7 +617,7 @@ func (m Model) focusBindings() []key.Binding {
 		if rejectable(*r.b) {
 			bs = append(bs, keyReject)
 		}
-		if r.b.Status != "closed" {
+		if r.b.Unclosed() {
 			bs = append(bs, verbKey("p", pauseLabel(r.b)))
 		}
 		if l := g.xHint(r.b); l != "" {
@@ -626,13 +626,13 @@ func (m Model) focusBindings() []key.Binding {
 		bs = append(bs, keyEdit, keyPrio)
 	}
 	if r.kind == fBead && (r.sec == secDefog || r.sec == secExec) {
-		if r.b.Status != "closed" {
+		if r.b.Unclosed() {
 			bs = append(bs, verbKey("p", pauseLabel(r.b)))
 		}
 		if l := g.xHint(r.b); l != "" {
 			bs = append(bs, verbKey("x", l))
 		}
-		if r.b.Status != "closed" {
+		if r.b.Unclosed() {
 			bs = append(bs, keyPrio)
 		}
 	}
@@ -758,7 +758,7 @@ func (m Model) focusLine(g graphData, r fRow, tagW int, blockers map[string]bool
 		flip := maps.Clone(m.focus.flip)
 		flip[dr.key] = m.focus.folded(r) != collapsed(nil, dr)
 		left, suffix := defogTab{g: g, flip: flip}.line(dr, m.focusTagW(), gut, "", blockers)
-		if r.b.HasLabel("chart:defogged") && r.b.Status != "closed" {
+		if r.b.HasLabel("chart:defogged") && r.b.Unclosed() {
 			left += dimSt.Render(" · defogged, awaiting land")
 		}
 		return left, suffix

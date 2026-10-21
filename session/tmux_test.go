@@ -1909,17 +1909,50 @@ func TestLaunchBarIsPlainSBRN(t *testing.T) {
 }
 
 // The bead pane names the executable by absolute path as one quoted word, whatever
-// shell or tmux metacharacters it holds, and takes its width inside the pane.
+// shell or tmux metacharacters it holds, and takes its width inside the pane, in
+// both the side split and the below-the-agent split.
 func TestBeadSplitQuotesExe(t *testing.T) {
-	got := beadSplit(`/a b/it's $x"y\z/mugicrew`)
 	want := `"'/a b/it'\\''s \$x\"y\\z/mugicrew' bead-detail `
-	if !strings.Contains(got, want) {
-		t.Errorf("beadSplit = %q, want it to contain %q", got, want)
-	}
-	for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1"} {
-		if !strings.Contains(got, w) {
-			t.Errorf("beadSplit lacks %q: %q", w, got)
+	for name, split := range map[string]func(string) string{"side": beadSplitSide, "below": beadSplitBelow} {
+		got := split(`/a b/it's $x"y\z/mugicrew`)
+		if !strings.Contains(got, want) {
+			t.Errorf("beadSplit %s = %q, want it to contain %q", name, got, want)
 		}
+		for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1", "-l 40%"} {
+			if !strings.Contains(got, w) {
+				t.Errorf("beadSplit %s lacks %q: %q", name, w, got)
+			}
+		}
+	}
+	if side := beadSplitSide("x"); !strings.HasPrefix(side, "split-window -h -l 40% ") || strings.Contains(side, "{top-left}") {
+		t.Errorf("side split = %q, want split-window -h -l 40%% of the active pane", side)
+	}
+	if below := beadSplitBelow("x"); !strings.HasPrefix(below, "split-window -t '{top-left}' -v -l 40% ") {
+		t.Errorf("below split = %q, want split-window -t '{top-left}' -v -l 40%%", below)
+	}
+}
+
+// F10 is a three-way choice made tmux-side: focus an open bead pane, else split
+// below the agent pane when a @protopane pane exists, else split to the side. The
+// F10 binding and the F1 menu's Bead pane entry carry the same command.
+func TestF10BeadCommandThreeWay(t *testing.T) {
+	cmd := beadCmd()
+	if len(cmd) != 5 || cmd[0] != "if-shell" || cmd[1] != "-F" || cmd[2] != beadPane || cmd[3] != focusBead {
+		t.Fatalf("beadCmd = %q, want if-shell -F beadPane focusBead <else>", cmd)
+	}
+	rest := cmd[4]
+	proto := "#{P:#{?#{@protopane},#{pane_id},}}"
+	want := cmdline("if-shell", "-F", proto, beadSplitBelow(beadExe()), beadSplitSide(beadExe()))
+	if rest != want {
+		t.Errorf("else branch = %q, want %q", rest, want)
+	}
+	pre := strings.Join(preamble(), " ")
+	if !strings.Contains(pre, "bind-key -T mchitl F10 "+strings.Join(cmd, " ")) {
+		t.Errorf("F10 binding lacks the else command %q: %q", rest, pre)
+	}
+	menu := strings.Join(menuArgv(false, false), " ")
+	if !strings.Contains(menu, literal(cmdline(cmd...))) {
+		t.Errorf("F1 menu Bead pane entry does not carry the F10 command: %q", menu)
 	}
 }
 

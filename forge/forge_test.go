@@ -327,19 +327,6 @@ func TestDiscussionsDecodesAcrossPages(t *testing.T) {
 	}
 }
 
-func TestIsBotDecodesTheBotFlag(t *testing.T) {
-	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"id":9,"bot":true}`, "HTTP/2.0 200 OK\n\n"+`{"id":10}`)
-	if bot, err := IsBot(proj, 9); err != nil || !bot {
-		t.Errorf("IsBot(9) = %v, %v; want true", bot, err)
-	}
-	if bot, err := IsBot(proj, 10); err != nil || bot {
-		t.Errorf("IsBot(10) = %v, %v; want false", bot, err)
-	}
-	if b, _ := os.ReadFile(log); !strings.HasPrefix(string(b), "api -i --hostname gl.example.com -X GET users/9\n") {
-		t.Errorf("argv = %q, want the instance-wide users/9", b)
-	}
-}
-
 func TestCurrentUserReplyResolve(t *testing.T) {
 	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"id":1,"username":"jinbe-bot"}`,
 		"HTTP/2.0 201 Created\n\n{}", "HTTP/2.0 200 OK\n\n{}", "HTTP/2.0 403 Forbidden\n\n{}")
@@ -449,5 +436,22 @@ func TestCloseOpenMR(t *testing.T) {
 				t.Errorf("iid %d closed %v err %v, want %d %v", iid, closed, err, tc.want, tc.closed)
 			}
 		})
+	}
+}
+
+func TestAwardEmoji(t *testing.T) {
+	log := fakeGlab(t, "HTTP/2.0 201 Created\n\n{}", "HTTP/2.0 404 Not Found\n\n{}", "HTTP/2.0 403 Forbidden\n\n{}")
+	if err := AwardEmoji(proj, 7, 42, "eyes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AwardEmoji(proj, 7, 42, "eyes"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("404 = %v, want ErrNotFound", err)
+	}
+	if err := AwardEmoji(proj, 7, 42, "eyes"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("403 = %v, want ErrForbidden", err)
+	}
+	b, _ := os.ReadFile(log)
+	if want := "-X POST -f name=eyes projects/ns%2Fp/merge_requests/7/notes/42/award_emoji\n"; !strings.Contains(string(b), want) {
+		t.Errorf("argv %q lacks %q", b, want)
 	}
 }

@@ -2985,6 +2985,20 @@ func (r Repo) IsAncestor(a, b string) bool {
 	return err == nil
 }
 
+// HasCommit is whether the child holds commit sha locally.
+func (r Repo) HasCommit(sha string) bool {
+	_, err := r.run("cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
+// FetchCommit fetches sha from the child's Forge remote, so a pushed head some other
+// clone made can be tested for ancestry.
+func (r Repo) FetchCommit(sha string) error {
+	remote := r.ForgeRemote()
+	_, err := r.runForge(remote, "fetch", "--quiet", remote, sha)
+	return err
+}
+
 // DeleteBranch is the package DeleteBranch in the child.
 func (r Repo) DeleteBranch(name string) error {
 	if _, err := r.run("branch", "-D", name); err != nil {

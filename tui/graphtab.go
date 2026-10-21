@@ -123,7 +123,7 @@ func (g graphData) xLabel(b *bd.Bead) string {
 	switch {
 	case g.busyWhy(b) != "":
 		return ""
-	case b.Kind == contract.KindCheckup && b.Status != "closed":
+	case b.Kind == contract.KindCheckup && b.Unclosed():
 		return "drop" // x ends a Checkup the human declined, session or none
 	case g.sessions[b.ID].Has():
 		return "drop" // a session always wins x
@@ -185,7 +185,7 @@ func (g graphTab) bindings() []key.Binding {
 	}
 	bs = append(bs, keySearch, keyStatus, keyKind)
 	if b != nil {
-		if b.Status != "closed" {
+		if b.Unclosed() {
 			bs = append(bs, verbKey("p", pauseLabel(b)))
 		}
 		if l := g.xHint(b); l != "" {
@@ -203,7 +203,7 @@ func (g graphTab) bindings() []key.Binding {
 		at = len(forms)
 	}
 	bs = append(bs, forms[:at]...)
-	if b != nil && b.Status != "closed" {
+	if b != nil && b.Unclosed() {
 		bs = append(bs, keyPrio)
 	}
 	bs = append(bs, forms[at:]...)

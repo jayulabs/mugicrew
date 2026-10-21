@@ -58,7 +58,7 @@ func (m Model) discussionsOpen() (tea.Model, tea.Cmd) {
 	}
 	var ds []bd.Bead
 	for _, b := range m.beads {
-		if b.Kind == contract.KindDiscussion && b.Status != "closed" {
+		if b.Kind == contract.KindDiscussion && b.Unclosed() {
 			ds = append(ds, b)
 		}
 	}

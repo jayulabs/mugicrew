@@ -38,18 +38,18 @@ never blocks.
 Always checked. Each FAIL's To-fix item names the minimum version and this OS's install command.
 
 - `bd` 1.3.0 or later
-- `dolt` (bd pins 2.2.0; doctor WARNs on 2.3.0 or later)
+- `dolt` (pinned 2.5.0; doctor FAILs below 2.3.0 and WARNs on 2.6.0 or later)
 - `tmux` 3.4 or later (3.5 or later for mouse-picking in the F1 menu)
 - `claude` 2.1.78 or later
 - `git`
 
 ### dolt
 
-Install the pinned 2.2.0 release (Linux amd64 shown; pick your platform's
-tarball from the [release page](https://github.com/dolthub/dolt/releases/tag/v2.2.0)):
+Install the pinned 2.5.0 release (Linux amd64 shown; pick your platform's
+tarball from the [release page](https://github.com/dolthub/dolt/releases/tag/v2.5.0)):
 
 ```bash
-curl -fsSLO https://github.com/dolthub/dolt/releases/download/v2.2.0/dolt-linux-amd64.tar.gz
+curl -fsSLO https://github.com/dolthub/dolt/releases/download/v2.5.0/dolt-linux-amd64.tar.gz
 tar -xzf dolt-linux-amd64.tar.gz
 sudo install dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
 ```

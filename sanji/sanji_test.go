@@ -212,45 +212,41 @@ func TestLaunchPrototypeFocus(t *testing.T) {
 	}
 }
 
-// Spec mc-16us: a UI prototype is handed over in a running tmux pane in the
-// throwaway tree, a logic prototype by its HTML path, and the hand-over happens
-// before the tree is removed.
-func TestPrototypePromptHandsOverUIInPane(t *testing.T) {
+// Spec mc-u1g7y: every prototype is served in a stacked right column: a server
+// pane split off the agent pane, and a browser-trigger pane split off the
+// server pane, both tagged @protopane. The hand-over happens before the tree
+// is removed.
+func TestPrototypePromptServesInStackedColumn(t *testing.T) {
 	p := strings.Join(strings.Fields(prototypePrompt("ws-proto", "/tmp/scratch")), " ")
-	want := `tmux -S "${MUGICREW_HITL_PANE%%,*}" split-window -t "${MUGICREW_HITL_PANE#*,}" -h -c /tmp/scratch '<start command>'`
-	at := strings.Index(p, want)
-	if at < 0 {
-		t.Fatalf("prototype prompt lacks %q:\n%s", want, p)
-	}
-	if i := strings.Index(p, "only for the UI branch"); i < 0 || i > at {
-		t.Errorf("pane instruction must be scoped to UI prototypes:\n%s", p)
-	}
-	if strings.Contains(p, "inherits $TMUX") {
-		t.Error("prompt must not claim the pane inherits $TMUX")
-	}
-	if !strings.Contains(p, "If MUGICREW_HITL_PANE is empty or unset, run no tmux at all") {
-		t.Error("prompt must name the MUGICREW_HITL_PANE-unset fallback")
-	}
 	for _, w := range []string{
+		`split-window -t "${MUGICREW_HITL_PANE#*,}" -h -l 40% -c /tmp/scratch -P -F '#{pane_id}' '<server command>'`,
+		`split-window -t <server pane id> -v -c /tmp/scratch -P -F '#{pane_id}'`,
+		`set-option -p -t <server pane id> @protopane 1`,
+		`set-option -p -t <trigger pane id> @protopane 1`,
+		"python3 -m http.server -b 127.0.0.1 <port> -d <dir of the demo>",
+		"http://127.0.0.1:<port>/<demo>.html",
 		"Press Enter to open",
 		`in %s\n" "<target>" "$BROWSER"`,
 		"applies to both the LOGIC and the UI branch",
-		"plain absolute path of the HTML demo (not a file:// URL)",
 		"the URL the dev server reports once it is up",
 		"MUGICREW_HITL_PANE is set, $BROWSER is non-empty, and command -v succeeds on $BROWSER's first word",
-		"otherwise open no browser pane",
+		"otherwise open no trigger pane",
 		"In every case print the target in the chat",
 		"POSIX sh loop",
 		"$BROWSER unquoted",
+		"If MUGICREW_HITL_PANE is empty or unset, run no tmux at all",
+		"carrying only the @protopane user option, and mugicrew does not track or reap them",
 	} {
 		if !strings.Contains(p, w) {
 			t.Errorf("prototype prompt lacks %q:\n%s", w, p)
 		}
 	}
-	if strings.Contains(p, "open no pane") {
-		t.Error("LOGIC must no longer open no pane")
+	for _, bad := range []string{"file:// URL", "inherits $TMUX", "open no pane", "only for the UI branch", "does not mark"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("prototype prompt still says %q", bad)
+		}
 	}
 	if !strings.Contains(p, "Open both panes below before the side-ref land and the tree removal") {
-		t.Error("prompt must order the browser pane before the tree is removed")
+		t.Error("prompt must order the panes before the tree is removed")
 	}
 }

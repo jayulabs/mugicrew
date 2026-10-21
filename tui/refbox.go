@@ -37,7 +37,8 @@ type refSection struct {
 }
 
 // refSections groups the bar's binding set (before any fit) into this row, this tab,
-// navigation, g goto › and global (Spec mc-bruk D6, ADR 0229 §5).
+// navigation, g goto › and global (Spec mc-bruk D6, ADR 0229 §5). A nested TUI whose
+// private server has a prefix2 ends global with one display-only line for it (ADR 0321).
 func (m Model) refSections() (left, right []refSection) {
 	var items []hintItem
 	var moves []key.Binding
@@ -70,8 +71,30 @@ func (m Model) refSections() (left, right []refSection) {
 	if opts := m.gotoOpts(); len(opts) > 0 {
 		right = append(right, refSection{"g goto ›", optBindings(opts)})
 	}
-	right = append(right, refSection{"n new ›", optBindings(m.newOpts())}, refSection{"global", shellKeys})
+	right = append(right, refSection{"n new ›", optBindings(m.newOpts())}, refSection{"global", m.globalKeys()})
 	return left, right
+}
+
+// globalKeys is shellKeys, plus the nested prefix2 line when ? read one on opening. The
+// line is help-only, with no keys, so nothing matches it and it is never in shellKeys.
+func (m Model) globalKeys() []key.Binding {
+	if m.prefix2 == "" {
+		return shellKeys
+	}
+	return append(slices.Clone(shellKeys), key.NewBinding(key.WithHelp(m.prefix2, "tmux prefix (nested)")))
+}
+
+// nestedPrefix2 is the chord ? shows as the nested tmux prefix, "" for none: read when
+// ? opens, since a render runs no subprocess. A read error shows no line.
+func nestedPrefix2() string {
+	if !tuiNested() {
+		return ""
+	}
+	k, err := readPrefix2()
+	if err != nil || k == "" || k == "None" {
+		return ""
+	}
+	return k
 }
 
 // refColumn renders sections as brand (bold accent) headings over key  desc lines, the keys padded to

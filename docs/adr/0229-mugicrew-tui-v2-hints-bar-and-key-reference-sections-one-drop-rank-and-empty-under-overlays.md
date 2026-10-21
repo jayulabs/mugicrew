@@ -2,6 +2,7 @@
 
 Status: Accepted
 Amended by ADR 0241 (§1, §3, §5: n new in nav and pinned, u and U gone, the n new › group).
+Amended by ADR 0321 (§5: one global `<k>  tmux prefix (nested)` line while nested with a prefix2).
 Amended by ADR 0258 (§1, §3, §5: E raw is removed; E explorer joins the shell keys in the ? reference after o loop on/off, never on the bar).
 Date: 2026-10-16
 

@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Project is a GitLab project: its host and URL-encoded <namespace>/<project> (the :id).
@@ -158,6 +159,9 @@ type MR struct {
 	HeadPipeline        *Pipeline `json:"head_pipeline"`
 	SHA                 string    `json:"sha"` // the source branch's current head
 	WebURL              string    `json:"web_url"`
+	Author              struct {
+		Username string `json:"username"`
+	} `json:"author"`
 }
 
 // Pipeline is a merge request's head pipeline.
@@ -273,12 +277,14 @@ type Discussion struct {
 
 // Note is one comment of a Discussion.
 type Note struct {
-	ID     int    `json:"id"`
-	Body   string `json:"body"`
-	System bool   `json:"system"`
-	Author struct {
+	ID        int       `json:"id"`
+	Body      string    `json:"body"`
+	System    bool      `json:"system"`
+	CreatedAt time.Time `json:"created_at"`
+	Author    struct {
 		ID       int    `json:"id"`
 		Username string `json:"username"`
+		Bot      bool   `json:"bot"`
 	} `json:"author"`
 	Position *Position `json:"position"` // diff notes only
 }
@@ -312,22 +318,6 @@ func Discussions(p Project, iid int) ([]Discussion, error) {
 			return all, nil
 		}
 	}
-}
-
-// IsBot is whether the GitLab user is a bot account (GET /users/:id; a note's author
-// is a UserBasic, which has no bot field). The endpoint is instance-wide, not project-scoped.
-func IsBot(p Project, userID int) (bool, error) {
-	body, err := call(p, "GET", fmt.Sprintf("/users/%d", userID), "")
-	if err != nil {
-		return false, err
-	}
-	var u struct {
-		Bot bool `json:"bot"`
-	}
-	if err := json.Unmarshal(body, &u); err != nil {
-		return false, fmt.Errorf("forge: decode user: %w", err)
-	}
-	return u.Bot, nil
 }
 
 // CurrentUser is the authenticated user's username (GET /user): the graph name.
@@ -368,6 +358,14 @@ func Reply(p Project, iid int, discussionID, body string) error {
 // Resolve marks the discussion resolved; resolving a resolved one is harmless.
 func Resolve(p Project, iid int, discussionID string) error {
 	_, err := call(p, "PUT", fmt.Sprintf("merge_requests/%d/discussions/%s?resolved=true", iid, discussionID), "")
+	return err
+}
+
+// AwardEmoji awards the named emoji on a note of the merge request, plain or thread alike.
+// ErrNotFound when the note is gone or the award is already there; a caller re-awarding
+// counts that as done.
+func AwardEmoji(p Project, iid, noteID int, name string) error {
+	_, err := call(p, "POST", fmt.Sprintf("merge_requests/%d/notes/%d/award_emoji", iid, noteID), "", "-f", "name="+name)
 	return err
 }
 

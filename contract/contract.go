@@ -59,11 +59,19 @@ const (
 	KindCritique Kind = "critique"
 	KindConflict Kind = "conflict"
 	KindApproval Kind = "approval"
+
+	// KindForgeReview is Usopp's AFK leaf that judges a container's Merge Request notes into Critiques or grillings; a Checkpoint member while open (ADR 0317, ADR 0318).
+	KindForgeReview Kind = "forge-review"
 )
 
 // KindLanding is the Jinbe-owned AFK leaf that lands its parent container: a child
 // pinned to the approved commit, so the container never lands itself (ADR 0145/0147).
 const KindLanding Kind = "landing"
+
+// KindMRWatch is the Jinbe-owned AFK leaf that reads its parent container's open Merge
+// Request every paced tick, so feedback left between Landings spawns a Forge Review
+// (ADR 0185 §8). Like a Landing it is never a member and never undrains its parent.
+const KindMRWatch Kind = "mr-watch"
 
 // KindLatch is the Brook-owned AFK leaf that blocks beads until a Jira ticket reaches Done.
 const KindLatch Kind = "latch"
@@ -73,7 +81,7 @@ const KindLatch Kind = "latch"
 var Kinds = []Kind{
 	KindSignal, KindGrilling, KindResearch, KindChart, KindSurvey, KindChartConflict, KindSpec,
 	KindCheckpoint, KindPrototype, KindTask, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup,
-	KindBuild, KindReview, KindCritique, KindConflict, KindApproval, KindLanding, KindLatch,
+	KindBuild, KindReview, KindForgeReview, KindCritique, KindConflict, KindApproval, KindLanding, KindMRWatch, KindLatch,
 }
 
 // kindPrefix matches one leading "<kind>:" (case-insensitive, whitespace around
@@ -86,6 +94,10 @@ var kindPrefix = func() *regexp.Regexp {
 	slices.SortFunc(names, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	return regexp.MustCompile(`(?i)^\s*(?:` + strings.Join(names, "|") + `)\s*:\s*`)
 }()
+
+// PacedLeaf reports whether this kind is a Landing or MR Watch: a leaf Jinbe's paced
+// tick works that is never a member's work, so it neither drains nor fogs its container.
+func (k Kind) PacedLeaf() bool { return k == KindLanding || k == KindMRWatch }
 
 // AdmitsLandOnlyHold reports whether an open blocker of this kind holds only a
 // Checkpoint's land, not its work (ADR 0269): the offshoot-shaped kinds. A pivot or

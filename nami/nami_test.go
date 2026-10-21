@@ -1315,7 +1315,7 @@ func TestLaunchGrillingFocus(t *testing.T) {
 		oShow := showBead
 		t.Cleanup(func() { showBead = oShow })
 		showBead = func(id string) (bd.Bead, error) {
-			if noShow && id != "ws-grl" { // the grilling's own body read is the Thread: probe
+			if noShow && id != "ws-grl" { // the grilling's own body read is the Source: probe
 				t.Fatal("bd show of a container on a no-context Workspace")
 			}
 			if id == "ws-grl" {
@@ -1700,16 +1700,17 @@ func TestReconcileChartForeignLandFilesHold(t *testing.T) {
 	}
 }
 
-// A grilling whose body carries a "Thread:" key line launches the reviewer-change
+// A grilling whose body carries a "Source:" key line launches the Source:
 // variant; a quoted "> Thread:" or no line keeps the plain prompt byte-for-byte.
-func TestLaunchGrillingThreadVariant(t *testing.T) {
+func TestLaunchGrillingSourceVariant(t *testing.T) {
 	for name, c := range map[string]struct {
 		body    string
 		variant bool
 	}{
-		"key line":   {"Thread: abc123\nwhy", true},
-		"later line": {"intro\nThread: abc123", true},
-		"quoted":     {"> Thread: abc123", false},
+		"key line":   {"Source: !12 d1 n1\nwhy", true},
+		"later line": {"intro\nSource: !12 d1 n1", true},
+		"quoted":     {"> Source: !12 d1 n1", false},
+		"old thread": {"Thread: abc123", false},
 		"none":       {"plain question", false},
 	} {
 		swap(t, &showBead, func(string) (bd.Bead, error) { return bd.Bead{Description: c.body}, nil })
@@ -1718,7 +1719,7 @@ func TestLaunchGrillingThreadVariant(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		p := h.inv.Prompt
-		if got := strings.Contains(p, "A reviewer asked for this change"); got != c.variant {
+		if got := strings.Contains(p, "A reviewer left this on the Chart"); got != c.variant {
 			t.Errorf("%s: variant=%v want %v", name, got, c.variant)
 		}
 		if c.variant {
@@ -1731,13 +1732,29 @@ func TestLaunchGrillingThreadVariant(t *testing.T) {
 	}
 }
 
-func TestThreadGrillingPromptRendersCleanly(t *testing.T) {
-	got := threadGrillingPrompt("mc-y")
+func TestSourceGrillingPromptRendersCleanly(t *testing.T) {
+	got := sourceGrillingPrompt("mc-y")
 	if strings.Contains(got, "%!") {
 		t.Errorf("stray format error in prompt:\n%s", got)
 	}
-	if want := threadGrillingTmpl + "\n" + grillingPrompt("mc-y"); got != want {
+	if want := sourceGrillingTmpl + "\n" + grillingPrompt("mc-y"); got != want {
 		t.Errorf("prompt != preamble + grillingPrompt:\n%s", got)
+	}
+}
+
+// Spec FR 4, 15, 31: a Source: grilling may be answered or closed as not needed
+// with no edit, and its close reason is relayed whole, not as one line.
+func TestSourceGrillingPromptRules(t *testing.T) {
+	got := sourceGrillingPrompt("mc-y")
+	for _, want := range []string{"answer it in the close reason", "Not needed, or already fixed", "Edit only when a change is asked", "relayed whole"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("source grilling prompt lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"write it, not only", "one-line reason"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("source grilling prompt still says %q", bad)
+		}
 	}
 }
 
@@ -1972,7 +1989,6 @@ func TestReconcileChartHoldsRateLimitedMRClose(t *testing.T) {
 	closed := stubChartSeams(t, func(string) (bd.Bead, error) {
 		return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
 	})
-	rateLimited.Clear()
 	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
 	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
 	var order []string
@@ -1985,8 +2001,13 @@ func TestReconcileChartHoldsRateLimitedMRClose(t *testing.T) {
 		return &forge.MR{IID: 7}, nil
 	})
 	swap(t, &forgeCloseMR, func(_ forge.Project, iid int) error { order = append(order, "mr"); return nil })
+	landing := bd.Bead{ID: "ws-landing", Status: "open"}
+	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{landing}, nil })
+	store := &bodyStore{}
+	store.stub(t, landing.ID)
 	evs := eventlogtest.Capture(t)
-	for range 2 {
+	for range 2 { // the second tick shares only the body the first wrote
+		landing.Description = store.body
 		if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
 			t.Fatalf("err = %v, want the 429 held", err)
 		}
@@ -1995,10 +2016,113 @@ func TestReconcileChartHoldsRateLimitedMRClose(t *testing.T) {
 		t.Fatalf("order %v closed %v events %v", order, *closed, eventlogtest.Names(*evs))
 	}
 	findErr = nil
+	landing.Description = store.body
 	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(store.body, "Rate limited:") {
+		t.Errorf("body = %q, want the line dropped once the hold clears", store.body)
+	}
 	if !slices.Equal(order, []string{"mr", "bead:ws-landing"}) {
 		t.Errorf("order %v, want the MR then the Landing", order)
+	}
+}
+
+// bodyStore is a one-bead fake of bd's body: showBead reads it, updateBody writes it.
+type bodyStore struct {
+	body    string
+	writes  int
+	showErr error
+	putErr  error
+}
+
+func (s *bodyStore) stub(t *testing.T, id string) {
+	t.Helper()
+	swap(t, &showBead, func(string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Description: s.body}, s.showErr
+	})
+	swap(t, &updateBody, func(_ string, args []string) error {
+		if s.putErr != nil {
+			return s.putErr
+		}
+		s.writes++
+		s.body = args[1]
+		return nil
+	})
+}
+
+func countEvents(evs []eventlogtest.Event, name string) int {
+	return strings.Count(strings.Join(eventlogtest.Names(evs), " ")+" ", name+" ")
+}
+
+func TestHoldRateLimitedMarker(t *testing.T) {
+	rl := fmt.Errorf("read: %w", forge.ErrRateLimited)
+	other := errors.New("boom")
+	for _, c := range []struct {
+		name       string
+		body       string
+		err        error
+		wantErr    error
+		wantEvents int
+		wantWrites int
+		wantLine   bool
+	}{
+		{"a: no line, 429", "Go.\n", rl, nil, 1, 1, true},
+		{"b: line, 429", "Go.\nRate limited: logged\n", rl, nil, 0, 0, true},
+		{"c: line, success", "Go.\nRate limited: logged\n", nil, nil, 0, 1, false},
+		{"d: line, other error", "Go.\nRate limited: logged\n", other, other, 0, 1, false},
+		{"e: no line, success", "Go.\n", nil, nil, 0, 0, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := &bodyStore{body: c.body}
+			s.stub(t, "ws-chart")
+			evs := eventlogtest.Capture(t)
+			b := bd.Bead{ID: "ws-chart", Description: c.body}
+			if err := holdRateLimited(b, c.err, nil); err != c.wantErr {
+				t.Errorf("err = %v, want %v", err, c.wantErr)
+			}
+			if n := countEvents(*evs, "land.rate_limited"); n != c.wantEvents {
+				t.Errorf("%d events, want %d", n, c.wantEvents)
+			}
+			if s.writes != c.wantWrites {
+				t.Errorf("%d writes, want %d", s.writes, c.wantWrites)
+			}
+			if got := strings.Count(s.body, "Rate limited: logged") == 1; got != c.wantLine || !strings.Contains(s.body, "Go.") {
+				t.Errorf("body = %q, want line present=%v exactly once and Go. kept", s.body, c.wantLine)
+			}
+		})
+	}
+}
+
+func TestHoldRateLimitedMarkerWriteFailureWarns(t *testing.T) {
+	for name, set := range map[string]func(*bodyStore){
+		"write":   func(s *bodyStore) { s.putErr = errors.New("bd down") },
+		"re-read": func(s *bodyStore) { s.showErr = errors.New("bd down") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &bodyStore{body: "Go.\n"}
+			set(s)
+			s.stub(t, "ws-chart")
+			evs := eventlogtest.Capture(t)
+			if err := holdRateLimited(bd.Bead{ID: "ws-chart", Description: s.body}, forge.ErrRateLimited, nil); err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+			if countEvents(*evs, "land.dedup_write_failed") != 1 || countEvents(*evs, "land.rate_limited") != 1 {
+				t.Errorf("events = %v", eventlogtest.Names(*evs))
+			}
+		})
+	}
+}
+
+// The marker builds on the bead as it is now: a line an earlier arm wrote survives.
+func TestHoldRateLimitedMarkerKeepsAnEarlierArmsLine(t *testing.T) {
+	s := &bodyStore{body: "Go.\nMR status: mergeable\n"}
+	s.stub(t, "ws-chart")
+	eventlogtest.Capture(t)
+	if err := holdRateLimited(bd.Bead{ID: "ws-chart", Description: "Go.\n"}, forge.ErrRateLimited, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Go.\nMR status: mergeable\nRate limited: logged\n"; s.body != want {
+		t.Errorf("body = %q, want %q", s.body, want)
 	}
 }

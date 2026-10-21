@@ -383,7 +383,7 @@ func (g graphData) trailer(hidden []bd.Bead, noBody, drained bool) string {
 	var open, live int
 	for i := range hidden {
 		b := &hidden[i]
-		if b.Status != "closed" && b.Status != "deferred" && !b.Event {
+		if b.Unclosed() && b.Status != "deferred" && !b.Event {
 			open++
 		}
 		if g.isLive(b) {

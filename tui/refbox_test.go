@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -25,6 +28,58 @@ func TestRefSectionsInOrder(t *testing.T) {
 	}
 	if strings.Contains(v, "tmux") {
 		t.Errorf("tmux section in ?:\n%s", v)
+	}
+}
+
+// refGlobal is ? opened with the nested flag and the private server's prefix2 as
+// given (err for a failed read): the global section's lines (ADR 0321).
+func refGlobal(t *testing.T, nested bool, prefix2 string, err error) []string {
+	t.Helper()
+	defer func(n func() bool, r func() (string, error)) { tuiNested, readPrefix2 = n, r }(tuiNested, readPrefix2)
+	tuiNested, readPrefix2 = func() bool { return nested }, func() (string, error) { return prefix2, err }
+	v := ansi.Strip(press(t, press(t, graphModel(t, 80, 60), runeKey("?")), runeKey("G")).View())
+	_, g, _ := strings.Cut(v, "global")
+	var ls []string
+	for _, l := range strings.Split(g, "\n") {
+		if l = strings.Trim(l, " │"); l != "" && !strings.Contains(l, "scroll") && !strings.HasPrefix(l, "╰") {
+			ls = append(ls, l)
+		}
+	}
+	return ls
+}
+
+// A nested TUI's ? ends the global section with the private server's prefix2; every
+// other case shows no tmux line (ADR 0321, FR14–18).
+func TestRefNestedPrefix2Line(t *testing.T) {
+	if ls := refGlobal(t, true, "C-a", nil); len(ls) == 0 || strings.Join(strings.Fields(ls[len(ls)-1]), " ") != "C-a tmux prefix (nested)" {
+		t.Errorf("nested with C-a: last global line is not the C-a line: %q", ls)
+	}
+	for name, ls := range map[string][]string{
+		"nested, None":      refGlobal(t, true, "None", nil),
+		"nested, empty":     refGlobal(t, true, "", nil),
+		"not nested, C-a":   refGlobal(t, false, "C-a", nil),
+		"nested, read fail": refGlobal(t, true, "C-a", errors.New("no tmux")),
+	} {
+		if slices.ContainsFunc(ls, func(l string) bool { return strings.Contains(l, "tmux") }) {
+			t.Errorf("%s: tmux line shown: %q", name, ls)
+		}
+	}
+}
+
+// The chord is display-only: the TUI does not handle it and the bar never offers it.
+func TestRefNestedPrefix2NotHandled(t *testing.T) {
+	defer func(n func() bool, r func() (string, error)) { tuiNested, readPrefix2 = n, r }(tuiNested, readPrefix2)
+	tuiNested, readPrefix2 = func() bool { return true }, func() (string, error) { return "C-a", nil }
+	m := graphModel(t, 80, 40)
+	before := ansi.Strip(m.View())
+	if after := ansi.Strip(press(t, m, tea.KeyMsg{Type: tea.KeyCtrlA}).View()); after != before {
+		t.Errorf("C-a changed the view:\n%s\n--- was ---\n%s", after, before)
+	}
+	if strings.Contains(before, "tmux prefix") {
+		t.Errorf("bar offers the chord:\n%s", before)
+	}
+	if slices.ContainsFunc(shellKeys, func(b key.Binding) bool { return b.Help().Desc == "tmux prefix (nested)" }) {
+		t.Error("the line joined shellKeys")
 	}
 }
 

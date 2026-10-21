@@ -144,7 +144,8 @@ func removeFiles(paths ...string) {
 // "HITL keys" menu (ADR 0296): Back to TUI (F6), Bead pane (F10), and while the
 // pressing session's @autofinish is set a separator and Cancel auto-exit (c),
 // which unsets it: no TUI, no subprocess. F10 shows the session's @bead in a side
-// pane, or focuses the one already open.
+// pane (below the agent pane when a @protopane pane is open), or focuses the one
+// already open.
 //
 // A session's key-table is its default table and tmux never falls back to root
 // from it, so every mouse event in a HITL session would be dropped. The run-shell
@@ -178,7 +179,9 @@ func f6Cmd() []string {
 }
 
 func beadCmd() []string {
-	return []string{"if-shell", "-F", beadPane, focusBead, beadSplit(beadExe())}
+	exe := beadExe()
+	return []string{"if-shell", "-F", beadPane, focusBead,
+		cmdline("if-shell", "-F", protoPane, beadSplitBelow(exe), beadSplitSide(exe))}
 }
 
 // cmdline joins argv into one tmux command string, each word quoted.
@@ -272,6 +275,11 @@ const hitlTable = "mchitl"
 // @beadpane), "" if none: F10 focuses it rather than split another. All tmux-side.
 const beadPane = "#{P:#{?#{@beadpane},#{pane_id},}}"
 
+// protoPane is a format naming the current window's prototype pane (one marked
+// @protopane), "" if none: with one open, F10 splits below the agent pane so the
+// prototype column stays intact.
+const protoPane = "#{P:#{?#{@protopane},#{pane_id},}}"
+
 // beadExe names the mugicrew executable the bead pane runs; a var so a test can
 // point it at a stub. The binding is server-wide, so it is an absolute path, not PATH.
 var beadExe = func() string {
@@ -282,19 +290,31 @@ var beadExe = func() string {
 }
 
 // beadSplit opens the bead pane: the hidden bead-detail subcommand for the pressing
-// session's @bead, at the pane's own width, in less -R, 40% wide on the right, from
-// the active pane's path (the session's path when the pane is dead and expands it to
-// "") so it sees the same Workspace; q ends less and so the pane. Stderr rides the
+// session's @bead, at the pane's own width, in less -R, from the target pane's path
+// (the session's path when the pane is dead and expands it to "") so it sees the
+// same Workspace; q ends less and so the pane. Stderr rides the
 // pipe, so a failed render stays readable. split-window leaves the command
 // unexpanded, so the pane reads @bead and its width itself (tmux sets $TMUX and
 // $TMUX_PANE in it); the id reaches the subcommand as a quoted command-substitution
 // result and is never spliced into the command text. exe is shell-quoted, then
 // escaped for the tmux double quotes around the command.
-func beadSplit(exe string) string {
+//
+// beadSplitBelow splits the window's top-left pane (the full-height agent pane) -v,
+// 40% tall under it.
+func beadSplitBelow(exe string) string {
+	return beadSplit(exe, "split-window -t '{top-left}' -v -l 40%")
+}
+
+// beadSplitSide splits the active pane -h, 40% wide on the right.
+func beadSplitSide(exe string) string {
+	return beadSplit(exe, "split-window -h -l 40%")
+}
+
+func beadSplit(exe, split string) string {
 	sh := "'" + strings.ReplaceAll(exe, "'", `'\''`) + "'"
 	sh += ` bead-detail "$(tmux display-message -p '#{@bead}')" "$(tmux display-message -p '#{pane_width}')" 2>&1 | less -R`
 	sh = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(sh)
-	return `split-window -h -l 40% -c '#{?pane_current_path,#{pane_current_path},#{session_path}}' "` + sh + `" ; set-option -p @beadpane 1`
+	return split + ` -c '#{?pane_current_path,#{pane_current_path},#{session_path}}' "` + sh + `" ; set-option -p @beadpane 1`
 }
 
 // ttyOption is the user option a TUI session carries naming its own client's tty
@@ -851,7 +871,10 @@ func LaunchTUI(args ...string) error {
 	return launchTUI(sock, cwd, exe, args...)
 }
 
-// launchTUI is LaunchTUI on sock with exe as the pane's program.
+// launchTUI is LaunchTUI on sock with exe as the pane's program. Nested in the
+// human's own tmux, it gives the private server a second prefix once the server
+// is up with ~/.tmux.conf loaded and before attaching (ADR 0321, which amends
+// ADR 0042 §4).
 // ponytail: tui-<pid> is unique per live launcher; it collides with a bead's
 // session only for a bead id literally tui-<n> (bd ids carry the repo prefix),
 // where new-session refuses it.
@@ -863,7 +886,12 @@ func launchTUI(sock, cwd, exe string, args ...string) error {
 	if err := os.WriteFile(out, nil, 0o644); err != nil { // truncated per launch; the pane appends
 		return err
 	}
-	env, err := writeEnvFile(nil)
+	nested := nestedIn(os.Getenv("TMUX"), sock)
+	var extra map[string]string
+	if nested {
+		extra = map[string]string{NestedEnv: "1"}
+	}
+	env, err := writeEnvFile(extra)
 	if err != nil {
 		return err
 	}
@@ -871,6 +899,9 @@ func launchTUI(sock, cwd, exe string, args ...string) error {
 	if err := runTmux(sock, tuiArgs(sess, cwd, tuiPane(exe, out, env, args...))); err != nil {
 		os.Remove(env) // no pane took it
 		return err
+	}
+	if nested {
+		setNestedPrefix2(sock)
 	}
 	// A closed terminal hangs us up with the client: stay alive to kill the session.
 	// A TERM kills it at once, which ends the client. Notify, not Ignore: an
@@ -912,16 +943,20 @@ func switchClient(sock, pane, sess string) error {
 	return runTmux(sock, switchArgs(tty, sess))
 }
 
-// Prefix is the private server's prefix key in tmux notation (e.g. C-b): the
-// user's ~/.tmux.conf loads there, so it may not be tmux's default (ADR 0066 §2).
-func Prefix() (string, error) {
+// NestedEnv is the env handoff variable that tells the TUI pane its launcher was
+// nested in the human's own tmux ("1"); unset otherwise (ADR 0321).
+const NestedEnv = "MUGICREW_TMUX_NESTED"
+
+// Prefix2 is the private server's second prefix key in tmux notation, "None" when
+// it has none (ADR 0321). The ? key reference reads it when it opens.
+func Prefix2() (string, error) {
 	sock, err := serverSocket()
 	if err != nil {
 		return "", err
 	}
-	out, err := tmuxCmd(sock, "show", "-gv", "prefix").Output()
+	out, err := tmuxCmd(sock, "show", "-gv", "prefix2").Output()
 	if err != nil {
-		return "", fmt.Errorf("tmux show prefix: %w", err)
+		return "", fmt.Errorf("tmux show prefix2: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

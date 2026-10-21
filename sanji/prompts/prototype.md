@@ -52,21 +52,31 @@ Read crew doc defog-session.md and run its skeleton over this bead, in order:
    <socket>,<pane id> of your own pane on mugicrew's private tmux server (TMUX
    is not set, so a bare tmux finds no server). If MUGICREW_HITL_PANE is empty
    or unset, run no tmux at all (no pane, no session, no server). The panes are
-   ordinary tmux panes; mugicrew does not mark, track or reap them.
+   ordinary tmux panes carrying only the @protopane user option, and mugicrew
+   does not track or reap them.
 
-   Dev-server pane, only for the UI branch of that pick. Split your window with
+   Server pane, for both the LOGIC and the UI branch. It makes the right-hand
+   column beside your full-height pane. The server command for UI is the
+   project's own dev-server start command; for LOGIC it is
+   python3 -m http.server -b 127.0.0.1 <port> -d <dir of the demo>, with <port>
+   a free localhost port you pick (bound to 127.0.0.1 so the demo is not
+   exposed off the machine and two sessions don't collide). Split your window
+   with -P -F so tmux prints the new pane id, record it as the server pane id, then tag it:
 
-       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" split-window -t "${MUGICREW_HITL_PANE#*,}" -h -c %[3]s '<start command>'
+       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" split-window -t "${MUGICREW_HITL_PANE#*,}" -h -l 40%% -c %[3]s -P -F '#{pane_id}' '<server command>'
+       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" set-option -p -t <server pane id> @protopane 1
 
-   Browser pane, which applies to both the LOGIC and the UI branch. The target
-   is the plain absolute path of the HTML demo (not a file:// URL) inside %[3]s
-   for LOGIC, and the URL the dev server reports once it is up for UI (open it
-   next to the dev-server pane). Open the pane only when MUGICREW_HITL_PANE is
+   Trigger pane, which applies to both the LOGIC and the UI branch. The target
+   is http://127.0.0.1:<port>/<demo>.html for LOGIC, and the URL the dev server
+   reports once it is up for UI. Open the pane only when MUGICREW_HITL_PANE is
    set, $BROWSER is non-empty, and command -v succeeds on $BROWSER's first word;
-   otherwise open no browser pane. Split the same way, running a POSIX sh loop
-   (no bash-only read -p) with $BROWSER unquoted so a value with arguments works:
+   otherwise open no trigger pane (the server pane alone makes the column and
+   the URL goes in chat). Split the *server pane* so the trigger sits below it,
+   tag it the same way, running a POSIX sh loop (no bash-only read -p) with
+   $BROWSER unquoted so a value with arguments works:
 
-       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" split-window -t "${MUGICREW_HITL_PANE#*,}" -h -c %[3]s 'while printf "Press Enter to open %%s in %%s\n" "<target>" "$BROWSER"; read -r _; do $BROWSER "<target>"; done'
+       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" split-window -t <server pane id> -v -c %[3]s -P -F '#{pane_id}' 'while printf "Press Enter to open %%s in %%s\n" "<target>" "$BROWSER"; read -r _; do $BROWSER "<target>"; done'
+       tmux -S "${MUGICREW_HITL_PANE%%%%,*}" set-option -p -t <trigger pane id> @protopane 1
 
    In every case print the target in the chat (and for UI the start command and
    %[3]s) so the human can open or re-run it.

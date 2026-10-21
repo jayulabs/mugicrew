@@ -57,8 +57,8 @@ func jiraGate(root string) bool {
 var prereqs = []prereq{
 	{name: "bd", bin: "bd", verArgs: []string{"version"}, field: 2, floor: "1.3.0",
 		linux: "brew install beads or npm install -g @beads/bd", macos: "brew install beads"},
-	{name: "dolt", bin: "dolt", verArgs: []string{"version"}, field: 2, warnFrom: "2.3.0",
-		linux: "pinned 2.2.0 tarball, see docs/install.md#dolt", macos: "pinned 2.2.0 tarball, see docs/install.md#dolt"},
+	{name: "dolt", bin: "dolt", verArgs: []string{"version"}, field: 2, floor: "2.3.0", warnFrom: "2.6.0",
+		linux: "pinned 2.5.0 tarball, see docs/install.md#dolt", macos: "pinned 2.5.0 tarball, see docs/install.md#dolt"},
 	{name: "git", bin: "git", linux: "apt install git (dnf/yum install git)", macos: "xcode-select --install or brew install git"},
 	{name: "tmux", bin: "tmux", verArgs: []string{"-V"}, field: 1, floor: "3.4",
 		warnBelow: "3.5", warnDetail: "the F1 menu ignores the mouse", warnHint: "build tmux from source or use a newer distro release for mouse-picking in the F1 menu",
@@ -166,8 +166,8 @@ func (p prereq) check(root string) []result {
 		return []result{problem(stWarn, p.name, v+" is below "+p.warnBelow+" and "+p.warnDetail,
 			p.name+" "+p.warnBelow+" or later is on PATH", p.manual(p.warnHint))}
 	case p.warnFrom != "" && !verLess(v, p.warnFrom):
-		return []result{problem(stWarn, p.name, v+" is outside the measured-clean range (bd pins 2.2.0; 2.3.x regressed)",
-			"dolt is below "+p.warnFrom+", the measured-clean range", p.manual("install "+p.install()))}
+		return []result{problem(stWarn, p.name, v+" is newer than the tested 2.5.0 pin",
+			"dolt is no newer than the tested 2.5.0 pin", p.manual("install "+p.install()))}
 	}
 	return []result{quiet(stOK, p.name, v)}
 }

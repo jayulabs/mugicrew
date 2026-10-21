@@ -1,6 +1,6 @@
 # ADR 0185: An open Merge Request outlives its Landings; a Forge-side close or trailerless merge holds the container on a Task
 
-Status: Accepted (amended by ADR 0189)
+Status: Accepted (amended by ADR 0189; §8 amended by Spec "Landings paced by a configurable poll interval measured from the previous effort's end" and by the Spec "Forge Reviews file a container's Merge Request feedback deduplicated…" (the MR Watch))
 Date: 2026-10-14
 
 Chart mc-t72m.2 (GitLab Merge Request land strategy for a single-repo
@@ -50,10 +50,15 @@ are in docs/research/gitlab-merge-request-mechanics-through-glab.md.
 7. **A Chart lands the same way.** It goes through the same MR flow, with Forge
    CI as the gate and auto-merge armed. It has no Review or Approval, because a
    Chart is gated by defog and Spec acceptance. Only the trailer kind differs.
-8. **No backoff on the pending check.** A pending Landing costs one fetch and
-   one MR read per tick (15s), which is well under gitlab.com's API limit. A 429
-   leaves the Landing open and is logged once, without an error each tick. Add a
-   backoff only when measured cost asks for it.
+8. **A pending Landing is re-checked on a poll interval.** A pending Landing
+   costs one fetch and one MR read per check. The loop re-checks it on `[gitlab]
+   landing_poll_interval` (default 60s, minimum 15s), measured from the previous
+   effort's end, pass or fail, instead of every tick. A Landing the loop has not
+   run since it started is due at once. A 429 leaves the Landing open and is
+   logged once, without an error each tick. No exponential or adaptive backoff.
+   The same budget covers the **MR Watch**, which reads an open container's MR on
+   the same interval between Landings. It skips its read while a Landing is
+   pending, so one MR is read once per period.
 
 ## Considered Options
 

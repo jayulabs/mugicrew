@@ -855,3 +855,18 @@ func TestParseBeadsBodyFields(t *testing.T) {
 		t.Errorf("body fields not decoded: %+v", b)
 	}
 }
+
+// An open MR Watch never undrains a Chart, like a Landing.
+func TestDrainBlockersOverSkipsOpenMRWatch(t *testing.T) {
+	watch := Bead{ID: "w", Kind: contract.KindMRWatch, Status: "open"}
+	if open, held := DrainBlockersOver([]Bead{watch}, nil); open != 0 || len(held) != 0 {
+		t.Errorf("open %d held %v, want an open MR Watch skipped", open, held)
+	}
+}
+
+// An MR Watch is no Checkpoint member, so it never holds a land.
+func TestIsMemberExcludesMRWatch(t *testing.T) {
+	if IsMember(contract.KindMRWatch) {
+		t.Error("an MR Watch must not be a member")
+	}
+}

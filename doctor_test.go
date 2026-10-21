@@ -58,7 +58,7 @@ var healthyVersions = map[string]string{
 	"bd":     "bd version 1.3.0 (dev)",
 	"tmux":   "tmux 3.7c",
 	"claude": "2.1.301 (Claude Code)",
-	"dolt":   "dolt version 2.2.0",
+	"dolt":   "dolt version 2.5.0",
 }
 
 func whereJSON(path string) string {
@@ -715,8 +715,10 @@ func TestDoctorToolVersions(t *testing.T) {
 		{"tmux", "tmux 3.5a", "ok  tmux: 3.5a"},
 		{"claude", "2.1.301 (Claude Code)", "ok  claude: 2.1.301"},
 		{"claude", "2.1.77 (Claude Code)", "FAIL  claude: 2.1.77 is below 2.1.78"},
-		{"dolt", "dolt version 2.2.0", "ok  dolt: 2.2.0"},
-		{"dolt", "dolt version 2.4.2", "warn  dolt: 2.4.2"},
+		{"dolt", "dolt version 2.2.0", "FAIL  dolt: 2.2.0 is below 2.3.0"},
+		{"dolt", "dolt version 2.3.4", "ok  dolt: 2.3.4"},
+		{"dolt", "dolt version 2.5.0", "ok  dolt: 2.5.0"},
+		{"dolt", "dolt version 2.6.0", "warn  dolt: 2.6.0"},
 		{"bd", "garbage", "warn  bd: on PATH, version unreadable"},
 	} {
 		t.Run(c.tool+" "+c.out, func(t *testing.T) {
@@ -762,7 +764,7 @@ func TestDoctorAbsentToolHintHasFloor(t *testing.T) {
 			doctorWS(t, "tmux", "dolt")
 			doctorOS = goos
 			out, code := doctorRun(t)
-			if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH") || !strings.Contains(out, "• need ≥ 3.4: install ") || !strings.Contains(out, hint) || !strings.Contains(out, "FAIL  dolt: not on PATH") || !strings.Contains(out, "• install pinned 2.2.0 tarball, see docs/install.md#dolt") {
+			if code != 1 || !strings.Contains(out, "FAIL  tmux: not on PATH") || !strings.Contains(out, "• need ≥ 3.4: install ") || !strings.Contains(out, hint) || !strings.Contains(out, "FAIL  dolt: not on PATH") || !strings.Contains(out, "• need ≥ 2.3.0: install pinned 2.5.0 tarball, see docs/install.md#dolt") {
 				t.Errorf("code %d out %q", code, out)
 			}
 		})

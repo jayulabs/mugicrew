@@ -252,7 +252,7 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 	var watch []string // open matches of the active query: if one closes, the drop-out read fetches it for keepClosers
 	if w := m.searched.words; w != "" && m.tab == tabGraph {
 		for _, b := range m.beads {
-			if b.Status != "closed" && matchWords(w, b.Title+" "+b.ID) {
+			if b.Unclosed() && matchWords(w, b.Title+" "+b.ID) {
 				watch = append(watch, b.ID)
 			}
 		}
@@ -1021,7 +1021,7 @@ func (m Model) crewCounts(in func(id string) bool, retrying map[string]bool) (hi
 		if !in(b.ID) {
 			continue
 		}
-		if b.Status != "closed" && bd.Paused(b) && !retrying[b.ID] {
+		if b.Unclosed() && bd.Paused(b) && !retrying[b.ID] {
 			paused++
 		}
 		if m.waiting(b) {

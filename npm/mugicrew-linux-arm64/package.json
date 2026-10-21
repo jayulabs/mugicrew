@@ -1,6 +1,6 @@
 {
   "name": "@jayulabs/mugicrew-linux-arm64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "mugicrew binary for linux arm64",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/jayulabs/mugicrew.git" },

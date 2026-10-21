@@ -17,6 +17,7 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 	var landedL, pauseL, openL, conflictL *bd.Bead // each rule's driver bead
 	var surveyL, hitlL, afkL, draftL *bd.Bead
 	landings, obsolete := 0, false
+	var forgeKids []bd.Bead // the Chart's Forge Reviews: a qualifier, never AFK fog (ADR 0320 (a-forge-review-surfaces…))
 	pause, unclosed := "", 0
 	var fogBlockers []*bd.Bead // the distinct outside blockers, while every defog child waits on one
 	fogBlocked := true
@@ -24,7 +25,7 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 		if b.Parent != c.ID || b.Event {
 			continue
 		}
-		if b.Status != "closed" && b.Kind != contract.KindLanding {
+		if b.Unclosed() && !b.Kind.PacedLeaf() {
 			unclosed++ // Drafts count: bd.DrainBlockersOver's sense
 		}
 		if b.Status == "deferred" {
@@ -33,7 +34,11 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 			}
 			continue
 		}
-		if b.Status != "closed" && b.Kind != contract.KindLanding && b.Kind != contract.KindChartConflict {
+		if b.Kind == contract.KindForgeReview {
+			forgeKids = append(forgeKids, b)
+			continue
+		}
+		if b.Unclosed() && !b.Kind.PacedLeaf() && b.Kind != contract.KindChartConflict {
 			bl := g.openBlockers(&g.beads[i])
 			switch inSession := g.sessions[b.ID].State == session.Alive; {
 			case b.Kind == contract.KindSurvey:
@@ -80,7 +85,7 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 				}
 			}
 		case contract.KindChartConflict:
-			if b.Status != "closed" && conflictL == nil {
+			if b.Unclosed() && conflictL == nil {
 				conflictL = &g.beads[i]
 			}
 		}
@@ -183,13 +188,14 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 	if r.Word == "" {
 		r.Word, r.Rank, r.Why = "idle ⚠", 17, "no rule matched"
 	}
-	// qualifiers, in order: round N, re-land, retrying
+	// qualifiers, in order: round N, re-land, forge review, retrying
 	if landings >= 2 {
 		r.Qualifiers = append(r.Qualifiers, fmt.Sprintf("round %d", landings))
 	}
 	if obsolete {
 		r.Qualifiers = append(r.Qualifiers, "re-land")
 	}
+	r.Qualifiers = append(r.Qualifiers, forgeReviewQualifier(forgeKids)...)
 	if r.Word == "landing" && landRetrying(g.landEv[openL.ID]) {
 		r.Qualifiers = append(r.Qualifiers, "retrying")
 	}

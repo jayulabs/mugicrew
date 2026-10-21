@@ -52,6 +52,16 @@ If you cannot build the slice, instead of implementing it run
 `bd comments add {{.BeadID}} "Not built: <why>"` and return, committing nothing.
 Franky's backstop pauses the bead for a human with your reason.
 
+## A Critique that needs no change
+
+If this is a filed Critique and, on reading the code, it is not needed or is
+already fixed, commit nothing and close it yourself with the full reason, which
+is relayed whole (up to 2000 characters) to whoever filed it:
+
+    bd close {{.BeadID}} --reason "<why it is not needed, or what already fixed it>"
+
+A Build is never closed this way.
+
 ## Commit to your effort branch — only if dirty — then integrate
 
 Roll forward, don't double-commit. Inspect the worktree FIRST (`git status`,
@@ -127,7 +137,7 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
 {{end}}
 {{template "external-work" .BeadID}}
 
-Do NOT close your own bead. Franky re-reads the graph after you return and closes
+Do NOT close your own bead, except a Critique that needs no change (above). Franky re-reads the graph after you return and closes
 this bead{{if .SpecID}} (or closes it `pivoted:` if you raised a pivot){{end}}; Jinbe
 spawns the Review once the Checkpoint drains.
 Touching the bead's status yourself corrupts that handoff.

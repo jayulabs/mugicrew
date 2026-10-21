@@ -1,6 +1,7 @@
 # ADR 0042: concurrent sessions are uncapped; attach shares, and nests inside the user's tmux
 
 Status: Accepted
+Amended by: ADR 0321 §4 (a nested TUI launch sets a second prefix).
 Amended by: ADR 0065 §2, §4 (F12 back to the TUI; nesting happens once at TUI launch)
 Date: 2026-10-04
 

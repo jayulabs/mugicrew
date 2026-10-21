@@ -113,6 +113,9 @@ func (t execTab) rowText(r eRow) string {
 		owner = e.Owner
 	}
 	field("owner", owner)
+	for _, f := range forgeReviewFields(b) {
+		field(f[0], f[1])
+	}
 	kind := r.kind
 	if r.cpAct() || kind == eLive || kind == eCPS || kind == eSPS || kind == eLanded { // a Live or Checkpoints row details like its tree row
 		switch b.Kind {
@@ -181,7 +184,7 @@ func (t execTab) rowText(r eRow) string {
 			field("stage", "specified — no Checkpoint cut")
 		}
 	default:
-		if b.Status != "closed" {
+		if b.Unclosed() {
 			field("state", leafWords[g.leafState(b)])
 		}
 		if v, ok := g.sessionLine(b); ok {

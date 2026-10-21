@@ -64,6 +64,8 @@ func (Jinbe) Run(_ contract.Ctx, bead contract.Bead) error {
 		return reconcileRollback(b)
 	case contract.KindLanding:
 		return reconcileLanding(b)
+	case contract.KindMRWatch:
+		return reconcileMRWatch(b)
 	}
 	return fmt.Errorf("jinbe.Run: kind %q has no handler", b.Kind)
 }
@@ -156,12 +158,12 @@ var (
 	causedBy        = bd.CausedBy
 )
 
-// Seams of threadArm (review threads, threads.go).
+// Seams of the Forge Review arm (forgereview.go) and the close leg (threads.go).
 var (
 	forgeDiscussions = forge.Discussions
-	forgeIsBot       = forge.IsBot
 	forgeReply       = forge.Reply
 	forgeResolve     = forge.Resolve
+	forgeAward       = forge.AwardEmoji
 	forgeUser        = func() (string, error) {
 		p, err := git.ForgeProject() // the reply-marker account is the Workspace's
 		if err != nil {
@@ -172,7 +174,7 @@ var (
 	newestByTrailer = git.Repo.NewestByTrailer
 	childrenOfKind  = bd.ChildrenOfKind
 	supersede       = bd.Supersede
-	spawnThreadBead = bd.SpawnChild
+	clock           = time.Now
 )
 
 // checkpointBranch is the branch a Checkpoint lands from (ADR 0010 §3: checkpoint/<id>)
@@ -234,10 +236,11 @@ func reconcileCheckpoint(cp bd.Bead) error {
 	return err
 }
 
-// closeLanded rolls a landed container forward: under gitlab it first closes any MR still open
-// on the branch; its open Landings close landed: <sha> through the Open() guard, then the
-// container itself — always the Landing first (ADR 0145 §3), so a container never closes
-// over an open Landing.
+// closeLanded rolls a landed container forward: under gitlab it first flags a stale pin,
+// runs the final close-out and closes any MR still open on the branch, then mints the
+// renumber; its open Landings close landed: <sha> through the Open() guard, its MR Watches
+// close, then the container itself — always the Landing first (ADR 0145 §3), so a
+// container never closes over an open Landing.
 func closeLanded(container bd.Bead, branch, sha string) error {
 	landings, err := landingsOf(container.ID)
 	if err != nil {
@@ -257,10 +260,14 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 			if err := flagStalePin(l, container, branch, sha, lg); err != nil {
 				return err
 			}
+			if err := finalCloseOut(l, container, branch, sha, lg); err != nil {
+				return holdRateLimited(evBead, "land.rate_limited", err, lg.attrs)
+			}
 		}
-		if err := closeLandedMR(evBead, branch, lg); err != nil { // before any bead closes, so a failure retries
+		err = closeLandedMR(evBead, branch, lg) // before any bead closes, so a failure retries
+		if herr := holdRateLimited(evBead, "land.rate_limited", err, lg.attrs); err != nil {
 			// a held 429 returns nil before anything closes; the next tick retries (ADR 0185 §8)
-			return holdRateLimited(evBead, "land.rate_limited", err, lg.attrs)
+			return herr
 		}
 		if hasLanding && l.Open() { // CloseLandings below closes it
 			landOutcome(lg, l, eventlog.LandLanded, git.RecordedMR(l.Description), "sha", sha)
@@ -272,6 +279,9 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 		}
 	}
 	if err := bd.CloseLandings(landings, sha, closeBead); err != nil {
+		return err
+	}
+	if err := closeMRWatches(container.ID, "container closed"); err != nil {
 		return err
 	}
 	return closeIfOpen(container, "")
@@ -320,19 +330,41 @@ func reconcileLanding(l bd.Bead) error {
 
 // holdRateLimited returns err unless it is a Forge 429, which it logs once per bead
 // under event and swallows, so the bead stays open and the next tick retries (ADR 0185 §8).
-// nested is the context/repo/into attrs the attempt resolved (Spec FR 30), nil for a
-// Workspace one (FR 33): appended with no further bead read.
+// "Once" is the bead's Rate limited: line, set on the first 429 and dropped by the first
+// outcome that isn't one, so it holds across ticks' processes. nested is the
+// context/repo/into attrs the attempt resolved (Spec FR 30), nil for a Workspace one (FR 33).
 func holdRateLimited(b bd.Bead, event string, err error, nested []any) error {
+	logged := bd.HasBodyLine(b.Description, rateLimitedLine)
 	if !errors.Is(err, forge.ErrRateLimited) {
-		rateLimited.Delete(b.ID)
+		if logged {
+			writeMarker(b, func(body string) string { return bd.RemoveBodyLine(body, rateLimitedPrefix) })
+		}
 		return err
 	}
-	if _, seen := rateLimited.LoadOrStore(b.ID, true); !seen {
-		pruneRateLimited()
-		attrs := append(eventlog.BeadAttrs(b), "mr", git.RecordedMR(b.Description))
-		slog.Warn(event, append(attrs, nested...)...)
+	if logged {
+		return nil
 	}
+	attrs := append(eventlog.BeadAttrs(b), "mr", git.RecordedMR(b.Description))
+	slog.Warn(event, append(attrs, nested...)...)
+	writeMarker(b, func(body string) string { return setBodyLine(body, rateLimitedPrefix, rateLimitedLine) })
 	return nil
+}
+
+// The dedup markers: body lines of the bead an event names, so "logged once" holds across
+// the fresh process of each tick (graph state, ADR 0033).
+const (
+	rateLimitedPrefix = "Rate limited: "
+	rateLimitedLine   = "Rate limited: logged"
+	strandedPrefix    = "Stranded: "
+	strandedLine      = "Stranded: logged"
+)
+
+// writeMarker applies edit to b's current body, not the tick-start copy earlier arms may
+// have made stale. A failed read or write only warns: the next tick logs again and retries.
+func writeMarker(b bd.Bead, edit func(body string) string) {
+	if err := bd.EditBody(showBead, updateBody, b.ID, edit); err != nil {
+		slog.Warn("land.dedup_write_failed", append(eventlog.BeadAttrs(b), "err", err)...)
+	}
 }
 
 // reconcileLandingOnce returns the legs' nested attrs once resolved (nil for a Workspace land).
@@ -418,6 +450,9 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 		if err := recordMR(l, lg.mrPath, pending.MR); err != nil {
 			return nested, err
 		}
+		if name == git.LandStrategyGitlab {
+			return nested, spawnMRWatch(cp, lg, pending.MR)
+		}
 		return nested, nil
 	}
 	if !errors.Is(err, forge.ErrRateLimited) { // held once by reconcileLanding, not an error per tick (FR 35)
@@ -431,6 +466,9 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 func landedClose(l, cp bd.Bead, branch, sha, strategy string, lg legs) error {
 	if strategy == git.LandStrategyGitlab {
 		if err := flagStalePin(l, cp, branch, sha, lg); err != nil {
+			return err
+		}
+		if err := finalCloseOut(l, cp, branch, sha, lg); err != nil {
 			return err
 		}
 		if err := closeLandedMR(l, branch, lg); err != nil {
@@ -453,18 +491,6 @@ func closeLandedMR(b bd.Bead, branch string, lg legs) error {
 	eventlog.RecordLandMRClosed(b, iid, "container landed", lg.attrs...)
 	return nil
 }
-
-// rateLimited remembers the Landings and Rollbacks whose 429 is already logged, so a Forge rate
-// limit is one event, not one per tick (Spec FR 35).
-var rateLimited sync.Map
-
-// strandedLogged remembers the Rollbacks whose revert.stranded is already logged, so a
-// Rollback left open for a human is one event, not one per tick.
-var strandedLogged sync.Map
-
-// pruneRateLimited drops the beads that closed (or vanished) while limited, which
-// their reconcile never sees again; run on each new 429, so the map stays small.
-func pruneRateLimited() { pruneClosed(&rateLimited) }
 
 // pruneClosed drops the entries of m, keyed by bead id, whose bead is no longer open.
 func pruneClosed(m *sync.Map) {
@@ -507,8 +533,11 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 		return true, holdTrailerless(cp, lg.mrPath, "merge request", "MR", git.TrailerFor(string(cp.Kind), cp.ID), iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
 	}
 	if mr.State == forge.StateOpened {
-		if done, err := threadArm(l, cp, lg, mr, branch); done || err != nil { // first: a filed thread changes the tip the other arms would act on
-			return done, err
+		if err := forgeReviewArm(cp, &l, lg, mr); err != nil { // first: an open Forge Review holds the land, and a 429 is held by reconcileLanding
+			return true, err
+		}
+		if err := closeOutArm(cp, lg, mr, branch, closeOutTarget{head: mr.SHA}); err != nil { // a 429 is held by reconcileLanding
+			return true, err
 		}
 		if done, err := conflictArm(&l, cp, branch, trailer, mr, lg, base); done || err != nil {
 			return done, err
@@ -667,9 +696,7 @@ func holdPipeline(l bd.Bead, pl forge.Pipeline) error {
 // setBodyLine is body with every line starting prefix replaced by line, appended when
 // none was there.
 func setBodyLine(body, prefix, line string) string {
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	lines = slices.DeleteFunc(lines, func(s string) bool { return strings.HasPrefix(s, prefix) })
-	return strings.Join(append(lines, line), "\n") + "\n"
+	return bd.SetBodyLine(body, prefix, line)
 }
 
 // infraReason is whether a job's failure_reason is the runner's or the scheduler's,
@@ -845,6 +872,22 @@ func holdTrailerless(cp bd.Bead, path, noun, label, trailer string, iid int, sha
 // flagStalePin is nami.FlagStalePin over Jinbe's seams.
 func flagStalePin(l, cp bd.Bead, branch, sha string, lg legs) error {
 	return nami.FlagStalePin(l, cp, branch, sha, func(sha string) (string, bool) { return landedTip(lg.repo, sha) }, lg.head, contexts.AncestorIn(lg.repo, isAncestor), spawnSignal)
+}
+
+// finalCloseOut is the landed Landing's last close-out pass (ADR 0319 (a-filed-comment-is-closed-out…)), before its
+// container closes: against the commit the MR landed (the squash's Tip: when it has one),
+// a bead whose integrate commit that lacks is stranded. A Landing with no recorded MR has
+// nothing to close out.
+func finalCloseOut(l, cp bd.Bead, branch, sha string, lg legs) error {
+	iid := git.RecordedMR(l.Description)
+	if iid == 0 {
+		return nil
+	}
+	head := sha
+	if tip, ok := landedTip(lg.repo, sha); ok {
+		head = tip
+	}
+	return closeOutArm(cp, lg, &forge.MR{IID: iid}, branch, closeOutTarget{head: head, merged: true, landing: l})
 }
 
 // recordMR appends "MR: !<iid>" (or "MR: <group/proj>!<iid>" for a nested repo's project, ADR 0230) to the Landing's body unless it already carries an
@@ -1298,9 +1341,9 @@ func revertMRArms(rb, cp bd.Bead, lg rbLeg, squash, base, reverts string, iid in
 		}
 		if _, ok, err := successorOf(rb.ID, contract.KindCheckpoint); err != nil || ok {
 			if ok {
-				if _, seen := strandedLogged.LoadOrStore(rb.ID, true); !seen {
-					pruneClosed(&strandedLogged)
+				if !bd.HasBodyLine(rb.Description, strandedLine) {
 					eventlog.RecordRevertStranded(rb, iid, lg.attrs...)
+					writeMarker(rb, func(body string) string { return setBodyLine(body, strandedPrefix, strandedLine) })
 				}
 			}
 			return err // a successor without a fix-forward pin is not ours to abandon

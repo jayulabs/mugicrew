@@ -528,3 +528,71 @@ func TestPreambleCopiesRootMouseRealTmux(t *testing.T) {
 		}
 	}
 }
+
+// With a pane tagged @protopane in the window, F10 opens the bead pane below the
+// full-height agent pane (a -v split of {top-left}), leaving the prototype column
+// and the agent's width alone. It complements the argv tests, which pin the composed
+// command, by showing tmux honours the {top-left} -v split; it skips without tmux.
+func TestF10BeadPaneBelowAgentRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	if _, err := exec.LookPath("less"); err != nil {
+		t.Skip("less not on PATH")
+	}
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "mugicrew")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho stub $*\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := beadExe
+	beadExe = func() string { return stub }
+	t.Cleanup(func() { beadExe = old })
+	sock := filepath.Join(dir, "s.sock")
+	tm := func(args ...string) string {
+		t.Helper()
+		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	out := filepath.Join(dir, "out.sock")
+	t.Cleanup(func() {
+		tmuxCmd(sock, "kill-server").Run()
+		tmuxCmd(out, "kill-server").Run()
+	})
+	tm(append(preamble(), ";", "new-session", "-d", "-s", "mc-a_1", "-x", "100", "-y", "30")...)
+	if b, err := tmuxCmd(out, "-f", "/dev/null", "new-session", "-d", "-s", "term", "-x", "100", "-y", "30",
+		"env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-S", sock, "attach-session", "-t", "=mc-a_1").CombinedOutput(); err != nil {
+		t.Fatalf("outer tmux: %v: %s", err, b)
+	}
+	for deadline := time.Now().Add(10 * time.Second); tm("list-clients") == ""; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("terminal never attached")
+		}
+	}
+	tm(setArgs("mc-a_1", [][2]string{{"@bead", "mc-a.1"}, {"key-table", hitlTable}})...)
+	agent := tm("display-message", "-p", "-t", "=mc-a_1:", "#{pane_id}")
+	proto := tm("split-window", "-t", agent, "-h", "-l", "40%", "-P", "-F", "#{pane_id}")
+	tm("set-option", "-p", "-t", proto, "@protopane", "1")
+	tm("select-pane", "-t", agent)
+	tmuxCmd(out, "send-keys", "-t", "=term:", "F10").Run()
+	var bead string
+	for deadline := time.Now().Add(10 * time.Second); bead == ""; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("F10 never opened the bead pane")
+		}
+		bead = tm("list-panes", "-t", "=mc-a_1:", "-f", "#{@beadpane}", "-F", "#{pane_id}")
+	}
+	geom := func(p string) string {
+		return tm("display-message", "-p", "-t", p, "#{pane_left} #{pane_top} #{pane_width} #{pane_height}")
+	}
+	a, b := strings.Fields(geom(agent)), strings.Fields(geom(bead))
+	if a[0] != "0" || a[2] != b[2] || b[1] == "0" {
+		t.Errorf("agent %v, bead %v: want the bead pane below the agent pane at its width", a, b)
+	}
+	if got := tm("display-message", "-p", "-t", proto, "#{pane_width}"); got != "40" {
+		t.Errorf("prototype pane width = %s, want 40", got)
+	}
+}

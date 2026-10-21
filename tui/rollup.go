@@ -71,7 +71,7 @@ func (g graphData) rollup(cp *bd.Bead) rollupResult {
 	blockers := g.openBlockers(cp)
 	var approvedL, openAp *bd.Bead
 	for i, a := range approvals {
-		if a.Status != "closed" {
+		if a.Unclosed() {
 			openAp = &approvals[i]
 		} else if approvedL == nil && a.ApprovedClosed() && atTip(a) {
 			approvedL = &approvals[i]
@@ -90,7 +90,7 @@ func (g graphData) rollup(cp *bd.Bead) rollupResult {
 	}
 	firstOpen := func(kinds ...contract.Kind) *bd.Bead {
 		for i, k := range kids {
-			if k.Status != "closed" && slices.Contains(kinds, k.Kind) {
+			if k.Unclosed() && slices.Contains(kinds, k.Kind) {
 				return &kids[i]
 			}
 		}
@@ -138,7 +138,7 @@ func (g graphData) rollup(cp *bd.Bead) rollupResult {
 	default:
 		r.Word, r.Rank, r.Why = "idle ⚠", 13, "members exist but no rule matched"
 	}
-	// qualifiers, in order: round N, re-review, stale pin, !<iid>, MR sub-state, retrying
+	// qualifiers, in order: round N, re-review, stale pin, !<iid>, MR sub-state, forge review, retrying
 	rounds := 0
 	for _, k := range kids {
 		if k.Kind == contract.KindReview {
@@ -185,12 +185,31 @@ func (g graphData) rollup(cp *bd.Bead) rollupResult {
 			}
 		}
 	}
+	r.Qualifiers = append(r.Qualifiers, forgeReviewQualifier(kids)...)
 	if r.Word == "landing" { // the snapshot wins: openL is from the beads, so an event for a closed Landing is never read
 		if landRetrying(g.landEv[openL.ID]) {
 			r.Qualifiers = append(r.Qualifiers, "retrying")
 		}
 	}
 	return r
+}
+
+// forgeReviewQualifier is the forge review qualifier (ADR 0320 (a-forge-review-surfaces…)) over a container's
+// children: none without an open Forge Review, "forge review paused" when one is paused
+// (failing or manual, which holds the container on its own row), else "forge review". It is
+// a qualifier, never a Rollup word: a pending Landing outranks it.
+func forgeReviewQualifier(kids []bd.Bead) []string {
+	var q []string
+	for _, b := range kids {
+		if b.Kind != contract.KindForgeReview || b.Status == "closed" || b.Status == "deferred" {
+			continue
+		}
+		if bd.PausedBy(b, bd.PausedFailing) || bd.PausedBy(b, bd.PausedManual) {
+			return []string{"forge review paused"}
+		}
+		q = []string{"forge review"}
+	}
+	return q
 }
 
 // mrStatusWord maps GitLab's raw detailed_merge_status (the Landing's MR status: line) to its

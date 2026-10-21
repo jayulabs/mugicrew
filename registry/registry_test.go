@@ -31,9 +31,11 @@ func TestLookupResolvesKinds(t *testing.T) {
 		{contract.KindCritique, Entry{Owner: "franky", Mode: AFK, Container: false}},
 		{contract.KindConflict, Entry{Owner: "franky", Mode: AFK, Container: false}},
 		{contract.KindReview, Entry{Owner: "usopp", Mode: AFK, Container: false}},
+		{contract.KindForgeReview, Entry{Owner: "usopp", Mode: AFK, Container: false}},
 		{contract.KindApproval, Entry{Owner: "luffy", Mode: HITL, Container: false}},
 		{contract.KindRollback, Entry{Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}},  // ADR 0047: Jinbe's first leaf kind
 		{contract.KindLanding, Entry{Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}},   // ADR 0145/0147: lands its parent container
+		{contract.KindMRWatch, Entry{Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}},   // Spec D4: Jinbe's every-tick MR read
 		{contract.KindLatch, Entry{Owner: "brook", Mode: AFK, Container: false, Mechanical: true}},     // Spec mc-8ymw.9 D1: Brook's Jira latch check
 		{contract.KindSurgery, Entry{Owner: "franky", Mode: HITL, Container: false}},                   // ADR 0092: human-filed HITL leaf, never an AFK candidate
 		{contract.KindTask, Entry{Owner: "brook", Mode: HITL, Container: false}},                       // ADR 0115: human-launched guide, never an AFK candidate
@@ -64,7 +66,7 @@ func TestLookupUnknownKindIsLoudError(t *testing.T) {
 func TestSessionKindsSortedAndExcludesMechanical(t *testing.T) {
 	want := []contract.Kind{
 		"approval", "build", "chart", "chart-conflict", "checkup", "conflict", "critique", "discussion",
-		"grilling", "initiative", "pivot", "prototype", "research", "review",
+		"forge-review", "grilling", "initiative", "pivot", "prototype", "research", "review",
 		"signal", "spec", "surgery", "survey", "task",
 	}
 	got := SessionKinds()
@@ -102,7 +104,7 @@ func TestAllKindsSortedCoversEveryKind(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AllKinds() lists %q: %v", k, err)
 		}
-		if want := slices.Contains([]contract.Kind{"checkpoint", "landing", "latch", "rollback"}, k); e.Mechanical != want {
+		if want := slices.Contains([]contract.Kind{"checkpoint", "landing", "latch", "mr-watch", "rollback"}, k); e.Mechanical != want {
 			t.Errorf("kind %q: Mechanical=%v, want %v", k, e.Mechanical, want)
 		}
 	}

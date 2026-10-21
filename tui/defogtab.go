@@ -618,7 +618,7 @@ func (t defogTab) bindings() []key.Binding {
 		}
 		return append(bs, keySection)
 	}
-	if r.b.Status != "closed" {
+	if r.b.Unclosed() {
 		bs = append(bs, verbKey("p", pauseLabel(r.b)))
 	}
 	if l := t.g.xHint(r.b); l != "" {
@@ -628,7 +628,7 @@ func (t defogTab) bindings() []key.Binding {
 		bs = append(bs, xBinding(r.b))
 	}
 	bs = append(bs, keyTranscript)
-	if r.b.Status != "closed" {
+	if r.b.Unclosed() {
 		bs = append(bs, keyPrio)
 	}
 	return append(bs, keySection)

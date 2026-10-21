@@ -192,10 +192,11 @@ Any value outside these 24 (a future GitLab addition) maps to none.
   GitLab's order, not all of them. A rebase need hides behind a missing approval.
   `d` can't list the others without a mergeability-checks read (GraphQL
   `mergeabilityChecks`, not checked here).
-- **`threads open` residue**: it isn't confirmed whether a Jinbe-skipped or
-  bot-authored thread keeps `discussions_not_resolved` on a fresh Landing. That
-  depends on `fileNew`'s filter (M `jinbe/threads.go:254-`), which wasn't traced
-  here.
+- **`threads open` residue**: it isn't confirmed whether a Jinbe-skipped
+  thread (system-started or individual note) keeps `discussions_not_resolved`
+  on a fresh Landing. Bot-authored resolvable threads are filed like any other,
+  so they don't linger unfiled. That depends on `fileNew`'s filter
+  (M `jinbe/threads.go`), which wasn't traced here.
 - No live MR was observed in each state. The mapping rests on G code and docs at
   the deployed revision. A GitLab upgrade can add values (they map to none) or
   reorder checks.

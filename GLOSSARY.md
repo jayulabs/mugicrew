@@ -102,11 +102,10 @@ display form, `<bead-id>@<graph-name>`, is for people only (ADR 0200).
 _Avoid_: bead ref, global bead id
 
 **Review thread**:
-A resolvable, unresolved discussion a human starts on a container's Merge
-Request. Jinbe files each as one bead on the container, a Critique under a
-Checkpoint or a grilling under a Chart, keyed by its `Thread: !<iid>
-<discussion-id>` body line.
-_Avoid_: comment (a plain comment is never filed)
+Retired. A container's Merge Request comments, threads included, are read and
+filed by a **Forge Review**; the `Thread: !<iid> <discussion-id>` key is gone,
+replaced by `Source:` lines (ADR 0199 §1, superseded for the key lines).
+_Avoid_: using it for new work; say Forge Review
 
 **Source repo**:
 The repo that holds mugicrew's own code, from which a from-source binary was
@@ -491,6 +490,29 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     build fails raises one carrying the **target base commit hash**; Franky
     rebases onto that base before fixing, so he fixes the tree that failed.
   - _Notes:_ See ADR 0152.
+- **Forge Review** — one pass over a container's unacked Merge Request comments
+  (plain comments and thread notes, from any reviewer, bots included) that files
+  the actionable ones on the container, merged where they duplicate, and acks
+  every comment it read so none is read again.
+  - _Owner:_ Usopp
+  - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
+    container); AFK
+  - _Operations:_ Jinbe spawns it when unacked comments appear → Usopp files
+    Critiques (Checkpoint) or grillings (Chart) → close. Not a **Review**, which
+    reviews the code at a pin.
+  - _Notes:_ Charted on the Chart "Actionable Merge Request comments are filed
+    deduplicated and acked".
+- **MR Watch** — the leaf that reads a container's open Merge Request every paced
+  tick, so a comment left between Landings is picked up and spawns a **Forge
+  Review**.
+  - _Owner:_ Jinbe
+  - _Structure:_ leaf (child of a Checkpoint or a Chart, never a member and never
+    undraining it; at most one open per container); AFK, Mechanical
+  - _Operations:_ spawned when the first MR is recorded for the container → read
+    the MR each `landing_poll_interval` (skipped while a Landing is pending, whose
+    own tick reads it) → close when the MR is merged or closed, or the container
+    closes.
+  - _Notes:_ See ADR 0185 §8.
 - **Approval** — the stamp that gates the land.
   - _Owner:_ Luffy
   - _Structure:_ leaf (one per Checkpoint)
@@ -1059,13 +1081,13 @@ born already **cut**; Review/Critique/Approval beads are spawned on demand.
   match wins): landed, land failed, landing, conflict, blocked on <Kind>,
   fixing, awaiting approval, in review, in build, approved, review due, cut.
   Qualifiers (round N, re-review, stale pin, under gitlab `!<iid>`, `<context>!<iid>` on a nested
-  Landing, and the MR sub-state, retrying) ride beside it, never in it (ADR 0198,
-  ADR 0226, ADR 0230). _Avoid:_ branch-state, branch-state chip, status.
+  Landing, the MR sub-state, forge review, retrying) ride beside it, never in it
+  (ADR 0198, ADR 0226, ADR 0230, ADR 0320). _Avoid:_ branch-state, branch-state chip, status.
 - **Chart status word** — an open Chart's one status word for where it is on its
   way to a Spec, derived by a waterfall (first match wins): speccing, landed,
   land failed, landing, conflict, blocked on <Kind>, failing/paused,
   charting/survey due, in defog session/your turn, defogging/defog queued, fog
   blocked on <Kind>, drafts pending, integrate due, judging, judge due, landing
   due. It reuses Rollup spellings for shared meanings. Qualifiers (round N,
-  re-land, retrying) ride beside it (ADR 0204). _Avoid:_ Chart rollup, Chart
+  re-land, forge review, retrying) ride beside it (ADR 0204, ADR 0320). _Avoid:_ Chart rollup, Chart
   stage, status.

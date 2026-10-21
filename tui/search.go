@@ -163,7 +163,7 @@ func (m Model) keepClosers(next []bd.Bead) Model {
 	}
 	was := map[string]bool{}
 	for _, b := range m.beads {
-		was[b.ID] = b.Status != "closed"
+		was[b.ID] = b.Unclosed()
 	}
 	for _, b := range next {
 		if b.Status == "closed" && was[b.ID] && matchWords(m.searched.words, b.Title+" "+b.ID) {

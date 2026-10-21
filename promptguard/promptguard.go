@@ -27,7 +27,7 @@ var (
 	// colon: the kind:* label carries the kind, never the title.
 	// ponytail: kind names hand-listed; contract's internal tests import
 	// promptguard, so deriving them from contract would be an import cycle.
-	kindTitle = regexp.MustCompile(`(?i)--title\s+"(?:Signal|Chart|Chart-conflict|Spec|Checkpoint|Build|Review|Critique|Conflict|Pivot|Approval|Rollback|Grilling|Research|Prototype|Surgery|Task):`)
+	kindTitle = regexp.MustCompile(`(?i)--title\s+"(?:Signal|Chart|Chart-conflict|Spec|Checkpoint|Build|Review|Forge Review|Critique|Conflict|Pivot|Approval|Rollback|Grilling|Research|Prototype|Surgery|Task):`)
 	// CrewDocRef is the parseable crew-doc reference form: "crew doc <name>.md",
 	// as in a prompt's "Read crew doc <name>.md", where a line wrap may fall
 	// between "crew doc" and the name.

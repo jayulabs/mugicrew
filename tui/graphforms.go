@@ -56,16 +56,16 @@ func rejectable(b bd.Bead) bool {
 
 // canAdopt is a's gate: an unclosed non-Initiative with an open Initiative to join.
 func canAdopt(beads []bd.Bead, b *bd.Bead) bool {
-	return b != nil && b.Status != "closed" && b.Kind != contract.KindInitiative && len(adoptTargets(beads)) > 0
+	return b != nil && b.Unclosed() && b.Kind != contract.KindInitiative && len(adoptTargets(beads)) > 0
 }
 
 // canRelease is A's gate: an unclosed member of an Initiative.
 func canRelease(beads []bd.Bead, b *bd.Bead) bool {
-	return b != nil && b.Status != "closed" && graphData{beads: beads}.beadByID(b.Parent).Kind == contract.KindInitiative
+	return b != nil && b.Unclosed() && graphData{beads: beads}.beadByID(b.Parent).Kind == contract.KindInitiative
 }
 
 // canBlock is B's gate: an open, non-Draft bead.
-func canBlock(b *bd.Bead) bool { return b != nil && b.Status != "closed" && b.Status != "deferred" }
+func canBlock(b *bd.Bead) bool { return b != nil && b.Unclosed() && b.Status != "deferred" }
 
 // canRebase is r's gate: an open Chart or Checkpoint (ADR 0262).
 func canRebase(b *bd.Bead) bool {
@@ -106,7 +106,7 @@ func canUnblock(beads []bd.Bead, b *bd.Bead) bool {
 func blockTargets(beads []bd.Bead, b *bd.Bead) []bd.Bead {
 	var out []bd.Bead
 	for _, t := range beads {
-		if t.Status != "closed" && t.Status != "deferred" && t.ID != b.ID && !slices.Contains(b.BlockedBy, t.ID) {
+		if t.Unclosed() && t.Status != "deferred" && t.ID != b.ID && !slices.Contains(b.BlockedBy, t.ID) {
 			out = append(out, t)
 		}
 	}
@@ -118,7 +118,7 @@ func blockTargets(beads []bd.Bead, b *bd.Bead) []bd.Bead {
 func adoptTargets(beads []bd.Bead) []bd.Bead {
 	var out []bd.Bead
 	for _, b := range beads {
-		if b.Kind == contract.KindInitiative && b.Status != "closed" {
+		if b.Kind == contract.KindInitiative && b.Unclosed() {
 			out = append(out, b)
 		}
 	}

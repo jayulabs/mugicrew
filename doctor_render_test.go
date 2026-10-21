@@ -77,7 +77,7 @@ To fix
 }
 
 func TestRenderFreshMachine(t *testing.T) {
-	dolt := problem(stFail, "dolt", "not on PATH", "dolt is on PATH", manual("dolt", "install pinned 2.2.0 tarball, see docs/install.md#dolt"))
+	dolt := problem(stFail, "dolt", "not on PATH", "dolt is on PATH", manual("dolt", "need ≥ 2.3.0: install pinned 2.5.0 tarball, see docs/install.md#dolt"))
 	tmux := problem(stFail, "tmux", "3.4 is below 3.5", "tmux 3.5 or later is on PATH", manual("core", "install apt install tmux"))
 	graph := problem(stFail, "bead graph", "not initialized or not resolvable", "a Bead Graph resolves for this clone", manual("", "run `mugicrew init`"))
 	got := plainStyle.report([]result{dolt, quiet(stOK, "git", "2.43.0"), tmux, graph, quiet(stSkip, "bd store", "mode unknown")})
@@ -92,7 +92,7 @@ To fix
 1. FAIL dolt
    Expected: dolt is on PATH.
    Manual — do it yourself:
-     • install pinned 2.2.0 tarball, see docs/install.md#dolt
+     • need ≥ 2.3.0: install pinned 2.5.0 tarball, see docs/install.md#dolt
    More: docs/install.md#dolt
 
 2. FAIL tmux

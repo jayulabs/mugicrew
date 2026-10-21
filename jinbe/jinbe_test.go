@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
@@ -96,16 +97,16 @@ type jinbeSeamRec struct {
 
 	discussions     []forge.Discussion // forgeDiscussions' answer
 	discussionsErr  error
-	discussionsRead bool          // forgeDiscussions was called
-	bots            map[int]bool  // author ids forgeIsBot reports as bots
-	botReads        []int         // forgeIsBot calls
-	botErrs         map[int]error // author ids forgeIsBot fails for
-	threadKids      []bd.Bead     // the container's children of the filed kind, any status
-	threadSpawned   []bd.Successor
+	discussionsRead bool           // forgeDiscussions was called
+	threadKids      []bd.Bead      // the container's children of the asked kind, any status (Forge Reviews)
+	reviewSpawned   []bd.Successor // Forge Reviews spawnChild was asked for
+	spawnReviewErr  error
 	sends           []string // "reply <disc> <body>" / "resolve <disc>", in order
 	replyErr        error
 	resolveErr      error
-	integrateSHA    string // newestByTrailer's answer
+	integrateSHA    string        // newestByTrailer's answer
+	awards          []string      // "<noteID> <emoji>" forgeAward was asked for, in order
+	awardErrs       map[int]error // per-note forgeAward failure
 
 	probeErr   error      // the pre-review conflict probe's verdict: nil clean, *RebaseConflict/*NumberClash, else a git failure
 	probeCalls int        // conflict probes run
@@ -140,13 +141,12 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	probeConflict = func(git.Repo, string, string) error { r.probeCalls++; return r.probeErr }
 	oStrategy, oLandings, oShow := landStrategy, landingsOf, showBead
 	oMR := forgeMR
-	oDisc, oBot, oKids, oThread := forgeDiscussions, forgeIsBot, childrenOfKind, spawnThreadBead
-	botCache.Clear()
-	t.Cleanup(notesSeen.Clear) // a Landing's first tick reads ungated
+	oDisc, oKids, oThread, oClock := forgeDiscussions, childrenOfKind, spawnChild, clock
 	oReply, oResolve, oUser, oNewest := forgeReply, forgeResolve, forgeUser, newestByTrailer
 	graphName.name = ""
 	t.Cleanup(func() {
-		forgeDiscussions, forgeIsBot, childrenOfKind, spawnThreadBead = oDisc, oBot, oKids, oThread
+		skippedAt.Clear()
+		forgeDiscussions, childrenOfKind, spawnChild, clock = oDisc, oKids, oThread, oClock
 		forgeReply, forgeResolve, forgeUser, newestByTrailer = oReply, oResolve, oUser, oNewest
 	})
 	forgeReply = func(p forge.Project, _ int, d, body string) error {
@@ -159,6 +159,13 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		r.sends = append(r.sends, "resolve "+d)
 		return r.resolveErr
 	}
+	oAward := forgeAward
+	t.Cleanup(func() { forgeAward = oAward })
+	forgeAward = func(p forge.Project, _ int, note int, emoji string) error {
+		r.projects = append(r.projects, p)
+		r.awards = append(r.awards, fmt.Sprintf("%d %s", note, emoji))
+		return r.awardErrs[note]
+	}
 	forgeUser = func() (string, error) { return "jinbe", nil }
 	newestByTrailer = func(git.Repo, string, string) (string, error) { return r.integrateSHA, nil }
 	git.SetGraphID("g00d")
@@ -167,18 +174,10 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		r.discussionsRead = true
 		return r.discussions, r.discussionsErr
 	}
-	forgeIsBot = func(p forge.Project, id int) (bool, error) {
-		r.projects = append(r.projects, p)
-		r.botReads = append(r.botReads, id)
-		return r.bots[id], r.botErrs[id]
-	}
 	childrenOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) {
 		return slices.DeleteFunc(slices.Clone(r.threadKids), func(b bd.Bead) bool { return b.Kind != k }), nil
 	}
-	spawnThreadBead = func(_ string, s bd.Successor) (string, error) {
-		r.threadSpawned = append(r.threadSpawned, s)
-		return "ws-thread", nil
-	}
+	clock = func() time.Time { return testNow }
 	oFind, oCloseMR := forgeFindOpenMR, forgeCloseMR
 	t.Cleanup(func() { forgeFindOpenMR, forgeCloseMR = oFind, oCloseMR })
 	forgeFindOpenMR = func(p forge.Project, _ string) (*forge.MR, error) {
@@ -294,6 +293,13 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		return nil
 	}
 	spawnChild = func(_ string, s bd.Successor) (string, bool, error) {
+		if s.Kind == contract.KindForgeReview {
+			if r.spawnReviewErr != nil {
+				return "", false, r.spawnReviewErr
+			}
+			r.reviewSpawned = append(r.reviewSpawned, s)
+			return "ws-fr", true, nil
+		}
 		for _, k := range r.kids { // SpawnChildIfAbsent's open-child guard
 			if k.Kind == s.Kind && k.Open() {
 				return k.ID, false, nil
@@ -1074,6 +1080,26 @@ func TestLandingTrialRerunsOnlyWhenMainMoves(t *testing.T) {
 	}
 }
 
+// feedTicks has the marker write's re-read see the Landing as the previous tick left it,
+// as bd would: no in-memory state is shared between ticks but the bead body.
+func feedTicks(r *jinbeSeamRec, l *bd.Bead) {
+	prev := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		if id == l.ID {
+			return *l, nil
+		}
+		return prev(id)
+	}
+}
+
+// lastBody is the body the last updateBody wrote, else old.
+func lastBody(r *jinbeSeamRec, old string) string {
+	if n := len(r.bodies); n > 0 {
+		return r.bodies[n-1]
+	}
+	return old
+}
+
 // A 429 leaves the Landing open with no error and logs once; any other Forge error is
 // returned; neither closes, files nor writes (Spec FR 35).
 func TestLandingMirrorRateLimitedLogsOnceOtherErrorsReturn(t *testing.T) {
@@ -1082,10 +1108,12 @@ func TestLandingMirrorRateLimitedLogsOnceOtherErrorsReturn(t *testing.T) {
 	stubJinbeSeams(t, r)
 	l := openLanding("cafef00d")
 	l.Description += "\nMR: !7\n"
+	feedTicks(r, &l)
 	for range 3 {
 		if err := reconcileLanding(l); err != nil {
 			t.Fatalf("429: err = %v, want nil", err)
 		}
+		l.Description = lastBody(r, l.Description)
 	}
 	limited := 0
 	for _, e := range *evs {
@@ -1119,7 +1147,6 @@ func TestLandingForgeRateLimitAnywhereLogsOnce(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			evs := eventlogtest.Capture(t)
-			rateLimited.Delete("ws-land")
 			r := c.r
 			r.head = "cafef00d"
 			stubJinbeSeams(t, &r)
@@ -1130,10 +1157,12 @@ func TestLandingForgeRateLimitAnywhereLogsOnce(t *testing.T) {
 			if c.retried {
 				l.Description += "Retried: pipeline 42\n"
 			}
+			feedTicks(&r, &l)
 			for range 3 {
 				if err := reconcileLanding(l); err != nil {
 					t.Fatalf("429: err = %v, want nil", err)
 				}
+				l.Description = lastBody(&r, l.Description)
 			}
 			limited := 0
 			for _, e := range *evs {
@@ -2537,27 +2566,6 @@ func TestFlagStalePinHeadErrorIsReturned(t *testing.T) {
 	}
 }
 
-// A Landing that closed while limited is pruned on the next new 429, not kept forever.
-func TestRateLimitedPrunesClosedLandings(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", landErr: forge.ErrRateLimited}
-	stubJinbeSeams(t, r)
-	rateLimited.Store("ws-gone", true)
-	rateLimited.Delete("ws-land")
-	t.Cleanup(func() { rateLimited.Delete("ws-gone") })
-	showBead = func(id string) (bd.Bead, error) {
-		if id == "ws-gone" {
-			return bd.Bead{ID: id, Status: "closed"}, nil
-		}
-		return openCheckpoint(), nil
-	}
-	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := rateLimited.Load("ws-gone"); ok {
-		t.Error("closed Landing still in rateLimited")
-	}
-}
-
 // A second pipeline on the same Landing (a human re-ran it) is not retried again once
 // its own "Retried:" line is recorded, even though an earlier pipeline's line comes first.
 func TestLandingDoesNotRetryASecondPipelineTwice(t *testing.T) {
@@ -2773,16 +2781,15 @@ func TestFlagStalePinReadsTheTipInTheChild(t *testing.T) {
 }
 
 // A 429 on a no-context Workspace Landing or Rollback logs with no bead read past the
-// attempt's own (Spec FR 33): holdRateLimited does no I/O.
+// attempt's own (Spec FR 33): holdRateLimited reads only the limited bead.
 func TestRateLimitedHoldReadsNoBeadsOnWorkspace(t *testing.T) {
-	rateLimited.Clear() // other tests' entries would make pruneRateLimited read their beads
 	t.Run("landing", func(t *testing.T) {
 		stubJinbeSeams(t, &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mrErr: forge.ErrRateLimited})
 		l := openLanding("cafef00d")
 		l.Description += "\nMR: !7\n"
 		nested, err := reconcileLandingOnce(l)
 		reads := 0
-		showBead = func(id string) (bd.Bead, error) { // pruneRateLimited re-reads the limited bead itself; any other read is the defect
+		showBead = func(id string) (bd.Bead, error) { // the marker write re-reads the limited bead itself; any other read is the defect
 			if id != l.ID {
 				reads++
 			}
@@ -2800,7 +2807,7 @@ func TestRateLimitedHoldReadsNoBeadsOnWorkspace(t *testing.T) {
 		rb := r.rollback()
 		nested, err := reconcileRollbackOnce(rb)
 		reads := 0
-		showBead = func(id string) (bd.Bead, error) { // pruneRateLimited re-reads the limited bead itself; any other read is the defect
+		showBead = func(id string) (bd.Bead, error) { // the marker write re-reads the limited bead itself; any other read is the defect
 			if id != rb.ID {
 				reads++
 			}
@@ -2883,11 +2890,15 @@ func TestGitlabRollForwardNoMRAndErrors(t *testing.T) {
 	rl := &jinbeSeamRec{trailerLanded: true, findErr: forge.ErrRateLimited, landings: []bd.Bead{openLanding("cafef00d")}}
 	stubJinbeSeams(t, rl)
 	evs := eventlogtest.Capture(t)
-	rateLimited.Clear()
+	landing := openLanding("cafef00d")
+	rl.landings = []bd.Bead{landing}
+	feedTicks(rl, &landing)
 	for range 2 {
+		rl.landings = []bd.Bead{landing}
 		if err := reconcileCheckpoint(openCheckpoint()); err != nil || len(rl.closed) != 0 {
 			t.Fatalf("err %v closed %v, want nil and everything open", err, rl.closed)
 		}
+		landing.Description = lastBody(rl, landing.Description)
 	}
 	n := 0
 	for _, name := range eventlogtest.Names(*evs) {
@@ -2940,4 +2951,23 @@ func TestLocalRollForwardMakesNoForgeCall(t *testing.T) {
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil || len(r.projects) != 0 || len(r.mrsClosed) != 0 {
 		t.Errorf("err %v projects %v MRs %v, want no Forge call", err, r.projects, r.mrsClosed)
 	}
+}
+
+// An open Forge Review is a member: an Approval at head spawns no Landing past it, and
+// once it closes the same Approval does.
+func TestOpenForgeReviewHoldsAFreshLandingOverAnApprovalAtHead(t *testing.T) {
+	r := &jinbeSeamRec{approvalBody: "Clean pass.\nCommit: cafef00d", head: "cafef00d",
+		kids: []bd.Bead{{ID: "ws-fr", Kind: contract.KindForgeReview, Status: "open"}}}
+	stubJinbeSeams(t, r)
+	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
+		t.Fatalf("reconcileCheckpoint: %v", err)
+	}
+	if len(r.spawned) != 0 {
+		t.Fatalf("an open Forge Review must hold the Landing, spawned %v", r.spawned)
+	}
+	r.kids[0].Status = "closed"
+	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
+		t.Fatalf("reconcileCheckpoint: %v", err)
+	}
+	landingsSpawned(t, r, "cafef00d", "ws-appr0")
 }

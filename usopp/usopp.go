@@ -35,10 +35,13 @@ func (Usopp) Run(ctx contract.Ctx, bead contract.Bead) error {
 	if err != nil {
 		return err
 	}
-	if b.Kind != contract.KindReview {
-		return fmt.Errorf("usopp.Run: kind %q has no handler", b.Kind)
+	switch b.Kind {
+	case contract.KindReview:
+		return runReview(ctx, b)
+	case contract.KindForgeReview:
+		return runForgeReview(ctx, b)
 	}
-	return runReview(ctx, b)
+	return fmt.Errorf("usopp.Run: kind %q has no handler", b.Kind)
 }
 
 // Launch composes the HITL command a human opens — but review is AFK (loop-only),

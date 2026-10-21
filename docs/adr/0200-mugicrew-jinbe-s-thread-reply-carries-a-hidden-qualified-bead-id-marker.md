@@ -36,8 +36,9 @@ reply. Under `land_strategy=gitlab` several personal Bead Graphs can share an
      branch whose `<Kind>: <bead-id>` integrate trailer names the bead. GitLab
      links it to the commit itself. If no such commit exists, the bead closed
      without a fix, and ` in <sha8>` is left out.
-   - `<reason>` is the first line of the bead's close reason, cut at 200
-     characters with `…`.
+   - `<reason>` is the bead's whole close reason, cut at 2000 characters with
+     `…`. (Amended by ADR 0319 (a-filed-comment-is-closed-out…) §4: it was the
+     first line cut at 200.)
    - The reply carries no Landing or pipeline link. The Landing that carries
      the fix does not exist yet when the bead closes.
 4. **The marker.** It is the reply's last line, an HTML comment. GitLab keeps

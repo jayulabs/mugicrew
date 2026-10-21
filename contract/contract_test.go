@@ -73,8 +73,8 @@ func TestClosingLine(t *testing.T) {
 // Spec D1: StripKindPrefix removes every leading kind prefix, driven
 // from Kinds so a new Kind const is covered without touching this test.
 func TestStripKindPrefix(t *testing.T) {
-	if len(Kinds) != 23 {
-		t.Fatalf("len(Kinds) = %d, want 23", len(Kinds))
+	if len(Kinds) != 25 {
+		t.Fatalf("len(Kinds) = %d, want 25", len(Kinds))
 	}
 	for _, k := range Kinds {
 		if got := StripKindPrefix(string(k) + ": Foo misses bar"); got != "Foo misses bar" {

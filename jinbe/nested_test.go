@@ -583,7 +583,6 @@ func TestNestedRateLimitedCarriesNestedAttrs(t *testing.T) {
 		r, _, _, _ := nestedGitlabRollback(t, "broke\nMR: ns/child!9\n")
 		r.targetSt = "open"
 		r.mrErr = forge.ErrRateLimited
-		rateLimited.Delete(r.rollback().ID) // the sibling subtest logged this bead once already
 		evs := eventlogtest.Capture(t)
 		if err := reconcileRollback(r.rollback()); err != nil {
 			t.Fatal(err)

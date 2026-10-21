@@ -45,16 +45,18 @@ var table = map[contract.Kind]Entry{
 
 	// Checkpoint tail, landed ahead of the owning packages — the loop
 	// skips a kind whose owner has no crew() entry, so a laid tail bead sits open.
-	contract.KindCheckpoint: {Owner: "jinbe", Mode: AFK, Container: true, Mechanical: true}, // the Checkpoint handler (container)
-	contract.KindPrototype:  {Owner: "sanji", Mode: HITL, Container: false},                 // Inbox HITL defog kind (§9.2)
-	contract.KindBuild:      {Owner: "franky", Mode: AFK, Container: false},
-	contract.KindCritique:   {Owner: "franky", Mode: AFK, Container: false},
-	contract.KindConflict:   {Owner: "franky", Mode: AFK, Container: false},
-	contract.KindReview:     {Owner: "usopp", Mode: AFK, Container: false},
-	contract.KindApproval:   {Owner: "luffy", Mode: HITL, Container: false},
+	contract.KindCheckpoint:  {Owner: "jinbe", Mode: AFK, Container: true, Mechanical: true}, // the Checkpoint handler (container)
+	contract.KindPrototype:   {Owner: "sanji", Mode: HITL, Container: false},                 // Inbox HITL defog kind (§9.2)
+	contract.KindBuild:       {Owner: "franky", Mode: AFK, Container: false},
+	contract.KindCritique:    {Owner: "franky", Mode: AFK, Container: false},
+	contract.KindConflict:    {Owner: "franky", Mode: AFK, Container: false},
+	contract.KindReview:      {Owner: "usopp", Mode: AFK, Container: false},
+	contract.KindForgeReview: {Owner: "usopp", Mode: AFK, Container: false}, // copies Review's row: Usopp's Forge Review pass over a container's MR notes
+	contract.KindApproval:    {Owner: "luffy", Mode: HITL, Container: false},
 
 	contract.KindRollback:   {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0047: human-filed, Jinbe's first leaf kind (amends ADR 0002)
 	contract.KindLanding:    {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0145/0147: lands its parent container; copies Rollback's row
+	contract.KindMRWatch:    {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // Spec D4: Jinbe's every-tick MR read; copies Landing's row
 	contract.KindLatch:      {Owner: "brook", Mode: AFK, Container: false, Mechanical: true}, // Spec mc-8ymw.9 D1: Brook's in-process Jira check; copies Landing's row
 	contract.KindSurgery:    {Owner: "franky", Mode: HITL, Container: false},                 // ADR 0092: HITL, so an open Surgery is never an AFK loop or run-now candidate
 	contract.KindTask:       {Owner: "brook", Mode: HITL, Container: false},                  // ADR 0115: only a human launches a Task, so the loop never does

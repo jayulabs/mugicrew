@@ -263,6 +263,17 @@ func TestFrankyPromptsSkillFree(t *testing.T) {
 	}
 }
 
+// FR 31: a filed Critique may close as not needed or already fixed, with a full
+// close reason.
+func TestBuildPromptCritiqueMayCloseNotNeeded(t *testing.T) {
+	b := implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp", SpecID: "ws-spec"})
+	for _, want := range []string{"not needed or is\nalready fixed", `bd close mc-x --reason "<why`, "relayed whole"} {
+		if !strings.Contains(b, want) {
+			t.Errorf("build prompt lacks %q", want)
+		}
+	}
+}
+
 // A Build or Critique works on its own effort branch and runs mugicrew integrate
 // before its bead closes; its roll-forward check reads the effort branch against
 // the Checkpoint (Spec D14, FR 56).

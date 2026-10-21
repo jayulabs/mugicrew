@@ -537,6 +537,8 @@ func TestReviewDue(t *testing.T) {
 		{"open build", []string{kid("b1", "closed", contract.KindBuild, ""), kid("b2", "in_progress", contract.KindBuild, "")}, nil, "[]", false},
 		{"open surgery", []string{kid("s1", "open", contract.KindSurgery, "")}, nil, "[]", false},
 		{"open review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("r1", "open", contract.KindReview, "")}, nil, "[]", false},
+		{"open forge review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("f1", "open", contract.KindForgeReview, "")}, nil, "[]", false},
+		{"closed forge review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("f1", "closed", contract.KindForgeReview, "")}, nil, "[]", true},
 		{"closed child with live ref", []string{kid("b1", "closed", contract.KindBuild, "")}, map[string]bool{"b1": true}, "[]", false},
 		{"open pivot", []string{kid("b1", "closed", contract.KindBuild, "")}, nil,
 			`[{"id":"p1","status":"open","labels":["kind:pivot"]}]`, false},

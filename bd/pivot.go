@@ -274,6 +274,16 @@ func SpawnOffshootSignalIfAbsent(originID, title, body string) (id string, creat
 	return id, err == nil, err
 }
 
+// SignalsFrom lists the Signals discovered-from originID, any status: the offshoots a
+// bead filed, read to name the one that carries work (the stranded-commits Signal).
+func SignalsFrom(originID string) ([]Bead, error) {
+	found, err := depTargets(originID, "up", "discovered-from")
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(found, func(b Bead) bool { return b.Kind != contract.KindSignal }), nil
+}
+
 // signalTitled is the Signal among beads titled exactly title.
 func signalTitled(beads []Bead, title string) (string, bool) {
 	for _, b := range beads {

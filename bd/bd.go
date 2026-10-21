@@ -1001,6 +1001,35 @@ func AppendBodyLine(body, line string) string {
 	return strings.TrimRight(body, "\n") + "\n" + line + "\n"
 }
 
+// SetBodyLine is body with every line starting prefix replaced by line, appended when
+// none was there.
+func SetBodyLine(body, prefix, line string) string {
+	return AppendBodyLine(RemoveBodyLine(body, prefix), line)
+}
+
+// RemoveBodyLine is body with every line starting prefix dropped, the rest untouched.
+func RemoveBodyLine(body, prefix string) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	lines = slices.DeleteFunc(lines, func(s string) bool { return strings.HasPrefix(s, prefix) })
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// HasBodyLine is whether the body holds line as a whole line, wherever it sits.
+func HasBodyLine(body, line string) bool {
+	return strings.Contains("\n"+body+"\n", "\n"+line+"\n")
+}
+
+// EditBody re-reads the bead through show and writes edit of its current body through
+// update: for a write that must not undo what earlier arms of the tick wrote to a body
+// the caller holds stale.
+func EditBody(show func(string) (Bead, error), update func(id string, args []string) error, id string, edit func(body string) string) error {
+	b, err := show(id)
+	if err != nil {
+		return err
+	}
+	return update(id, []string{"--description", edit(b.Description)})
+}
+
 // kindsSQL is every bead's kind label. One query reads the kind of beads no list holds
 // (the Logs f filter names closed history, ADR 0232).
 const kindsSQL = "SELECT issue_id, label FROM labels WHERE label LIKE 'kind:%'"

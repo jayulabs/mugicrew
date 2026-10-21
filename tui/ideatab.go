@@ -263,13 +263,13 @@ const (
 // bodyless is an unclosed Initiative whose description has no Done when: computed from the
 // snapshot at render, no subprocess (ADR 0101; ADR 0182 §5).
 func bodyless(b *bd.Bead) bool {
-	return b != nil && b.Kind == contract.KindInitiative && b.Status != "closed" && !bd.HasDoneWhen(b.Description)
+	return b != nil && b.Kind == contract.KindInitiative && b.Unclosed() && !bd.HasDoneWhen(b.Description)
 }
 
 // noRef is an unclosed Initiative with an empty external ref while Enforce external ID is on:
 // a render-time marker, never stored, cleared by bd update <id> --external-ref R.
 func (g graphData) noRef(b *bd.Bead) bool {
-	return g.extRef && b != nil && b.Kind == contract.KindInitiative && b.Status != "closed" && strings.TrimSpace(b.ExternalRef) == ""
+	return g.extRef && b != nil && b.Kind == contract.KindInitiative && b.Unclosed() && strings.TrimSpace(b.ExternalRef) == ""
 }
 
 // backlogKey is the Backlog header's key: it contains a NUL, so it is never a Signal ID.
@@ -311,7 +311,7 @@ func listsInit(in bd.Bead, s session.Info, drained, hasMember bool) bool {
 
 // hasCutSession is whether an unclosed Initiative has a cut session, alive or exited.
 func hasCutSession(in bd.Bead, s session.Info) bool {
-	return in.Status != "closed" && s.Has()
+	return in.Unclosed() && s.Has()
 }
 
 // parkedInits are the listed Initiatives whose whole group sits in the Backlog.
@@ -350,7 +350,7 @@ func ideaFolded(flip map[string]bool, key string) bool {
 func groupKey(g graphData, b bd.Bead) string {
 	j := g.beadIndex(b.Parent)
 	init := j >= 0 && g.beads[j].Kind == contract.KindInitiative
-	lowInit := init && g.beads[j].Status != "closed" && g.beads[j].Priority >= 3
+	lowInit := init && g.beads[j].Unclosed() && g.beads[j].Priority >= 3
 	switch {
 	case init && (!isBacklog(b) || lowInit):
 		return "i:" + b.Parent
@@ -394,7 +394,7 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 	members := map[string][]*bd.Bead{}
 	drained := map[string]bool{}
 	for _, b := range beads {
-		if b.Kind == contract.KindInitiative && b.Status != "closed" && bd.StateOf(b, beads) == bd.InitiativeDrained {
+		if b.Kind == contract.KindInitiative && b.Unclosed() && bd.StateOf(b, beads) == bd.InitiativeDrained {
 			drained[b.ID] = true
 		}
 	}
@@ -628,7 +628,7 @@ func (g graphData) ideaBands() (wait, front, paused []ideaRow) {
 					paused = append(paused, r)
 				}
 			}
-		case b.Kind == contract.KindInitiative && b.Status != "closed" && !g.launching[b.ID] && (g.launched[b.ID].IsZero() || g.sessions[b.ID].State == session.Alive): // a held launch is Live until its session shows alive
+		case b.Kind == contract.KindInitiative && b.Unclosed() && !g.launching[b.ID] && (g.launched[b.ID].IsZero() || g.sessions[b.ID].State == session.Alive): // a held launch is Live until its session shows alive
 			s := g.sessions[b.ID]
 			drained := bd.StateOf(*b, g.beads) == bd.InitiativeDrained
 			r := ideaRow{key: "act:" + b.ID, init: b, act: true, drained: drained, cut: s.Has(), depth: 1}
@@ -689,7 +689,7 @@ func (g graphData) ideaLive(exp []ideaRow, flip map[string]bool) []ideaRow {
 	for _, b := range g.liveBeads(cands, act) {
 		r := ideaRow{key: livePrefix + b.ID, act: true, live: true, depth: 1}
 		if b.Kind == contract.KindInitiative {
-			r.init, r.drained, r.cut = b, bd.StateOf(*b, g.beads) == bd.InitiativeDrained && b.Status != "closed", g.sessions[b.ID].Has()
+			r.init, r.drained, r.cut = b, bd.StateOf(*b, g.beads) == bd.InitiativeDrained && b.Unclosed(), g.sessions[b.ID].Has()
 		} else {
 			r.b = b
 			if j := g.beadIndex(b.Parent); j >= 0 && g.beads[j].Kind == contract.KindInitiative && isBacklog(*b) {
@@ -869,7 +869,7 @@ func (t ideaTab) bindingsAt(c ideaRow) []key.Binding {
 	if rejectable(*b) {
 		bs = append(bs, keyReject)
 	}
-	if b.Status != "closed" {
+	if b.Unclosed() {
 		bs = append(bs, verbKey("p", pauseLabel(b)))
 	}
 	if l := t.gate.xHint(b); l != "" {

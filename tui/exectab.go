@@ -423,7 +423,7 @@ func (g graphData) cpsRows() []eRow {
 // so a Checkpoint closed nothing to land: or swept obsolete: never has it. It is the one
 // "Checkpoint landed" test, windowless; landedRows adds its window.
 func (g graphData) landingOf(cp *bd.Bead) int {
-	if cp.Kind != contract.KindCheckpoint || cp.Status != "closed" {
+	if cp.Kind != contract.KindCheckpoint || cp.Unclosed() {
 		return -1
 	}
 	for _, j := range g.children(cp.ID) {
@@ -809,7 +809,7 @@ func (t execTab) bindings() []key.Binding {
 		}
 		return append(bs, keySection)
 	}
-	if r.b.Status != "closed" {
+	if r.b.Unclosed() {
 		bs = append(bs, verbKey("p", pauseLabel(r.b)))
 	}
 	if l := t.g.xHint(r.b); l != "" {
@@ -819,7 +819,7 @@ func (t execTab) bindings() []key.Binding {
 		bs = append(bs, xBinding(r.b))
 	}
 	bs = append(bs, keyTranscript)
-	if r.b.Status != "closed" {
+	if r.b.Unclosed() {
 		bs = append(bs, keyPrio)
 	}
 	return append(bs, keySection)

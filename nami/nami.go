@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
@@ -237,8 +236,8 @@ func (Nami) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 	switch bead.Kind {
 	case contract.KindGrilling:
 		prompt = grillingPrompt(bead.ID)
-		if b, err := showBead(bead.ID); err == nil && hasThreadLine(b.Description) {
-			prompt = threadGrillingPrompt(bead.ID)
+		if b, err := showBead(bead.ID); err == nil && hasSourceLine(b.Description) {
+			prompt = sourceGrillingPrompt(bead.ID)
 		}
 		prompt = contexts.FocusUnder(prompt, bead.ID, showBead)
 	case contract.KindSurvey:
@@ -276,22 +275,22 @@ func grillingPrompt(grillingID string) string {
 	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID))
 }
 
-// threadGrillingTmpl frames a Merge Request review thread's grilling: the
-// reviewer asked for a Chart change, so the session writes it (ADR 0199).
+// sourceGrillingTmpl frames a Merge Request review thread's grilling: the
+// reviewer left a question or ask on the Chart, so the session answers it in the
+// close reason, closes it as not needed, or writes the change (ADR 0199).
 //
-//go:embed prompts/grilling-thread.md
-var threadGrillingTmpl string
+//go:embed prompts/grilling-source.md
+var sourceGrillingTmpl string
 
-// threadGrillingPrompt is the plain grilling prompt under the reviewer-change
-// framing, so the Draft instruction and the close contract carry over.
-func threadGrillingPrompt(grillingID string) string {
-	return threadGrillingTmpl + "\n" + grillingPrompt(grillingID)
+// sourceGrillingPrompt is the plain grilling prompt under the Source: framing, so the Draft instruction and the close contract carry over.
+func sourceGrillingPrompt(grillingID string) string {
+	return sourceGrillingTmpl + "\n" + grillingPrompt(grillingID)
 }
 
-// hasThreadLine reports a "Thread:" key line in a grilling body; a quoted
-// "> Thread:" does not start a line with the key, so it never matches.
-func hasThreadLine(body string) bool {
-	_, ok := git.ParseLine(body, "Thread:")
+// hasSourceLine reports a "Source:" key line in a grilling body; a quoted
+// "> Source:" does not start a line with the key, so it never matches.
+func hasSourceLine(body string) bool {
+	_, ok := git.ParseLine(body, "Source:")
 	return ok
 }
 
@@ -477,6 +476,7 @@ var (
 	closeBead          = bd.Close
 	spawnSuccessor     = bd.SpawnSuccessorIfAbsent
 	showBead           = bd.Show
+	updateBody         = bd.Update
 	closeOnPublish     = bd.CloseOnPublish
 	spawnChildIfAbsent = bd.SpawnChildIfAbsent
 	branchHead         = git.Head
@@ -641,11 +641,11 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 					return err
 				}
 			}
-			if err := closeLandedMR(evBead, chart.ID, r, nested); err != nil { // before any bead closes, so a failure retries
+			err := closeLandedMR(evBead, chart.ID, r, nested) // before any bead closes, so a failure retries
+			if herr := holdRateLimited(evBead, err, nested); err != nil {
 				// a held 429 returns nil before anything closes; the next tick retries (ADR 0185 §8)
-				return holdRateLimited(evBead, err, nested)
+				return herr
 			}
-			rateLimited.Delete(evBead.ID)
 			if hasLanding && l.Open() { // CloseLandings below closes it; logged after the MR close so a retry doesn't re-log it
 				eventlog.RecordLandOutcome(l, eventlog.LandLanded, git.RecordedMR(l.Description), append([]any{"sha", sha}, nested...)...)
 			}
@@ -824,24 +824,40 @@ func legacyBase(body string) string {
 	return ""
 }
 
-// rateLimited remembers the beads whose Forge 429 is already logged: one event, not one per
-// tick (ADR 0185 §8). Entries leave on the bead's next success; a bead that closes while
-// limited leaves a stale id (ponytail: Jinbe prunes these, Nami's volume doesn't need it).
-var rateLimited sync.Map
+// The Forge 429 dedup marker: a body line of the bead the event names, so "logged once"
+// holds across ticks' fresh processes (ADR 0185 §8, graph state per ADR 0033).
+const (
+	rateLimitedPrefix = "Rate limited: "
+	rateLimitedLine   = "Rate limited: logged"
+)
 
 // holdRateLimited returns err unless it is a Forge 429, which it logs once per bead and
-// swallows so the bead stays open and the next tick retries. Jinbe's twin cannot be shared
-// (Jinbe imports Nami, and its prune reads beads through Jinbe's seams).
+// swallows so the bead stays open and the next tick retries. The first 429 sets the
+// bead's Rate limited: line; the first outcome that isn't one drops it. Jinbe's twin
+// cannot be shared (Jinbe imports Nami).
 func holdRateLimited(b bd.Bead, err error, nested []any) error {
+	logged := bd.HasBodyLine(b.Description, rateLimitedLine)
 	if !errors.Is(err, forge.ErrRateLimited) {
-		rateLimited.Delete(b.ID)
+		if logged {
+			writeMarker(b, func(body string) string { return bd.RemoveBodyLine(body, rateLimitedPrefix) })
+		}
 		return err
 	}
-	if _, seen := rateLimited.LoadOrStore(b.ID, true); !seen {
-		attrs := append(eventlog.BeadAttrs(b), "mr", git.RecordedMR(b.Description))
-		slog.Warn("land.rate_limited", append(attrs, nested...)...)
+	if logged {
+		return nil
 	}
+	attrs := append(eventlog.BeadAttrs(b), "mr", git.RecordedMR(b.Description))
+	slog.Warn("land.rate_limited", append(attrs, nested...)...)
+	writeMarker(b, func(body string) string { return bd.SetBodyLine(body, rateLimitedPrefix, rateLimitedLine) })
 	return nil
+}
+
+// writeMarker applies edit to b's current body, not the tick-start copy. A failed read or
+// write only warns: the next tick logs again and retries.
+func writeMarker(b bd.Bead, edit func(body string) string) {
+	if err := bd.EditBody(showBead, updateBody, b.ID, edit); err != nil {
+		slog.Warn("land.dedup_write_failed", append(eventlog.BeadAttrs(b), "err", err)...)
+	}
 }
 
 // closeLandedMR closes whatever MR is still open on a landed Chart's branch (the fetch/push
@@ -858,6 +874,11 @@ func closeLandedMR(evBead bd.Bead, chartID string, r git.Repo, nested []any) err
 	}
 	eventlog.RecordLandMRClosed(evBead, iid, "container landed", nested...)
 	return nil
+}
+
+// StalePinTitle is the title of the stranded-commits Signal FlagStalePin files for cp.
+func StalePinTitle(cp bd.Bead) string {
+	return cp.Title + ": commits after the landed Tip: are not on mainline"
 }
 
 // FlagStalePin files the offshoot Signal (discovered-from the Landing) for a landed
@@ -889,6 +910,6 @@ func FlagStalePin(l, cp bd.Bead, branch, sha string, landedTip func(string) (str
 		body = fmt.Sprintf("%s landed with Tip: %s, but branch %s was rewritten after the landed pin and is now at %s.\nLanded Tip: %s\nHead: %s\n"+
 			"Fix: the commits not on mainline are those `git range-diff %s...%s` shows as new or changed. Land them as new work.\n", cp.ID, tip, branch, h, tip, h, tip, h)
 	}
-	_, _, err = signal(l.ID, cp.Title+": commits after the landed Tip: are not on mainline", body)
+	_, _, err = signal(l.ID, StalePinTitle(cp), body)
 	return err
 }

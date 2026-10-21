@@ -13,7 +13,10 @@ pending Landing or a human merge on the Forge.
 
 ## Decision
 
-1. **Body.** The grilling's title is the comment's first line, trimmed. Below
+1. **Body.** *(Key lines superseded by the Forge Review Spec: the `Thread:` /
+   `Thread note:` keys are replaced by `Source: !<iid> <discussion-id>
+   <note-id>` lines, and thread filing by a Forge Review; the body shape is
+   kept.)* The grilling's title is the comment's first line, trimmed. Below
    the key lines (`Thread: !<iid> <discussion-id>`, `Thread note: <id>`) it
    carries the MR link to the note (`<web_url>#note_<id>`). A diff note also
    gets `Position: <path>:<line> @ <sha>` at the commented sha. Then comes

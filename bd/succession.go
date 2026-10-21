@@ -862,11 +862,11 @@ func DrainBlockers(id string, efforts map[string]bool) (open int, held []Bead, e
 // does at refresh: kids' open count, and the closed ones whose id is in efforts
 // (the git.EffortRefs set). An open Landing is skipped: a Chart's own Landing
 // never undrains it (ADR 0145), nor does a child closed ContainerLandedReason
-// (ADR 0201): its kept branch is carried by a Signal.
+// (ADR 0201): its kept branch is carried by a Signal. An open MR Watch is skipped too.
 func DrainBlockersOver(kids []Bead, efforts map[string]bool) (open int, held []Bead) {
 	for _, k := range kids {
 		switch {
-		case k.Open() && k.Kind == contract.KindLanding:
+		case k.Open() && k.Kind.PacedLeaf():
 		case k.Open():
 			open++
 		case efforts[k.ID] && !strings.HasPrefix(k.CloseReason, ContainerLandedReason):
@@ -940,7 +940,7 @@ func MembersDrainedOver(kids []Bead, efforts map[string]bool) bool {
 // IsMember is whether a Checkpoint child of kind k carries work onto its branch.
 func IsMember(k contract.Kind) bool {
 	switch k {
-	case contract.KindBuild, contract.KindCritique, contract.KindConflict, contract.KindSurgery, contract.KindReview:
+	case contract.KindBuild, contract.KindCritique, contract.KindConflict, contract.KindSurgery, contract.KindReview, contract.KindForgeReview:
 		return true
 	}
 	return false

@@ -57,6 +57,20 @@ func TestFormPriorityClampsAndIsNeverTyped(t *testing.T) {
 	}
 }
 
+// +/= step the priority field up and -/_ down, each clamped.
+func TestFormPriorityAcceptsShiftedAndUnshiftedKeys(t *testing.T) {
+	for _, c := range []struct {
+		k    string
+		want int
+	}{{"+", 1}, {"=", 1}, {"-", 3}, {"_", 3}} {
+		m := press(t, pressN(t, formModel(t), "s"), tabKey())
+		m = press(t, m, runeKey(c.k))
+		if p := m.modals[0].sf.prio; p != c.want {
+			t.Errorf("%q: prio %d, want %d", c.k, p, c.want)
+		}
+	}
+}
+
 func TestFormEmptyTitleRefused(t *testing.T) {
 	seam(t, &newSignal, func(string, string) (string, error) { t.Fatal("filed"); return "", nil })
 	m := press(t, pressN(t, formModel(t), "s"), ctrlS())

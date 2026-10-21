@@ -3,6 +3,7 @@ package jinbe
 import (
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -199,7 +200,9 @@ func TestAllSkippedReadAdvancesTheMarkWithoutASpawn(t *testing.T) {
 	if len(r.reviewSpawned) != 0 {
 		t.Fatalf("spawned %v, want none", r.reviewSpawned)
 	}
-	if len(r.bodies) == 0 || !strings.Contains(r.bodies[0], "Read through note: 12\n") || !strings.Contains(r.bodies[0], "Notes count: 3\n") || strings.Contains(r.bodies[0], "Read through note: 10") {
+	if !slices.ContainsFunc(r.bodies, func(b string) bool {
+		return strings.Contains(b, "Read through note: 12\n") && strings.Contains(b, "Notes count: 3\n") && !strings.Contains(b, "Read through note: 10")
+	}) {
 		t.Errorf("bodies %q, want the pair advanced to 12 and 3", r.bodies)
 	}
 }

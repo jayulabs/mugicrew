@@ -72,3 +72,15 @@ Each entry carries one or more ordering lines: `after: land` (the Task waits
 for this Spec's Checkpoint to land), `before: land` (the land waits for the
 Task) or `after: <Task title>` (another Task in this section). The ordering
 lines become blocks edges; the Task's own body never carries them.
+
+An entry may instead adopt an existing open Task by id, so a corrected Spec holds
+a Task rather than filing a duplicate:
+
+### <Task title>
+
+task: <id>
+before: land
+
+An adopted entry has a `task: <id>` line, its ordering lines and no Steps body.
+Slicing files nothing for it and only adds its missing ordering edges; the Task
+keeps its own body and origin.

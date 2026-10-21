@@ -5,8 +5,9 @@ Date: 2026-10-07
 
 ## Context
 
-A loop force stop or a confirmed TUI quit abandons in-flight efforts (ADR
-0050 §2, ADR 0051 amendment). The claim stays `in_progress`, and the
+A loop force stop or a run-now host's second signal abandons in-flight
+efforts (ADR 0050 §2, ADR 0330). A confirmed TUI quit once did too (ADR 0051
+amendment, superseded). The claim stays `in_progress`, and the
 orphaned reconcile child and its `claude` keep running in the effort's tree. Until the Chopper Signal exists, the human recovers with `bd unclaim`
 (plan of record, bd memory `mugicrew-loop-off-until-tui-confidence`). Once the
 bead is unclaimed it is back in `bd ready`, and the next tick could dispatch a
@@ -21,10 +22,11 @@ settled the surface.
    it is written additively (ADR 0070 §3). Like every loop-written cause, it
    pauses only its own bead and never cascades (ADR 0081).
 2. **Written wherever `effort.abandoned` is logged.** Today those are the
-   loop force stop and the confirmed TUI quit with run-now efforts in flight.
+   loop force stop and a run-now host's second signal.
+   A TUI quit is no longer a cause: the host outlives the TUI.
    Each abandoned effort's bead gets one label. Restart never abandons,
-   because it drains fully (ADR 0062). SIGKILL, crash, terminal close and
-   unconfirmed TUI death can't write anything and stay unpaused and unlogged.
+   because it drains fully (ADR 0062). SIGKILL of the loop or of a run-now host, a crash and terminal close can't
+   write anything and stay unpaused and unlogged, as before.
    That gap is left to Chopper.
 3. **Label first, then the event.** For each effort the host makes one
    `bd update <id> --add-label paused:abandoned` call. It is commutative
@@ -73,7 +75,7 @@ settled the surface.
 - `bd` gains `PausedAbandoned`. `pauseSty` gains orange, `runNowLabel` and
   `t`'s refusal gain the abandoned case, and `PausedCauses` ranks
   `manual`, `abandoned`, `failing`, then the rest.
-- The loop's force path and the TUI's quit-confirm path each add one bd
+- The loop's force path and a run-now host's second-signal path each add one bd
   write per abandoned effort before `RecordAbandoned`. `RecordAbandoned`
   gains the `paused` and `error` fields.
 - Siblings routed to the orphan's branch still hit `effort.busy`/

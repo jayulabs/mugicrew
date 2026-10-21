@@ -123,7 +123,7 @@ func Judge(h Holder) (string, error) {
 	case h.CwdErr != nil: // alive: refuse (ADR 0127 §2) in effect, but the verdict stays unclassified, like SessionErr
 		return refuse("can't read process cwds, so a live process may still hold its tree: %v", h.CwdErr)
 	case h.Held:
-		return verdict(Alive, "held by its dispatcher (the loop or a TUI); stop it with mugicrew abort %s", id)
+		return verdict(Alive, "held by its dispatcher (the loop or a run-now host); stop it with mugicrew abort %s", id)
 	case h.Force && !h.LockFree:
 		return "", forceRefused(id)
 	case h.SessionErr != nil:

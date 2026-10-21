@@ -30,6 +30,13 @@ parent edges alone would leave its cost out of every rollup. Therefore:
    ancestor (an Initiative, ADR 0135
    (mugicrew-initiative-is-a-branchless-container…); a free-standing Task; a
    discussion bead), `--spine` exits 2: "X is not on a spine".
+5. **A rerouted Signal is a stage on its host's spine.** A pivot or Critique that
+   is `caused-by` a `kind:signal` (a Signal-triage REROUTE) puts that Signal on
+   the spine of the Checkpoint it serves: a pivot through its `blocks` Checkpoint,
+   a Critique through its parent Checkpoint. It gets a row with KIND `signal`
+   right after that host Checkpoint and ahead of the host's pivot rows, several
+   ordered by creation time. `--spine <signal>` returns the host spine. The
+   exclusion in item 3 stays for the walk's own root.
 
 ## Considered and rejected
 

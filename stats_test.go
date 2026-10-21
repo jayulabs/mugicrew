@@ -414,6 +414,29 @@ func TestStatsSpine(t *testing.T) {
 	}
 }
 
+// A rerouted Signal's triage cost lands on the host spine, between the host and its pivots.
+func TestStatsSpineRerouted(t *testing.T) {
+	spineFixture(t)
+	stubStatsLog(t, endEv(time.Now(), "session.ended", "rr", "", cost1), endEv(time.Now(), "session.ended", "pv", "", cost1))
+	stubLineage(t, bd.NewLineage([][]string{
+		{"b", "sig", "kind:signal", "1"}, {"b", "ch", "kind:chart", "2"}, {"b", "sp", "kind:spec", "3"},
+		{"b", "cp", "kind:checkpoint", "4"}, {"b", "pv", "kind:pivot", "5"}, {"b", "rr", "kind:signal", "0"},
+		{"b", "cr", "kind:critique", "6"},
+		{"e", "ch", "sig", "caused-by"}, {"e", "sp", "ch", "caused-by"}, {"e", "cp", "sp", "caused-by"}, {"e", "cp", "pv", "blocks"},
+		{"e", "cr", "cp", "parent-child"}, {"e", "cr", "rr", "caused-by"},
+	}))
+	for _, from := range []string{"rr", "cr", "sp"} {
+		got := runStatsJSON(t, from, "--spine")
+		var keys []any
+		for _, r := range got.Rows {
+			keys = append(keys, r["key"])
+		}
+		if !reflect.DeepEqual(keys, []any{"sig", "ch", "sp", "cp", "rr", "pv"}) || got.Total["sessions"] != 2.0 {
+			t.Errorf("--spine %s rows = %v total %v, want rr after cp, before pv", from, keys, got.Total)
+		}
+	}
+}
+
 func TestStatsSpineBy(t *testing.T) {
 	spineFixture(t)
 	got := runStatsJSON(t, "sp", "--spine", "--by", "kind")

@@ -17,6 +17,8 @@ Cheap to costly. Stop reading once the evidence supports a cause.
 4. The event log, capped: grep the target's "bead" field over .git/mugicrew/events.jsonl.1
    then .git/mugicrew/events.jsonl, and read about the last 200 lines of the
    result (grep -hF '"bead":"<target-id>"' .git/mugicrew/events.jsonl.1 .git/mugicrew/events.jsonl | tail -n 200).
+   The event log is history, not liveness: a started event with no end means a
+   crash or kill. Only recover's inventory verdict or mugicrew ps says an effort is alive.
 5. Transcripts, last: mugicrew transcript --no-follow --no-pager --last <bead>
    first, never a live follow. Only read an uncapped transcript when the graph
    and the events do not explain the symptom.
@@ -78,7 +80,8 @@ as an offshoot Signal, discovered-from %[1]s (read crew doc signal-filing.md).
 
 ## Done
 
-Close %[1]s only when the human says they are finished.
+Close %[1]s only when the human says they are finished. A Checkup whose every
+finding the human declined stays open.
 
 - If any repair plan ran: bd close %[1]s --reason "repaired: <what changed>",
   naming any offshoot Signal filed, any command printed for the human and any

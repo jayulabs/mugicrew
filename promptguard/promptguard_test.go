@@ -3,6 +3,7 @@ package promptguard
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -23,7 +24,7 @@ func TestSkillCalls(t *testing.T) {
 		{"under /tmp/x/y", false},
 		{"and/or", false},
 		{"Read crew doc grilling.md", false},
-		{"⏸ Surgery idle — /exit; l on its row resumes it.", false},
+		{"⏸ Surgery idle — /exit; enter on its row resumes it.", false},
 	} {
 		if got := SkillCalls(c.text); (len(got) > 0) != c.bad {
 			t.Errorf("SkillCalls(%q) = %q, want bad=%v", c.text, got, c.bad)
@@ -245,5 +246,30 @@ func TestPromptsInlineNoSignalCreate(t *testing.T) {
 		if hits := inlineSignalCreates(text); len(hits) > 0 {
 			t.Errorf("%s: inline Signal create(s) %q; Read crew doc signal-filing.md instead", p, hits)
 		}
+	}
+}
+
+func TestBareADRCitationsFlagsOnlyNumberWithoutSlug(t *testing.T) {
+	text := "per ADR 0086 (mugicrew-x…), then ADR 0012, and ADR 0011 (mugicrew-chart-conflict-policy), ADR 0219."
+	if got, want := BareADRCitations(text), []string{"ADR 0012", "ADR 0219"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("BareADRCitations = %q, want %q", got, want)
+	}
+}
+
+// ADR 0328: "held or landed" conflated exits 2 and 3; no prompt or crew doc may
+// say it, and the defog skeleton points at the prompt's exits instead.
+func TestNoHeldOrLandedExitLine(t *testing.T) {
+	for p, text := range promptTexts(t) {
+		if strings.Contains(text, "held or landed") {
+			t.Errorf("%s: says \"held or landed\"", p)
+		}
+	}
+	for name, text := range Docs(t) {
+		if strings.Contains(text, "held or landed") {
+			t.Errorf("crew doc %s: says \"held or landed\"", name)
+		}
+	}
+	if !strings.Contains(Docs(t)["defog-session.md"], "your prompt's integrate exits") {
+		t.Error("defog-session.md must point at \"your prompt's integrate exits\"")
 	}
 }

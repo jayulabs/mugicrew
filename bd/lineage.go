@@ -149,6 +149,32 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 	}
 	sameKind := func(a, b string) bool { k := l.stageKind(a); return k != "" && k != "signal" && k == l.stageKind(b) }
 
+	// hostOf resolves the Checkpoint a pivot or Critique serves: a pivot's blocker, a
+	// Critique's parent.
+	hostOf := func(id string) string {
+		switch l.stageKind(id) {
+		case "pivot":
+			for _, cp := range in(id, "blocks") {
+				if l.stageKind(cp) == "checkpoint" {
+					return cp
+				}
+			}
+		case "":
+			if p := l.parent[id]; strings.TrimPrefix(l.kind[id], "kind:") == "critique" && l.stageKind(p) == "checkpoint" {
+				return p
+			}
+		}
+		return ""
+	}
+	// A rerouted Signal has a pivot or Critique caused-by it; its spine is the host's.
+	if l.stageKind(start) == "signal" {
+		for _, s := range in(start, "caused-by") {
+			if h := hostOf(s); h != "" {
+				start = h
+				break
+			}
+		}
+	}
 	// A pivot or Rollback is reached by no succession edge: start from what it serves.
 	switch l.stageKind(start) {
 	case "pivot":
@@ -183,10 +209,19 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 	// Forward from the root.
 	order := []string{root}
 	seen := map[string]bool{root: true}
+	rerouted := map[string]string{} // rerouted Signal -> its host Checkpoint
 	add := func(id string) {
 		if !seen[id] && l.stageKind(id) != "" {
 			seen[id] = true
 			order = append(order, id)
+		}
+	}
+	addRerouted := func(host, via string) {
+		for _, sg := range out(via, "caused-by") {
+			if l.stageKind(sg) == "signal" && !seen[sg] {
+				rerouted[sg] = host
+				add(sg)
+			}
 		}
 	}
 	for i := 0; i < len(order); i++ {
@@ -203,6 +238,12 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 			for _, p := range out(n, "blocks") {
 				if l.stageKind(p) == "pivot" {
 					add(p)
+					addRerouted(n, p)
+				}
+			}
+			for _, c := range l.kids[n] {
+				if hostOf(c) == n {
+					addRerouted(n, c)
 				}
 			}
 			for _, r := range in(n, "related") {
@@ -232,13 +273,33 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 		stages[s] = st
 	}
 	// ponytail: created_at compared as bd's text, fine within one timezone.
-	sort.SliceStable(order, func(i, j int) bool {
-		a, b := order[i], order[j]
+	byCreated := func(a, b string) bool { return l.created[a] < l.created[b] }
+	var base, signals []string
+	for _, s := range order {
+		if rerouted[s] != "" {
+			signals = append(signals, s)
+		} else {
+			base = append(base, s)
+		}
+	}
+	sort.SliceStable(base, func(i, j int) bool {
+		a, b := base[i], base[j]
 		if ra, rb := stageRank[stages[a].Kind], stageRank[stages[b].Kind]; ra != rb {
 			return ra < rb
 		}
-		return l.created[a] < l.created[b]
+		return byCreated(a, b)
 	})
+	// A rerouted Signal sits right after its host, ahead of the host's pivots (ADR 0284).
+	sort.SliceStable(signals, func(i, j int) bool { return byCreated(signals[i], signals[j]) })
+	order = order[:0]
+	for _, s := range base {
+		order = append(order, s)
+		for _, sg := range signals {
+			if rerouted[sg] == s {
+				order = append(order, sg)
+			}
+		}
+	}
 	res := make([]Stage, len(order))
 	for i, s := range order {
 		res[i] = *stages[s]

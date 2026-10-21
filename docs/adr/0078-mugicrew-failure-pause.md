@@ -29,9 +29,8 @@ settled the surface.
 4. **Run-now** (`t`, labelled `t retry`) is allowed on a failing bead. When the
    effort returns `err == nil`, it lifts `paused:failing` and logs
    `effort.resumed`. If the effort fails, the label stays and nothing is
-   counted, because the TUI can't reach the loop's memory. There is no
-   TUI-quit fallback (unlike ADR 0055's amendment), so a run that
-   succeeds after the TUI quits leaves the label for the human to remove. On a
+   counted, because the TUI can't reach the loop's memory. The run-now host
+   (ADR 0330) lifts it whether or not the TUI is still alive. On a
    bead that also carries foreign-hold, each cause lifts on its own condition:
    foreign-hold on a clean cut, failing on a clean return. `paused:manual`
    still refuses `t`.

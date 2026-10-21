@@ -48,6 +48,12 @@ var readAutoExit = func() loop.AutoExit {
 	return loop.AutoExitSetting(root)
 }
 
+// readLandStrategy is the refresh's Workspace land_strategy read (name, err), a var as readPool is.
+// LandStrategyAt, never the silent-local setting or the cwd-bound git.LandStrategyName (Spec D5).
+var readLandStrategy = func() (string, error) {
+	return loop.LandStrategyAt(repoRoot())
+}
+
 // readInitiatives is the refresh's shared-only [initiatives] read, a var as readPool is.
 var readInitiatives = func() cfglayer.Initiatives {
 	root := repoRoot()
@@ -118,7 +124,7 @@ type profiled interface {
 var (
 	keyRowDown = key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/k", "row"))
 	keyRowUp   = key.NewBinding(key.WithKeys("k", "up"))
-	keyStage   = key.NewBinding(key.WithKeys("+", "-"), key.WithHelp("+/-", "stage"))
+	keyStage   = key.NewBinding(key.WithKeys("+", "=", "-", "_"), key.WithHelp("+/-", "stage"))
 	keySave    = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "save"))
 	keyDiscard = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "discard"))
 )
@@ -163,7 +169,7 @@ func (m Model) settingsKey(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 		return m.kindEdit(k)
 	}
 	if m.setRow == initiativesRow { // read-only: the setting is shared, there is nothing to write locally
-		return m, nil, k == "+" || k == "-" || k == "esc" || k == "enter"
+		return m, nil, stepOf(k) != stepNone || k == "esc" || k == "enter"
 	}
 	if m.setRow == 1 {
 		return m.autoExitEdit(k)
@@ -172,24 +178,24 @@ func (m Model) settingsKey(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 	if cur == 0 {
 		cur = m.pool.N
 	}
-	switch k {
-	case "+", "-":
-		if k == "-" && cur <= 1 {
+	switch s := stepOf(k); {
+	case s != stepNone:
+		if s == stepDown && cur <= 1 {
 			return m, nil, true
 		}
 		if m.staged == 0 {
 			m.stagedFrom = m.pool.N
 		}
 		m.staged = cur + 1
-		if k == "-" {
+		if s == stepDown {
 			m.staged = cur - 1
 		}
 		if m.staged == m.pool.N { // stepped back to the value in force: nothing staged
 			m.staged = 0
 		}
-	case "esc":
+	case k == "esc":
 		m.staged = 0
-	case "enter":
+	case k == "enter":
 		n := m.staged
 		if n == 0 || n == m.pool.N {
 			return m, nil, true
@@ -212,19 +218,19 @@ func (m Model) autoExitEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 	if m.exitStaged {
 		cur = m.stagedExit
 	}
-	switch k {
-	case "+", "-":
+	switch s := stepOf(k); {
+	case s != stepNone:
 		if !m.exitStaged {
 			m.exitFrom = m.exit.D
 		}
 		m.stagedExit = cur + autoExitStep
-		if k == "-" {
+		if s == stepDown {
 			m.stagedExit = max(cur-autoExitStep, 0)
 		}
 		m.exitStaged = m.stagedExit != m.exit.D // back at the value in force: nothing staged
-	case "esc":
+	case k == "esc":
 		m.exitStaged = false
-	case "enter":
+	case k == "enter":
 		d := m.stagedExit
 		if !m.exitStaged || d == m.exit.D {
 			return m, nil, true
@@ -291,8 +297,8 @@ func kindRowKey(setRow int) string { return kindKeys()[setRow-firstKindRow] }
 func (m Model) kindEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 	key := kindRowKey(m.setRow)
 	local := m.kinds.local[key]
-	switch k {
-	case "+", "-":
+	switch s := stepOf(k); {
+	case s != stepNone:
 		if len(m.kinds.profiles) == 0 && local == "" {
 			m.setStatus("no profiles declared in config.toml or agent-profiles.toml")
 			return m, nil, true
@@ -304,11 +310,11 @@ func (m Model) kindEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 		slots := append(m.kinds.names(), "")
 		i := slices.Index(slots, st.to)
 		switch {
-		case i < 0 && k == "+": // an undeclared name: + to the first, - to the last slot
+		case i < 0 && s == stepUp: // an undeclared name: + to the first, - to the last slot
 			i = 0
 		case i < 0:
 			i = len(slots) - 1
-		case k == "+":
+		case s == stepUp:
 			i = (i + 1) % len(slots)
 		default:
 			i = (i - 1 + len(slots)) % len(slots)
@@ -322,10 +328,10 @@ func (m Model) kindEdit(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 		if st.to == local {
 			delete(m.kindStaged, key)
 		}
-	case "esc":
+	case k == "esc":
 		m.kindStaged = maps.Clone(m.kindStaged)
 		delete(m.kindStaged, key)
-	case "enter":
+	case k == "enter":
 		st, staged := m.kindStaged[key]
 		if !staged || st.to == local {
 			return m, nil, true

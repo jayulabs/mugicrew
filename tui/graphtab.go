@@ -25,7 +25,7 @@ var (
 
 	keyLaunch = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "launch/attach (HITL) · run/spec/land/retry (AFK)"))
 	keyBg     = key.NewBinding(key.WithKeys("b"), key.WithHelp("b", "bg"))
-	keyPrio   = key.NewBinding(key.WithKeys("+", "=", "-"), key.WithHelp("+/-", "prio"))
+	keyPrio   = key.NewBinding(key.WithKeys("+", "=", "-", "_"), key.WithHelp("+/-", "prio"))
 
 	// p and x name what they do to the selection (ADR 0144 §7); these are the
 	// labelless forms ? shows and the shell matches on.
@@ -224,7 +224,7 @@ func (g graphTab) extra() []key.Binding {
 	}
 	var out []key.Binding
 	if len(g.rows()) >= 2 { // one row has nowhere to move
-		out = append(out, keyMove)
+		out = append(out, keyMove, keySection)
 	}
 	for _, b := range []key.Binding{keyLaunch, keyBg, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio, keyReject, keyAdopt, keyRelease, keyBlock, keyUnblock, keyCheckup} {
 		if !shown[b.Keys()[0]] {
@@ -254,6 +254,15 @@ func (g graphTab) update(k tea.KeyMsg) (component, tea.Cmd) {
 			d = -1
 		}
 		g.sel, g.off, g.want = rows[clampWrap(i+d, len(rows))].sel, 0, "" // any move cancels the memory; the detail follows: back to the top
+	case key.Matches(k, keySection):
+		if len(rows) == 0 {
+			return g, nil
+		}
+		d := 1
+		if s := k.String(); s == "K" || s == "ctrl+up" {
+			d = -1
+		}
+		g.sel, g.off, g.want = rows[jumpTo(rows, i, d, func(r row) bool { return r.header && r.depth == 0 })].sel, 0, "" // like a move: cancel the memory, detail back to the top
 	case key.Matches(k, keyFold) && i >= 0 && rows[i].kids:
 		f := maps.Clone(g.folds())
 		f[rows[i].collapseKey] = !f[rows[i].collapseKey]

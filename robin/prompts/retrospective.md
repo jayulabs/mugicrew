@@ -22,7 +22,7 @@ Work in this order:
    "<bead title> session <id8>".
 3. **Coverage.** Read the oldest event's time from the first line of
    `$(git rev-parse --git-common-dir)/mugicrew/events.jsonl.1`, else the live
-   `events.jsonl`. Take each bead's closed_at from bd. A bead is lost when it is
+   `events.jsonl` (the horizon is read from the rotated session log, then the current one). Take each bead's closed_at from bd. A bead is lost when it is
    of a kind that runs sessions (anything but a Checkpoint or Landing), has no
    findable session, and closed before the log's oldest event. A session is
    pruned when its transcript renders header only. Print the header

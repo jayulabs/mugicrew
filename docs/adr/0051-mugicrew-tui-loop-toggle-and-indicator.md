@@ -57,6 +57,12 @@ lockfile).
 - In-process loop forked by the TUI: breaks "TUI toggles, never owns".
 - inotify watch on the lockfile: the 3s tick already exists.
 
+> **Superseded (2026-10-21) by ADR 0330 and ADR 0098 §6.** Run-now efforts are
+> hosted by a detached `mugicrew run <id>`, not by the TUI, so quitting no
+> longer strands them and `q` no longer counts them or writes
+> `effort.abandoned`. The quit confirm still guards pending writes and
+> launches; ADR 0098 §6 owns that dialog. The text below is history.
+>
 > **Amended (2026-10-04): quit confirms when run-now efforts are
 > in flight.** Run-now (`t`) efforts are goroutines inside the TUI, so quitting
 > strands their claims `in_progress`, skips worktree teardown and drops the

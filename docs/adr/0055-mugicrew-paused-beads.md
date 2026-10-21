@@ -89,8 +89,9 @@ lives only in loop memory would be invisible to the TUI and lost on restart.
 §6's lift happens when run-now's dispatch returns with a clean cut, not at the
 moment of the cut, so `effort.resumed` follows the effort's `effort.finished`
 or `effort.failed`. While the effort runs the label stays, but `◐` hides the
-`‖` and the loop's auto-clear reads only ready beads. If the TUI quits
-mid-run, the loop's auto-clear (§5) lifts the pause instead. Lifting at the
+`‖` and the loop's auto-clear reads only ready beads. The run-now host (ADR 0330)
+lifts it on a clean cut whether or not the TUI lives; the loop's auto-clear
+(§5) is the backstop after a host SIGKILL. Lifting at the
 cut would need a hook in Dispatch, which none of §6's guarantees requires.
 
 ## Amendment: pauses are additive labels (ADR 0070 §3)
@@ -115,8 +116,8 @@ and refused by run-now (ADR 0081).
 
 ## Amendment: a fourth cause, `abandoned` (ADR 0082)
 
-§2 gains `paused:abandoned`: written by the loop force stop and the confirmed
-TUI quit for each abandoned effort's bead. It **never** clears itself, and
+§2 gains `paused:abandoned`: written by the loop force stop and a run-now host's
+second signal for each abandoned effort's bead. It **never** clears itself, and
 only the human lifts it (Chopper may later, ADR 0082 §4).
 
 > **Amended by ADR 0158:** `paused:context` is a further cause, written on a container whose `context:` label names an undeclared context and lifted by the loop once the label or config is fixed.

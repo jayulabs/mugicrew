@@ -1,4 +1,4 @@
-<!-- verbatim subset of mugicrew GLOSSARY.md (ADR citations and History lines stripped) · checked by vocabulary_test.go -->
+<!-- verbatim subset of mugicrew GLOSSARY.md (ADR citations and History lines stripped) · checked by vocabulary_test.go, whose admission test (a) counts uses in crew docs and CREWMATE.md only -->
 
 # Vocabulary
 
@@ -32,3 +32,31 @@
   open but has no unclosed member; Drafts count as unclosed. A drained
   container is routed to its handler.
   _Avoid:_ "draining" (a loop state), "empty", "done".
+- **Container** — a bead that parents member beads; a bd `epic`. Contrast a
+  **leaf**, a bd `task` that parents none.
+  _Avoid:_ a Docker or OCI container.
+- **Signal** — anything that could catalyze a change to the Workspace. Abstract
+  by nature — concrete forms include a human-written idea, an error log, or a
+  system alert. mugicrew records each one as a `signal` bead; anything that may
+  result in a code change enters the bead graph this way. Triage can **reroute** a Signal whose code is only on one in-flight
+  Checkpoint (its **host**) instead of charting it.
+  _Avoid:_ event, input, trigger, issue, ticket
+- **Landing** — one bead per attempt to land a container's branch on mainline,
+  pinned (`Commit: <sha>`) to the base it will land. Its outcomes: _landed_
+  closes it `landed: <sha>`; _conflict_ closes it `obsolete: conflict` and files
+  the container's conflict bead; _pending_ leaves it open; a branch that
+  advanced past its pin closes it `obsolete: branch advanced`.
+  _Avoid:_ the act of landing, which is **Land**.
+  - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
+    container); AFK, Mechanical, no session
+  - _Notes:_ The `<Kind>: <id>` trailer on mainline stays the durable landed
+    fact; the Landing's close mirrors it. Only Checkpoint and Chart lands are
+    Landings; other moves of main (Rollback reverts, and legacy Spec anchors)
+    stay bead-less.
+- **Build** — a unit of implementation work sliced from the Spec: a slice
+  inside a Checkpoint.
+  - _Owner:_ Franky
+  - _Structure:_ leaf
+  - _Operations:_ Franky executes → close. May raise a `critique` (offshoot
+    defect) or a `pivot` (Spec proven wrong).
+  - _Notes:_ —

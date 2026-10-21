@@ -70,10 +70,15 @@ A Spec may end with an optional `## Tasks` section: steps in the external world
 Tasks it lists, and file them BEFORE any Build: a re-run that finds Builds
 already laid skips this session, so Tasks filed after them could be lost.
 
+Read each entry for a `task: <id>` line first: such an entry adopts an existing
+Task, and slicing files nothing for an adopted entry (see "Adopted entries"
+below). The filing steps that follow cover the other entries.
+
 Enumerate the Tasks a prior run already filed, however they were published or
 closed, by listing the Spec's dependents over the discovered-from edge. Keep only
 rows labelled `kind:task` (ignore any other kind, e.g. an offshoot Signal), compare
-by title, and file only the titles that are missing:
+by title, and file only the titles that are missing (an adopted entry is left out of the
+title-dedupe enumeration):
 
     bd dep list %[1]s --direction=up -t discovered-from --json
 
@@ -96,6 +101,22 @@ Then turn each ordering line into a blocks edge, adding any that is missing:
 
 When the slice lays no Builds, every `before: land` line is skipped (no edge on
 the Checkpoint); `after: land` and `after: <T>` stay.
+
+### Adopted entries
+
+An entry with a `task: <id>` line adopts that Task. It is not filed, and it is
+left out of the title-dedupe enumeration. Resolve it first:
+
+    bd show <id> --json
+
+- It must be an open `kind:task`. A closed Task is skipped with a line saying so
+  (print which entry and why); it gets no edges. An id that is not a Task (any
+  other kind, or no such bead) must fail the slice loudly: stop and lay nothing more.
+- Turn its ordering lines into the same `bd dep add` edges as a filed Task's,
+  added only if missing: `before: land` makes the new Checkpoint block on that
+  Task. `after: <T>` may name an adopted or a filed Task. When the slice lays no
+  Builds, `before: land` is skipped, as above.
+- Slicing adds no `discovered-from` edge from the Task to the Spec: the Task keeps its origin.
 
 The Tasks publish with your Builds.
 

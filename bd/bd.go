@@ -752,6 +752,12 @@ func Comments(id string) ([]Comment, error) {
 	return parseComments([]byte(out))
 }
 
+// AddComment appends text as a comment on id.
+func AddComment(id, text string) error {
+	_, err := run("comments", "add", id, text)
+	return err
+}
+
 func parseComments(js []byte) ([]Comment, error) {
 	var cs []Comment
 	if err := json.Unmarshal(js, &cs); err != nil {

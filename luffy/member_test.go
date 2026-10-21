@@ -90,3 +90,11 @@ func TestLaunchMemberSectionBelongOffer(t *testing.T) {
 		t.Error("current parent excluded from the move list")
 	}
 }
+
+// A member Signal is not open to REROUTE: it has Initiative-placement rules to follow.
+func TestMemberSectionExcludesReroute(t *testing.T) {
+	got := memberSection("ws-sig", bd.Bead{ID: "ws-ini"}, nil, false, nil)
+	if !strings.Contains(got, "REROUTE is not open to a member") {
+		t.Errorf("member section must exclude REROUTE:\n%s", got)
+	}
+}

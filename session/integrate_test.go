@@ -235,3 +235,21 @@ func TestIntegrateReplaceOffPinIsItsOwnExit(t *testing.T) {
 		t.Errorf("exit %d, want %d", code, ExitOffPin)
 	}
 }
+
+// ADR 0328: the exit block every integrate-running prompt embeds names each Exit*
+// constant's number beside its instruction.
+func TestIntegrateExitsBlockNamesEachExitCode(t *testing.T) {
+	got := contract.IntegrateExits()
+	for _, want := range []string{
+		fmt.Sprintf("Exit %d: integrated, or nothing ahead.", ExitIntegrated),
+		fmt.Sprintf("Exit %d with a rebase stopped in your tree: resolve", ExitConflict),
+		fmt.Sprintf("Exit %d with no rebase stopped: the container is held.", ExitConflict),
+		fmt.Sprintf("Exit %d: the container already landed.", ExitLanded),
+		fmt.Sprintf("Exit %d or %d: the container was rewritten past your cut or is off its pin. Never repair or rebase branches by hand.", ExitNoCutPoint, ExitOffPin),
+		fmt.Sprintf("Any exit but %d or a resolved %d (%d is transient): note the output on your bead, leave it open and stop.", ExitIntegrated, ExitConflict, ExitTransient),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("IntegrateExits missing %q:\n%s", want, got)
+		}
+	}
+}

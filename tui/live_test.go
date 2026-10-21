@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,7 +17,6 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
-	"jayulabs.org/mugicrew/dispatch"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/looplock"
@@ -47,6 +47,7 @@ func TestMain(m *testing.M) {
 	recordClient = func() error { return nil }
 	setBars = func(map[string]bool, map[string]string, map[string]session.Info) error { return nil }
 	loopVerb = func(...string) (string, error) { return "", errors.New("loopVerb not stubbed") }
+	startHost = func(*exec.Cmd) error { return errors.New("startHost not stubbed") } // no test forks tui.test
 	pauseBead = func(string, string) error { return errors.New("pauseBead not stubbed") }
 	newSignal = func(string, string) (string, error) { return "", errors.New("newSignal not stubbed") }
 	newInitiative = func(string, string, string) (string, error) { return "", errors.New("newInitiative not stubbed") }
@@ -436,9 +437,6 @@ func TestQuitGuard(t *testing.T) {
 	pending := sized(t, 100, 30)
 	pending.pending = map[string]string{"b1": "closing"}
 	inflight["pending"] = pending
-	runs := sized(t, 100, 30)
-	runs.runs = []dispatch.Inflight{{ID: "e1", Bead: bd.Bead{ID: "r1", Title: "Build the lock"}}}
-	inflight["runs"] = runs
 	for name, m := range inflight {
 		for _, key := range []tea.KeyMsg{runeKey("q"), {Type: tea.KeyCtrlC}} {
 			open, cmd := send(t, m, key)
@@ -453,7 +451,7 @@ func TestQuitGuard(t *testing.T) {
 		}
 	}
 	open, _ := send(t, pending, runeKey("q"))
-	if v := ansi.Strip(open.View()); !strings.Contains(v, "1 write in flight: b1") {
+	if v := ansi.Strip(open.View()); strings.Contains(v, "run-now") || !strings.Contains(v, "1 write in flight: b1") {
 		t.Errorf("quit dialog does not name the write:\n%s", v)
 	}
 	_, cmd = send(t, open, runeKey("y"))
@@ -462,6 +460,38 @@ func TestQuitGuard(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Error("y did not quit")
+	}
+}
+
+// A run-now effort is a detached host once its press has returned: with nothing
+// else in flight q and ctrl+c quit at once and write no pause (ADR 0332, FR 2, 4).
+func TestQuitIgnoresRunNowHosts(t *testing.T) {
+	pauses := 0
+	orig := pauseBead
+	t.Cleanup(func() { pauseBead = orig })
+	pauseBead = func(string, string) error { pauses++; return nil }
+	for _, key := range []tea.KeyMsg{runeKey("q"), {Type: tea.KeyCtrlC}} {
+		m, cmd := send(t, sized(t, 100, 30), key)
+		if cmd == nil || len(m.modals) != 0 {
+			t.Fatalf("%s: no immediate quit (modals=%d)", key, len(m.modals))
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("%s did not quit", key)
+		}
+	}
+	if pauses != 0 {
+		t.Errorf("quit wrote %d pauses", pauses)
+	}
+}
+
+// The press itself (reads, claim, spawn) is the pending "dispatching" key, which
+// still guards quit.
+func TestQuitGuardsARunNowPress(t *testing.T) {
+	m := sized(t, 100, 30)
+	m.pending = map[string]string{"b1": "dispatching"}
+	m, cmd := send(t, m, runeKey("q"))
+	if cmd != nil || len(m.modals) != 1 {
+		t.Fatalf("no dialog for a run-now press in flight (modals=%d)", len(m.modals))
 	}
 }
 

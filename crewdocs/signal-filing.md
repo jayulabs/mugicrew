@@ -22,7 +22,7 @@ A Signal for work you found, not a member of any container:
       --title "<the work, no kind prefix>" --description "<what and why; Sources: …>"
 
 Pick the order and say why in the description:
-- follow-up: the work waits until what you were working on lands;
+- follow-up: the work waits until its container lands;
 - prerequisite: what you were working on can't land until this work lands;
 - none: separable work with no order either way.
 
@@ -30,6 +30,11 @@ In a HITL session, include the order in your chat proposal. The verb finds the
 container, records the order, and prints the new id. If the order can't apply
 (no container, a closed one, or a pair bd refuses), it files the Signal
 unordered and says why on stdout and in the body. Don't add edges yourself.
+
+Some filings are human-only. A crewmate never files a Rollback, never runs
+mugicrew rebase or rebases a container by hand, never files a Surgery, and
+never files a Task mid-work. Each one is suggested by an offshoot Signal
+instead, and the human decides.
 
 ## Initiative member form
 

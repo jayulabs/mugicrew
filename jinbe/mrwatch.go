@@ -2,22 +2,28 @@ package jinbe
 
 import (
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 )
 
 // spawnMRWatch gives a container its MR Watch (Spec D4) when recordMR first records an MR
-// for it, copying the Landing's MR: line so the Watch knows the iid between Landings.
+// for it, copying the Landing's MR: and MR link: lines so the Watch knows the iid between Landings.
 // SpawnChildIfAbsent keeps it to one open per container.
-func spawnMRWatch(cp bd.Bead, lg legs, iid int) error {
+func spawnMRWatch(cp bd.Bead, lg legs, iid int, webURL string) error {
+	body := git.MRLine(lg.mrPath, iid) + "\n"
+	if webURL != "" {
+		body += git.MRLinkLine(webURL) + "\n"
+	}
 	_, _, err := spawnChild(cp.ID, bd.Successor{
 		Kind:        contract.KindMRWatch,
 		Title:       fmt.Sprintf("Watch %s", git.MRRef(lg.mrPath, iid)),
-		Description: git.MRLine(lg.mrPath, iid) + "\n",
+		Description: body,
 	})
 	return err
 }
@@ -78,6 +84,11 @@ func reconcileMRWatch(w bd.Bead) error {
 		case forge.StateClosed:
 			return closeIfOpen(w, "obsolete: merge request closed")
 		case forge.StateOpened:
+			if mr.WebURL != "" {
+				if err := setLine(&w, git.MRLinkKey, git.MRLinkLine(mr.WebURL)); err != nil {
+					slog.Warn("mrwatch.mr_link_write_failed", append(eventlog.BeadAttrs(w), "err", err)...)
+				}
+			}
 			if err = forgeReviewArm(cp, nil, lg, mr); err == nil {
 				err = closeOutArm(cp, lg, mr, git.BranchName(string(cp.Kind), cp.ID), closeOutTarget{head: mr.SHA})
 			}

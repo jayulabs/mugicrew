@@ -26,6 +26,26 @@ never send the human to a bead id or to `bd show` in place of its content.
 
       bd dep list <pivotID> --direction=down -t discovered-from --json
 
+- A Signal raiser: a rerouted Signal raised the pivot through caused-by, not
+  discovered-from. Keep the `kind:signal` rows:
+
+      bd dep list <pivotID> --direction=down -t caused-by --json
+
+  For one, `bd show` the Signal (its report), read the pivot's
+  `## Triage (<signal>)` section, and for a pivot the Signal merged into, the
+  `Rerouted from <signal>` evidence comment. Its **Ask Critique** is the
+  kind:critique row in `bd dep list <pivotID> --direction=up -t discovered-from --json`.
+
+- A Task raiser: a `kind:task` row among the discovered-from rows. A Task that
+  hit a defect or a wrong FR stays stuck on this Checkpoint and does not close.
+  `bd show` it and read its stuck comment, which names the pivot and what to
+  wait for. Its **Ask Critique** is the kind:critique row discovered-from the
+  pivot, as for a Signal.
+
+- The Checkpoint's held Tasks, raising or not: the open `kind:task` rows from
+  the same `bd dep list %[2]s --direction=down -t blocks --json` read. A
+  confirm or escalate must account for each.
+
 - The effective Spec: `bd show %[3]s` (body plus `AMENDMENT` comments).
 - The built work, for hunks the human asks for; never the whole diff unasked:
 
@@ -36,6 +56,7 @@ never send the human to a bead id or to `bd show` in place of its content.
 For EACH open pivot, judged on its own, recommend one outcome:
 
 - **dismiss**: the Spec stood, the raiser was wrong; the FR is refiled as work.
+  For a Signal raiser, the report was wrong; the Ask stands in for the FR.
 - **amend**: the FR's mechanism changes; it stays on this Checkpoint. The amend
   line: amend ONLY when the FR's intent holds AND no
   already-built work becomes wrong. Otherwise confirm or escalate.
@@ -53,6 +74,10 @@ Show each as a pivot card of exactly this shape and field order:
       member Builds, sibling pivots, a new Spec, Chart or Critique).
     **Evidence** — verbatim.
     **Raised by** — each raising bead's finding and merged raiser's comment, quoted.
+      For a Signal raiser, quote the Signal's report and its `## Triage (<signal>)`
+      section; for a merged-into pivot, the `Rerouted from <signal>` comment instead.
+      For a Task raiser, quote the Task's stuck comment and the pivot's
+      `Raised by Task` line.
     **Amendments on this FR** — quoted, or "none".
     **Built so far** — short summary of work toward this FR; hunks on request.
     **Recommendation** — outcome and reason, citing the amend line.
@@ -74,11 +99,57 @@ a pivot the human has not seen.
 
 ## 6. Execute
 
-Check before each write, so a re-run converges. If a sweep leg fails, fix the cause and re-run the same command.
+Check before each write, so a re-run converges. If a sweep leg fails, fix the cause and re-run the same command. A "main worktree … is dirty; clean main, then re-run" refusal is the human's to clean: report the dirty paths, never discard, stash or commit on main, and re-run only after the human says main is clean.
 
 %[4]s
 
 Your wrapper publishes them, and any Spec or Chart a sweep drafts, at clean exit.
+
+### Signal raisers
+
+A pivot with a Signal raiser has an Ask Critique, the Critique discovered-from
+the pivot that carries the Signal's Ask. The Ask assumes the Spec is wrong, so
+it is not refiled as-is, and you never reopen the Signal: the human just
+decided on it. Read "the Ask" for "the unfinished FR" below.
+
+- **Dismiss** (the report was wrong): rewrite it to whatever as-specced work is
+  left (`bd update <critiqueID> --title ... --description ...`), or else close it
+  `dismissed: <pivotID>` (`bd close <critiqueID> --reason "dismissed: <pivotID>"`).
+  Never reopen the Signal. It is the dismiss refile, so file no second Critique.
+- **Amend**: add an `AMENDMENT (<pivotID>): …` comment on the Ask Critique, so
+  the original Ask stays visible. It is the amend refile, so file no second one.
+- **Confirm** or **escalate**: the sweep closes it as obsolete, and the session
+  folds the Ask into the corrected Spec or the escalate evidence, where an effort
+  raiser's unfinished FR goes.
+
+Several Ask Critiques on one pivot (after a merge) are each treated so.
+
+### Task raisers
+
+A pivot with a Task raiser has an Ask Critique too, and it is treated exactly as
+for a Signal raiser above (dismiss rewrites or closes it, amend comments on it),
+so skip the step-1 refile of Dismiss and Amend: the Ask Critique already exists.
+The Task is never closed by you or the sweep.
+
+On dismiss or amend, add one comment on EACH raising Task (skip if it has one for
+this pivot):
+
+    bd comments add <taskID> "pivot <pivotID> dismissed|amended: <gist>. <which Critique to wait for>"
+
+where the last part names which Critique to wait for (`Wait for <critiqueID>.`), or,
+if the Ask Critique was closed, says "the step may be wrong; amend it on resume".
+
+### Held Tasks on confirm and escalate
+
+A Task holds the Checkpoint's land and the sweep neither closes nor carries it,
+so the corrected Spec must re-hold it. In step 1 of Confirm, list the held Tasks
+(the open `kind:task` rows from step 2, raising or not) and put each to the
+human: adopt it or leave it out. Write each adopted Task into the corrected
+Spec's `## Tasks` as `### <Task title>`, `task: <id>`, `before: land`, with no
+Steps body. A Task left out stays open for the human to abandon.
+
+On escalate, the evidence must name each held Task and whether the human wants it
+adopted; the new Chart's Spec carries the entry.
 
 ### Dismiss
 

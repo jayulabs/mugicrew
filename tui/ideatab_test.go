@@ -911,6 +911,7 @@ func TestIdeateInitiativeRowsReprioritise(t *testing.T) {
 		{"header +", members(ini("i", "open", "Init", 2)), "i:i", "+", "i --priority 1"},
 		{"header =", members(ini("i", "open", "Init", 2)), "i:i", "=", "i --priority 1"},
 		{"header -", members(ini("i", "open", "Init", 2)), "i:i", "-", "i --priority 3"},
+		{"header _", members(ini("i", "open", "Init", 2)), "i:i", "_", "i --priority 3"},
 		{"drained hint row", drained(ini("i", "open", "Init", 2)), "h:i", "+", "i --priority 1"},
 		{"drained header", drained(ini("i", "open", "Init", 2)), "i:i", "-", "i --priority 3"},
 		{"combined row", drained(ini("i", "open", "Init", 2)), "act:i", "+", "i --priority 1"},

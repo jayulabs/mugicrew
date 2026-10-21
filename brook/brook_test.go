@@ -95,7 +95,21 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		"Never run the mugicrew rebase verb yourself",
 		"never merge or rebase a container branch by hand",
 		"hand off to the Stuck exit",
+		"merge a merge request on the Forge",
 		contract.DraftInstruction("ws-task"),
+		"mugicrew pivot raise ws-task",
+		"git diff main...checkpoint/<id>", "git show checkpoint/<id>:<path>",
+		"unsure: Signal",
+		"Raised by Task ws-task, step N (<title>)", "Unblocks Task ws-task step N",
+		"*raise*", "*file an offshoot Signal instead*", "*neither*",
+		"freezes the whole Checkpoint",
+		"raised pivot <id> + Critique <id> on Checkpoint <id>, wait for Critique <id> to close",
+		"never both",
+		"bd dep list <cp> --direction=down -t blocks --json",
+		"names the SAME FR", "--merge-into <pivot> <evidence-file> --critique <file>",
+		"raised Critique <id> merged into pivot <id> on Checkpoint <id>, wait for Critique <id> to close",
+		"enter on its row resumes it",
+		"pivot <id> dismissed", "amended:",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("Task prompt missing %q", want)

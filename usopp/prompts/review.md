@@ -50,7 +50,7 @@ The Spec axis's source is the Surgeries: read each with `bd show <id>` as the
 human's intent, and run the axis's Surgery check once per Surgery over its own
 commits (trailered `Surgery: <id>`): report only a stated change that is missing
 or partial, or one implemented wrong — no scope-creep check. A Surgery with no
-trailered commits (an abandoned one) gets no check. If you think the intent
+trailered commits (a Surgery that committed nothing) gets no check. If you think the intent
 itself is wrong, file that as a Critique; the human settles it at Approval. Read
 crew doc checkpoint-rules.md and file Critiques as it says, with the command
 below.

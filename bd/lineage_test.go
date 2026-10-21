@@ -130,3 +130,26 @@ func TestLineageSpineFastLaneAndCycle(t *testing.T) {
 		t.Errorf("cycle = %v", got)
 	}
 }
+
+// A rerouted Signal (ADR 0284 amended): its pivot and Critique are caused-by it, and
+// it sits on the host spine right after the host Checkpoint, before the host's pivots.
+func TestLineageSpineReroutedSignal(t *testing.T) {
+	rows := [][]string{
+		bead("sig", "kind:signal", "01"), bead("ch", "kind:chart", "02"), bead("sp", "kind:spec", "03"),
+		bead("cp", "kind:checkpoint", "04"),
+		bead("pv0", "kind:pivot", "05"), // an earlier, unrelated pivot
+		bead("rr1", "kind:signal", "09"), bead("pv1", "kind:pivot", "10"),
+		bead("rr2", "kind:signal", "06"), bead("cr2", "kind:critique", "11"),
+		edge("ch", "sig", "caused-by"), edge("sp", "ch", "caused-by"), edge("cp", "sp", "caused-by"),
+		edge("cp", "pv0", "blocks"), edge("cp", "pv1", "blocks"),
+		edge("pv1", "rr1", "caused-by"),                                    // reached from the pivot
+		edge("cr2", "cp", "parent-child"), edge("cr2", "rr2", "caused-by"), // reached from the Critique's parent
+	}
+	l := NewLineage(rows)
+	want := []string{"sig:signal", "ch:chart", "sp:spec", "cp:checkpoint", "rr2:signal", "rr1:signal", "pv0:pivot", "pv1:pivot"}
+	for _, from := range []string{"sig", "cp", "pv1", "cr2", "rr1", "rr2"} {
+		if got := spineIDs(t, l, from); !slices.Equal(got, want) {
+			t.Errorf("Spine(%s) = %v, want %v", from, got, want)
+		}
+	}
+}

@@ -26,7 +26,7 @@ func watchTick(t *testing.T, r *jinbeSeamRec, state string, count int, kids ...b
 }
 
 func TestPendingLandingSpawnsOneMRWatchCopyingItsMR(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}}
+	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7, WebURL: "https://gl.example.com/ns/p/-/merge_requests/7"}}
 	stubJinbeSeams(t, r)
 	l := openLanding("cafef00d")
 	for range 2 {
@@ -40,8 +40,8 @@ func TestPendingLandingSpawnsOneMRWatchCopyingItsMR(t *testing.T) {
 			watches = append(watches, s)
 		}
 	}
-	if len(watches) != 1 || strings.TrimSpace(watches[0].Description) != "MR: !7" {
-		t.Errorf("spawned %+v, want one mr-watch carrying MR: !7", watches)
+	if len(watches) != 1 || strings.TrimSpace(watches[0].Description) != "MR: !7\nMR link: https://gl.example.com/ns/p/-/merge_requests/7" {
+		t.Errorf("spawned %+v, want one mr-watch carrying MR: !7 and its MR link:", watches)
 	}
 }
 
@@ -130,5 +130,86 @@ func TestMRWatchClosesOutAFiledBeadBetweenLandings(t *testing.T) {
 	want := []string{"reply " + disc1 + " 🤖 mugicrew: addressed by **Fix ws-a** (ws-a@jinbe): not needed: by design\n" + marker("ws-a", "g00d", "jinbe"), "resolve " + disc1}
 	if got := slices.DeleteFunc(slices.Clone(r.sends), func(s string) bool { return !strings.HasPrefix(s, "reply ") && !strings.HasPrefix(s, "resolve ") }); !slices.Equal(got, want) {
 		t.Errorf("sends %q, want %q", got, want)
+	}
+}
+
+const mrLinkURL = "https://gl.example.com/ns/p/-/merge_requests/7"
+
+// recordWrites replaces updateBody (after stubJinbeSeams) with a recorder of the bodies
+// carrying an MR link: by bead id; a non-nil err fails those writes only.
+func recordWrites(t *testing.T, err error) map[string][]string {
+	t.Helper()
+	writes := map[string][]string{}
+	old := updateBody
+	t.Cleanup(func() { updateBody = old })
+	updateBody = func(id string, args []string) error {
+		if git.RecordedMRLink(args[1]) == "" {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		writes[id] = append(writes[id], args[1])
+		return nil
+	}
+	return writes
+}
+
+// A pending Landing's tick backfills MR link: on itself and on the open Watch, and a second
+// tick (bodies now current) makes no write.
+func TestPendingLandingBackfillsMRLinkOnItselfAndItsWatch(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mr: &forge.MR{IID: 7, State: "opened", WebURL: mrLinkURL}, threadKids: []bd.Bead{openWatch()}}
+	stubJinbeSeams(t, r)
+	writes := recordWrites(t, nil)
+	l := openLanding("cafef00d")
+	l.Description += "\nMR: !7\n"
+	if err := reconcileLanding(l); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ws-land", "ws-watch"} {
+		if len(writes[id]) == 0 || git.RecordedMRLink(writes[id][0]) != mrLinkURL {
+			t.Errorf("writes to %s = %q, want the first carrying the MR link", id, writes[id])
+		}
+	}
+	// the same bodies, now carrying the line: no further write
+	l.Description = writes["ws-land"][len(writes["ws-land"])-1]
+	w := openWatch()
+	w.Description = writes["ws-watch"][0]
+	r.threadKids = []bd.Bead{w}
+	before := len(writes["ws-land"]) + len(writes["ws-watch"])
+	if err := reconcileLanding(l); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(writes["ws-land"]) + len(writes["ws-watch"]); got != before {
+		t.Errorf("second tick wrote %d more times, want none", got-before)
+	}
+}
+
+// A Watch with no pending Landing backfills its own MR link: on an open MR.
+func TestMRWatchBackfillsMRLinkWithoutAPendingLanding(t *testing.T) {
+	r := &jinbeSeamRec{}
+	r.mr = &forge.MR{IID: 7, State: "opened", WebURL: mrLinkURL}
+	stubJinbeSeams(t, r)
+	writes := recordWrites(t, nil)
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes["ws-watch"]) != 1 || git.RecordedMRLink(writes["ws-watch"][0]) != mrLinkURL {
+		t.Errorf("writes = %q, want one carrying the MR link", writes)
+	}
+}
+
+// A failed backfill write warns and neither fails the Watch's nor the Landing's reconcile.
+func TestMRLinkBackfillWriteFailureDoesNotFailTheReconcile(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mr: &forge.MR{IID: 7, State: "opened", WebURL: mrLinkURL}, threadKids: []bd.Bead{openWatch()}}
+	stubJinbeSeams(t, r)
+	recordWrites(t, errors.New("bd down"))
+	l := openLanding("cafef00d")
+	l.Description += "\nMR: !7\n"
+	if err := reconcileLanding(l); err != nil {
+		t.Errorf("Landing reconcile = %v, want nil", err)
+	}
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Errorf("Watch reconcile = %v, want nil", err)
 	}
 }

@@ -33,7 +33,7 @@ doing the build is not.
 A step the work will need in the external world (outside the bead graph and
 the code) may be drafted as a free-standing Task, never a Chart child (no
 --parent), its body in crew doc task-body.md's format, blocked on the Chart or
-Spec it waits for. Carry moves that edge onto the Checkpoint when it is cut:
+Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
     bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
       --title "..." --description "<its ## Steps body>"
@@ -91,7 +91,8 @@ The Destination is Luffy's scope call. You may push back on it only these ways:
   and add an Out-of-scope line for it. Read crew doc signal-filing.md and file
   it in its offshoot form with the Survey as the cause:
      mugicrew signal offshoot --from %[1]s --drafted-by %[1]s --order <follow-up|prerequisite|none> ...
-- **Hand back** a Chart whose Destination is wrong: file a Signal carrying your
+- **Hand back** a Chart whose Destination is wrong, or that spans more than one
+  Checkpoint (don't split it into phase offshoots): file a Signal carrying your
   case, a Draft by the Survey, then close the Chart (--force: your open Survey
   is still its child). Read crew doc signal-filing.md and file the Signal in its
   offshoot form, its description why the Destination is wrong. The Chart closes

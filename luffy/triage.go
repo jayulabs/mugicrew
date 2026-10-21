@@ -17,14 +17,16 @@ import (
 )
 
 // triagePrompt is the triage workflow a Signal's launched session runs (ADR 0129,
-// ADR 0035): Luffy adjudicates the Signal exactly one of five ways — ACCEPT
+// ADR 0035): Luffy adjudicates the Signal exactly one of six ways — ACCEPT
 // (reconcile spawns the one Chart and its Survey; Luffy writes its Destination
 // and the Notes settled at triage, retitles them and sets the priority, and maps
 // no fog), FAST LANE (reconcile --spec seeds and anchors the one Spec; Luffy sets its
 // priority), INITIATIVE (on the human's yes, reconcile --initiative spawns the
 // one Initiative; Luffy sets its priority and files phase 1's member Signal(s),
 // one per touched repo context in a Workspace with repo = contexts, ADR 0252,
-// Spec D3), REJECT or DUPLICATE. No reconcile closes the Signal: the
+// Spec D3), REJECT, DUPLICATE or REROUTE (after `triage locate` says the code is only
+// on one open Checkpoint, reconcile --checkpoint files its pivot or Critique there,
+// ADR 0322). No reconcile closes the Signal: the
 // session's clean-exit publish does (ADR 0096). Rationale the prompt no longer
 // cites (ADR 0088 §6): a Chart charts toward exactly one Spec (ADR 0008, ADR
 // 0013); the fast lane's one predicate and its standard template (ADR 0035).
@@ -82,7 +84,7 @@ func requireSection(signalID string, inis []bd.Bead, extRef bool) string {
 	return fmt.Sprintf(`
 ## Require Initiatives
 
-This Workspace requires every piece of work to belong to an Initiative, and this Signal is in none. Your outcomes are limited to: (a) adopt it into one of the open Initiatives below, then ACCEPT or FAST LANE as usual; (b) INITIATIVE; (c) REJECT; (d) DUPLICATE. ACCEPT and FAST LANE without adopting first make mugicrew reconcile exit non-zero and create nothing.
+This Workspace requires every piece of work to belong to an Initiative, and this Signal is in none. Your outcomes are limited to: (a) adopt it into one of the open Initiatives below, then ACCEPT or FAST LANE as usual; (b) INITIATIVE; (c) REJECT; (d) DUPLICATE; (e) REROUTE. ACCEPT and FAST LANE without adopting first make mugicrew reconcile exit non-zero and create nothing.
 
 Open Initiatives:
 
@@ -263,6 +265,8 @@ Phases:
 Other open members:
 
 %[5]s
+REROUTE is not open to a member: triage it ACCEPT, FAST LANE, REJECT or DUPLICATE.
+
 Place the Signal before any outcome. In the first round, before any mugicrew reconcile, propose one placement against Done when and Phases: join an under-way phase (apply the sibling rules, then ACCEPT or FAST LANE as usual); join a later, not-yet-cut Phases line (park); or open a new Phases line, proposed live or later. A live new phase needs the human's explicit yes, and so does a phase you cannot trace to Done when. A later phase is parked.
 
 - Any Phases change rewrites the Initiative body whole in one `+"`bd update %[1]s --description`"+`.
@@ -479,11 +483,30 @@ func reconcileSignal(sig bd.Bead, context string) error {
 	if fastLane && charted {
 		return fmt.Errorf("reconcile: signal %s has both Spec %s and Chart %s; refusing to pick a leg", sig.ID, specID, chartID)
 	}
+	rerouted, err := rerouteDrafts(sig.ID)
+	if err != nil {
+		return err
+	}
 	if err := refuseBeside(sig.ID, "reconcile", "chart or fast-lane it", contract.KindInitiative); err != nil {
+		return err
+	}
+	if len(rerouted) > 0 { // the reroute leg: its Drafts are the graph's choice (ADR 0322)
+		if fastLane || charted {
+			return fmt.Errorf("reconcile: signal %s has reroute Draft %s beside a Spec or Chart; refusing to pick a leg", sig.ID, rerouted[0].ID)
+		}
+		return reconcileReroute(sig, rerouted)
+	}
+	if err := refuseBeside(sig.ID, "reconcile", "chart or fast-lane it", contract.KindPivot, contract.KindCritique); err != nil {
 		return err
 	}
 	if isJiraRef(sig.ExternalRef) {
 		return fmt.Errorf("reconcile: signal %s mirrors Jira work item %s; refusing to chart or fast-lane it: triage it INITIATIVE, REJECT or DUPLICATE", sig.ID, sig.ExternalRef)
+	}
+	if _, stale := sig.Metadata[RaiseMergesMeta]; stale && sig.Open() {
+		// merges with no reroute Drafts are a failed reroute's leftover (Spec decision 4)
+		if err := clearMetadata(sig.ID, RaiseMergesMeta); err != nil {
+			return err
+		}
 	}
 	if fastLane {
 		return reconcileFastLane(sig, specID)
@@ -601,7 +624,10 @@ func SeedSpec(sig bd.Bead, title, body, context string) error {
 	if isJiraRef(sig.ExternalRef) {
 		return fmt.Errorf("reconcile --spec: signal %s mirrors Jira work item %s; refusing to fast-lane it: triage it INITIATIVE, REJECT or DUPLICATE", sig.ID, sig.ExternalRef)
 	}
-	if err := refuseBeside(sig.ID, "reconcile --spec", "fast-lane it", contract.KindChart, contract.KindInitiative); err != nil {
+	if err := refuseBeside(sig.ID, "reconcile --spec", "fast-lane it", contract.KindChart, contract.KindInitiative, contract.KindPivot, contract.KindCritique); err != nil {
+		return err
+	}
+	if err := refuseBesideReroute(sig.ID, "reconcile --spec", "fast-lane it"); err != nil {
 		return err
 	}
 	spec := specFastLaneSuccessor(sig, title, body)
@@ -659,7 +685,10 @@ func SeedInitiative(sig bd.Bead, title, body, ref string) error {
 		}
 		return fmt.Errorf("reconcile --initiative: signal %s is closed; refusing to open an Initiative", sig.ID)
 	}
-	if err := refuseBeside(sig.ID, "reconcile --initiative", "open an Initiative", contract.KindChart, contract.KindSpec); err != nil {
+	if err := refuseBeside(sig.ID, "reconcile --initiative", "open an Initiative", contract.KindChart, contract.KindSpec, contract.KindPivot, contract.KindCritique); err != nil {
+		return err
+	}
+	if err := refuseBesideReroute(sig.ID, "reconcile --initiative", "open an Initiative"); err != nil {
 		return err
 	}
 	ref = strings.TrimSpace(ref)
@@ -760,6 +789,7 @@ var (
 	fetchForge       = func() (string, error) { return git.FetchMainline(git.ForgeRemote()) }
 	listAll          = bd.ListAll
 	carry            = bd.Carry
+	carryTargets     = bd.CarryTargets
 	initiativeOf     = bd.InitiativeOf
 	initiativesByRef = bd.InitiativesByRef
 )

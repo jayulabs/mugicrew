@@ -203,7 +203,7 @@ func landNested(t *testing.T, child Repo, branch, trailer string) (string, error
 	}
 	defer down()
 	tr := Repo(tree)
-	composed, base, pin, err := tr.Compose(branch, trailer, "")
+	composed, base, pin, err := tr.Compose(branch, trailer, "", "")
 	if err != nil {
 		return "", err
 	}
@@ -288,20 +288,20 @@ func TestRepoLandComposesAndLandsOnTheChildsMain(t *testing.T) {
 
 // LandStrategyFor with no repo is LandStrategyByName; local and gitlab both act per repo.
 func TestLandStrategyForRepo(t *testing.T) {
-	if _, err := LandStrategyFor(LandStrategyLocal, ""); err != nil {
+	if _, err := LandStrategyFor(LandStrategyLocal, "", ""); err != nil {
 		t.Error(err)
 	}
-	if _, err := LandStrategyFor("nope", "/x"); err == nil {
+	if _, err := LandStrategyFor("nope", "/x", ""); err == nil {
 		t.Error("unknown strategy accepted")
 	}
-	if _, err := LandStrategyFor(LandStrategyGitlab, "/x"); err != nil {
+	if _, err := LandStrategyFor(LandStrategyGitlab, "/x", ""); err != nil {
 		t.Errorf("gitlab for a repo: %v", err)
 	}
 	child := newChild(t)
 	child.run("checkout", "-q", "checkpoint/cp")
 	commitIn(t, child, "f.txt", "f\n")
 	child.run("checkout", "-q", "main")
-	st, err := LandStrategyFor(LandStrategyLocal, child)
+	st, err := LandStrategyFor(LandStrategyLocal, child, "")
 	if err != nil {
 		t.Fatal(err)
 	}

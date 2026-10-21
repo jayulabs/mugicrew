@@ -74,7 +74,6 @@ var (
 	// run-now (enter): the same entry points the loop calls (FR59).
 	readyFrontier      = bd.Ready
 	claimBead          = dispatch.Claim
-	runDispatch        = dispatch.Dispatch
 	drainBlockers      = func(id string) (int, []bd.Bead, error) { return bd.DrainBlockers(id, nil) }
 	inProgressBeads    = bd.InProgress
 	pausedBeads        = bd.PausedList
@@ -132,6 +131,8 @@ type loadedMsg struct {
 	pool        loop.Setting
 	autoExit    loop.AutoExit
 	initiatives cfglayer.Initiatives
+	landName    string // land_strategy, read with the slow tier
+	landErr     error
 	kinds       kindProfiles
 	commits     []git.MainlineCommit // History's mainline read, newest first
 	histErr     error                // that read failed; the rest of the load stands
@@ -143,12 +144,8 @@ type (
 	tickMsg struct{}
 )
 
-// runDoneMsg is a run-now effort's completion, dropped from Model.runs by effort id.
-type runDoneMsg struct {
-	id, run string
-	err     error
-	tail    string // a failed effort's last output lines
-}
+// runDoneMsg is a run-now host's exit, already worded (runStatus).
+type runDoneMsg struct{ status string }
 
 // launchDoneMsg is a session start or resume's outcome (ADR 0107).
 type launchDoneMsg struct {
@@ -371,6 +368,7 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 			msg.kinds = readKindProfiles()
 			msg.kinds.reasons = profileReasons(m.ctx, msg.kinds)
 			msg.commits, msg.histErr = readMainline()
+			msg.landName, msg.landErr = readLandStrategy()
 			msg.pool, msg.autoExit, msg.initiatives, msg.jiraSet = readPool(), readAutoExit(), readInitiatives(), jiraSiteSet()
 		}
 		return msg
@@ -627,6 +625,7 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		m.live, m.sessions, m.loop = msg.live, msg.sessions, msg.loop
 		if msg.slowTier { // a fast load keeps the slow tier's last values
 			m.efforts, m.cpTips, m.pool, m.exit, m.kinds, m.initiatives, m.jiraSet = msg.efforts, msg.cpTips, msg.pool, msg.autoExit, msg.kinds, msg.initiatives, msg.jiraSet
+			m.landName, m.landErr = msg.landName, msg.landErr
 			m.histCommits, m.histErr = msg.commits, msg.histErr
 		}
 		m.flashCloseFailed()
@@ -800,15 +799,7 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case pickGraphMsg:
 		return m.pickGraph(msg.facet), nil, true
 	case runDoneMsg:
-		m.runs = slices.DeleteFunc(slices.Clone(m.runs), func(r dispatch.Inflight) bool { return r.ID == msg.run })
-		s := "run " + msg.id + " done"
-		if msg.err != nil {
-			s = "run " + msg.id + " failed: " + msg.err.Error()
-			if msg.tail != "" {
-				s += "\n" + msg.tail
-			}
-		}
-		m.setStatus(s)
+		m.setStatus(msg.status)
 		return m, m.load(), true
 	case loopDoneMsg:
 		next, cmd := m.loopDone(msg)
@@ -829,6 +820,9 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.setStatus("explorer: " + msg.err.Error())
 		}
 		return m, nil, true
+	case browserDoneMsg:
+		next, cmd := m.browserDone(msg)
+		return next, cmd, true
 	case writeDoneMsg:
 		m.pending = maps.Clone(m.pending)
 		delete(m.pending, msg.key)
@@ -1031,11 +1025,16 @@ func (m Model) crewCounts(in func(id string) bool, retrying map[string]bool) (hi
 	return
 }
 
-// retrying is the beads whose run-now retry is in flight.
+// retrying is the beads whose retry is in flight: paused by paused:failing or
+// paused:foreign-hold with a live effort (ADR 0331). It reads the effort's
+// liveness, not the TUI's run-now set, so a detached host's retry counts too. A
+// live paused:manual bead is an abort winding down and stays paused.
 func (m Model) retrying() map[string]bool {
 	r := map[string]bool{}
-	for _, run := range m.runs {
-		r[run.Bead.ID] = true
+	for _, b := range m.beads {
+		if m.live[b.ID] && (bd.PausedBy(b, bd.PausedFailing) || bd.PausedBy(b, bd.PausedForeignHold)) {
+			r[b.ID] = true
+		}
 	}
 	return r
 }
@@ -1108,28 +1107,16 @@ func pendingNames(pending map[string]string) []string {
 	return ns
 }
 
-// quitPrompt is the quit dialog's body (ADR 0051 quit amendment): `N run-now
-// efforts will be abandoned: <title>…, <title>… +N — quit?`, then the writes still
-// in flight, named by key: `; N writes in flight: <key>…`.
-func quitPrompt(runs []dispatch.Inflight, pending map[string]string, w int) string {
-	const quit = " — quit?"
-	end := quit // only the last part folds against it
-	if len(pending) > 0 {
-		end = ""
-	}
-	s := ""
-	if len(runs) > 0 {
-		s = foldTitles(fmt.Sprintf("%d run-now efforts will be abandoned: ", len(runs)), bd.Titles(dispatch.Beads(runs)), end, w)
-	}
+// quitPrompt is the quit dialog's body: the writes still in flight, named by key:
+// `N writes in flight: <key>…` (ADR 0098 §6). A run-now effort is a detached host
+// and no part of it.
+func quitPrompt(pending map[string]string, w int) string {
 	if len(pending) == 0 {
-		return s
-	}
-	if s != "" {
-		s += "; "
+		return ""
 	}
 	noun := "writes"
 	if len(pending) == 1 {
 		noun = "write"
 	}
-	return foldTitles(s+fmt.Sprintf("%d %s in flight: ", len(pending), noun), pendingNames(pending), quit, w)
+	return foldTitles(fmt.Sprintf("%d %s in flight: ", len(pending), noun), pendingNames(pending), " — quit?", w)
 }

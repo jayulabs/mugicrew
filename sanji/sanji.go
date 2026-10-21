@@ -73,5 +73,5 @@ var prototypeTmpl string
 // mugicrew's and blocks nothing (ADR 0071). Pure — asserted through the Launch seam test, mirroring
 // Nami's grillingPrompt.
 func prototypePrompt(prototypeID, scratch string) string {
-	return fmt.Sprintf(prototypeTmpl, prototypeID, prototypeSideRef, scratch, contract.DraftInstruction(prototypeID))
+	return fmt.Sprintf(prototypeTmpl, prototypeID, prototypeSideRef, scratch, contract.DraftInstruction(prototypeID), contract.IntegrateExits())
 }

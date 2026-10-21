@@ -159,6 +159,7 @@ func stubDrafts(t *testing.T, err error) *[]string {
 		endSession = origEnd
 	})
 	listDrafts = func(string) ([]bd.Bead, error) { return nil, nil }
+	swapSeam(t, &clearMetadata, func(string, string) error { return nil })
 	hupGrace = 50 * time.Millisecond
 	calls := &[]string{}
 	markClosing = func(tmuxEnv, pane string) { *calls = append(*calls, "closing "+tmuxEnv+" "+pane) }

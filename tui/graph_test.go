@@ -342,7 +342,7 @@ func TestGraphBindingCoverage(t *testing.T) {
 		for _, k := range candidateKeys() {
 			next, cmd := send(t, m, k)
 			handled := cmd != nil || next.View() != m.View()
-			if handled != bound[k.String()] && k.String() != "4" {
+			if sectionKey := slices.Contains([]string{"J", "K", "ctrl+up", "ctrl+down"}, k.String()); handled != bound[k.String()] && k.String() != "4" && !sectionKey { // the end-stopping jump is inert at an end or with one top-level header; TestGraphSection* cover it
 				t.Errorf("%s: key %q handled=%v bound=%v", name, k, handled, bound[k.String()])
 			}
 		}

@@ -32,6 +32,10 @@ var (
 	// as in a prompt's "Read crew doc <name>.md", where a line wrap may fall
 	// between "crew doc" and the name.
 	CrewDocRef = regexp.MustCompile(`\bcrew doc\s+([A-Za-z0-9_/-]+\.md)\b`)
+	// RetiredPhrasings are wordings that read a shipped glossary term (Held,
+	// Carry) in a sense the glossary contradicts; no prompt or crew doc may
+	// say them.
+	RetiredPhrasings = []string{"Land held by", "Carry moves", "Land the finding"}
 )
 
 // SkillCalls lists every skill call in text: "Skill tool", any /<name> slash
@@ -53,6 +57,22 @@ func SkillCalls(text string) []string {
 
 // ADRCitations lists every "ADR NNNN" citation in text.
 func ADRCitations(text string) []string { return adrCite.FindAllString(text, -1) }
+
+// bareADR is "ADR NNNN" as bead text cites an ADR by number.
+var bareADR = regexp.MustCompile(`\bADR \d{4}\b`)
+
+// BareADRCitations lists every "ADR NNNN" in text that is not followed by its
+// slug, " (<slug>)": bead text Go renders must cite each ADR as
+// ADR <n> (<slug>) so a foreign Workspace's crewmate can tell what it decided.
+func BareADRCitations(text string) []string {
+	var hits []string
+	for _, loc := range bareADR.FindAllStringIndex(text, -1) {
+		if !strings.HasPrefix(text[loc[1]:], " (") {
+			hits = append(hits, text[loc[0]:loc[1]])
+		}
+	}
+	return hits
+}
 
 // KindPrefixedTitles lists every kind-prefixed --title template in text.
 func KindPrefixedTitles(text string) []string { return kindTitle.FindAllString(text, -1) }
@@ -79,6 +99,11 @@ func Check(t testing.TB, name, text string) {
 	}
 	if hits := KindPrefixedTitles(text); len(hits) > 0 {
 		t.Errorf("%s: kind-prefixed titles %q", name, hits)
+	}
+	for _, p := range RetiredPhrasings {
+		if strings.Contains(text, p) {
+			t.Errorf("%s: retired phrasing %q", name, p)
+		}
 	}
 	docs := Docs(t)
 	for _, ref := range CrewDocRefs(text) {

@@ -76,13 +76,14 @@ func HasEdge(from, to, typ string) (bool, error) {
 // RaisePivot is the Go half of the split raise (ADR 0043 §3–4), shared by Franky
 // (Build/Conflict) and Usopp (Review): for each open pivot discovered-from bead —
 // fresh (a Draft by bead), or an existing same-FR pivot the agent merged into —
-// hand Checkpoint blocks→pivot, pivot related→specID and bead's close 'pivoted:
-// <pivot>' to the publish, so the pivot and its gate become visible in one batch
-// and the Checkpoint is never briefly unfrozen (Spec D6; FR 24). Edges already
-// present are not handed over (one failing batch line rolls back the publish), so
-// a merged raise and a re-dispatch both converge. A Spec-less Checkpoint (specID
-// "") errors before anything is written (Spec D7): no gate freezes it behind a
-// pivot nobody can resolve, and bead's failure path pauses it for the human.
+// hand checkpoint (explicit: an effort raiser passes its parent) blocks→pivot, pivot
+// related→specID and bead's close 'pivoted: <pivot>' to the publish, so the pivot
+// and its gate become visible in one batch and the Checkpoint is never briefly
+// unfrozen (Spec D6; FR 24). Edges already present are not handed over (one failing
+// batch line rolls back the publish), so a merged raise and a re-dispatch both
+// converge. A Spec-less Checkpoint (specID "") errors before anything is written
+// (Spec D7): no gate freezes it behind a pivot nobody can resolve, and bead's failure
+// path pauses it for the human.
 // ponytail: a merged-into pivot that was another creator's Draft would dangle if
 // that creator's effort failed and its tail deleted it (FR18). Siblings run
 // concurrently (ADR 0102), so the serializer is the pivot merge rule (Spec
@@ -90,23 +91,34 @@ func HasEdge(from, to, typ string) (bool, error) {
 // Checkpoint's blocks-edge query lists (published) or their own prior raise, and
 // otherwise raise their own; a duplicate is accepted and the sweep closes it
 // superseded:. Guard (publish the merged pivot here) if that rule ever loosens.
-func RaisePivot(ctx contract.Ctx, bead Bead, specID string, pivots []Bead) error {
+func RaisePivot(ctx contract.Ctx, bead Bead, checkpoint, specID string, pivots []Bead) error {
 	ids := IDs(pivots)
 	if specID == "" {
-		return fmt.Errorf("checkpoint %s has no Spec (caused-by, or through a Rollback) to relate pivot(s) %v to", bead.Parent, ids)
+		return fmt.Errorf("checkpoint %s has no Spec (caused-by, or through a Rollback) to relate pivot(s) %v to", checkpoint, ids)
 	}
-	var edges []Edge
-	for _, id := range ids {
-		if err := edgeIfAbsent(&edges, bead.Parent, id, "blocks"); err != nil {
-			return err
-		}
-	}
-	for _, id := range ids {
-		if err := edgeIfAbsent(&edges, id, specID, "related"); err != nil {
-			return err
-		}
+	edges, err := GateEdges(checkpoint, specID, ids)
+	if err != nil {
+		return err
 	}
 	return CloseOnPublish(ctx, bead.ID, "pivoted: "+strings.Join(ids, ", "), edges)
+}
+
+// GateEdges is the gate a pivot batch hands to a publish: for each pivot id the
+// checkpoint blocks→pivot edge, then each pivot related→specID, minus any edge bd
+// already holds.
+func GateEdges(checkpoint, specID string, pivotIDs []string) ([]Edge, error) {
+	var edges []Edge
+	for _, id := range pivotIDs {
+		if err := edgeIfAbsent(&edges, checkpoint, id, "blocks"); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range pivotIDs {
+		if err := edgeIfAbsent(&edges, id, specID, "related"); err != nil {
+			return nil, err
+		}
+	}
+	return edges, nil
 }
 
 // edgeIfAbsent appends from→to of typ to edges unless bd already holds it.
@@ -341,4 +353,6 @@ func ForceCloseAll(ids []string, reason string) error {
 }
 
 // DiscoveredFromSources is the beads id was discovered from: where an offshoot was found.
-func DiscoveredFromSources(id string) ([]Bead, error) { return depTargets(id, "down", "discovered-from") }
+func DiscoveredFromSources(id string) ([]Bead, error) {
+	return depTargets(id, "down", "discovered-from")
+}

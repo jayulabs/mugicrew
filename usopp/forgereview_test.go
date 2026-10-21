@@ -123,7 +123,7 @@ func TestForgeReviewPromptCarriesSnapshotFiledBeadsDraftBlockAndRubric(t *testin
 	if strings.Contains(p, "ws-c3") {
 		t.Errorf("a bead with no Source: line for this MR must not be listed")
 	}
-	if strings.Contains(p, "ws-c2 ") && strings.Contains(p, "d9") {
+	if !strings.Contains(p, "ws-c2 [open] source notes: 701\n") { // not "d9" anywhere: the crewdocs hash path can contain it
 		t.Errorf("another MR's source note leaked into the filed list")
 	}
 }

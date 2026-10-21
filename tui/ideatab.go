@@ -643,6 +643,21 @@ func (g graphData) ideaBands() (wait, front, paused []ideaRow) {
 			}
 		}
 	}
+	seen := map[string]bool{}
+	for _, r := range slices.Concat(wait, front, paused) {
+		if r.b != nil {
+			seen[r.b.ID] = true
+		}
+	}
+	for _, b := range g.homePaused(tabIdeate, seen) { // Spec mc-f22wp FR 5; the Backlog rule (ADR 0314 §2) still holds
+		if isBacklog(*b) {
+			continue
+		}
+		if j := g.beadIndex(b.Parent); j >= 0 && backlogInit(g.beads[j], g.sessions, g.isHeld, triage) {
+			continue
+		}
+		paused = append(paused, ideaRow{key: "act:" + b.ID, b: b, act: true, depth: 1})
+	}
 	bead := func(r ideaRow) bd.Bead {
 		if r.b != nil {
 			return *r.b

@@ -21,7 +21,6 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
-	"jayulabs.org/mugicrew/dispatch"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/looplock"
@@ -151,7 +150,7 @@ func (m Model) tabAt(i int) component {
 func (m Model) gateData() graphData {
 	return graphData{
 		beads: m.beads, idx: m.idx, live: m.live, sessions: m.sessions, efforts: m.efforts, cpTips: m.cpTips, landEv: m.landEv, launching: m.launching, launched: m.launched,
-		pending: m.pending, crew: m.crew, comments: m.comments, rollups: m.rollups, extRef: m.initiatives.ExternalRef, w: m.w, h: m.h - chromeH,
+		pending: m.pending, crew: m.crew, comments: m.comments, rollups: m.rollups, extRef: m.initiatives.ExternalRef, landName: m.landName, landErr: m.landErr, w: m.w, h: m.h - chromeH,
 	}
 }
 
@@ -230,6 +229,8 @@ type Model struct {
 	tabs       []component
 	tab        int
 	jiraSet    bool   // the [jira] site was set when the slow tier last loaded
+	landName   string // land_strategy as the slow tier last read it; landErr when it was unusable
+	landErr    error
 	surgerySet bool   // some Surgery target existed then
 	ref        bool   // the ? key reference is open
 	refOff     int    // its first visible line (Spec mc-bruk D7)
@@ -293,7 +294,6 @@ type Model struct {
 	loopRestarting bool            // a `loop restart` has not returned: the menu's options are dimmed and inert
 	watched        bool            // opened with --watch: o starts a watched loop
 
-	runs      []dispatch.Inflight  // run-now efforts in flight, oldest first
 	launched  map[string]time.Time // bead id → when its launch succeeded; cleared by a loadedMsg that began after that and shows it alive, or one launchHoldMax on
 	waitSince map[string]time.Time // bead id → first snapshot its session read waiting; dropped when it stops (Sessions modal order)
 	launching map[string]bool      // bead ids whose session start is in flight (ADR 0107 §5)
@@ -566,21 +566,22 @@ func (m Model) saveGraphFolds() Model {
 	return m
 }
 
-// quit exits at once, or asks first while an effort, write or launch is in flight.
+// quit exits at once, or asks first while a write or launch is in flight; a run-now
+// effort, once its press has returned, is a detached host and never holds it up.
 // A Quit? already on top is not stacked again (below the floor every q lands here).
 func (m Model) quit() (tea.Model, tea.Cmd) {
-	if len(m.runs) == 0 && len(m.pending) == 0 && len(m.launching) == 0 {
+	if len(m.pending) == 0 && len(m.launching) == 0 {
 		return m, tea.Quit
 	}
 	if n := len(m.modals); n > 0 && m.modals[n-1].title == "Quit?" {
 		return m, nil
 	}
-	runs, pending, launching := m.runs, m.pending, len(m.launching)
+	pending, launching := m.pending, len(m.launching)
 	body := func(w int) []string {
-		s := quitPrompt(runs, pending, w)
+		s := quitPrompt(pending, w)
 		if launching > 0 { // ADR 0098 §6: quitting must not silently strand a claim
 			s = strings.TrimSpace(fmt.Sprintf("%d launching — a claimed bead may be left without a session. %s", launching, s))
-			if len(runs) == 0 && len(pending) == 0 {
+			if len(pending) == 0 {
 				s += " Quit?"
 			}
 		}
@@ -588,7 +589,6 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	}
 	return m.push(promptDialog("Quit?", body, "",
 		func(m Model, _ dialog) (Model, tea.Cmd) {
-			dispatch.Abandon(m.runs, pauseBead) // paused:abandoned before each effort.abandoned (ADR 0082)
 			return m, tea.Quit
 		})), nil
 }

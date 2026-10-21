@@ -18,6 +18,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 )
 
 // Row kinds.
@@ -35,11 +36,13 @@ const (
 	eCPS           // an open Checkpoint in the Checkpoints section: status only
 	eLanded        // a closed Checkpoint in 'Landed in last 24h': status only
 	eSPS           // an open Spec in the Specs section: status only
+	eMR            // an open MR Watch in the Merge Requests section
 )
 
 const (
 	actKey   = "s:act"
 	liveKey  = "s:live"  // the Live section: unfolded by default like actKey, never pruned
+	mrsKey   = "s:mrs"   // the Merge Requests section right below Live: likewise
 	specsKey = "s:specs" // the Specs section between Live and Checkpoints: likewise
 	cpsKey   = "s:cps"   // the Checkpoints section between Live and Initiatives: likewise
 	treeKey  = "s:tree"  // the Initiatives section above the tree: likewise
@@ -47,6 +50,10 @@ const (
 	livePrefix   = "live:"           // a Live row's key is livePrefix + the bead id
 	liveNone     = liveKey + "/none" // the empty Live section's placeholder
 	liveEmpty    = "nothing is running"
+	mrsPrefix    = "mrs:"           // a Merge Requests row's key is mrsPrefix + the Watch's id
+	mrsNone      = mrsKey + "/none" // the empty Merge Requests section's placeholder
+	mrsEmpty     = "no open Merge Requests"
+	mrsDetail    = "Every open Merge Request the crew is waiting on, under the gitlab land strategy. d shows its link."
 	specsPrefix  = "specs:"           // a Specs row's key is specsPrefix + the bead id
 	specsNone    = specsKey + "/none" // the empty Specs section's placeholder
 	specsEmpty   = "no open Specs"
@@ -148,7 +155,7 @@ func (r eRow) shadeIn() shadeIn {
 		return shadeIn{id: r.b.ID, act: true}
 	case eLive:
 		return shadeIn{id: r.b.ID, act: true, live: true}
-	case eCP, eCPS, eSPS, eLanded, eSpec, eMem, eSide, eClosed:
+	case eCP, eCPS, eSPS, eMR, eLanded, eSpec, eMem, eSide, eClosed:
 		return shadeIn{id: r.b.ID}
 	}
 	return shadeIn{}
@@ -173,7 +180,7 @@ const noInitKey = "i:"
 
 // isSectionKey is whether key is the Actionable, Live, Checkpoints or Initiatives section's header.
 func isSectionKey(key string) bool {
-	return key == actKey || key == liveKey || key == specsKey || key == cpsKey || key == treeKey
+	return key == actKey || key == liveKey || key == mrsKey || key == specsKey || key == cpsKey || key == treeKey
 }
 
 // liveTitle is the Live header text "Live (N)", all bold in the live green.
@@ -313,6 +320,13 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 			paused = append(paused, eRow{kind: eAct, key: "act:" + cp.ID, b: cp, cp: cp, depth: 1})
 		}
 	}
+	for _, b := range g.homePaused(tabExecute, idSet(slices.Concat(wait, front, paused), func(r eRow) *bd.Bead { return r.b })) {
+		r := eRow{kind: eAct, key: "act:" + b.ID, b: b, depth: 1}
+		if p := g.beadByID(b.Parent); p.Kind == contract.KindCheckpoint {
+			r.cp, r.rel = p, "member"
+		}
+		paused = append(paused, r)
+	}
 	slices.SortStableFunc(paused, func(a, b eRow) int { return beadCmp(*a.b, *b.b) })
 	return
 }
@@ -418,6 +432,55 @@ func (g graphData) cpsRows() []eRow {
 	return rows
 }
 
+// mrRows is the Merge Requests section's rows and whether the section shows (Spec D5): an
+// unusable land_strategy shows it with no rows, gitlab with every open non-Draft MR Watch,
+// local not at all. Rows run in their container's beadCmp order.
+func (g graphData) mrRows() (rows []eRow, shown bool) {
+	if g.landErr != nil {
+		return nil, true
+	}
+	if g.landName != git.LandStrategyGitlab {
+		return nil, false
+	}
+	for i, w := range g.beads {
+		if w.Kind != contract.KindMRWatch || w.Event || !w.Unclosed() || bd.IsDraft(w) {
+			continue
+		}
+		if p := g.beadIndex(w.Parent); p >= 0 {
+			rows = append(rows, eRow{kind: eMR, key: mrsPrefix + w.ID, b: &g.beads[i], cp: &g.beads[p], rel: "watches", depth: 1})
+		}
+	}
+	slices.SortStableFunc(rows, func(a, b eRow) int { return beadCmp(*a.cp, *b.cp) })
+	return rows, true
+}
+
+// mrLine is an MR row's text: the ref (the context named only for the nested body form, as
+// the rollup qualifier does), the Watch's container title, and the status word of the
+// container's open unpaused Landing, left out when it has none or the status is unmapped.
+func (g graphData) mrLine(w, cp *bd.Bead) string {
+	var parts []string
+	if path, iid := git.RecordedMRPath(w.Description); iid != 0 {
+		ctxName := ""
+		if path != "" {
+			ctxName = bd.ContextOf(*cp)
+		}
+		parts = append(parts, git.MRRef(ctxName, iid))
+	}
+	parts = append(parts, cp.Title)
+	for _, j := range g.children(cp.ID) {
+		l := g.beads[j]
+		if l.Kind != contract.KindLanding || !l.Unclosed() || len(bd.PausedCauses(l)) > 0 {
+			continue
+		}
+		raw, _ := git.ParseLine(l.Description, "MR status:")
+		if word := mrStatusWord[raw]; word != "" {
+			parts = append(parts, word)
+		}
+		break
+	}
+	return strings.Join(parts, " · ")
+}
+
 // landingOf is the index of the Landing that landed Checkpoint cp: a child of it, looked up
 // across the whole graph, closed landed: <sha>. -1 when cp is not a closed Checkpoint with one,
 // so a Checkpoint closed nothing to land: or swept obsolete: never has it. It is the one
@@ -500,6 +563,20 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			rows = append(rows, eRow{kind: ePlace, key: liveNone, depth: 1})
 		}
 		rows = append(rows, live...)
+	}
+
+	if mrRows, shown := g.mrRows(); shown {
+		mh := eRow{kind: eSec, key: mrsKey, title: fmt.Sprintf("Merge Requests (%d)", len(mrRows))}
+		rows = append(rows, mh)
+		if !ecollapsed(flip, mh) {
+			switch {
+			case g.landErr != nil:
+				rows = append(rows, eRow{kind: ePlace, key: mrsNone, title: g.landErr.Error(), depth: 1})
+			case len(mrRows) == 0:
+				rows = append(rows, eRow{kind: ePlace, key: mrsNone, depth: 1})
+			}
+			rows = append(rows, mrRows...)
+		}
 	}
 
 	spRows := g.specsRows()
@@ -685,7 +762,7 @@ func newExec() component {
 // save writes the folds minus a closed or missing bead's; the Actionable key is never pruned. The fold still
 // applies this session.
 func (t execTab) save() error {
-	return saveFolds(t.path, "execute", pruneFolds(unpeeked(t.flip, t.peek), t.g.beads, actKey, liveKey, specsKey, cpsKey, landedKey, treeKey))
+	return saveFolds(t.path, "execute", pruneFolds(unpeeked(t.flip, t.peek), t.g.beads, actKey, liveKey, mrsKey, specsKey, cpsKey, landedKey, treeKey))
 }
 
 func (t execTab) rows() []eRow { return t.g.execList(t.flip) }
@@ -718,7 +795,7 @@ func (t execTab) selIndex(rows []eRow) int {
 		}
 	}
 	if ok {
-		for _, k := range []string{id, "side:" + id} {
+		for _, k := range []string{specsPrefix + id, id, "side:" + id} { // a Spec's twin is its Specs-section row
 			if i := at(k); i >= 0 {
 				return i
 			}
@@ -798,6 +875,9 @@ func (t execTab) bindings() []key.Binding {
 	if r.kind == eSec || r.kind == eSum || r.kind == eCP {
 		bs = append(bs, keyFold)
 	}
+	if r.kind == eMR {
+		bs = append(bs, keyOpenMR)
+	}
 	if t.open {
 		bs = append(bs, keyShut, keyScroll)
 	} else {
@@ -862,6 +942,18 @@ func (m Model) execKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			nm.setStatus("folds won't survive a restart: " + err.Error())
 		}
 		return nm, cmd, true
+	}
+	if r.kind == eMR && key.Matches(k, keyOpenMR) {
+		ref := "its MR"
+		if path, iid := git.RecordedMRPath(r.b.Description); iid != 0 {
+			ctxName := ""
+			if path != "" && r.cp != nil {
+				ctxName = bd.ContextOf(*r.cp)
+			}
+			ref = git.MRRef(ctxName, iid)
+		}
+		next, cmd := m.openMR(r.b, ref)
+		return next, cmd, true
 	}
 	if r.kind == eLanded && (key.Matches(k, keyLaunch) || key.Matches(k, keyBg)) {
 		m.setStatus(landedRefuse)
@@ -950,7 +1042,7 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 			return ind + dimSt.Render(fold) + selMarker.Render(r.title), ""
 		case liveKey: // the count in the live ●'s green
 			return ind + dimSt.Render(fold) + liveTitle(r.title), ""
-		case specsKey, cpsKey, treeKey:
+		case mrsKey, specsKey, cpsKey, treeKey:
 			return ind + dimSt.Render(fold) + sectionSt.Render(r.title), ""
 		case noInitKey: // the count, and the folded trailer
 			return ind + dimSt.Render(fold) + sectionSt.Render(r.title) + trail, ""
@@ -965,6 +1057,9 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 		}
 		if r.key == liveNone {
 			return ind + blank + dimSt.Render(liveEmpty), ""
+		}
+		if r.key == mrsNone {
+			return ind + blank + dimSt.Render(mrsEmpty), ""
 		}
 		if r.key == specsNone {
 			return ind + blank + dimSt.Render(specsEmpty), ""
@@ -984,6 +1079,10 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 		return ind + fold + g.sbrn(r.b, containerTitle(r.b, hot, r.b.Title), true, 0) + trail, suffix
 	}
 	var s string
+	if r.kind == eMR { // a Watch row: its MR, the container it waits on, the MR's state; the Watch's own title is no news
+		s = ind + blank + g.sbrnLeaf(r.b, g.mrLine(r.b, r.cp), tagW, false)
+		return s, suffix
+	}
 	if r.kind == eCPS { // a container row, as its tree row: no AFK mute on the title or badge
 		s = ind + blank + g.sbrn(r.b, containerTitle(r.b, hot, r.b.Title), true, tagW)
 		s += sep() + dimSt.Render(g.rollup(r.b).label()) // the Rollup word and its qualifiers: a status hint, not an action
@@ -1023,12 +1122,14 @@ func (t execTab) view(w, h int) string {
 	shade := shadeSet(t.g.parentOf, rows, sel, full, eRow.shadeIn)
 	lines, selRow := make([]string, len(rows)), sel
 	ids := make([]string, len(rows))
-	liveAt, specsAt, cpsAt, treeAt, noInitAt := 0, 0, 0, 0, 0 // the section headers that get a blank line above
+	liveAt, mrsAt, specsAt, cpsAt, treeAt, noInitAt := 0, 0, 0, 0, 0, 0 // the section headers that get a blank line above
 	for i, r := range rows {
 		ids[i], lines[i] = r.id(), strconv.Itoa(i)
 		switch r.key {
 		case liveKey:
 			liveAt = i
+		case mrsKey:
+			mrsAt = i
 		case specsKey:
 			specsAt = i
 		case cpsKey:
@@ -1043,6 +1144,7 @@ func (t execTab) view(w, h int) string {
 	lines, ids, sel = gapAt(lines, ids, sel, treeAt)
 	lines, ids, sel = gapAt(lines, ids, sel, cpsAt)
 	lines, ids, sel = gapAt(lines, ids, sel, specsAt)
+	lines, ids, sel = gapAt(lines, ids, sel, mrsAt)
 	lines, ids, sel = gapAt(lines, ids, sel, liveAt)
 	var footer func(off, lh int) []string
 	if b != nil {

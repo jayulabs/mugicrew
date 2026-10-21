@@ -217,10 +217,10 @@ func (m Model) formKey(d dialog, k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case f.field == fieldRef:
 		f.ref = f.ref.apply(k)
 	case f.field == fieldPrio:
-		switch k.String() {
-		case "+", "=":
+		switch stepOf(k.String()) {
+		case stepUp:
 			f.prio = max(f.prio-1, 0)
-		case "-":
+		case stepDown:
 			f.prio = min(f.prio+1, 4)
 		}
 	default:

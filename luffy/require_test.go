@@ -50,7 +50,7 @@ func TestTriagePromptRequireInitiatives(t *testing.T) {
 	if !ok {
 		t.Fatal("the section must be appended")
 	}
-	for _, want := range []string{"## Require Initiatives", "ws-a — A", "A done.", "ws-b — B", "B done.", "mugicrew initiative adopt ws-sig <initiativeID>", "REJECT; (d) DUPLICATE"} {
+	for _, want := range []string{"## Require Initiatives", "ws-a — A", "A done.", "ws-b — B", "B done.", "mugicrew initiative adopt ws-sig <initiativeID>", "REJECT; (d) DUPLICATE; (e) REROUTE"} {
 		if !strings.Contains(rest, want) {
 			t.Errorf("section missing %q:\n%s", want, rest)
 		}

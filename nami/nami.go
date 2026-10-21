@@ -174,7 +174,7 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 }
 
 // escalateOutcome prefixes the chart-conflict agent's escalation line, "Escalate:
-// <title>", which ends its payload block; payloadStart opens that block (ADR 0079).
+// <title>", which ends its payload block; payloadStart opens that block (ADR 0079 (mugicrew-afk-chart-conflict-escalates…)).
 const (
 	escalateOutcome = "Escalate:"
 	payloadStart    = "Blocks:"
@@ -198,7 +198,7 @@ func escalateChartConflict(ctx contract.Ctx, conflict bd.Bead, title, output str
 		return fmt.Errorf("chart-conflict %s: %q needs a title and a Blocks: payload", conflict.ID, escalateOutcome+" "+title)
 	}
 	body := payload + fmt.Sprintf("\n\nAnswer each numbered question in this bead's notes under the same number, "+
-		"then close it. Do not commit to the Chart branch or close %s: the AFK resolve applies the answers (ADR 0079).", conflict.ID)
+		"then close it. Do not commit to the Chart branch or close %s: the AFK resolve applies the answers (ADR 0079 (mugicrew-afk-chart-conflict-escalates…)).", conflict.ID)
 	id, err := spawnChild(conflict.Parent, bd.Successor{Kind: contract.KindGrilling, Title: title, Description: body, DraftedBy: conflict.ID})
 	if err != nil {
 		return err
@@ -272,7 +272,7 @@ func (Nami) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 var grillingTmpl string
 
 func grillingPrompt(grillingID string) string {
-	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID))
+	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID), contract.IntegrateExits())
 }
 
 // sourceGrillingTmpl frames a Merge Request review thread's grilling: the
@@ -329,7 +329,7 @@ func lastNonEmptyLine(s string) string {
 var researchTmpl string
 
 func researchPrompt(researchID string) string {
-	return fmt.Sprintf(researchTmpl, researchID, researchDocPointer)
+	return fmt.Sprintf(researchTmpl, researchID, researchDocPointer, contract.IntegrateExits())
 }
 
 // chartConflictPrompt is the headless resolve workflow runChartConflict runs (ADR
@@ -403,7 +403,7 @@ func speccingPrompt(chartID string) string {
 var promoteOrStampTmpl string
 
 func promoteOrStampPrompt(chartID string) string {
-	return fmt.Sprintf(promoteOrStampTmpl, chartID, wayfinderMapFields, contract.DraftInstruction(chartID), contract.LabelDefogged)
+	return fmt.Sprintf(promoteOrStampTmpl, chartID, wayfinderMapFields, contract.DraftInstruction(chartID), contract.LabelDefogged, contract.IntegrateExits())
 }
 
 // Reconcile drives a bead to its conformant next state (spec §8.2), the single
@@ -755,7 +755,7 @@ func ChartConflictBody(chartID, base, tip, variant string, clashes []string) str
 	if len(clashes) > 0 {
 		intro = "Chart-land numbered-file clash"
 	}
-	intro += ` (ADR 0011, ADR 0219). It is resolved AFK; closing it
+	intro += ` (ADR 0011 (mugicrew-chart-conflict-policy), ADR 0219 (mugicrew-the-adr…)). It is resolved AFK; closing it
 re-drains the Chart and reconcileChart re-lands it.`
 	if variant == ConflictRequested {
 		intro = "Requested rebase (ADR 0262 (mugicrew-a-requested-rebase-is-a-human-filed-conflict-variant…)): a human asked for this Chart to be rebased onto mainline;\nit is not a land conflict. It is resolved AFK; closing it re-drains the Chart."

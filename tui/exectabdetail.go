@@ -12,6 +12,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/registry"
 )
 
@@ -74,6 +75,9 @@ func (t execTab) rowText(r eRow) string {
 		if r.key == liveKey {
 			return liveHeaderText(r.title)
 		}
+		if r.key == mrsKey {
+			return r.title + "\n\n" + mrsDetail + "\n\nenter does nothing here (space folds)."
+		}
 		if r.key == specsKey {
 			return r.title + "\n\n" + specsDetail + "\n\nenter does nothing here (space folds)."
 		}
@@ -115,6 +119,11 @@ func (t execTab) rowText(r eRow) string {
 	field("owner", owner)
 	for _, f := range forgeReviewFields(b) {
 		field(f[0], f[1])
+	}
+	if r.kind == eMR {
+		if url := git.RecordedMRLink(b.Description); url != "" { // read through the helper only: never derived from the iid, path or host
+			field("MR link", url)
+		}
 	}
 	kind := r.kind
 	if r.cpAct() || kind == eLive || kind == eCPS || kind == eSPS || kind == eLanded { // a Live or Checkpoints row details like its tree row

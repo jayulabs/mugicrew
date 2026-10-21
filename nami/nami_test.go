@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -471,6 +472,9 @@ func TestRunChartConflictEscalateFilesGrilling(t *testing.T) {
 	if want := []string{"ws-chart grilling ws-cf Which Chart-conflict definition stands?"}; !reflect.DeepEqual(r.spawned, want) {
 		t.Errorf("spawned = %q, want %q", r.spawned, want)
 	}
+	if bare := promptguard.BareADRCitations(r.bodies[0]); len(bare) > 0 {
+		t.Errorf("grilling body cites %q by bare number: %q", bare, r.bodies[0])
+	}
 	if body := r.bodies[0]; !strings.HasPrefix(body, "Blocks: ws-cf\nVariant: rebase-conflict") ||
 		!strings.Contains(body, "Chart: b") || !strings.Contains(body, "under the same number") ||
 		strings.Contains(body, "Escalate:") || strings.Contains(body, "contradictory.") {
@@ -647,13 +651,26 @@ func TestLaunchRefusesChart(t *testing.T) {
 	}
 }
 
-// Spec mc-r832 D2 (FR 22–23): a Survey is not a defog bead, so promote-or-stamp
-// and speccing skip a closed kind:survey child when they gather the Chart's
-// closed children.
-func TestJudgeAndSpeccingSkipClosedSurvey(t *testing.T) {
+// Spec mc-oeibm (FR 1–7): promote-or-stamp and speccing read only the closed
+// defog children (grilling, research, prototype) and skip every other child:
+// the Survey, Landings (obsoleted ones too) and chart-conflicts record no
+// defog decision.
+func TestJudgeAndSpeccingReadOnlyClosedDefogChildren(t *testing.T) {
+	k := func(kind contract.Kind) string { return "kind:" + string(kind) }
+	read := k(contract.KindGrilling) + ", " + k(contract.KindResearch) + " and " + k(contract.KindPrototype) + " children"
 	for name, p := range map[string]string{"promote-or-stamp": promoteOrStampPrompt("mc-x"), "speccing": speccingPrompt("mc-x")} {
-		if flat := strings.Join(strings.Fields(p), " "); !strings.Contains(flat, "Skip the kind:"+string(contract.KindSurvey)+" child") {
-			t.Errorf("%s prompt must skip the closed kind:survey child:\n%s", name, p)
+		flat := strings.Join(strings.Fields(p), " ")
+		for _, want := range []string{
+			"Read only the closed " + read,
+			"skip every other child",
+			k(contract.KindSurvey) + " child",
+			k(contract.KindLanding) + " children, including obsoleted ones",
+			k(contract.KindChartConflict) + " children",
+			"None of them records a defog decision",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("%s prompt must contain %q:\n%s", name, want, p)
+			}
 		}
 	}
 }
@@ -790,6 +807,17 @@ func TestSpeccingPromptCarriesForkSpecifics(t *testing.T) {
 	assertSpecSections(t, "spec-template.md", promptguard.Docs(t)["spec-template.md"])
 }
 
+// FR 43: speccing an escalated Chart reads the evidence's held Tasks into
+// adopted ## Tasks entries.
+func TestSpeccingPromptAdoptsHeldTasks(t *testing.T) {
+	flat := strings.Join(strings.Fields(speccingPrompt("mc-x")), " ")
+	for _, want := range []string{"held Tasks", "task: <id>", "adopted entry"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("speccing prompt missing %q", want)
+		}
+	}
+}
+
 // assertSpecSections pins all seven standard Spec template sections, in the
 // template order, somewhere in p.
 // Spec D5: the template's optional ## Tasks section follows Further
@@ -802,7 +830,7 @@ func TestSpecTemplateOptionalTasksAfterFurtherNotes(t *testing.T) {
 		t.Fatalf("spec-template.md: ## Tasks must follow ## Further Notes")
 	}
 	tasks := doc[j:]
-	for _, want := range []string{"optional", "task-body.md", "after: land", "before: land", "after: <Task title>"} {
+	for _, want := range []string{"optional", "task-body.md", "after: land", "before: land", "after: <Task title>", "task: <id>", "no Steps body", "files nothing"} {
 		if !strings.Contains(tasks, want) {
 			t.Errorf("spec-template.md ## Tasks missing %q", want)
 		}
@@ -818,7 +846,7 @@ func TestChartSessionsMayDraftFreeStandingTask(t *testing.T) {
 		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), "mc-x"},
 	} {
 		flat := strings.Join(strings.Fields(c.p), " ")
-		for _, want := range []string{"-l kind:task," + contract.DraftedBy(c.drafter), "never a Chart child", "Carry moves"} {
+		for _, want := range []string{"-l kind:task," + contract.DraftedBy(c.drafter), "never a Chart child", "Carry copies"} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s prompt missing %q", name, want)
 			}
@@ -2124,5 +2152,38 @@ func TestHoldRateLimitedMarkerKeepsAnEarlierArmsLine(t *testing.T) {
 	}
 	if want := "Go.\nMR status: mergeable\nRate limited: logged\n"; s.body != want {
 		t.Errorf("body = %q, want %q", s.body, want)
+	}
+}
+
+// Bead text Go renders cites each ADR with its slug, never by bare number.
+func TestChartConflictAndRenumberBodiesCiteADRsWithSlug(t *testing.T) {
+	clash := []string{"docs/adr/0031-a.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0031-b.md)"}
+	bodies := map[string]string{
+		"rebase":    ChartConflictBody("mc-x", "b4se", "t1p", ConflictRebase, nil),
+		"clash":     ChartConflictBody("mc-x", "b4se", "t1p", ConflictNumberClash, clash),
+		"requested": ChartConflictBody("mc-x", "b4se", "t1p", ConflictRequested, nil),
+		"renumber":  renumberBody("mc-l", "sha", []git.PostLandClash{{Added: "docs/adr/0009-b.md", Others: []string{"docs/adr/0009-a.md"}}}),
+	}
+	for name, body := range bodies {
+		if !regexp.MustCompile(`ADR \d{4} \(`).MatchString(body) {
+			t.Errorf("%s body cites no ADR with a slug:\n%s", name, body)
+		}
+		if bare := promptguard.BareADRCitations(body); len(bare) > 0 {
+			t.Errorf("%s body cites %q by bare number:\n%s", name, bare, body)
+		}
+	}
+}
+
+// Every Nami prompt that runs mugicrew integrate carries the exit block spliced
+// from the session exit constants (ADR 0328).
+func TestPromptsCarryIntegrateExits(t *testing.T) {
+	for name, got := range map[string]string{
+		"research":         researchPrompt("mc-x"),
+		"grilling":         grillingPrompt("mc-x"),
+		"promote-or-stamp": promoteOrStampPrompt("mc-x"),
+	} {
+		if !strings.Contains(got, contract.IntegrateExits()) {
+			t.Errorf("%s prompt lacks the integrate exit block", name)
+		}
 	}
 }

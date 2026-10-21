@@ -26,6 +26,7 @@ func TestMain(m *testing.M) {
 	discoveredFrom = func(string) ([]bd.Bead, error) { return nil, nil }
 	initiativesSetting = func() cfglayer.Initiatives { return cfglayer.Initiatives{} }
 	initiativesByRef = func(string) ([]bd.Bead, error) { return nil, nil }
+	draftsOf = func(string) ([]bd.Bead, error) { return nil, nil }
 	os.Exit(m.Run())
 }
 
@@ -594,7 +595,7 @@ func TestTriageAcceptSeedsAndTendsSurvey(t *testing.T) {
 // ADR 0096: no reconcile closes the Signal; mugicrew does at the clean-exit publish.
 func TestTriagePromptSaysSignalClosesAtPublish(t *testing.T) {
 	got := strings.Join(strings.Fields(triagePrompt("ws-sig", "", "", nil, nil)), " ")
-	if strings.Count(got, "does NOT close the Signal") != 3 || !strings.Contains(got, "mugicrew closes it when this session exits cleanly") {
+	if strings.Count(got, "does NOT close the Signal") != 4 || !strings.Contains(got, "mugicrew closes it when this session exits cleanly") {
 		t.Errorf("triage prompt must say, on every reconcile leg, that mugicrew closes the Signal at publish:\n%s", got)
 	}
 }
@@ -784,8 +785,49 @@ func TestTriagePromptOffersInitiative(t *testing.T) {
 			t.Errorf("INITIATIVE section missing %q:\n%s", want, ini)
 		}
 	}
-	if !strings.Contains(p, "ACCEPT, FAST LANE, INITIATIVE, REJECT, or DUPLICATE") {
-		t.Errorf("triage prompt must close on all five outcomes:\n%s", p)
+	if !strings.Contains(p, "ACCEPT, FAST LANE, INITIATIVE, REJECT, DUPLICATE, or REROUTE") {
+		t.Errorf("triage prompt must close on all six outcomes:\n%s", p)
+	}
+}
+
+// Spec mc-6qokc decision 10 (FRs 31, 51-52): the prompt checks the code's location
+// before FAST LANE with the locate verb and offers REROUTE as a sixth outcome.
+func TestTriagePromptOffersRerouteAfterLocate(t *testing.T) {
+	p := triagePrompt("ws-sig", "", "", nil, nil)
+	locate, _, _ := strings.Cut(p, "### ACCEPT")
+	for _, want := range []string{
+		"Before FAST LANE: is the Signal's code only on one open Checkpoint?",
+		"--token", "--path", "mugicrew triage locate --signal ws-sig",
+		"only <id>", "main, several and none keep the other outcomes",
+	} {
+		if !strings.Contains(locate, want) {
+			t.Errorf("locate section missing %q:\n%s", want, locate)
+		}
+	}
+	_, reroute, ok := strings.Cut(p, "### REROUTE — the defect or wrong FR is on one in-flight Checkpoint")
+	if !ok {
+		t.Fatalf("prompt has no REROUTE section:\n%s", p)
+	}
+	reroute, _, _ = strings.Cut(reroute, "\n### ")
+	for _, want := range []string{
+		"mugicrew reconcile ws-sig --checkpoint <cp>", "--pivot <body-file>", "--critique <body-file>", "--merge-into <pivot> <evidence-file>",
+		"## Triage (ws-sig)", "FR judged wrong:", "Report:", "Why this Checkpoint:", "Settled with the human:", "Ask:",
+		"Ask Critique", "bd dep list <cp> --direction=down -t blocks",
+		"body ends with this fixed section",
+		"FR judged wrong: <FR id and verbatim text>",
+		"Report: <the Signal's claim, quoted>",
+		"Why this Checkpoint: <the locate verdict>",
+		"Settled with the human: <what triage decided, or \"none\">",
+		"Ask: <the change the Signal wants>",
+		"evidence file is that same ## Triage (ws-sig) section",
+		"the session's clean-exit publish closes the Signal; do not close it yourself",
+	} {
+		if !strings.Contains(reroute, want) {
+			t.Errorf("REROUTE section missing %q:\n%s", want, reroute)
+		}
+	}
+	if strings.Contains(p, "five ways") {
+		t.Errorf("prompt still says five ways:\n%s", p)
 	}
 }
 

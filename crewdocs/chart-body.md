@@ -66,7 +66,7 @@ dependency.
 ## Fog of war
 
 The Chart is deliberately incomplete: don't chart what you can't yet see.
-Beyond the live defog beads lies fog: decisions you can tell are coming but
+Beyond the unclosed defog beads lies fog: decisions you can tell are coming but
 can't yet pin down. The test for **bead vs. fog** is whether you can state the
 question precisely now, not whether you can answer it:
 

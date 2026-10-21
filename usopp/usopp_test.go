@@ -75,7 +75,7 @@ func stubUsoppSeams(t *testing.T, r *usoppSeamRec) {
 	pivotsDiscoveredFrom = func(string) ([]bd.Bead, error) { return r.raised, nil }
 	// The raise's edges and close are bd.RaisePivot's (tested in bd); Usopp's job
 	// is handing it the Review, the resolved Spec and the raised pivots.
-	raisePivot = func(_ contract.Ctx, b bd.Bead, spec string, ps []bd.Bead) error {
+	raisePivot = func(_ contract.Ctx, b bd.Bead, _, spec string, ps []bd.Bead) error {
 		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(ps), ","))
 		return nil
 	}

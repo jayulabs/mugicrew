@@ -41,7 +41,7 @@ func TestMirrorMRArmsUseTheLegsProject(t *testing.T) {
 	r := &jinbeSeamRec{}
 	stubJinbeSeams(t, r)
 	lg := legs{proj: childProject, repo: "/ws/child",
-		compose: func(string, string, string) (string, string, string, error) { return "", "", "", nil }}
+		compose: func(string, string, string, string) (string, string, string, error) { return "", "", "", nil }}
 	l := openLanding("cafef00d")
 	l.Description += "\nMR: ns/child!5\nChecked: forgesha\n"
 	if _, err := mirrorMR(l, openCheckpoint(), "checkpoint/ws-cp", "Checkpoint: ws-cp", lg, "forgesha"); err != nil {

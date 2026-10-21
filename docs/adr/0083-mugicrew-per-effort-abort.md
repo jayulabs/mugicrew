@@ -48,7 +48,10 @@ it. Grilling settled the surface.
    failure path tears the tree down, so no orphan writer is left. No new cause
    is added.
 8. **Cleanup is the host's existing failure path.** The host's `cmd.Run` (or,
-   on the in-process route, `crew.Run`) returns the signal error.
+   on the in-process route, `crew.Run`) returns the signal error. A run-now
+   host (ADR 0330) matches §6's argv scan like the loop's children do: abort
+   SIGTERMs it, it absorbs that first signal, and its failure path runs off the
+   child's exit or the ADR 0155 pre-spawn pause re-read.
    `effort.failed` records it truthfully, the Drafts are deleted, the tree is
    removed and the claim is released. The bead stays paused. The loop skips
    `countFailure` when the post-failure re-read (the one `release` already
@@ -57,7 +60,7 @@ it. Grilling settled the surface.
 9. **No live host.**
    - If the scan finds nothing, abort pauses only and reports "no live process;
      paused only".
-   - If it finds orphans from an earlier force stop or TUI quit, abort kills
+   - If it finds orphans from an earlier force stop or a run-now host's second signal, abort kills
      them too, because the human asked for this bead to stop.
    - In both cases there is no host left to clean up. The claim, tree and
      Drafts stay for the human or Chopper, and abort never unclaims or
@@ -73,8 +76,8 @@ it. Grilling settled the surface.
 
 - **Abort reaches HITL sessions too.** It would duplicate `x` drop.
 - **Ask the host (a request file plus a signal, and a per-effort `exec.Cmd`
-  handle).** It is new IPC, and it can't reach a run-now effort hosted by a
-  different TUI.
+  handle).** It is new IPC, and it needed a channel to each host. A run-now
+  host is now a `mugicrew run <id>` process the argv scan already finds.
 - **Reuse `paused:abandoned`, or add `paused:aborted`.** Abandoned warns of an
   orphan writer that a live-host abort doesn't leave behind. A new cause would
   need a glyph and rank for no reader.

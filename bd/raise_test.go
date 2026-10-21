@@ -79,7 +79,7 @@ func TestRaisePivotPublishesGateAndCloseOutsideEffort(t *testing.T) {
 	g := &fakeGraph{}
 	stubGraph(t, g)
 	for range 2 {
-		if err := RaisePivot(nil, raiser, "ws-spec", []Bead{{ID: "ws-piv"}}); err != nil {
+		if err := RaisePivot(nil, raiser, "ws-cp", "ws-spec", []Bead{{ID: "ws-piv"}}); err != nil {
 			t.Fatalf("RaisePivot: %v", err)
 		}
 	}
@@ -99,7 +99,7 @@ func TestRaisePivotHandsGateAndCloseToPublish(t *testing.T) {
 	g := &fakeGraph{edges: map[string]bool{"blocks ws-cp ws-old": true}}
 	stubGraph(t, g)
 	ctx := &publishingCtx{}
-	if err := RaisePivot(ctx, raiser, "ws-spec", []Bead{{ID: "ws-piv"}, {ID: "ws-old"}}); err != nil {
+	if err := RaisePivot(ctx, raiser, "ws-cp", "ws-spec", []Bead{{ID: "ws-piv"}, {ID: "ws-old"}}); err != nil {
 		t.Fatalf("RaisePivot: %v", err)
 	}
 	want := []Edge{{From: "ws-cp", To: "ws-piv", Type: "blocks"}, {From: "ws-piv", To: "ws-spec", Type: "related"}, {From: "ws-old", To: "ws-spec", Type: "related"}}
@@ -125,7 +125,7 @@ func TestRaisePivotWithoutSpecErrorsAndWritesNothing(t *testing.T) {
 		if ctx != nil {
 			c = ctx
 		}
-		if err := RaisePivot(c, raiser, "", []Bead{{ID: "ws-piv"}}); err == nil {
+		if err := RaisePivot(c, raiser, "ws-cp", "", []Bead{{ID: "ws-piv"}}); err == nil {
 			t.Fatalf("%s: a Spec-less raise must error", name)
 		}
 		if len(g.edges) != 0 || g.batches != 0 {
@@ -134,5 +134,40 @@ func TestRaisePivotWithoutSpecErrorsAndWritesNothing(t *testing.T) {
 		if ctx != nil && len(ctx.edges)+len(ctx.closes) != 0 {
 			t.Errorf("%s: nothing may be handed to the tail, got %v %v", name, ctx.edges, ctx.closes)
 		}
+	}
+}
+
+// A rerouted Signal is not the host's member: the Checkpoint passed in, not the
+// raiser's parent, takes the gate edge.
+func TestRaisePivotGatesTheExplicitCheckpoint(t *testing.T) {
+	g := &fakeGraph{}
+	stubGraph(t, g)
+	if err := RaisePivot(nil, raiser, "ws-host", "ws-spec", []Bead{{ID: "ws-piv"}}); err != nil {
+		t.Fatalf("RaisePivot: %v", err)
+	}
+	if !g.edges["blocks ws-host ws-piv"] || g.edges["blocks ws-cp ws-piv"] {
+		t.Errorf("gate must be on the passed Checkpoint, got %v", g.edges)
+	}
+}
+
+// The no-Spec error names the Checkpoint passed in.
+func TestRaisePivotWithoutSpecNamesPassedCheckpoint(t *testing.T) {
+	stubGraph(t, &fakeGraph{})
+	err := RaisePivot(nil, raiser, "ws-host", "", []Bead{{ID: "ws-piv"}})
+	if err == nil || !strings.Contains(err.Error(), "ws-host") || strings.Contains(err.Error(), "ws-cp") {
+		t.Errorf("error must name ws-host, got %v", err)
+	}
+}
+
+// GateEdges skips edges bd already holds.
+func TestGateEdgesSkipsPresent(t *testing.T) {
+	stubGraph(t, &fakeGraph{edges: map[string]bool{"blocks ws-cp ws-a": true, "related ws-b ws-spec": true}})
+	got, err := GateEdges("ws-cp", "ws-spec", []string{"ws-a", "ws-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Edge{{From: "ws-cp", To: "ws-b", Type: "blocks"}, {From: "ws-a", To: "ws-spec", Type: "related"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("GateEdges = %v, want %v", got, want)
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -338,5 +339,50 @@ func TestSettingsCycleEmptyMergedSetFlash(t *testing.T) {
 	m, _ = send(t, m, runeKey("+"))
 	if got := m.kindStaged[kindRowKey(m.setRow)].to; got != "bad" {
 		t.Errorf("staged %q, want bad", got)
+	}
+}
+
+// Each Settings editor steps up on +/= and down on -/_; the Initiatives row swallows all four.
+func TestSettingsStepKeysAcceptShiftedAndUnshifted(t *testing.T) {
+	down := func(m Model, n int) Model {
+		for range n {
+			m, _ = send(t, m, runeKey("j"))
+		}
+		return m
+	}
+	for _, c := range []struct{ k, pool, exit string }{
+		{"+", "4", "1m30s"}, {"=", "4", "1m30s"}, {"-", "2", "30s"}, {"_", "2", "30s"},
+	} {
+		m, _ := settingsModel(t)
+		m = down(m, 1)
+		m, _ = send(t, m, runeKey(c.k))
+		if got := m.stagedExit; got.String() != c.exit {
+			t.Errorf("%q: auto-exit staged %v, want %s", c.k, got, c.exit)
+		}
+		m, _ = settingsModel(t)
+		m, _ = send(t, m, runeKey(c.k))
+		if got := fmt.Sprint(m.staged); got != c.pool {
+			t.Errorf("%q: pool staged %s, want %s", c.k, got, c.pool)
+		}
+		m, _ = settingsModel(t) // the build row holds the declared name opus, between haiku and sonnet
+		m = down(m, 5)
+		m, _ = send(t, m, runeKey(c.k))
+		want := map[string]string{"+": "sonnet", "=": "sonnet", "-": "haiku", "_": "haiku"}[c.k]
+		if got := m.kindStaged["build"].to; got != want {
+			t.Errorf("%q: kind staged %q, want %q", c.k, got, want)
+		}
+		m, _ = settingsModel(t) // an undeclared name: up to the first slot, down to the last (unset)
+		m.kinds.local["build"] = "gone"
+		m = down(m, 5)
+		m, _ = send(t, m, runeKey(c.k))
+		want = map[string]string{"+": "haiku", "=": "haiku", "-": "", "_": ""}[c.k]
+		if got := m.kindStaged["build"].to; got != want {
+			t.Errorf("%q: undeclared kind staged %q, want %q", c.k, got, want)
+		}
+		m, _ = settingsModel(t)
+		m = down(m, 2)
+		if _, _, ok := m.settingsKey(c.k); !ok {
+			t.Errorf("%q not swallowed on the Initiatives row", c.k)
+		}
 	}
 }

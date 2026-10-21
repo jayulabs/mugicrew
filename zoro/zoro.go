@@ -116,7 +116,7 @@ func checkpointSuccessor(spec bd.Bead) bd.Successor {
 		Kind:        contract.KindCheckpoint,
 		Container:   true,
 		Title:       spec.Title,
-		Description: "Checkpoint skeleton — Builds laid by the slicing session over the authored Spec (ADR 0015).",
+		Description: "Checkpoint skeleton — Builds laid by the slicing session over the authored Spec (ADR 0015 (mugicrew-zoro…)).",
 		Context:     bd.ContextOf(spec),
 		Repo:        bd.RepoStampOf(spec),
 	}

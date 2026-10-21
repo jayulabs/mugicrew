@@ -39,7 +39,7 @@ The Door (one-way or two-way) and the Blast Radius, with brief notes on why.
 The problems met during execution: Critiques raised and how each cleared,
 Pivots, Amendments, gate-build failures and Landing conflicts. Say "none" in one
 line when there were none.
-When the Checkpoint has an open blocker, add one line per blocker: "Land held by
+When the Checkpoint has an open blocker, add one line per blocker: "Land waits on
 <blocker title> until it lands".
 
 ### Approval History

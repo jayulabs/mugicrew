@@ -21,8 +21,11 @@ graph, and you read them there first:
 
       bd dep list %[1]s --direction=up --json     # the Chart's defog children (its dependents)
 
-  Skip the kind:survey child: it is the Chart's charting session, not a defog
-  bead, and records no decision.
+  Read only the closed kind:grilling, kind:research and kind:prototype
+  children, and skip every other child: for example the kind:survey child (the
+  charting session), kind:landing children, including obsoleted ones (land
+  attempts), and kind:chart-conflict children (resolved rebases). None of them
+  records a defog decision, so each records no decision.
 
 - **Prototype side-refs.** A prototype defog bead's artifact lives outside the
   bead body, at refs/mugicrew/prototypes/%[1]s. Read it for the exact validated
@@ -48,3 +51,8 @@ same command to name WHAT is built. No kind prefix in the title.
 
 Write the body to the one Spec template: read crew doc spec-template.md and
 carry its seven sections in exactly its order.
+
+If the evidence you are speccing from (an escalate's) names held Tasks, read each
+open one into the `## Tasks` section as an adopted entry: `### <its title>`, a
+`task: <id>` line and its ordering lines, with no Steps body. Do not copy a held
+Task's steps into a new entry; slicing files nothing for an adopted entry.

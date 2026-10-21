@@ -211,6 +211,7 @@ func slowReads(t *testing.T) (n *int, pool *int) {
 	seam(t, &readMainline, func() ([]git.MainlineCommit, error) { *n++; return []git.MainlineCommit{{}}, nil })
 	seam(t, &readPool, func() loop.Setting { *n++; return loop.Setting{N: *pool} })
 	seam(t, &readAutoExit, func() loop.AutoExit { *n++; return loop.AutoExit{} })
+	seam(t, &readLandStrategy, func() (string, error) { *n++; return "local", nil })
 	return
 }
 
@@ -222,7 +223,7 @@ func TestSlowReadsRunOnlyOnSlowLoads(t *testing.T) {
 	*pool = 3
 	m := sized(t, 120, 30)
 	m = runLoad(t, m, m.loadSlow())
-	if *n != 5 || m.pool.N != 3 || !m.efforts["e"] || len(m.histCommits) != 1 {
+	if *n != 6 || m.pool.N != 3 || !m.efforts["e"] || len(m.histCommits) != 1 {
 		t.Fatalf("slow load: reads %d pool %d efforts %v commits %d", *n, m.pool.N, m.efforts, len(m.histCommits))
 	}
 	if m.gateData().cpTips["cp"] != "tip" {

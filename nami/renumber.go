@@ -115,7 +115,7 @@ func MintRenumber(landed bd.Bead, sha string, clashes []git.PostLandClash, s Ren
 // file(s) it clashes with, and the landed sha. It carries no Spec: line.
 func renumberBody(landedID, sha string, clashes []git.PostLandClash) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Renumber Checkpoint for %s, landed at %s (ADR 0225). Its added numbered file(s) clash with earlier ones on mainline:\n", landedID, sha)
+	fmt.Fprintf(&b, "Renumber Checkpoint for %s, landed at %s (ADR 0225 (mugicrew-a-forge-merged…)). Its added numbered file(s) clash with earlier ones on mainline:\n", landedID, sha)
 	for _, c := range clashes {
 		others := make([]string, len(c.Others))
 		for i, o := range c.Others {

@@ -23,8 +23,8 @@ func TestJiraKeyOfWalk(t *testing.T) {
 		edit  func(map[string]Bead)
 		want  string
 	}{
-		{"signal beats initiative", "cp", chain, nil, "SIG-1: "},
-		{"initiative when signal has none", "cp", chain, func(m map[string]Bead) { m["sig"] = Bead{ID: "sig"} }, "INI-9: "},
+		{"signal beats initiative", "cp", chain, nil, "SIG-1"},
+		{"initiative when signal has none", "cp", chain, func(m map[string]Bead) { m["sig"] = Bead{ID: "sig"} }, "INI-9"},
 		{"no ref", "cp", chain, func(m map[string]Bead) {
 			m["sig"] = Bead{ID: "sig"}
 			m["ini"] = Bead{ID: "ini", Kind: contract.KindInitiative}
@@ -46,7 +46,7 @@ func TestJiraKeyOfWalk(t *testing.T) {
 			return p, ok, nil
 		}
 		show := func(id string) (Bead, error) { return m[id], nil }
-		got, err := jiraPrefixOf(m[c.from], causedBy, show)
+		got, err := jiraKeyOf(m[c.from], causedBy, show)
 		if err != nil || got != c.want {
 			t.Errorf("%s: got %q, %v; want %q", c.name, got, err, c.want)
 		}

@@ -438,3 +438,28 @@ type AgentCommand struct {
 }
 
 func (AgentCommand) isLaunchCommand() {}
+
+// mugicrew integrate's exit codes. They live here, not in session, so prompt
+// packages that session's tests import can splice IntegrateExits; session
+// re-exports them as its Exit* constants.
+const (
+	ExitIntegrated = 0 // integrated, or nothing ahead
+	ExitTransient  = 1
+	ExitConflict   = 2 // rebase, held
+	ExitLanded     = 3 // the container already landed
+	ExitNoCutPoint = 4 // no cut ref and no fork point after a rewrite; non-transient
+	ExitOffPin     = 5 // a replace refused: the container was rewritten off the bead's pinned Tip
+)
+
+// IntegrateExits is the one exit block every prompt that runs mugicrew integrate
+// embeds (ADR 0328 §4), rendered from the Exit* constants so the text cannot
+// drift from the binary.
+func IntegrateExits() string {
+	return fmt.Sprintf("- Exit %d: integrated, or nothing ahead.\n"+
+		"- Exit %d with a rebase stopped in your tree: resolve the conflicts, `git add` them, `git rebase --continue`, then re-run `mugicrew integrate`.\n"+
+		"- Exit %[2]d with no rebase stopped: the container is held.\n"+
+		"- Exit %d: the container already landed.\n"+
+		"- Exit %d or %d: the container was rewritten past your cut or is off its pin. Never repair or rebase branches by hand.\n"+
+		"- Any exit but %[1]d or a resolved %[2]d (%[6]d is transient): note the output on your bead, leave it open and stop.",
+		ExitIntegrated, ExitConflict, ExitLanded, ExitNoCutPoint, ExitOffPin, ExitTransient)
+}

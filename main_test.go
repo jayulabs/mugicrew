@@ -433,6 +433,67 @@ func TestRunReconcileFastLaneRefusals(t *testing.T) {
 	}
 }
 
+// The reroute flags of `mugicrew reconcile` (Spec decision 3, ADR 0322): a bad flag
+// set is a usage error before bd is touched; a non-Signal, a missing body file or an
+// unpaired pivot errors with nothing created.
+func TestRunReconcileRerouteFlagRefusals(t *testing.T) {
+	signal := `[{"id":"mc-s","title":"sig","status":"open","labels":["kind:signal"]}]`
+	chart := `[{"id":"mc-c","title":"ch","status":"open","labels":["kind:chart"]}]`
+	body := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(body, []byte("a body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range [][]string{
+		{"mc-s", "--pivot", body},                        // --checkpoint is required
+		{"mc-s", "--critique", body},                     // likewise
+		{"mc-s", "--merge-into", "mc-p", body},           // likewise
+		{"mc-s", "--checkpoint", "mc-a", "--spec", body}, // not beside the other legs
+		{"mc-s", "--checkpoint", "mc-a", "--initiative", body},
+		{"mc-s", "--checkpoint", "mc-a", "--critique", body, "--context", "x"},
+		{"mc-s", "--checkpoint", "mc-a", "--critique", body, "--title", "t"},
+		{"mc-s", "--checkpoint", "mc-a", "--critique", body, "--ref", "R-1"},
+		{"mc-s", "--checkpoint"},                                 // missing its value
+		{"mc-s", "--checkpoint", "mc-a", "--pivot"},              // missing its value
+		{"mc-s", "--checkpoint", "mc-a", "--merge-into", "mc-p"}, // missing the evidence file
+		{"mc-s", "--checkpoint", "mc-a", "--critique", body, "extra"},
+	} {
+		log := fakeBd(t, signal, "[]")
+		if err := runReconcile(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runReconcile(%q) = %v, want a usage error", argv, err)
+		}
+		if l := bdLog(t, log); l != "" {
+			t.Errorf("runReconcile(%q) touched bd before rejecting its flags: %q", argv, l)
+		}
+	}
+
+	log := fakeBd(t, signal, "[]")
+	if err := runReconcile([]string{"mc-s", "--checkpoint", "mc-a", "--checkpoint", "mc-b", "--pivot", body}); err == nil || !strings.Contains(err.Error(), "second --checkpoint") {
+		t.Errorf("a second --checkpoint = %v, want it refused by name", err)
+	}
+	if l := bdLog(t, log); l != "" {
+		t.Errorf("a second --checkpoint touched bd: %q", l)
+	}
+
+	fakeBd(t, chart, "[]")
+	if err := runReconcile([]string{"mc-c", "--checkpoint", "mc-a", "--critique", body}); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+		t.Errorf("reroute flags on a Chart = %v, want a usage error", err)
+	}
+
+	for name, argv := range map[string][]string{
+		"missing body":  {"mc-s", "--checkpoint", "mc-a", "--critique", filepath.Join(t.TempDir(), "nope.md")},
+		"missing merge": {"mc-s", "--checkpoint", "mc-a", "--merge-into", "mc-p", filepath.Join(t.TempDir(), "nope.md")},
+		"unpaired":      {"mc-s", "--checkpoint", "mc-a", "--pivot", body},
+	} {
+		log := fakeBd(t, signal, "[]")
+		if err := runReconcile(argv); err == nil {
+			t.Errorf("%s: runReconcile must error", name)
+		}
+		if l := bdLog(t, log); strings.Contains(l, "create") || strings.Contains(l, "update") {
+			t.Errorf("%s: wrote despite refusing: %q", name, l)
+		}
+	}
+}
+
 // Spec D3: `mugicrew reconcile --initiative` shares the fast lane's flag rules —
 // one body flag at a time, a usage error before bd is touched — and a refusal (a
 // non-Signal, a Signal already charted) spawns nothing.
@@ -483,6 +544,77 @@ func TestRunPivotConfirmUsage(t *testing.T) {
 		}
 		if l := bdLog(t, log); l != "" {
 			t.Errorf("runPivotConfirm(%q) touched bd: %q", argv, l)
+		}
+	}
+}
+
+// `mugicrew pivot raise` takes exactly one task id; anything else is a usage error
+// before bd is touched.
+func TestRunPivotRaiseUsage(t *testing.T) {
+	for _, argv := range [][]string{
+		{},
+		{""},
+		{"ws-t", "more"},                         // stray positional
+		{"--pivot", "f"},                         // a flag where the task goes
+		{"ws-t", "--critique"},                   // a flag with no file
+		{"ws-t", "--merge-into", "p"},            // a merge with no evidence file
+		{"ws-t", "--merge-into", "--pivot", "f"}, // a flag where a value goes
+		{"ws-t", "--bogus", "f"},
+	} {
+		log := fakeBd(t, "[]", "[]")
+		if err := runPivotRaise(argv, io.Discard); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runPivotRaise(%q) = %v, want a usage error", argv, err)
+		}
+		if l := bdLog(t, log); l != "" {
+			t.Errorf("runPivotRaise(%q) touched bd: %q", argv, l)
+		}
+	}
+}
+
+// A flagged raise reads every body file before it touches bd: a missing one writes
+// nothing, and a bad shape is refused by the verb with only reads run.
+func TestRunPivotRaiseFlags(t *testing.T) {
+	dir := t.TempDir()
+	body := filepath.Join(dir, "b.md")
+	if err := os.WriteFile(body, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := fakeBd(t, "[]", "[]")
+	if err := runPivotRaise([]string{"ws-t", "--critique", filepath.Join(dir, "missing")}, io.Discard); err == nil {
+		t.Error("a missing body file was accepted")
+	}
+	if l := bdLog(t, log); l != "" {
+		t.Errorf("a missing body file touched bd: %q", l)
+	}
+	for _, argv := range [][]string{
+		{"ws-t", "--pivot", body},                                      // pivot without Critique
+		{"ws-t", "--pivot", body, "--pivot", body, "--critique", body}, // two pivots
+		{"ws-t", "--merge-into", "ws-p", body},                         // merge without Critique
+	} {
+		log := fakeBd(t, `[{"id":"ws-t","status":"open","issue_type":"task","labels":["kind:task"]}]`, "[]")
+		err := runPivotRaise(argv, io.Discard)
+		if err == nil || strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runPivotRaise(%q) = %v, want the verb's shape refusal", argv, err)
+		}
+		for _, l := range strings.Split(bdLog(t, log), "\n") {
+			if l != "" && !strings.HasPrefix(l, "show ") && !strings.HasPrefix(l, "dep ") && !strings.HasPrefix(l, "list ") {
+				t.Errorf("runPivotRaise(%q): bd write %q", argv, l)
+			}
+		}
+	}
+}
+
+// A probe on a bead that is not an open Task refuses, names the offshoot-Signal
+// fallback and writes nothing (only show is run).
+func TestRunPivotRaiseRefusesNonTask(t *testing.T) {
+	log := fakeBd(t, `[{"id":"ws-t","status":"open","issue_type":"task","labels":["kind:signal"]}]`, "[]")
+	err := runPivotRaise([]string{"ws-t"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "offshoot Signal") {
+		t.Errorf("runPivotRaise = %v, want a refusal naming the offshoot Signal", err)
+	}
+	for _, l := range strings.Split(bdLog(t, log), "\n") {
+		if l != "" && !strings.HasPrefix(l, "show ") && !strings.HasPrefix(l, "dep ") {
+			t.Errorf("bd write %q", l)
 		}
 	}
 }
@@ -1971,7 +2103,7 @@ func TestGraphVerbIsUnknown(t *testing.T) {
 // of the hidden surface (FR7, FR8; ADR 0060 §3, ADR 0037, ADR 0099).
 func TestUsageListsVerbsNotHidden(t *testing.T) {
 	for _, verb := range []string{"signal new", "signal triage", "signal offshoot", "surgery new", "surgery end", "pivot confirm",
-		"pivot escalate", "reconcile", "loop", "abort", "ps", "stats", "doctor", "transcript", "integrate", "chart append|drop", "land-lineage", "--watch", "-C <dir>"} {
+		"pivot escalate", "pivot raise", "reconcile", "loop", "abort", "ps", "stats", "doctor", "transcript", "integrate", "chart append|drop", "land-lineage", "--watch", "-C <dir>"} {
 		if !strings.Contains(usage, "\n  mugicrew "+verb) {
 			t.Errorf("usage lacks %q", verb)
 		}
@@ -3296,5 +3428,26 @@ func TestPrintKeptItems(t *testing.T) {
 	printKept(&sb, withdraw.Result{Closed: []string{"h"}, Kept: []withdraw.Item{{Kind: "tree", Bead: "b1", Path: "/tmp/x", Holder: "/home/me/wt"}}})
 	if want := "kept tree /tmp/x (b1), held by /home/me/wt\n"; sb.String() != want {
 		t.Errorf("output = %q, want %q", sb.String(), want)
+	}
+}
+
+// A --merge-into keeps its argv position among --pivot and --critique, so "the first
+// --critique after it" pairs as it does for a --pivot.
+func TestSplitMergeIntoRecordsPosition(t *testing.T) {
+	rest, merges, ok := splitMergeInto([]string{"mc-s", "--critique", "a", "--merge-into", "mc-p", "e.md", "--critique", "b"})
+	if want := []mergeArg{{pivot: "mc-p", file: "e.md", after: 1}}; !ok || !slices.Equal(merges, want) {
+		t.Fatalf("merges = %v ok=%v, want %v", merges, ok, want)
+	}
+	want := []string{"mc-s", "--critique", "a", "--critique", "b"}
+	if !slices.Equal(rest, want) {
+		t.Errorf("rest = %q, want %q", rest, want)
+	}
+}
+
+// The internal position marker is gone: a hand-passed --merge-at is an unknown flag.
+func TestReconcileRejectsMergeAtFlag(t *testing.T) {
+	err := runReconcile([]string{"mc-s", "--checkpoint", "mc-cp", "--merge-at=1"})
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Errorf("err = %v, want the usage error", err)
 	}
 }

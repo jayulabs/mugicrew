@@ -246,7 +246,15 @@ func TestPrototypePromptServesInStackedColumn(t *testing.T) {
 			t.Errorf("prototype prompt still says %q", bad)
 		}
 	}
-	if !strings.Contains(p, "Open both panes below before the side-ref land and the tree removal") {
+	if !strings.Contains(p, "Open both panes below before the side-ref push and the tree removal") {
 		t.Error("prompt must order the panes before the tree is removed")
+	}
+}
+
+// The prototype prompt carries the integrate exit block spliced from the
+// session exit constants (ADR 0328).
+func TestPrototypePromptCarriesIntegrateExits(t *testing.T) {
+	if got := prototypePrompt("ws-proto", "/tmp/mugicrew-wt-1/wt"); !strings.Contains(got, contract.IntegrateExits()) {
+		t.Error("prototype prompt lacks the integrate exit block")
 	}
 }

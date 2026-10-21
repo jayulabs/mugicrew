@@ -12,6 +12,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/cfglayer"
+	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/route"
@@ -28,12 +29,12 @@ var (
 
 // Integrate's exit codes, which the backstop and the CLI pass through.
 const (
-	ExitIntegrated = 0 // integrated, or nothing ahead
-	ExitTransient  = 1
-	ExitConflict   = 2 // rebase, held
-	ExitLanded     = 3 // the container already landed
-	ExitNoCutPoint = 4 // no cut ref and no fork point after a rewrite; non-transient
-	ExitOffPin     = 5 // a replace refused: the container was rewritten off the bead's pinned Tip
+	ExitIntegrated = contract.ExitIntegrated
+	ExitTransient  = contract.ExitTransient
+	ExitConflict   = contract.ExitConflict
+	ExitLanded     = contract.ExitLanded
+	ExitNoCutPoint = contract.ExitNoCutPoint
+	ExitOffPin     = contract.ExitOffPin
 )
 
 // Integrate is mugicrew integrate for bead b, run in its effort tree (Spec

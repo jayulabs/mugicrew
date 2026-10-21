@@ -36,7 +36,11 @@ type Successor struct {
 	Context        string // successor container only: the context: label to carry; "" adds none
 	Repo           string // successor container only: the repo:<dir> stamp to copy; "" adds none
 	ExternalRef    string // bd external_ref the bead carries (an unparented create or a successor spawn); "" adds none
+	Metadata       string // bd metadata, a JSON object, set at create; "" adds none
 }
+
+// Meta is a bead's bd metadata: custom JSON values by key.
+type Meta = map[string]json.RawMessage
 
 // Bead is what a read returns: the routing key (from labels[]) plus the fields
 // a reconcile, the dispatch loop, or the TUI needs. status/title/labels drive
@@ -64,6 +68,7 @@ type Bead struct {
 	CloseReason    string    // bd close_reason: why a closed bead was closed (bd defaults it to DefaultCloseReason); detail pane only
 	CreatedBy      string    // bd created_by: an event bead's actor (ADR 0057 §2)
 	ExternalRef    string    // bd external_ref: the outside item this bead mirrors (jira-<KEY>); "" when none
+	Metadata       Meta      // bd metadata (a raise's raise_checkpoint); nil when none
 	Event          bool      // bd issue_type event: a state-change record, history not work (GLOSSARY.md "Event bead")
 
 	Notes, Design, AcceptanceCriteria string // bd notes, design, acceptance_criteria: free-text fields beside the description
@@ -110,6 +115,9 @@ const DefaultCloseReason = "Closed"
 func (b Bead) Open() bool {
 	return b.Status == "open" || b.Status == "in_progress" || b.Status == "deferred"
 }
+
+// Draft reports whether the bead is an unpublished Draft (status deferred).
+func (b Bead) Draft() bool { return b.Status == "deferred" }
 
 // Unclosed reports whether the bead is anything but closed (blocked included,
 // unlike Open).
@@ -159,10 +167,19 @@ func successorCreateArgs(predID string, s Successor, extraDeps ...string) []stri
 	if s.Parent != "" {
 		args = append(args, "--parent", s.Parent)
 	}
+	if s.Metadata != "" {
+		args = append(args, "--metadata", s.Metadata)
+	}
+	deps := extraDeps
+	title := s.Title
+	if predID != "" { // "" is a raise Draft: provenance edges only, no successor edge
+		deps = append([]string{"caused-by:" + predID}, extraDeps...) // new bead caused-by pred → new is the successor
+		title = stripTitle(title, "parent", predID)                  // a copied upstream prefix stops here (ADR 0097)
+	}
 	return append(append(args, externalRefArgs(s)...),
 		"--no-inherit-labels",
-		"--deps", strings.Join(append([]string{"caused-by:" + predID}, extraDeps...), ","), // new bead caused-by pred → new is the successor
-		"--title", stripTitle(s.Title, "parent", predID), // a copied upstream prefix stops here (ADR 0097)
+		"--deps", strings.Join(deps, ","),
+		"--title", title,
 		"--description", s.Description,
 		"--silent",
 	)
@@ -357,6 +374,68 @@ func SpawnSuccessorIfAbsent(predID string, s Successor) (id string, created bool
 	return id, true, nil
 }
 
+// CreateDraft creates a successor of predID unconditionally (SpawnSuccessorIfAbsent
+// guards one per kind; a reroute files several pivots and Critiques), with extraDeps
+// ("type:target") beside the caused-by edge. The Parent, DraftedBy and Metadata of s
+// apply as in a spawn.
+func CreateDraft(predID string, s Successor, extraDeps ...string) (string, error) {
+	return run(successorCreateArgs(predID, s, extraDeps...)...)
+}
+
+// CreateRaiseDraft creates a Draft by creator that is not its successor: no caused-by
+// edge, only the given "type:target" deps (a Task's raise is discovered-from the Task,
+// ADR 0326 §5). The Parent, DraftedBy and Metadata of s apply as in CreateDraft.
+func CreateRaiseDraft(s Successor, deps ...string) (string, error) {
+	return run(successorCreateArgs("", s, deps...)...)
+}
+
+// SetMetadata merges key → value (any JSON value) into id's bd metadata, keeping its
+// other keys: bd's --set-metadata stores only strings, and --metadata replaces the object.
+func SetMetadata(id, key string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return updateMetadata(id, func(meta Meta) bool {
+		meta[key] = raw
+		return true
+	})
+}
+
+// ClearMetadata removes key from id's bd metadata, keeping its other keys. An
+// absent key writes nothing.
+func ClearMetadata(id, key string) error {
+	return updateMetadata(id, func(meta Meta) bool {
+		if _, ok := meta[key]; !ok {
+			return false
+		}
+		delete(meta, key)
+		return true
+	})
+}
+
+// updateMetadata reads id's metadata, lets change edit it, and writes the whole object
+// back when change reports it did.
+func updateMetadata(id string, change func(Meta) bool) error {
+	b, err := Show(id)
+	if err != nil {
+		return err
+	}
+	meta := b.Metadata
+	if meta == nil {
+		meta = Meta{}
+	}
+	if !change(meta) {
+		return nil
+	}
+	blob, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	_, err = run("update", id, "--metadata", string(blob))
+	return err
+}
+
 // CarrySkip names a dependent a Carry left out and why: closed | hierarchy |
 // cycle | type-clash. The json tags are the carry event's skipped attr shape.
 type CarrySkip struct {
@@ -373,6 +452,27 @@ type CarrySkip struct {
 // It also carries pred's open latch blockers onto succ (carryLatches).
 // Event-blind: callers record it (eventlog.RecordCarry).
 func Carry(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
+	moved, skipped, err = CarryOrdering(pred, succ)
+	if err != nil {
+		return moved, skipped, err
+	}
+	return carryLatches(pred, succ, moved, skipped)
+}
+
+// CarryTargets is Carry with a target per kind of edge: pred's ordering dependents
+// go onto ordering, its open Latches onto latches (ADR 0322 §4: a reroute carries
+// the one onto the host, the other onto its caused-by successor). Same rules as Carry.
+func CarryTargets(pred, ordering, latches string) (moved []string, skipped []CarrySkip, err error) {
+	moved, skipped, err = CarryOrdering(pred, ordering)
+	if err != nil {
+		return moved, skipped, err
+	}
+	return carryLatches(pred, latches, moved, skipped)
+}
+
+// CarryOrdering is Carry without the Latch step: only pred's blocks and
+// conditional-blocks dependents move onto succ.
+func CarryOrdering(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
 	out, err := run("dep", "list", pred, "--direction=up", "--json")
 	if err != nil {
 		return nil, nil, err
@@ -405,7 +505,7 @@ func Carry(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
 			moved = append(moved, d.ID)
 		}
 	}
-	return carryLatches(pred, succ, moved, skipped)
+	return moved, skipped, nil
 }
 
 // carryLatches also lists pred's incoming blockers and blocks succ with each open
@@ -606,6 +706,7 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 		CloseReason string    `json:"close_reason"`
 		CreatedBy   string    `json:"created_by"`
 		ExternalRef string    `json:"external_ref"`
+		Metadata    Meta      `json:"metadata"`
 		Notes       string    `json:"notes"`
 		Design      string    `json:"design"`
 		Acceptance  string    `json:"acceptance_criteria"`
@@ -624,7 +725,7 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 		beads[i] = Bead{
 			ID: b.ID, Kind: kindFromLabels(b.Labels), Status: b.Status, Title: b.Title, Description: b.Description, Labels: b.Labels,
 			Parent: b.Parent, Priority: b.Priority, Created: b.Created, Updated: b.Updated, Assignee: b.Assignee, Started: b.Started, Closed: b.Closed,
-			CloseReason: b.CloseReason, CreatedBy: b.CreatedBy, ExternalRef: b.ExternalRef,
+			CloseReason: b.CloseReason, CreatedBy: b.CreatedBy, ExternalRef: b.ExternalRef, Metadata: b.Metadata,
 			Container: b.IssueType == "epic", // container kind = bd epic (ADR 0002)
 			Event:     b.IssueType == "event",
 			Notes:     b.Notes, Design: b.Design, AcceptanceCriteria: b.Acceptance, CommentCount: b.Comments,

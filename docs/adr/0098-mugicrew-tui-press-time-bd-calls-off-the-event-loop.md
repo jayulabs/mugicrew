@@ -40,9 +40,11 @@ Decided in grilling.
    badge. Create forms and inline commits stay open and ignore input while
    filing. Success closes them. Failure keeps the text.
 6. **`t` keeps claim-before-dispatch.** The whole press (reads, eligibility,
-   pool check, claim) is one Cmd. Its done message appends to `m.runs` and
-   starts `runNowCmd`. The quit confirm also counts in-flight writes, so quitting
-   cannot silently strand a claim.
+   pool check, claim, spawn of the detached host and the fd handoff, ADR 0330)
+   is one Cmd. Its done message records the child for `Wait` only; the run-now
+   set no longer feeds the quit confirm, since the host outlives the TUI. The
+   quit confirm still counts in-flight writes and launches, so quitting cannot
+   silently strand a claim between claim and spawn.
 
 ## Considered Options
 

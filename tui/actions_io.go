@@ -5,12 +5,16 @@ package tui
 // render, and goes through the shared session/dispatch/chopper core (FR59).
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -364,42 +368,106 @@ func landHeldNote(titles []string) string {
 	return "approved; land held by open blocker: " + strings.Join(titles, ", ")
 }
 
-// runNowCmd runs the shared dispatch entry point in a goroutine (a tea.Cmd) so the
-// UI stays live (FR7). Output goes to a buffer — never the terminal — so a
-// background effort can't corrupt the bubbletea alt-screen the TUI owns (FR8); on
-// failure the tail rides back for diagnosis (FR12), on success it is discarded.
-func runNowCmd(ctx contract.Ctx, crew contract.Crewmate, r dispatch.Inflight) tea.Cmd {
-	return func() tea.Msg {
-		defer r.Hold.Release() // after Dispatch and the unpauses below (ADR 0154)
-		var buf bytes.Buffer
-		o, err := runDispatch(ctx, crew, r.Bead, &buf, r.ID, liveAFK)
-		clean := err == nil // the run's own return, before any unpause error joins in
-		// A retry hold whose cut went through lifts the pause (ADR 0055 §6); a refused
-		// one already logged effort.held and keeps it. The loop's held count is
-		// another process's, untouched.
-		// ponytail: lifted once Dispatch returns, not at the cut — ◐ masks the ‖ while it
-		// runs and the loop's auto-clear reads only ready beads; hook Dispatch if that bites.
-		if o.Cut == dispatch.CutOK && bd.PausedBy(r.Bead, bd.PausedForeignHold) {
-			if uerr := unpauseBead(r.Bead.ID, bd.PausedForeignHold); uerr != nil {
-				err = errors.Join(err, uerr)
-			} else {
-				slog.Info("effort.resumed", append(eventlog.BeadAttrs(r.Bead), "cause", bd.PausedForeignHold, "branch", o.Branch)...)
-			}
-		}
-		// A failing pause lifts on a clean return (ADR 0078); a failed one keeps it,
-		// and the loop's failure count is another process's, untouched.
-		if clean && bd.PausedBy(r.Bead, bd.PausedFailing) {
-			if uerr := unpauseBead(r.Bead.ID, bd.PausedFailing); uerr != nil {
-				err = errors.Join(err, uerr)
-			} else {
-				slog.Info("effort.resumed", append(eventlog.BeadAttrs(r.Bead), "cause", bd.PausedFailing)...)
-			}
-		}
-		tail := ""
+// startHost starts the run-now host; a var, as loopVerb is, so the TUI's TestMain
+// stubs it and no test forks the tui.test binary (apps/mugicrew/.mugicrew/CREW.md).
+var startHost = func(c *exec.Cmd) error { return c.Start() }
+
+// holdFd is the descriptor the host finds its hold on: ExtraFiles[0] is fd 3.
+const holdFd = 3
+
+// runHostCmd is the setsid-detached `<self> run <id> --lock-fd=3` (ADR 0330): the
+// hold rides ExtraFiles, stdin is nil, and stdout and stderr go to out.
+func runHostCmd(self, id string, hold, out *os.File) *exec.Cmd {
+	c := exec.Command(self, "run", id, fmt.Sprintf("--lock-fd=%d", holdFd))
+	c.ExtraFiles = []*os.File{hold}
+	c.Stdout, c.Stderr = out, out
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return c
+}
+
+// spawnRunHost hands the claimed effort r to a detached host running the TUI's own
+// binary (ADR 0330), output on <common>/mugicrew/run-<id>.out opened O_TRUNC. The
+// TUI's copy of the hold closes once Start returns. On a failure the hold never
+// left the TUI: run.failed, unclaim, release (ADR 0331).
+func spawnRunHost(r dispatch.Inflight) (*exec.Cmd, string, error) {
+	cmd, outPath, err := func() (*exec.Cmd, string, error) {
+		self, err := os.Executable()
 		if err != nil {
-			tail = lastLines(buf.String(), runTailLines)
+			return nil, "", err
 		}
-		return runDoneMsg{id: r.Bead.ID, run: r.ID, err: err, tail: tail}
+		common, err := commonDir()
+		if err != nil {
+			return nil, "", err
+		}
+		outPath := filepath.Join(common, "mugicrew", "run-"+r.Bead.ID+".out")
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return nil, "", err
+		}
+		out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			return nil, "", err
+		}
+		defer out.Close() // the host holds its own copy
+		cmd := runHostCmd(self, r.Bead.ID, r.Hold.File(), out)
+		return cmd, outPath, startHost(cmd)
+	}()
+	if err != nil {
+		slog.Error("run.failed", append(eventlog.BeadAttrs(r.Bead), "effort", r.ID, "err", err.Error())...)
+		if uerr := eventlog.RecordClaim(r.Bead, "claim.released", hitlUnclaim(r.Bead.ID), "effort", r.ID); uerr != nil {
+			err = errors.Join(err, fmt.Errorf("unclaim: %w", uerr))
+		}
+		r.Hold.Release()
+		return nil, "", err
+	}
+	r.Hold.Release() // the host owns the flock now
+	return cmd, outPath, nil
+}
+
+// waitRunHost is the follow-up Cmd: it Waits on the host and reports from its exit
+// status and the tail of its out file (ADR 0332). A TUI that quits first just exits.
+func waitRunHost(id string, cmd *exec.Cmd, outPath string) tea.Cmd {
+	return func() tea.Msg {
+		err := cmd.Wait()
+		out, _ := os.ReadFile(outPath)
+		return runDoneMsg{status: runStatus(id, err, string(out))}
+	}
+}
+
+var liftCause = regexp.MustCompile(`paused:[\w-]+`)
+
+// runStatus is the status line for a host that exited with err (nil = 0), per
+// ADR 0332's table; out is its run-<id>.out.
+func runStatus(id string, err error, out string) string {
+	tail := func(s string, n int) string {
+		if t := lastLines(out, n); t != "" {
+			s += "\n" + t
+		}
+		return s
+	}
+	if err == nil {
+		return "run " + id + " done"
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return tail("run "+id+" failed: "+err.Error(), runTailLines)
+	}
+	switch code := ee.ExitCode(); code {
+	case -1: // a signal the host did not absorb
+		return tail("run "+id+" killed: "+err.Error(), runTailLines)
+	case dispatch.RunPreDispatch:
+		return tail("run "+id+" failed before dispatch", runTailLines)
+	case dispatch.RunNotRun:
+		return tail("run "+id+" not run", 1)
+	case dispatch.RunLiftFailed:
+		cause := liftCause.FindString(lastLines(out, 1))
+		if cause == "" {
+			cause = "its pause"
+		}
+		return tail("run "+id+" done; lifting "+cause+" failed — clear it by hand", 1)
+	case dispatch.RunAbandoned:
+		return tail("run "+id+" abandoned (paused:abandoned)", runTailLines)
+	default: // 1, and anything else, 2 included
+		return tail("run "+id+" failed: "+err.Error(), runTailLines)
 	}
 }
 

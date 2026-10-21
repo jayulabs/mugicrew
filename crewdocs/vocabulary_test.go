@@ -11,7 +11,8 @@ import (
 
 // vocabulary.md is a verbatim subset of ../GLOSSARY.md (ADR 0202): its entries
 // are the term list, and each must equal the glossary's entry after stripEntry.
-// Admit a term only if (a) crew docs use it in its mugicrew sense, (b) nothing defines it inline, (c) it is misreadable.
+// Admit a term only if (a) crew docs or CREWMATE.md use it in its mugicrew sense
+// (role prompts do not count, ADR 0329), (b) nothing defines it inline, (c) it is misreadable.
 
 var (
 	adrCite   = regexp.MustCompile(` \(ADR \d{4}(?:, ADR \d{4})*\)`)
@@ -134,5 +135,60 @@ func TestVocabularyMatchesGlossary(t *testing.T) {
 	}
 	for _, e := range checkVocabulary(vocab, string(g)) {
 		t.Error(e)
+	}
+}
+
+// TestAdmittedTermsAreUsed pins ADR 0329's admission test (a): each admitted
+// term appears in a crew doc (other than vocabulary.md) or in CREWMATE.md.
+func TestAdmittedTermsAreUsed(t *testing.T) {
+	b, err := fs.ReadFile(docs, "vocabulary.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms, _ := entries(string(b))
+	for _, want := range []string{"Container", "Signal", "Landing", "Build"} {
+		found := false
+		for _, term := range terms {
+			found = found || term == want
+		}
+		if !found {
+			t.Errorf("vocabulary.md does not admit %s", want)
+		}
+	}
+	var corpus strings.Builder
+	files, err := fs.Glob(docs, "*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f == "vocabulary.md" {
+			continue
+		}
+		d, err := fs.ReadFile(docs, f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		corpus.Write(d)
+	}
+	if d, err := os.ReadFile("../contract/CREWMATE.md"); err == nil {
+		corpus.Write(d)
+	}
+	for _, term := range terms {
+		if !regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(term) + `\b`).MatchString(corpus.String()) {
+			t.Errorf("%s is used in no crew doc or CREWMATE.md", term)
+		}
+	}
+}
+
+// TestSignalEntryIsIntakeSense: the first Signal entry in GLOSSARY.md must be
+// the intake sense, so the lift picks it rather than the bead-kind entry.
+func TestSignalEntryIsIntakeSense(t *testing.T) {
+	g, err := os.ReadFile("../GLOSSARY.md")
+	if err != nil {
+		t.Skip("GLOSSARY.md is excluded from the nix build source")
+	}
+	_, src := entries(string(g))
+	if !strings.Contains(src["Signal"], "anything that could catalyze") {
+		t.Errorf("first Signal entry is not the intake sense:\n%s", src["Signal"])
 	}
 }

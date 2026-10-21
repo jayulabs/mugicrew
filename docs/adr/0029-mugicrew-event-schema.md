@@ -113,6 +113,7 @@ failed-session stderr-tail research §5).
    | `loop.stopped` | Info | `dur_ms` (uptime) |
    | `loop.forced` | Warn | `inflight` |
    | `loop.failed` | Error | `err` (lock open / re-exec / fatal) |
+   | `run.failed` | Error | (common attrs); `effort`, `err` (a run-now host never reached Dispatch, `proc` run: bad `--lock-fd`, failed re-read; or the TUI's `Start` of the host failed, `proc` tui; Logs tab only, ADR 0331) |
    | `effort.abandoned` | Warn | (common attrs; claim not released, `proc` loop or tui); `paused` (did its `paused:abandoned` write land, ADR 0082), `error` when it didn't |
    | `effort.aborted` | Warn | (common attrs); `by` (cli or tui), `pids` (the liveness scan's matches, before the SIGTERM), `paused` (always true: logged only after the `paused:manual` write lands, ADR 0083) |
    | `recover.done` | Info | (common attrs); `verdict` (`dead`, `ambiguous-resolved` or `forced`), `rebase_aborted` (it aborted a rebase stopped in the tree), `tree` (the dropped effort tree, "" none), `discarded` (it held uncommitted files), `drafts` (Draft ids deleted), `unclaimed`, `lifted` (pause causes lifted), `remaining` (pause causes left: manual, integrate-conflict) (ADR 0127 §10) |
@@ -156,6 +157,10 @@ failed-session stderr-tail research §5).
 > directly. A SIGKILL or crash still writes nothing, so its efforts stay
 > dangling (stranded-claim recovery is the Chopper Signal, ADR 0050 §6).
 
+> **Superseded (2026-10-21) by ADR 0330:** the TUI no longer writes
+> `effort.abandoned`; a run-now host writes it on a second signal. Text below
+> is history.
+>
 > **Amended (2026-10-04):** the TUI also writes
 > `effort.abandoned`, with `proc=tui`. When the human confirms quitting with
 > run-now (`t`) efforts in flight (ADR 0051, as amended), it writes one per

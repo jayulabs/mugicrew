@@ -148,6 +148,8 @@ func main() {
 		err = runLatchJira(args[2:], os.Stdout)
 	case args[0] == "latch" && len(args) >= 2 && args[1] == "mr":
 		err = runLatchMR(args[2:], os.Stdout)
+	case args[0] == "triage" && len(args) >= 2 && args[1] == "locate":
+		err = runTriageLocate(args[2:], os.Stdout)
 	case args[0] == "surgery" && len(args) >= 2 && args[1] == "new":
 		err = runSurgeryNew(args[2:])
 	case args[0] == "surgery" && len(args) >= 2 && args[1] == "end":
@@ -156,6 +158,8 @@ func main() {
 		err = runPivotConfirm(args[2:])
 	case args[0] == "pivot" && len(args) >= 2 && args[1] == "escalate":
 		err = runPivotEscalate(args[2:])
+	case args[0] == "pivot" && len(args) >= 2 && args[1] == "raise":
+		err = runPivotRaise(args[2:], os.Stdout)
 	case args[0] == "initiative":
 		err = runInitiative(args[1:])
 	case args[0] == "withdraw":
@@ -166,6 +170,8 @@ func main() {
 		err = runLoopVerb(args[1:])
 	case args[0] == "abort":
 		err = runAbort(args[1:], os.Stdout)
+	case args[0] == "run": // hidden: a run-now effort's detached host (ADR 0330)
+		os.Exit(runRun(args[1:]))
 	case args[0] == "recover":
 		os.Exit(runRecover(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "checkup":
@@ -215,15 +221,18 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew latch jira <KEY> --blocks <bead>...             hold beads until a Jira ticket is Done
   mugicrew latch mr <ref> --blocks <bead>...               hold beads until a GitLab merge request is merged
   mugicrew signal triage <id>                               triage a Signal in an interactive session
+  mugicrew triage locate [--signal <id>] --token <t>... --path <p>... [--json]  say whether a Signal's code is only on one live Checkpoint
   mugicrew surgery new --title T [--problem P] [--checkpoint ID]  file a Surgery on a fresh Checkpoint, or join ID
   mugicrew surgery end <surgery-id>                         end a Surgery
   mugicrew checkup <bead> [--problem "<one line>"]          repair a broken bead in a Chopper session
   mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>]  file a pivot's corrected Spec
   mugicrew pivot escalate <pivot-id> --evidence <file>      re-chart a pivot from its evidence
+  mugicrew pivot raise <task> [--pivot <f>] [--critique <f>] [--merge-into <pivot> <f>]  probe a Task's held Checkpoint, or raise a pivot or Critique on it
   mugicrew withdraw <head> [--discard]  drop any unclosed chain head (initiative withdraw is its alias)
   mugicrew initiative cancel <initiative> [--release <head>]... [--discard]  drop an Initiative and its member chains
   mugicrew initiative adopt <head> <initiative> | release <head>  move a chain into or out of an Initiative
   mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>]  drive a bead to its next state
+  mugicrew reconcile <signal> --checkpoint <cp> [--pivot <f>]... [--critique <f>]... [--merge-into <pivot> <f>]...  reroute a Signal onto its host Checkpoint
   mugicrew loop [--watch | start [--watch] | status [--json] | stop [--force]]  run or control the dispatch loop
   mugicrew abort <bead-id>                                  abort a bead's running effort
   mugicrew recover [<bead-id> [--force] [--discard]]        list stranded beads, or repair one
@@ -294,6 +303,7 @@ func requireGraph(args []string) error {
 	user := len(args) == 0 ||
 		args[0] == "loop" && (len(args) == 1 || args[1] == watchArg || !strings.HasPrefix(args[1], "--") || os.Getenv("BEADS_DIR") == "") ||
 		args[0] == "signal" && len(args) >= 2 && (args[1] == "new" || args[1] == "triage" || args[1] == "offshoot") ||
+		args[0] == "triage" && len(args) >= 2 && args[1] == "locate" ||
 		args[0] == "intake" && len(args) >= 2 && args[1] == "jira" ||
 		args[0] == "latch" && len(args) >= 2 && (args[1] == "jira" || args[1] == "mr") ||
 		args[0] == "surgery" && len(args) >= 2 && (args[1] == "new" || args[1] == "end") ||
@@ -509,7 +519,7 @@ var launchTUI = session.LaunchTUI
 // runSignalTriage resolves a Signal and opens its owner's triage session in the
 // human's terminal (spec §7.2). The Signal's registry owner, Luffy (ADR 0129),
 // formats the command via the harness; this verb runs it interactively — the
-// second Launch invoker alongside the TUI. The four outcomes happen inside the
+// second Launch invoker alongside the TUI. The six outcomes happen inside the
 // session, not here.
 func runSignalTriage(argv []string) error {
 	if len(argv) != 1 {
@@ -1315,9 +1325,16 @@ func pollInterval() time.Duration {
 // --initiative <body-file> [--title <t>] is the INITIATIVE outcome (Spec D3):
 // luffy.SeedInitiative spawns the Initiative and carries, and is the whole job —
 // the Signal reconcile after it would refuse beside the Initiative.
+// --checkpoint <cp> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into
+// <pivot> <evidence-file>]... is the REROUTE outcome (ADR 0322): luffy.SeedReroute files
+// the Drafts and is the whole job, as --initiative is.
 func runReconcile(argv []string) error {
-	const usage = "usage: mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>] [--ref <R>] [--context <name>]"
+	const usage = "usage: mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>] [--ref <R>] [--context <name>]\n       mugicrew reconcile <signal> --checkpoint <cp> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into <pivot> <evidence-file>]..."
 	if len(argv) < 1 {
+		return errors.New(usage)
+	}
+	argv, mergeArgs, ok := splitMergeInto(argv)
+	if !ok {
 		return errors.New(usage)
 	}
 	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
@@ -1327,9 +1344,36 @@ func runReconcile(argv []string) error {
 	refFlag := fs.String("ref", "", "INITIATIVE: external issue ref the Initiative mirrors (default: the signal's own)")
 	title := fs.String("title", "", "fast lane / INITIATIVE: successor title, no kind prefix (default: the signal title)")
 	ctxName := fs.String("context", "", "ACCEPT / fast lane: declared context the Chart or Spec targets")
+	var hosts []string
+	var rerouteFiles []luffy.RerouteItem // Path holds the file until rerouteSignal reads Body
+	fs.Func("checkpoint", "REROUTE: the host Checkpoint", func(v string) error { hosts = append(hosts, v); return nil })
+	fs.Func("pivot", "REROUTE: file holding a pivot body (repeatable)", func(v string) error {
+		rerouteFiles = append(rerouteFiles, luffy.RerouteItem{Pivot: true, Path: v})
+		return nil
+	})
+	fs.Func("critique", "REROUTE: file holding a Critique body (repeatable)", func(v string) error {
+		rerouteFiles = append(rerouteFiles, luffy.RerouteItem{Path: v})
+		return nil
+	})
 	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 ||
 		(*specFile != "" && *iniFile != "") || (*title != "" && *specFile == "" && *iniFile == "") || (*refFlag != "" && *iniFile == "") {
 		return errors.New(usage)
+	}
+	if rerouting := len(hosts) > 0 || len(rerouteFiles) > 0 || len(mergeArgs) > 0; rerouting {
+		if len(hosts) == 0 || *specFile != "" || *iniFile != "" || *title != "" || *refFlag != "" || *ctxName != "" {
+			return errors.New(usage)
+		}
+		if len(hosts) > 1 {
+			return fmt.Errorf("reconcile --checkpoint: a second --checkpoint (%s) is refused: one reroute names one host", hosts[1])
+		}
+		bead, err := bd.Show(argv[0])
+		if err != nil {
+			return err
+		}
+		if bead.Kind != contract.KindSignal {
+			return fmt.Errorf("%s: --checkpoint is valid only on a signal, %s is kind %q", usage, bead.ID, bead.Kind)
+		}
+		return rerouteSignal(bead, hosts[0], rerouteFiles, mergeArgs)
 	}
 	if err := luffy.ValidateContext(*ctxName); err != nil { // before any write
 		return err
@@ -1368,6 +1412,70 @@ func runReconcile(argv []string) error {
 	path := os.Getenv(dispatch.PublishEnv)
 	os.Unsetenv(dispatch.PublishEnv) // a nested reconcile (an agent's) is not the dispatch child
 	return dispatch.Reconcile(newCtx(), c, bead, path)
+}
+
+// mergeArg is one `--merge-into <pivot> <evidence-file>` as given: the pivot, the file
+// holding its evidence, and after, how many --pivot and --critique items came before it.
+type mergeArg struct {
+	pivot, file string
+	after       int
+}
+
+// splitMergeInto lifts each `--merge-into <pivot> <evidence-file>` pair out of argv (a
+// flag.FlagSet takes one value per flag), returning the rest and each pair with its
+// argv position among --pivot and --critique; ok is false for a pair missing a value.
+func splitMergeInto(argv []string) (rest []string, merges []mergeArg, ok bool) {
+	items := 0
+	for i := 0; i < len(argv); i++ {
+		switch arg := strings.TrimLeft(argv[i], "-"); {
+		case argv[i] == "--merge-into":
+			if i+2 >= len(argv) {
+				return nil, nil, false
+			}
+			merges = append(merges, mergeArg{pivot: argv[i+1], file: argv[i+2], after: items})
+			i += 2
+			continue
+		case arg == "pivot" || arg == "critique" || strings.HasPrefix(arg, "pivot=") || strings.HasPrefix(arg, "critique="):
+			items++
+		}
+		rest = append(rest, argv[i])
+		if flagTakesValue(argv[i]) && i+1 < len(argv) { // its value is not a flag
+			i++
+			rest = append(rest, argv[i])
+		}
+	}
+	return rest, merges, true
+}
+
+// flagTakesValue is whether arg is a reconcile flag written without "=", so its value
+// is the next argv element.
+func flagTakesValue(arg string) bool {
+	switch strings.TrimLeft(arg, "-") {
+	case "spec", "initiative", "ref", "title", "context", "checkpoint", "pivot", "critique":
+		return strings.HasPrefix(arg, "-") && !strings.Contains(arg, "=")
+	}
+	return false
+}
+
+// rerouteSignal reads the body files of a REROUTE and files it (luffy.SeedReroute).
+// Every file is read before any write, so a missing one writes nothing.
+func rerouteSignal(sig bd.Bead, host string, items []luffy.RerouteItem, mergeArgs []mergeArg) error {
+	for i, it := range items {
+		body, err := os.ReadFile(it.Path)
+		if err != nil {
+			return err
+		}
+		items[i].Body = string(body)
+	}
+	var merges []luffy.RaiseMerge
+	for _, m := range mergeArgs {
+		body, err := os.ReadFile(m.file)
+		if err != nil {
+			return err
+		}
+		merges = append(merges, luffy.RaiseMerge{Pivot: m.pivot, Evidence: string(body), After: m.after})
+	}
+	return luffy.SeedReroute(sig, host, items, merges)
 }
 
 // crewFor resolves the crewmate that owns a kind through the same registry the
@@ -1428,6 +1536,56 @@ func runPivotEscalate(argv []string) error {
 		return err
 	}
 	return zoro.Escalate(argv[0], string(evidence))
+}
+
+// runPivotRaise is `mugicrew pivot raise <task> [--pivot <body-file>]... [--critique
+// <body-file>]... [--merge-into <pivot> <evidence-file>]...`, Brook's stuck-exit raise.
+// With no flag it is a probe: it names the one open, unlanded Checkpoint the Task holds,
+// its Spec and branch, or says why a raise is refused, and writes nothing
+// (luffy.ProbeRaise). With flags it files the raise as Drafts (luffy.RaiseFromTask);
+// every body file is read before any write.
+func runPivotRaise(argv []string, out io.Writer) error {
+	const usage = "usage: mugicrew pivot raise <task> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into <pivot> <evidence-file>]..."
+	if len(argv) == 0 || argv[0] == "" || strings.HasPrefix(argv[0], "-") {
+		return errors.New(usage)
+	}
+	task, rest := argv[0], argv[1:]
+	var req luffy.RaiseRequest
+	read := func(path string) (string, error) {
+		body, err := os.ReadFile(path)
+		return string(body), err
+	}
+	for len(rest) > 0 {
+		var n int
+		switch rest[0] {
+		case "--pivot", "--critique":
+			n = 2
+		case "--merge-into":
+			n = 3
+		default:
+			return errors.New(usage)
+		}
+		if len(rest) < n || slices.ContainsFunc(rest[1:n], func(a string) bool { return a == "" || strings.HasPrefix(a, "--") }) {
+			return errors.New(usage)
+		}
+		body, err := read(rest[n-1])
+		if err != nil {
+			return err
+		}
+		switch rest[0] {
+		case "--pivot":
+			req.Pivots = append(req.Pivots, body)
+		case "--critique":
+			req.Critiques = append(req.Critiques, body)
+		default:
+			req.Merges = append(req.Merges, luffy.RaiseMerge{Pivot: rest[1], Evidence: body})
+		}
+		rest = rest[n:]
+	}
+	if req.None() {
+		return luffy.ProbeRaise(task, out)
+	}
+	return luffy.RaiseFromTask(task, req)
 }
 
 // runSignalNew files a Signal via the bd intake helper (spec §7.1). Title +

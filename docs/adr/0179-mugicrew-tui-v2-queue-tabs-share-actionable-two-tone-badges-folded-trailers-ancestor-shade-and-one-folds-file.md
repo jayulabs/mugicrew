@@ -1,6 +1,6 @@
 # ADR 0179: v2 queue tabs share Actionable sections, two-tone badges, folded trailers, ancestor shade and one folds file
 
-Status: Accepted; §1 amended by Spec mc-qgtw (Actionable gains a paused band for own-paused ready beads); §1 amended again by Spec mc-llx8 (the paused band also lists own-paused AFK beads: on Execute every open Checkpoint member, on Defog every open Chart child)
+Status: Accepted; §1 amended by Spec mc-qgtw (Actionable gains a paused band for own-paused ready beads); §1 amended again by Spec mc-llx8 (the paused band also lists own-paused AFK beads: on Execute every open Checkpoint member, on Defog every open Chart child); §1 amended again by Spec "Actionable's paused band lists every own-paused bead on its home tab" (mc-f22wp: the paused band lists every own-paused, otherwise-ready bead whose home tab is the tab)
 Date: 2026-10-14
 
 Chart mc-c3es (Queue-tab parity). Settles grilling mc-c3es.4 after the

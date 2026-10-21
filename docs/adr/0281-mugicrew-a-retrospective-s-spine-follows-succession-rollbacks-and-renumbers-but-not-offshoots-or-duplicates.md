@@ -18,7 +18,8 @@ is part of it. Settled by the grilling mc-4ryp.6.10.
 2. **Duplicate Signals (`supersedes`) are out.** A duplicate's triage session is
    about how triage spotted the duplicate, not about how the spine's work went.
    Pivot re-plans stay connected through `caused-by`, so ignoring `supersedes`
-   loses no spine bead.
+   loses no spine bead. Exception: a rerouted Signal, whose pivot or Critique is
+   `caused-by` it, is in (ADR 0284 item 5): its triage is part of how the host's work went.
 3. **A Rollback and its successor Checkpoint are in.** A Rollback filed after a
    retrospective reopens the spine. `r` refuses until the successor lands, and a
    later retrospective re-reads the whole spine, including the original Build

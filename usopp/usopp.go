@@ -161,7 +161,7 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 		return err
 	}
 	if len(pivots) > 0 {
-		return raisePivot(ctx, bead, specID, pivots)
+		return raisePivot(ctx, bead, bead.Parent, specID, pivots)
 	}
 	return approveIfClean(ctx, bead, pin)
 }

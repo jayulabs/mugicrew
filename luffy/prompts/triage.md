@@ -34,10 +34,22 @@ You propose, the human disposes: they can always turn FAST LANE into a Chart,
 but a Chart into FAST LANE only if you can then write the complete Spec —
 insisting doesn't make it sharp.
 
+## Before FAST LANE: is the Signal's code only on one open Checkpoint?
+
+A reroute applies only when the code the Signal reports lives on exactly one
+open, unlanded Checkpoint's branch, and not on main or another Checkpoint.
+Pick what the Signal names: identifiers or literal strings from the defect as
+--token, repo-relative paths as --path. Then run:
+
+    mugicrew triage locate --signal %[1]s --token <t>... --path <p>... [--json]
+
+Only the verdict `only <id>` opens REROUTE into that Checkpoint.
+main, several and none keep the other outcomes.
+
 Every outcome that keeps the Signal carries a priority call: agree with the
 human a bd priority, P0 (critical) to P4 (backlog), for its successor.
 
-Resolve the Signal one of five ways:
+Resolve the Signal one of six ways:
 
 ### ACCEPT — the Signal is worth charting
 
@@ -48,6 +60,7 @@ Resolve the Signal one of five ways:
    NOT close the Signal. It is idempotent — safe to re-run; it never makes a
    second Chart or Survey. Both stay Drafts until this session exits cleanly,
    when they are published together. mugicrew closes the Signal in that publish, not you.
+   If it refuses with "main worktree … is dirty; clean main, then re-run", the dirty main is the human's to clean: report the dirty paths, never discard, stash or commit on main, and re-run only after the human says main is clean.
 2. Find the new Chart:  bd dep list %[1]s --direction=up -t caused-by --json
    and its Survey: bd list --parent <chartID> -l kind:survey --all --json
 3. Write the Chart body in one bd update: the five sections %[2]s,
@@ -74,6 +87,7 @@ Resolve the Signal one of five ways:
    This spawns the Spec caused by the Signal and pins its Anchor: sha on the
    Spec bead; it does NOT close the Signal — mugicrew closes it when this session exits cleanly, in the same publish. Idempotent. The --title names
    what is built, no kind prefix (default: the Signal's title).
+   If it refuses with "main worktree … is dirty; clean main, then re-run", the dirty main is the human's to clean: report the dirty paths, never discard, stash or commit on main, and re-run only after the human says main is clean.
 4. Find the Spec with bd dep list %[1]s --direction=up -t caused-by --json and
    set its priority:  bd update <specID> --priority <P0-P4>
 5. Stop. Never write the Anchor: pin yourself, never bd create the Spec, and
@@ -105,10 +119,37 @@ each later triaged and charted on its own. Only phase 1 is cut now; later phases
    It is published at exit and waits for its own triage.
    Or, if open chains under way are the first phases, propose adopting them
    instead of filing a new member Signal; only on the human's explicit yes, for
-   each chain's unclosed head (live Signal, Chart, Spec or Checkpoint), run:
+   each chain's unclosed head (unclosed Signal, Chart, Spec or Checkpoint), run:
      mugicrew initiative adopt <head> <initiativeID>
    It re-parents the head alone; closed predecessors stay put. Name each adopted head's title in Phases.
 6. Stop. Do not chart or triage phase 1 here, and file no later phase.
+
+### REROUTE — the defect or wrong FR is on one in-flight Checkpoint
+
+Open only on the verdict `only <id>` above, naming the host Checkpoint <cp>. The
+Signal is folded into the host instead of being rejected and hand-filed.
+
+1. Write one body file per pivot and per Critique. A pivot says the host's Spec
+   is wrong for one FR; a Critique is a defect in the host's code. Every pivot
+   body ends with this fixed section:
+     ## Triage (%[1]s)
+     FR judged wrong: <FR id and verbatim text>
+     Report: <the Signal's claim, quoted>
+     Why this Checkpoint: <the locate verdict>
+     Settled with the human: <what triage decided, or "none">
+     Ask: <the change the Signal wants>
+   Every pivot needs an Ask Critique: give a --critique right after its --pivot.
+2. Merge, don't duplicate: read the host's open pivots with
+     bd dep list <cp> --direction=down -t blocks
+   If one already names the SAME FR, do not file another pivot; pass
+   --merge-into <pivot> <evidence-file>, where the
+   evidence file is that same ## Triage (%[1]s) section.
+3. Show the bodies to the human and wait for an explicit yes, then run:
+     mugicrew reconcile %[1]s --checkpoint <cp> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into <pivot> <evidence-file>]...
+   It files the pivots and Critiques as Drafts and writes nothing to the merge
+   targets; it does NOT close the Signal. Give at least one --pivot or --critique; a
+   --merge-into needs a --critique after it carrying the Signal's Ask (the first --critique after it, as for a --pivot); that Critique is filed discovered-from the merged pivot.
+4. Stop: the session's clean-exit publish closes the Signal; do not close it yourself.
 
 ### REJECT — not worth doing
 
@@ -118,4 +159,4 @@ No Chart:  bd close %[1]s --reason "why this Signal is not worth doing"
 
 Supersede it (keeps multi-report lineage):  bd supersede %[1]s --with <original-id>
 
-Do exactly one of ACCEPT, FAST LANE, INITIATIVE, REJECT, or DUPLICATE before you finish.
+Do exactly one of ACCEPT, FAST LANE, INITIATIVE, REJECT, DUPLICATE, or REROUTE before you finish.

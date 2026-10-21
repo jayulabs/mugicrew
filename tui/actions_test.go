@@ -297,6 +297,7 @@ func TestUnguardedActionsFireAtOnce(t *testing.T) {
 		{"+ raises", "sig", runeKey("+"), "updateBead sig [--priority 1]"},
 		{"= raises", "sig", runeKey("="), "updateBead sig [--priority 1]"},
 		{"- lowers", "sig", runeKey("-"), "updateBead sig [--priority 3]"},
+		{"_ lowers", "sig", runeKey("_"), "updateBead sig [--priority 3]"},
 		{"enter runs", "res", enterKey(), "readyFrontier"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -446,7 +447,7 @@ func TestActionDialogsFit(t *testing.T) {
 }
 
 // Under a load error a dialog still draws over the notice and owns its keys, and q
-// routes through the guarded quit: Abandon runs only after y/enter (FR20, FR24, ADR 0082).
+// routes through the guarded quit: the dialog decides while a write is in flight (FR20, FR24).
 func TestLoadErrorQuitKeepsGuard(t *testing.T) {
 	m, _ := actModel(t)
 	m, _ = at(t, m, "sess", runeKey("x"))
@@ -459,12 +460,11 @@ func TestLoadErrorQuitKeepsGuard(t *testing.T) {
 	}
 
 	m, _ = actModel(t)
-	m.runs = []dispatch.Inflight{{}}
 	m.pending = map[string]string{"p1": "closing"}
 	m, _ = send(t, m, errMsg{errors.New("dolt down")})
 	m, cmd := send(t, m, runeKey("q"))
 	if cmd != nil && cmd() == tea.Quit() {
-		t.Fatalf("q quit at once with work in flight")
+		t.Fatalf("q quit at once with a write in flight")
 	}
 	if len(m.modals) != 1 || !strings.Contains(m.modals[0].title, "Quit") {
 		t.Fatalf("modals = %+v, want the Quit dialog", m.modals)

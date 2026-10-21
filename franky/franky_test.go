@@ -71,7 +71,7 @@ func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 	pivotsDiscoveredFrom = func(string) ([]bd.Bead, error) { return r.raised, nil }
 	// The raise's edges and close are bd.RaisePivot's (tested in bd); Franky's job
 	// is handing it the bead, the resolved Spec and the raised pivots.
-	raisePivot = func(_ contract.Ctx, b bd.Bead, spec string, ps []bd.Bead) error {
+	raisePivot = func(_ contract.Ctx, b bd.Bead, _, spec string, ps []bd.Bead) error {
 		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(ps), ","))
 		return nil
 	}
@@ -131,7 +131,7 @@ func TestLaunchSurgeryComposesSession(t *testing.T) {
 func TestSurgeryPromptRenders(t *testing.T) {
 	p := surgeryPrompt(surgeryArgs{ID: "ws-surg", Checkpoint: "ws-cp", CheckpointTitle: "Cp title"})
 	for _, want := range []string{
-		"⏸ Surgery idle — /exit; l on its row resumes it.",
+		"⏸ Surgery idle — /exit; enter on its row resumes it.",
 		"mugicrew surgery end ws-surg",
 		"bd update ws-surg --claim",
 		"bd comments add ws-surg",
@@ -1028,5 +1028,22 @@ func TestRunRequestedConflictClosesWithoutLanding(t *testing.T) {
 	}
 	if len(r.closed) != 1 {
 		t.Errorf("want the conflict closed once, got %v", r.closed)
+	}
+}
+
+// Every Franky prompt that runs mugicrew integrate carries the exit block
+// spliced from the session exit constants (ADR 0328).
+func TestPromptsCarryIntegrateExits(t *testing.T) {
+	for name, got := range map[string]string{
+		"build":    implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp"}),
+		"conflict": conflictPrompt(promptArgs{BeadID: "mc-x", Base: "b4se"}),
+		"surgery":  surgeryPrompt(surgeryArgs{ID: "ws-sg"}),
+	} {
+		// surgery nests the block under a numbered step, so compare line by line.
+		for _, line := range strings.Split(contract.IntegrateExits(), "\n") {
+			if !strings.Contains(got, line) {
+				t.Errorf("%s prompt lacks the integrate exit line %q", name, line)
+			}
+		}
 	}
 }

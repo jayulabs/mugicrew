@@ -22,6 +22,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/luffy"
 	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/route"
 )
@@ -654,6 +655,9 @@ func DropDrafts(b bd.Bead) error { return DropDraftsWith(b) }
 func DropDraftsWith(b bd.Bead, extra ...any) error {
 	attrs := append(eventlog.BeadAttrs(b), extra...)
 	ids, branches, err := deleteDrafts(b.ID)
+	if err == nil { // always: b may be a copy older than the reconcile that wrote the merges
+		err = clearMetadata(b.ID, luffy.RaiseMergesMeta) // a drop forgets a raise's merges (ADR 0096 §6)
+	}
 	err = eventlog.RecordDrafts("draft.deleted", b.ID, ids, err, attrs...)
 	eventlog.RecordBranches(branches, attrs...)
 	return err

@@ -140,6 +140,18 @@ func Acquire(id string) (*Hold, error) {
 	}
 }
 
+// File is the hold's flock-bearing file, for a parent to pass a child through
+// exec.Cmd.ExtraFiles (ADR 0330). The child adopts it with Adopt; the parent
+// keeps ownership and Releases its own copy.
+func (h *Hold) File() *os.File { return h.f }
+
+// Adopt re-wraps an inherited fd as id's Hold and re-arms O_CLOEXEC on it, so
+// the adopter's own children (reconcile, claude) never inherit the lock.
+func Adopt(fd int, id string) *Hold {
+	syscall.CloseOnExec(fd)
+	return &Hold{os.NewFile(uintptr(fd), id+".lock")}
+}
+
 // Release drops the hold. It never unlinks the file: unlink-on-release let two
 // holders (or a dead verdict on a held lock) through in the ADR 0154 prototype.
 func (h *Hold) Release() {

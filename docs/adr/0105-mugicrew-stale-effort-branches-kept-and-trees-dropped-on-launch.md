@@ -7,7 +7,7 @@ Amends: ADR 0102 §9/§10 (gates, holds), ADR 0082 §2/§4 (event, recovery), AD
 ## Context
 
 ADR 0102 makes an effort branch outlive a dropped, failed or orphaned session.
-A force stop, a confirmed TUI quit, a SIGKILL or a crash can leave
+A force stop, a run-now host's second signal, a SIGKILL or a crash can leave
 `effort/<id>`, its loop `mugicrew-wt-*` tree and the claim behind (ADR 0082).
 §9 counts any live effort ref as open in the drain gates. So a bead that is
 **closed** but still has a ref that no backstop will process blocks its

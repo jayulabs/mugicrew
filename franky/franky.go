@@ -53,7 +53,7 @@ func (Franky) Run(ctx contract.Ctx, bead contract.Bead) error {
 }
 
 // Launch composes the HITL command a human opens. Franky's one HITL kind is the
-// Surgery (Spec D4): l on its row opens a fresh dictation session over
+// Surgery (Spec D4): enter on its row opens a fresh dictation session over
 // surgeryPrompt, routed to effort/<id> (integrating onto checkpoint/<parent>) by
 // the route arm. The prompt names the Checkpoint the Surgery joins and its bd
 // context, read at launch (surgeryContext). Build, critique
@@ -172,6 +172,9 @@ type promptArgs struct {
 // Draft is the prompt's shared Draft block.
 func (a promptArgs) Draft() string { return contract.DraftInstruction(a.BeadID) }
 
+// Exits is the prompt's shared integrate exit block.
+func (promptArgs) Exits() string { return contract.IntegrateExits() }
+
 // surgeryPrompt (surgery.md) is one dictation session over a Surgery: start
 // (read the Workspace docs, claim, read the record and git log, rebuild a missing
 // record, re-read the Checkpoint's children), dictation, the per-session record,
@@ -197,7 +200,7 @@ type surgeryArgs struct {
 }
 
 func surgeryPrompt(a surgeryArgs) string {
-	return fmt.Sprintf(surgeryTmpl, a.ID, contract.DraftInstruction(a.ID), surgeryOpener(a), surgeryBlocks(a), regexp.QuoteMeta(a.ID))
+	return fmt.Sprintf(surgeryTmpl, a.ID, contract.DraftInstruction(a.ID), surgeryOpener(a), surgeryBlocks(a), regexp.QuoteMeta(a.ID), strings.ReplaceAll(contract.IntegrateExits(), "\n", "\n   "))
 }
 
 func surgeryOpener(a surgeryArgs) string {
@@ -375,7 +378,7 @@ func afterRun(ctx contract.Ctx, id string) error {
 		if err != nil {
 			return err
 		}
-		return raisePivot(ctx, b, spec, pivots)
+		return raisePivot(ctx, b, b.Parent, spec, pivots)
 	}
 	return finish(b)
 }

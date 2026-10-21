@@ -470,6 +470,12 @@ func (m Model) focusKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			j = clampWrap(j+d, len(rows))
 		}
 		m.focus.sel, m.focus.off = rows[j].key, 0 // the detail follows: back to the top
+	case key.Matches(k, keySection):
+		d := 1
+		if s := k.String(); s == "K" || s == "ctrl+up" {
+			d = -1
+		}
+		m.focus.sel, m.focus.off = rows[jumpTo(rows, i, d, func(r fRow) bool { return r.kind == fSec })].key, 0
 	case key.Matches(k, keyFold) && r.foldable():
 		m.focus.flip = maps.Clone(m.focus.flip)
 		m.focus.flip[r.key] = !m.focus.flip[r.key]
@@ -655,13 +661,13 @@ func (m Model) focusBindings() []key.Binding {
 	return append(bs, keyBack)
 }
 
-// focusExtra is moving, then the verbs the row handles but does not hint (enter's and
+// focusExtra is moving and section jumps, then the verbs the row handles but does not hint (enter's and
 // b's refusals): shown in ? alone.
 func (m Model) focusExtra() []key.Binding {
 	if _, ok := m.focusSel(); !ok {
 		return nil
 	}
-	out := []key.Binding{keyMove}
+	out := []key.Binding{keyMove, keySection}
 	shown := map[string]bool{}
 	for _, b := range m.focusBindings() {
 		shown[b.Keys()[0]] = true

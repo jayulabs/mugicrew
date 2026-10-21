@@ -2,7 +2,7 @@
 
 Status: accepted
 
-ADR 0154 lets the dispatcher (the loop, or a TUI's run-now) hold a per-effort
+ADR 0154 lets the dispatcher (the loop, or a run-now host) hold a per-effort
 flock from before the claim until after the release. Abort and Chopper's recover
 do not read that lock. Both still use the argv and cwd scans, which see nothing
 in the dispatcher's own windows: pre-cut, post-child (publish, retire,
@@ -14,7 +14,7 @@ This amends ADR 0083 §9 and ADR 0127 §2.
 - **Recover refuses under a held flock, even with `--force`.** `Judge` gains a
   third alive check, after `Probe` and `Cwd` and before the Force case. A held
   flock refuses every verdict, `Forced` and `Dead` included, says the bead is
-  held by its dispatcher (the loop or a TUI), and points to `mugicrew abort <id>`.
+  held by its dispatcher (the loop or a run-now host), and points to `mugicrew abort <id>`.
   `--force` exists to settle ambiguity about a claim with no host. A held flock
   is not ambiguous, because the OS reports the host as alive. Today `--force`
   with the loop off can reap a TUI run-now effort mid-publish, since `TUIAlive`
@@ -44,15 +44,17 @@ This amends ADR 0083 §9 and ADR 0127 §2.
 
 ## Considered options
 
-- **Let `--force` override the flock.** Rejected. It would keep the TUI run-now
+- **Let `--force` override the flock.** Rejected. It would keep the run-now
   hole open, only to serve a wedged dispatcher that stopping or killing it
   already handles.
 - **Make abort refuse ("held by a dispatcher, retry").** Rejected. The pause
   would never be written, and the human would have to time a retry to land
   after the child spawns.
-- **Make abort signal the dispatcher.** Rejected. Each spawn leads its own
-  process group, so a signal to the dispatcher's group hits the loop or the TUI,
-  and that kills every other effort the dispatcher hosts.
+- **Make abort signal the dispatcher.** Rejected for the loop. Each spawn leads
+  its own process group, so a signal to the loop's group kills every other
+  effort it hosts. Amended: a run-now dispatcher is a `mugicrew run <id>` host
+  (ADR 0330), its own session and hosting one effort, so abort's argv scan does
+  signal it and that is safe. The host absorbs the first signal.
 - **Re-read the pause before publish as well.** Rejected. Finishing work that
   has already landed is harmless, and the post-child window is short.
 

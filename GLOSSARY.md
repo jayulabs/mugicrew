@@ -16,12 +16,25 @@ _Avoid_: Factory, Merger, pipeline, generator, agent runner, PR system, CI
 _History_: replaces the former Factory and Merger, now one Application — the
 review/merge stages are mugicrew's tail, not a separate Application (ADR 0001).
 
-**Signal**:
-Anything that could catalyze a change to the OE. Abstract by nature — concrete
-forms include a human-written idea, an error log, or a system alert. mugicrew
-records each one as a `signal` bead (see the Signal kind below); anything that
-may result in a code change enters the bead graph this way.
-_Avoid_: event, input, trigger, issue, ticket
+- **Signal** — anything that could catalyze a change to the Workspace. Abstract
+  by nature — concrete forms include a human-written idea, an error log, or a
+  system alert. mugicrew records each one as a `signal` bead; anything that may
+  result in a code change enters the bead graph this way. Triage can **reroute** a Signal whose code is only on one in-flight
+  Checkpoint (its **host**) instead of charting it.
+  _Avoid:_ event, input, trigger, issue, ticket
+
+**Reroute**:
+The sixth triage outcome. After `mugicrew triage locate` says a Signal's code is only
+on one open Checkpoint's branch, Luffy folds the Signal into that Checkpoint:
+`mugicrew reconcile <signal> --checkpoint <cp>` files a pivot (the Spec is wrong
+for one FR) and/or Critique (the code is) there, or merges evidence into a pivot
+already open on the same FR. The Signal's clean-exit publish closes it. Not open to
+an Initiative member.
+_Avoid_: redirect, fold-in
+
+**Host**:
+The one in-flight Checkpoint a **Reroute** targets.
+_Avoid_: target Checkpoint, parent Checkpoint
 
 This glossary is being built out by the wayfinding effort
 "Ontology for the mugicrew bead graph". The kind / edge / owner / state
@@ -135,7 +148,8 @@ _Avoid_: host, remote service, PR system
 The Forge's reviewable proposal to merge a container's branch into mainline.
 There is at most one open per container branch. It outlives its Landings: each
 Landing re-pushes its pin into the same open Merge Request and re-arms it
-(ADR 0147, ADR 0185).
+(ADR 0147, ADR 0185). Jinbe records its GitLab web URL as an `MR link:` line
+beside every `MR:` line it writes (Landing, MR Watch, Rollback).
 _Avoid_: PR, pull request
 
 **Land strategy**:
@@ -247,7 +261,8 @@ tab's HITL sessions waiting on you, then its takeable frontier (the items you co
 start from that tab now; on Execute that includes every open, unblocked Task, wherever
 it sits), then its paused band: leaves carrying their own paused:* label that are
 otherwise ready (not blocked, Live, waiting, launching or exited), HITL and AFK alike
-(on Execute, every open Checkpoint member; AFK beads join only this band); each tab's
+(on Execute, every open Checkpoint member; AFK beads join only this band); on every tab it lists every
+own-paused, otherwise-ready bead whose home tab is that tab (ADR 0183), whatever container it sits under; each tab's
 own container kind joins it when own-paused, open and unblocked: Ideate's P0–P2 Initiatives
 (as ADR 0180's combined row; a P3 or P4 one is Actionable only while its cut session waits, ADR 0314), Defog's Charts and Execute's Checkpoints (as their
 section rows); beads paused only by an ancestor stay out. A live session the agent is
@@ -344,6 +359,10 @@ crewmate (`kind → crewmate` is total and single-valued); a crewmate may own
 several kinds; no kind is ever co-owned (co-ownership would make owner-from-kind
 routing ambiguous).
 
+- **Container** — a bead that parents member beads; a bd `epic`. Contrast a
+  **leaf**, a bd `task` that parents none.
+  _Avoid:_ a Docker or OCI container.
+
 Each kind records a short **description** (top line), then as sub-bullets: its
 **owner** (with role), whether it is a **leaf** or **container**, the
 **operations** crewmates apply to it and what those produce, and free-form
@@ -392,7 +411,7 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Notes:_ Charting and its knowledge-bearing defog sessions (grilling →
     ADRs/CONTEXT, research → `docs/research/*`), plus prototype and chart-conflict
     sessions, **operate in a worktree of `chart/<id>`** (ADR 0071), so their artifacts (ADRs, CONTEXT edits, research docs) accrue
-    on the branch and **merge to mainline on defog** — no review gate; charting is
+    on the branch and **land on mainline once the Chart is defogged** — no review gate; charting is
     gated by defog + Spec acceptance. Prototype output does **not** land here (side
     ref; ADR 0009 §2). Separable work found mid-defog splits as an offshoot-Signal
     (ADR 0006), not a second Spec. See ADR 0008, 0009, 0010.
@@ -468,8 +487,8 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     after its Landing (which _is_ the `merged` state). On a rebase conflict the
     Landing files a `conflict` bead on the Checkpoint.
   - _Notes:_ See ADR 0004, 0010.
-- **Build** — a unit of implementation work sliced from the Spec (a slice
-  inside a Checkpoint, not what a Checkpoint Producer produces).
+- **Build** — a unit of implementation work sliced from the Spec: a slice
+  inside a Checkpoint.
   - _Owner:_ Franky
   - _Structure:_ leaf
   - _Operations:_ Franky executes → close. May raise a `critique` (offshoot
@@ -511,7 +530,8 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Operations:_ spawned when the first MR is recorded for the container → read
     the MR each `landing_poll_interval` (skipped while a Landing is pending, whose
     own tick reads it) → close when the MR is merged or closed, or the container
-    closes.
+    closes. Its body is the `MR:` line plus the `MR link:` line, copied from the
+    Landing.
   - _Notes:_ See ADR 0185 §8.
 - **Approval** — the stamp that gates the land.
   - _Owner:_ Luffy
@@ -574,11 +594,12 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     one is open per Chart, whatever its variant; Landing supersedes an unclaimed
     requested one (ADR 0261).
 - **Pivot** — work on a Checkpoint proves the **Spec** wrong (the plan, not the
-  code).
+  code). A triaged Signal can raise one on its **Host** by **Reroute**, and a
+  **Task** can raise one on the Checkpoint it holds.
   - _Owner:_ Zoro (triages)
   - _Structure:_ leaf (offshoot of the Build/Review, pointing at the Spec)
   - _Operations:_ raised by the discovering crewmate (Franky/Usopp), whose own
-    bead then closes normally; a live pivot **blocks the whole Checkpoint** —
+    bead then closes normally, or by a stuck Task (Brook), which stays claimed; a live pivot **blocks the whole Checkpoint** —
     every current and later member, the Review/Approval spawn, and the land.
     Zoro triages → **correct the Spec**
     (slice error); **amend** (the FR's intent holds and no built work becomes
@@ -626,26 +647,32 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     and Forge merge path. The earlier side files nothing.
   - _Notes:_ recognised from the graph alone: a Checkpoint caused by a Chart or
     Checkpoint, where an ordinary one is caused by a Spec. See ADR 0225.
-- **Landing** — one attempt to land a container's branch on mainline, as a bead.
-  - _Owner:_ Jinbe
+- **Landing** — one bead per attempt to land a container's branch on mainline,
+  pinned (`Commit: <sha>`) to the base it will land. Its outcomes: _landed_
+  closes it `landed: <sha>`; _conflict_ closes it `obsolete: conflict` and files
+  the container's conflict bead; _pending_ leaves it open; a branch that
+  advanced past its pin closes it `obsolete: branch advanced`.
+  _Avoid:_ the act of landing, which is **Land**.
   - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
     container); AFK, Mechanical, no session
-  - _Operations:_ spawned at the container's land gate, pinned (`Commit: <sha>`)
-    to the commit it will land: on a Checkpoint, once an Approval is at head,
-    members are drained and no blocker is open, copying the Approval's pin and
-    succeeding it; on a Chart, once it is drained and stamped, at the branch
-    head. Jinbe runs it through the **Land strategy**, with four outcomes:
-    _landed_ closes it `landed: <sha>`; _conflict_ files the container's
-    `conflict` or `chart-conflict` and closes it `obsolete: conflict`; _pending_
-    leaves it open; any other _error_ (including a dirty main) leaves it open
-    and the effort fails. A branch that advanced past its pin closes it
-    `obsolete: branch advanced`, and the container's gate respawns one. The
-    container closes after its Landing.
   - _Notes:_ The `<Kind>: <id>` trailer on mainline stays the durable landed
-    fact; the Landing's close mirrors it, and a container's reconcile closes a
-    stranded Landing first. Only Checkpoint and Chart lands are Landings; other
-    moves of main (Rollback reverts, and legacy Spec anchors) stay bead-less. See ADR 0145,
-    ADR 0147.
+    fact; the Landing's close mirrors it. Only Checkpoint and Chart lands are
+    Landings; other moves of main (Rollback reverts, and legacy Spec anchors)
+    stay bead-less (ADR 0145, ADR 0147).
+
+Landing mechanics (not lifted into vocabulary.md): Jinbe owns it. It is
+spawned at the container's land gate, pinned to the commit it will land: on a
+Checkpoint, once an Approval is at head, members are drained and no blocker is
+open, copying the Approval's pin and succeeding it; on a Chart, once it is
+drained and stamped, at the branch head. Jinbe runs it through the **Land
+strategy**; any error other than conflict or pending (including a dirty main)
+leaves it open and the effort fails. A branch that advanced past its pin makes
+the container's gate respawn a Landing. A container's reconcile closes a
+stranded Landing first, and the container closes after its Landing. Under
+gitlab a pending Landing records `MR: !<iid>` and, beside it,
+`MR link: <web_url>` (GitLab's absolute URL for the MR, never derived; no line
+when the URL is unknown).
+
 - **Surgery** — a HITL session in which a human dictates small code changes on
   a Checkpoint and Franky writes them, then hands them to review.
   - _Owner:_ Franky
@@ -668,7 +695,7 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Notes:_ HITL only; agents never file one but may suggest one by offshoot
     Signal. "Dictation", not authorship: the human authorizes each change.
     An **idle** surgery is open and in progress, with no session running;
-    `l` on its row resumes it. Never "paused": that word is the loop's
+    `enter` on its row resumes it. Never "paused": that word is the loop's
     (Paused). See ADR 0091, ADR 0092, ADR 0093, ADR 0094, ADR 0095, ADR 0160, ADR 0162, ADR 0163.
 - **Amendment** — a decision appended to a Spec that replaces one FR's
   mechanism while keeping its intent. It comes from an amended Pivot.
@@ -689,10 +716,13 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     per step, `amended` for an approved rewrite, one `stuck` on a stuck exit.
     Ordered only by `blocks` edges: after a land (blocked by the Checkpoint),
     before a land (the Checkpoint blocked by it), or after another Task.
-  - _Operations:_ only a human launches or resumes it (`l`/`b`); the loop never
+    A Spec's `## Tasks` entry may adopt an existing open Task by id (`task:
+    <id>`): slicing files no duplicate and only adds its ordering edges.
+  - _Operations:_ only a human launches or resumes it (`enter`/`b`); the loop never
     does. The guide runs at the repo root, re-runs every Check to find where it
     is, and closes the Task itself only after a final all-checks pass and the
-    human's in-session yes. An interrupted or stuck Task stays claimed and
+    human's in-session yes. It may raise a pivot or Critique on the one
+    Checkpoint it holds. An interrupted or stuck Task stays claimed and
     **idle**; `x` unclaims it. Abandoning one is the human's own `bd close`.
   - _Notes:_ Not a defog kind: a Chart never contains one (ADR 0013). Agents
     never file one mid-work; they file an offshoot Signal. See ADR 0113, ADR
@@ -926,10 +956,19 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   TUI takes is logged as a `usage.read` event (ADR 0260).
   _Avoid:_ bare "usage", "quota", "budget".
 - **Abandoned effort** — an in-flight effort the loop gave up on during a
-  force stop, or a run-now effort a confirmed TUI quit left behind: its
+  force stop, or a run-now effort whose host gave up on a second signal: its
   bookkeeping ended without releasing its claim (`effort.abandoned`, ADR 0029).
   The work itself may still finish.
   _Avoid:_ calling it a failed or ended effort, which releases its claim (ADR 0034).
+  _History_: a confirmed TUI quit also abandoned run-now efforts before the
+  run-now host (ADR 0330) took them out of the TUI.
+- **Run-now host** — the detached `mugicrew run <id>` process that carries one
+  run-now (`t`) AFK effort, so the effort outlives the TUI. The TUI claims,
+  spawns it and hands over the effort flock by fd; the host dispatches, lifts the
+  failing and foreign-hold pauses, releases, and exits. It absorbs a first
+  SIGTERM/SIGINT and abandons its effort on a second (ADR 0330, ADR 0053 is the
+  precedent). It still ignores the Plan usage limit, as run-now did in the TUI.
+  _Avoid:_ "run-now goroutine"; calling it the loop.
 - **Aborted effort** — an in-flight AFK effort the human stopped with
   `mugicrew abort` or TUI `x`: its bead is paused _manual_ first, then its
   processes are terminated, and a live host cleans up as for a failure (ADR 0083).
@@ -1024,7 +1063,7 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   pause names its cause: _foreign-hold_ (the loop paused it after repeated
   foreign-held skips, and lifts it once the hold is gone), _failing_ (the loop
   paused it after repeated failed efforts; only the human or a successful
-  run-now lifts it), _abandoned_ (the loop or TUI abandoned its effort, whose
+  run-now lifts it), _abandoned_ (the loop or a run-now host abandoned its effort, whose
   orphaned process may still be running; only the human lifts it),
   _integrate-conflict_ (the backstop couldn't integrate its effort branch;
   only a successful integrate or the human lifts it), _not-built_ (the

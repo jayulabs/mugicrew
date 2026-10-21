@@ -23,7 +23,11 @@ publish batch (`CloseOnPublish`). Decided in grilling.
    in the same `bd batch` that opens its Drafts, which is the `CloseOnPublish`
    shape.
 2. **The graph decides.** The batch closes the bead only when it is a Signal
-   with a caused-by Chart or Spec among its Drafts (`bd.SuccessorOf`). A
+   with a caused-by Chart, Spec or Initiative among its Drafts
+   (`bd.SuccessorOf`), or a caused-by pivot or Critique among its own Drafts
+   (a reroute: the batch also hands the host's gate edges and each merge's
+   caused-by edge, and closes `rerouted: <ids>`; the widening is by kind, not a
+   status-blind `SuccessorOf`, and a merge alone never closes it). A
    session that exits without a decision closes nothing. REJECT (`bd close`)
    and DUPLICATE (`bd supersede`) are agent closes with no successor Draft, and
    are unchanged; a batch close of an already-closed bead is a no-op.

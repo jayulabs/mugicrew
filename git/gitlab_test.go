@@ -82,8 +82,8 @@ func TestLandGitlabPushesPinOpensMRAndIsPending(t *testing.T) {
 
 	_, err := Land("chart/x", "Chart: x", landGitlab)
 	var p *LandPending
-	if !errors.Is(err, ErrLandPending) || !errors.As(err, &p) || p.MR != 5 || !p.Pushed || !p.Opened {
-		t.Fatalf("Land = %v (%+v), want pending !5 pushed+opened", err, p)
+	if !errors.Is(err, ErrLandPending) || !errors.As(err, &p) || p.MR != 5 || !p.Pushed || !p.Opened || p.WebURL != "https://gl.example.com/ns/p/-/merge_requests/5" {
+		t.Fatalf("Land = %v (%+v), want pending !5 pushed+opened with its web URL", err, p)
 	}
 	if got := mustGit(t, "-C", bare, "rev-parse", "refs/heads/chart/x"); got != pin {
 		t.Errorf("Forge branch = %s, want the pin %s", got, pin)
@@ -100,11 +100,29 @@ func TestLandGitlabPushesPinOpensMRAndIsPending(t *testing.T) {
 	}
 
 	_, err = Land("chart/x", "Chart: x", landGitlab)
-	if !errors.As(err, &p) || p.MR != 5 || p.Pushed || p.Opened {
-		t.Errorf("second Land = %v (%+v), want pending !5, nothing pushed or opened", err, p)
+	if !errors.As(err, &p) || p.MR != 5 || p.Pushed || p.Opened || p.WebURL != "https://gl.example.com/ns/p/-/merge_requests/5" {
+		t.Errorf("second Land = %v (%+v), want pending !5 with its web URL, nothing pushed or opened", err, p)
 	}
 	if a, _ := os.ReadFile(argv); strings.Count(string(a), "assignee_id") != 1 || strings.Count(string(a), " user\n") != 1 {
 		t.Errorf("reuse must not read /user or send an assignee: %s", a)
+	}
+}
+
+// An unpinned gitlab Land titles its MR with the subject its caller supplies, never "land <branch>".
+func TestLandGitlabTitlesTheMRWithTheCallerSubject(t *testing.T) {
+	_, argv := gitlabForge(t)
+	defer SetGraphID("g00")()
+	mustGit(t, "branch", "chart/x")
+	st, err := LandStrategyFor(LandStrategyGitlab, "", "docs(mugicrew): Chart it (MC-2)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Land("chart/x", "Chart: x", st); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	a, _ := os.ReadFile(argv)
+	if !strings.Contains(string(a), "title=docs(mugicrew): Chart it (MC-2)") || strings.Contains(string(a), "title=land chart/x") {
+		t.Errorf("create argv = %s", a)
 	}
 }
 
@@ -293,7 +311,7 @@ func TestPushRevertMRPushesPinOpensTiplessMR(t *testing.T) {
 	if want := "Reverts-Checkpoint: a\nGraph: g00"; strings.TrimSpace(string(b)) != want {
 		t.Errorf("description = %q, want %q", b, want)
 	}
-	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=revert "+squash) {
+	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=revert: "+mustGit(t, "log", "-1", "--format=%s", squash)) {
 		t.Errorf("create argv = %s", a)
 	}
 	p, err = Repo("").PushRevertMR("rb1", "Reverts-Checkpoint: a", pin)
@@ -679,8 +697,8 @@ func TestPinnedGitlabOnAChildActsOnlyOnTheChildProject(t *testing.T) {
 	}
 	_, err := child.Land("chart/x", "Chart: x", child.PinnedGitlab(pin, MRPresentation{Title: "land chart/x"}))
 	var p *LandPending
-	if !errors.As(err, &p) || p.MR != 5 || !p.Pushed || !p.Opened {
-		t.Fatalf("Land = %v (%+v), want pending !5 pushed+opened", err, p)
+	if !errors.As(err, &p) || p.MR != 5 || !p.Pushed || !p.Opened || p.WebURL != "https://gl.example.com/ns/child/-/merge_requests/5" {
+		t.Fatalf("Land = %v (%+v), want pending !5 pushed+opened with the child project's absolute web URL", err, p)
 	}
 	if got := mustGit(t, "-C", childBare, "rev-parse", "refs/heads/chart/x"); got != pin {
 		t.Errorf("child Forge branch = %s, want %s", got, pin)
@@ -820,8 +838,10 @@ func TestPinnedGitlabDuplicateRaceRewritesTitleAndBody(t *testing.T) {
 	mustGit(t, "branch", "chart/x")
 	pin := mustGit(t, "rev-parse", "chart/x")
 	strategy := Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it", Body: "## Why\n\nbecause\n"})
-	if _, err := Land("chart/x", "Chart: x", strategy); !errors.Is(err, ErrLandPending) {
-		t.Fatal(err)
+	_, err := Land("chart/x", "Chart: x", strategy)
+	var p *LandPending
+	if !errors.As(err, &p) || p.WebURL != "https://gl.example.com/ns/p/-/merge_requests/5" {
+		t.Fatalf("Land = %v (%+v), want pending carrying the re-listed MR's web URL", err, p)
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, "desc"))
 	if want := "## Why\n\nbecause\n\nTip: " + pin + "\nChart: x\nGraph: testgraphroot\n"; string(b) != want {
@@ -830,5 +850,18 @@ func TestPinnedGitlabDuplicateRaceRewritesTitleAndBody(t *testing.T) {
 	a, _ := os.ReadFile(argv)
 	if n := strings.Count(string(a), "-X PUT"); n != 1 || !strings.Contains(string(a), "title=Ship it") || strings.Contains(string(a[strings.Index(string(a), "-X PUT"):]), "assignee") {
 		t.Errorf("argv = %s, want one PUT with the title and no assignee", a)
+	}
+}
+
+func TestRecordedMRLinkRoundTrips(t *testing.T) {
+	const url = "https://gl.example.com/ns/child/-/merge_requests/5"
+	if got := RecordedMRLink("MR: ns/child!5\n" + MRLinkLine(url) + "\n"); got != url {
+		t.Errorf("RecordedMRLink = %q, want %q", got, url)
+	}
+	if MRLinkLine(url) != "MR link: "+url {
+		t.Errorf("MRLinkLine = %q", MRLinkLine(url))
+	}
+	if got := RecordedMRLink("MR: !5\n"); got != "" {
+		t.Errorf("RecordedMRLink without a line = %q, want empty", got)
 	}
 }

@@ -62,10 +62,7 @@ func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 	case key.Matches(k, keyWithdrawKey):
 		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.withdrawKey(g, b) }
 	case key.Matches(k, keyPrio):
-		d := 1 // + and = raise (P-1), - lowers
-		if s := k.String(); s == "+" || s == "=" {
-			d = -1
-		}
+		d := prioDir(k)
 		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.bumpPriority(b, d) }
 	default:
 		return m, nil, false
@@ -88,9 +85,28 @@ func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 	return next, cmd, true
 }
 
-// prioDir is a priority key's step: + and = raise (P-1), - lowers (P+1).
+// stepUp and stepDown classify a +/- stepper key by its side, shifted or not:
+// + and = step up, - and _ step down. Every stepper reads its key through stepOf.
+const (
+	stepNone = iota
+	stepUp
+	stepDown
+)
+
+// stepOf is key string s's step direction: stepUp, stepDown, or stepNone.
+func stepOf(s string) int {
+	switch s {
+	case "+", "=":
+		return stepUp
+	case "-", "_":
+		return stepDown
+	}
+	return stepNone
+}
+
+// prioDir is a priority key's step: up raises (P-1), down lowers (P+1).
 func prioDir(k tea.KeyMsg) int {
-	if s := k.String(); s == "+" || s == "=" {
+	if stepOf(k.String()) == stepUp {
 		return -1
 	}
 	return 1
@@ -437,15 +453,12 @@ func (m Model) abortDone(id string, signalled []int, held bool, err error) (tea.
 }
 
 // recoverOpts are x's recover options, never forced (ADR 0127): the TUI's own
-// session is left out of the TUI-alive read only when its run-now set holds
-// nothing on id, since its own effort there is a live host.
+// session is always left out of the TUI-alive read. A live effort, run-now
+// included, is already caught by recover's argv scan and flock read first.
 func (m Model) recoverOpts(id string) func(discard bool) (chopper.Opts, error) {
-	mine := slices.ContainsFunc(m.runs, func(r dispatch.Inflight) bool { return r.Bead.ID == id })
 	return func(discard bool) (o chopper.Opts, err error) {
 		o.Discard = discard
-		if !mine {
-			o.ExcludeTUISession, err = ownSession()
-		}
+		o.ExcludeTUISession, err = ownSession()
 		return o, err
 	}
 }
@@ -567,20 +580,25 @@ func (m Model) transcript(id string) (tea.Model, tea.Cmd) {
 	})
 }
 
-// runNowGo runs the reads, eligibility, pool check and claim in one Cmd under the
+// runNowGo runs the reads, eligibility, pool check, claim and host spawn in one Cmd under the
 // bead's pending key (ADR 0098 §6): a second enter, or any other write, on it is refused.
 func (m Model) runNowGo(bead bd.Bead, force bool) (tea.Model, tea.Cmd) {
 	crews, ctx := m.crew, m.ctx
 	return m.startAct(bead.ID, "dispatching", func() writeDoneMsg {
 		status, crew, r := claimRunNow(ctx, bead, crews, force)
+		if crew != nil { // claimed: hand the effort to a detached host (ADR 0330)
+			cmd, outPath, err := spawnRunHost(r)
+			return writeDoneMsg{bead.ID, func(m Model) (tea.Model, tea.Cmd) {
+				if err != nil {
+					m.setStatus("run " + bead.ID + " failed to start: " + err.Error())
+					return m, nil
+				}
+				return m, waitRunHost(bead.ID, cmd, outPath)
+			}}
+		}
 		return writeDoneMsg{bead.ID, func(m Model) (tea.Model, tea.Cmd) {
-			if crew == nil {
-				m.setStatus(status)
-				return m, nil
-			}
-			// Tracked only once claimed, so a concurrent loop tick's busy count is truthful.
-			m.runs = append(slices.Clip(m.runs), r)
-			return m, runNowCmd(m.ctx, crew, r)
+			m.setStatus(status)
+			return m, nil
 		}}
 	})
 }

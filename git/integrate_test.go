@@ -1045,3 +1045,22 @@ func TestIntegrateSubject(t *testing.T) {
 		})
 	}
 }
+
+func TestLandSubject(t *testing.T) {
+	cases := []struct{ name, kind, title, context, key, want string }{
+		{"checkpoint", "checkpoint", "Ship it", "app", "", "feat(app): Ship it"},
+		{"chart", "chart", "Map it", "app", "", "docs(app): Map it"},
+		{"checkpoint with key", "checkpoint", "Ship it", "app", "ABC-1", "feat(app): Ship it (ABC-1)"},
+		{"chart with key", "chart", "Map it", "app", "ABC-1", "docs(app): Map it (ABC-1)"},
+		{"no context", "checkpoint", "Ship it", "", "", "feat: Ship it"},
+		{"no context with key", "chart", "Map it", "", "ABC-1", "docs: Map it (ABC-1)"},
+		{"blank title", "checkpoint", " \t", "app", "ABC-1", "land checkpoint/b1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := LandSubject(c.kind, c.title, c.context, c.key, "checkpoint/b1"); got != c.want {
+				t.Errorf("LandSubject = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

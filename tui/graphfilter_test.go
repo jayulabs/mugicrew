@@ -428,7 +428,7 @@ func TestGraphFilterBindingCoverage(t *testing.T) {
 		"facet":    pick(t, graphModel(t, 120, 30), "s", "open"),
 		"no match": filtered(t, graphModel(t, 120, 30), "zzz"),
 	} {
-		checkCoverage(t, "Graph "+name, m, true, "4")
+		checkCoverage(t, "Graph "+name, m, true, "4", "J", "K", "ctrl+up", "ctrl+down") // the end-stopping section jump is inert at an end
 	}
 }
 

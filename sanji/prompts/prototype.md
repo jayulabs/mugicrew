@@ -12,14 +12,14 @@ Prototype under way: %[1]s (read it with: bd show %[1]s)
 You were launched inside a linked worktree on your own effort branch
 effort/%[1]s, cut from chart/<chart-id> (the Chart is this bead's parent). Any
 ADR/GLOSSARY commits happen there and reach chart/<chart-id> when you run
-mugicrew integrate. The throwaway does NOT: it never lands on your effort branch
-or chart/<chart-id>, only on the side ref below.
+mugicrew integrate. The throwaway does NOT: it is never integrated onto your effort branch
+or chart/<chart-id>, only pushed to the side ref below.
 
-## Land the throwaway on the side ref
+## Push the throwaway to the side ref
 
-This is throwaway code: it lands to a LOCAL side ref for lineage and is NEVER
+This is throwaway code: it is pushed to a LOCAL side ref for lineage and is NEVER
 merged. Build it in a second, detached tree at the path below (so it holds no
-branch), commit there, land HEAD to the side ref, then remove the tree. If %[3]s
+branch), commit there, push HEAD to the side ref, then remove the tree. If %[3]s
 is left over from an earlier attempt, remove it the same way first.
 
     git worktree add --detach %[3]s chart/<chart-id>
@@ -42,11 +42,11 @@ Read crew doc defog-session.md and run its skeleton over this bead, in order:
    ref and branch above are keyed on (shown as <chart-id>).
 3. **Prototype** the answer to the bead's design question.
    Read crew doc prototype.md and follow it: the LOGIC-vs-UI pick, the
-   rules, and the branch body you picked. Every capture lands on the side ref
+   rules, and the branch body you picked. Every capture is pushed to the side ref
    above.
 
    **Hand it over** once the prototype is runnable (so the human sees it, not a
-   build error). Open both panes below before the side-ref land and the tree
+   build error). Open both panes below before the side-ref push and the tree
    removal above: removing the tree kills whatever a pane runs there, so close
    or ignore the panes after capture. MUGICREW_HITL_PANE holds
    <socket>,<pane id> of your own pane on mugicrew's private tmux server (TMUX
@@ -96,7 +96,10 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
 
 6. **Record, integrate and close**: the bead resolves when the design question
    is answered, not merely when code exists. Run `mugicrew integrate` in this
-   tree (the skeleton says what each exit means), and only after it exits 0
-   close with:
+   tree. Its exits:
+
+%[5]s
+
+   Only after it exits 0 close with:
 
        bd close %[1]s --reason "prototyped: <one-line verdict>"

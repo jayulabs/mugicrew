@@ -781,6 +781,26 @@ func TestSlicingPromptFilesSpecTasks(t *testing.T) {
 	}
 }
 
+// FR 43–46: a Tasks entry with a task: <id> line is adopted, not filed.
+func TestSlicingPromptAdoptsTaskByID(t *testing.T) {
+	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
+	for _, want := range []string{
+		"`task: <id>` line",
+		"files nothing for an adopted entry",
+		"left out of the title-dedupe enumeration",
+		"bd show <id>",
+		"open `kind:task`",
+		"A closed Task is skipped with a line saying so",
+		"fail the slice loudly",
+		"added only if missing",
+		"adds no `discovered-from` edge",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("slicing prompt missing adopted-entry rule %q", want)
+		}
+	}
+}
+
 // Spec D11 rows 12–14: the triage session's Critiques are Drafts by the pivot, so
 // its hitl-run publishes them with the sweep's Spec or Chart.
 func TestPivotPromptDraftsByPivot(t *testing.T) {
@@ -1110,5 +1130,71 @@ func TestCheckpointBaseNestedChartGitlabFetchesFirst(t *testing.T) {
 	swap(t, &repoLanded, func(_ git.Repo, tr string) (string, error) { order = append(order, tr); return "chartsha", nil })
 	if got, err := checkpointBase(bd.Bead{ID: "k-s"}); err != nil || got != "chartsha" || len(order) != 2 || order[0] != "fetch" {
 		t.Errorf("checkpointBase = %q, %v, order %v", got, err, order)
+	}
+}
+
+// Spec D11 (FRs 46–50): the pivot prompt reads a Signal raiser through
+// caused-by and carries the Signal-raiser prose and Ask Critique handling.
+func TestPivotPromptReadsSignalRaiser(t *testing.T) {
+	p := strings.Join(strings.Fields(pivotPrompt("ws-pv", "ws-cp", "ws-sp")), " ") // line wraps are not content
+	if strings.Contains(p, "%!") {
+		t.Fatalf("bad pivot prompt render: %q", p)
+	}
+	for _, want := range []string{
+		"bd dep list <pivotID> --direction=down -t caused-by --json", // FR46: the Signal raiser read
+		"kind:signal",
+		"## Triage (<signal>)",   // FR47: the Triage section quoted
+		"Rerouted from <signal>", // FR47: the merge-comment variant
+		"the report was wrong",   // FR47: dismiss prose
+		"the Ask",                // FR47: in place of the unfinished FR
+		"Ask Critique",           // FR48–50
+		"rewrite it to whatever as-specced work is left",
+		"close it `dismissed: <pivotID>`",
+		"you never reopen the Signal",
+		"AMENDMENT (<pivotID>): …` comment on the Ask Critique", // FR49
+		"closes it as obsolete",                                 // FR50
+		"folds the Ask",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("pivot prompt missing %q", want)
+		}
+	}
+}
+
+// The skeleton's body cites its ADR with a slug, never by bare number.
+func TestCheckpointSuccessorCitesADRWithSlug(t *testing.T) {
+	d := checkpointSuccessor(bd.Bead{ID: "ws-spec", Title: "A spec"}).Description
+	if bare := promptguard.BareADRCitations(d); len(bare) > 0 || !strings.Contains(d, "ADR 0015 (") {
+		t.Errorf("skeleton body %q must cite ADR 0015 with its slug (bare: %q)", d, bare)
+	}
+}
+
+// ADR 0325: the pivot prompt reads a Task raiser, comments the verdict on the
+// Task, and adopts the Checkpoint's held Tasks into a corrected Spec by id.
+func TestPivotPromptReadsTaskRaiser(t *testing.T) {
+	p := strings.Join(strings.Fields(pivotPrompt("ws-pv", "ws-cp", "ws-sp")), " ") // line wraps are not content
+	if strings.Contains(p, "%!") {
+		t.Fatalf("bad pivot prompt render: %q", p)
+	}
+	for _, want := range []string{
+		"A Task raiser: a `kind:task` row", // Raised by read
+		"stuck comment",
+		"`Raised by Task` line",
+		"pivot <pivotID> dismissed|amended: <gist>", // Task comment on dismiss/amend
+		"which Critique to wait for",
+		"the step may be wrong; amend it on resume", // ...
+		"skip the step-1 refile",                    // Ask Critique already exists
+		"the open `kind:task` rows",                 // held-Task listing
+		"adopt it or leave it out",                  // confirm: put each to the human
+		"### <Task title>",                          // confirm: Spec entry
+		"task: <id>",                                // ...
+		"before: land",                              // ...
+		"no Steps body",                             // ...
+		"stays open for the human to abandon",       // left-out Task
+		"name each held Task and whether the human wants it adopted", // escalate evidence
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("pivot prompt missing %q", want)
+		}
 	}
 }

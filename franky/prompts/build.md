@@ -77,13 +77,11 @@ Then, as your last step, run `mugicrew integrate` in this tree. It squashes your
 effort branch onto checkpoint/{{.Checkpoint}}; until it does, your bead stays
 open (Franky's backstop reopens one his close got ahead of).
 
-- Exit 0: integrated, or nothing ahead. Return.
-- Exit 2, a rebase conflict, left stopped in this tree: resolve the conflicts,
-  `git add` them, `git rebase --continue`, then re-run `mugicrew integrate`. If
-  you can't resolve them: `git rebase --abort`, note why on your bead
-  (`bd comments add {{.BeadID}} "<why>"`), leave it open and return.
-- Exit 2 with no rebase stopped (the Checkpoint is held or landed), or exit 1:
-  note its output on your bead and return; Franky's backstop retries or pauses it.
+{{.Exits}}
+
+If you can't resolve a rebase conflict: `git rebase --abort`, note why on your
+bead (`bd comments add {{.BeadID}} "<why>"`), leave it open and return. On any
+other note-and-stop exit, return; Franky's backstop retries or pauses it.
 
 ## Every bead you file is a Draft
 

@@ -364,3 +364,132 @@ func TestExecPausedBuildCursorFollowsTwin(t *testing.T) {
 		t.Errorf("cursor = %q, want b's tree row", r.key)
 	}
 }
+
+// Spec mc-f22wp FR 1-3, 5-10, 12-13: Defog's paused band lists every own-paused, otherwise
+// ready bead whose home tab is Defog, a defogged Chart and its children included.
+func TestDefogActionablePausedHomeTab(t *testing.T) {
+	own := labeled("paused:failing")
+	defogged := labeled("chart:defogged")
+	beads := []bd.Bead{
+		dbead("dc", contract.KindChart, "open", "", 1, defogged),
+		dbead("land", contract.KindLanding, "open", "dc", 1, own),
+		dbead("mrw", contract.KindMRWatch, "open", "dc", 2, own),
+		dbead("fr", contract.KindForgeReview, "open", "dc", 3, own),
+		dbead("unp", contract.KindLanding, "open", "dc", 4),
+		dbead("blk", contract.KindLanding, "open", "dc", 5, own, blockedBy("unp")),
+		dbead("lv", contract.KindMRWatch, "open", "dc", 6, own),
+		dbead("ex", contract.KindForgeReview, "open", "dc", 7, own),
+		dbead("pc", contract.KindChart, "open", "", 2, defogged, own),
+		dbead("inh", contract.KindLanding, "open", "pc", 1),
+		dbead("nd", contract.KindChart, "open", "", 3),
+		dbead("ndk", contract.KindBuild, "open", "nd", 1, own),
+	}
+	m := sized(t, 160, 40)
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"lv": true}, sessions: map[string]session.Info{"lv": {State: session.Alive}, "ex": {State: session.Exited}}})
+	m = press(t, m, runeKey("2"))
+	tab := m.tabAt(tabDefog).(defogTab)
+	var got []string
+	for _, r := range tab.g.defogAct() {
+		got = append(got, r.key)
+		if r.b.ID == "land" && r.chart.ID != "dc" {
+			t.Errorf("land carries chart %q, want dc", r.chart.ID)
+		}
+	}
+	if want := []string{"act:ndk", "act:land", "act:mrw", "act:pc", "act:fr"}; !slices.Equal(got, want) {
+		t.Fatalf("Actionable = %v, want %v", got, want)
+	}
+	if tab.actN() != 5 || tab.g.defogBadge() != 0 {
+		t.Errorf("actN = %d, amber = %d, want 5, 0", tab.actN(), tab.g.defogBadge())
+	}
+	for _, k := range []string{"enter", "d", "p"} {
+		_, c := send(t, defogAt(t, m, "act:land"), runeKey(k))
+		_, ct := send(t, defogAt(t, m, "act:ndk"), runeKey(k))
+		if (c == nil) != (ct == nil) {
+			t.Errorf("%s on a Landing differs from a Chart child's twin row", k)
+		}
+	}
+}
+
+// Spec mc-f22wp FR 14: unpausing a defogged Chart's Landing from Actionable leaves the cursor
+// on its Chart's row, and pausing it again lists it in Actionable.
+func TestDefogPausedLandingCursorFollowsTwin(t *testing.T) {
+	beads := []bd.Bead{
+		dbead("dc", contract.KindChart, "open", "", 1, labeled("chart:defogged")),
+		dbead("land", contract.KindLanding, "open", "dc", 1, labeled("paused:failing")),
+	}
+	m := sized(t, 160, 40)
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
+	m = press(t, m, runeKey("2"))
+	m = defogAt(t, m, "act:land")
+	beads[1].Labels = nil
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
+	if r, _ := m.tabAt(tabDefog).(defogTab).selRow(); r.key != chartsPrefix+"dc" {
+		t.Errorf("cursor = %q, want the Chart's row", r.key)
+	}
+	beads[1].Labels = []string{"paused:failing"}
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
+	m = defogAt(t, m, "act:land")
+	if r, _ := m.tabAt(tabDefog).(defogTab).selRow(); r.key != "act:land" {
+		t.Errorf("cursor = %q, want act:land", r.key)
+	}
+}
+
+// Spec mc-f22wp FR 4-5, 6-14: Execute's paused band lists every own-paused, otherwise ready
+// bead whose home tab is Execute, a Spec and a bead under no listed Checkpoint included.
+func TestExecActionablePausedHomeTab(t *testing.T) {
+	own := labeled("paused:failing")
+	beads := []bd.Bead{
+		dbead("cp", contract.KindCheckpoint, "open", "", 1, isContainer),
+		dbead("m", contract.KindBuild, "open", "cp", 1, own),
+		dbead("sp", contract.KindSpec, "open", "", 2, own),
+		dbead("orph", contract.KindBuild, "open", "", 3, own),
+		dbead("inh", contract.KindSpec, "open", "", 4),
+		dbead("pc", contract.KindCheckpoint, "open", "", 5, isContainer, own),
+		dbead("kid", contract.KindBuild, "open", "pc", 1),
+		dbead("blk", contract.KindSpec, "open", "", 6, own, blockedBy("inh")),
+		dbead("lv", contract.KindSpec, "open", "", 7, own),
+		dbead("ex", contract.KindSpec, "open", "", 8, own),
+	}
+	m, _ := execModel(t, beads)
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"lv": true}, sessions: map[string]session.Info{"lv": {State: session.Alive}, "ex": {State: session.Exited}}})
+	g := m.tabAt(tabExecute).(execTab).g
+	var got []string
+	for _, r := range g.actionable() {
+		got = append(got, r.key)
+		if r.b.ID == "orph" && r.cp != nil {
+			t.Errorf("orph carries cp %q, want none", r.cp.ID)
+		}
+	}
+	if want := []string{"act:m", "act:sp", "act:orph", "act:pc"}; !slices.Equal(got, want) {
+		t.Fatalf("Actionable = %v, want %v", got, want)
+	}
+	if g.execList(nil)[0].title != "Actionable (4)" || g.execBadge() != 0 {
+		t.Errorf("header = %q, amber = %d", g.execList(nil)[0].title, g.execBadge())
+	}
+	for _, k := range []string{"enter", "d", "p"} {
+		_, ca := send(t, execAt(t, m, "act:sp"), runeKey(k))
+		_, ct := send(t, execAt(t, m, specsPrefix+"sp"), runeKey(k))
+		if (ca == nil) != (ct == nil) {
+			t.Errorf("%s on act:sp differs from its Specs-section twin", k)
+		}
+	}
+}
+
+// Spec mc-f22wp FR 14: pausing then unpausing a Spec keeps the cursor on its twin each time.
+func TestExecPausedSpecCursorFollowsTwin(t *testing.T) {
+	beads := []bd.Bead{dbead("sp", contract.KindSpec, "open", "", 1)}
+	m, _ := execModel(t, beads)
+	execRow := func(m Model) string { r, _ := m.tabAt(tabExecute).(execTab).selRow(); return r.key }
+	m = execAt(t, m, specsPrefix+"sp")
+	beads[0].Labels = []string{"paused:failing"}
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: execSessions()})
+	if got := execRow(m); got != specsPrefix+"sp" {
+		t.Errorf("after pause cursor = %q, want the Specs row", got)
+	}
+	m = execAt(t, m, "act:sp")
+	beads[0].Labels = nil
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: execSessions()})
+	if got := execRow(m); got != specsPrefix+"sp" {
+		t.Errorf("after unpause cursor = %q, want the Specs row", got)
+	}
+}

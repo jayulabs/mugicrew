@@ -99,3 +99,67 @@ func TestSigkilledHolderFreesLockDespiteOrphan(t *testing.T) {
 		t.Error("lock still held after holder SIGKILL; orphaned child inherited it")
 	}
 }
+
+// cloexec reports whether fd carries FD_CLOEXEC.
+func cloexec(t *testing.T, fd int) bool {
+	t.Helper()
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFD, 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	return flags&syscall.FD_CLOEXEC != 0
+}
+
+// Adopt re-arms O_CLOEXEC on an inherited (non-CLOEXEC) fd, and Release on the
+// adopted Hold frees the lock.
+func TestAdopt(t *testing.T) {
+	fakeLocks(t)
+	h, err := Acquire("e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Dup(int(h.File().Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cloexec(t, fd) {
+		t.Fatal("dup'd fd should model an inherited one: no CLOEXEC")
+	}
+	a := Adopt(fd, "e1")
+	if !cloexec(t, int(a.File().Fd())) {
+		t.Error("Adopt must set FD_CLOEXEC")
+	}
+	h.Release()
+	if !Held("e1") {
+		t.Error("adopted hold must keep the lock after the original closes")
+	}
+	a.Release()
+	if Held("e1") {
+		t.Error("Release on an adopted Hold must free the lock")
+	}
+}
+
+// A hold handed to a child through ExtraFiles outlives the parent's copy and
+// frees when the child exits.
+func TestHoldHandedToChild(t *testing.T) {
+	fakeLocks(t)
+	h, err := Acquire("e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command("sleep", "60")
+	child.ExtraFiles = []*os.File{h.File()}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { child.Process.Kill(); child.Wait() })
+	h.Release()
+	if !Held("e1") || !HeldIn(os.Getenv("BEADS_DIR"), "e1") {
+		t.Fatal("child's inherited fd must keep the effort held")
+	}
+	child.Process.Kill()
+	child.Wait()
+	if Held("e1") {
+		t.Error("lock still held after the child exited")
+	}
+}

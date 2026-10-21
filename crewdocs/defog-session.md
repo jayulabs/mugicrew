@@ -36,7 +36,7 @@ settles (format: crew doc GLOSSARY-FORMAT.md). Commit these in your tree, on
 your own effort branch (effort/<your bead>, cut from the chart branch
 chart/<chart-id>); they reach the chart branch when you integrate (step 6). A
 re-launch reuses the branch: `git log --oneline chart/<chart-id>..HEAD` shows
-what a prior run already committed. A Chart's artifacts merge to mainline when
+what a prior run already committed. A Chart's artifacts land on mainline once
 the Chart is defogged, with no review gate (charting is gated by defog and Spec
 acceptance). Use judgment: not every answer earns an ADR, but a decision the
 Spec or later beads will lean on does.
@@ -44,7 +44,7 @@ Spec or later beads will lean on does.
 ## 5. Tend the Chart before closing
 
 The answer reshapes the map. Tend it BEFORE you close your bead: the close may
-drain the Chart, so the fog it graduates must already exist.
+leave the Chart drained, so the fog it graduates must already exist.
 
 Edit the Chart body one line at a time, never by rewriting its description
 (bd update --description): a sibling session may be tending the same Chart, and
@@ -77,12 +77,11 @@ Your bead resolves when its question is answered, not merely when work exists.
    Chart is the index; the detail lives on your bead):
    mugicrew chart append <chartID> Decisions-so-far "- <your bead>: <gist>"
 3. Run `mugicrew integrate` in your tree. It squashes your effort branch onto
-   the chart branch. Exit 0: integrated, or nothing ahead. Exit 2 with a rebase
-   stopped in your tree: resolve the conflicts, `git add` them,
-   `git rebase --continue`, and re-run it. If you judge them unresolvable, ask
-   the human before `git rebase --abort`; then note why on your bead, leave it
-   open and exit. Exit 2 with no rebase stopped (the Chart is held or landed),
-   or exit 1: note its output on your bead, leave it open and exit.
+   the chart branch. Act on your prompt's integrate exits; a Held
+   chart branch (checked out in another worktree) stays untouched and your bead
+   stays open. If you judge a rebase
+   conflict unresolvable, ask the human before `git rebase --abort`; then note
+   why on your bead, leave it open and exit.
 4. Only after integrate exits 0, close your bead with the reason your prompt
    gives.
 
@@ -91,3 +90,5 @@ Your bead resolves when its question is answered, not merely when work exists.
 Resolve only YOUR bead. You may **spawn** new defog beads above, but never
 **resolve** them here: leave them on the frontier for another session or
 crewmate.
+
+Never edit an Initiative's body in a defog session; the Initiative's body is not yours to change.

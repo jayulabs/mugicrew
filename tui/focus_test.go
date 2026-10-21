@@ -446,11 +446,12 @@ func TestFocusChanges(t *testing.T) {
 func TestFocusBindingCoverage(t *testing.T) {
 	m, _ := defaultFocus(t)
 	f := ideaFocus(t, m)
+	jumps := []string{"J", "K", "ctrl+down", "ctrl+up"} // a no-op where no section lies that way
 	for _, row := range []string{"Billing revamp", "Ideate", "t s1", "t s4", "1 closed", "t cp ", "t task"} {
 		at := focusAt(t, f, row)
-		checkCoverage(t, "focus "+row, at, false)
+		checkCoverage(t, "focus "+row, at, true, jumps...)
 		open := press(t, press(t, at, runeKey("d")), tea.KeyMsg{Type: tea.KeyCtrlD}) // mid-scroll, so up and down both move
-		checkCoverage(t, "focus "+row+" drawer", open, false)
+		checkCoverage(t, "focus "+row+" drawer", open, true, jumps...)
 	}
 	checkCoverage(t, "focus gone", func() Model {
 		n, _ := send(t, f, loadedMsg{beads: nil, live: map[string]bool{}})
@@ -744,5 +745,76 @@ func TestFocusDefogChildIndent(t *testing.T) {
 	}
 	if col(leaf) != col(chart)+4 || col(afk) != col(chart)+4 {
 		t.Errorf("columns chart %d leaf %d afk %d:\n%q\n%q\n%q", col(chart), col(leaf), col(afk), chart, leaf, afk)
+	}
+}
+
+// J/K jump between the Ideate, Defog and Execute rows; the Initiative's own top row is
+// no stop, the ends do not wrap, and a folded section is still a stop.
+func TestFocusSectionJumps(t *testing.T) {
+	m, _ := defaultFocus(t)
+	f := ideaFocus(t, m)
+	at := func(m Model, want string) {
+		t.Helper()
+		if c := ansi.Strip(cursorLine(m)); !strings.Contains(c, want) {
+			t.Errorf("cursor at %q, want %q", c, want)
+		}
+	}
+	at(f, "Billing revamp")
+	if n := press(t, f, runeKey("K")); ansi.Strip(n.View()) != ansi.Strip(f.View()) {
+		t.Errorf("K on the top row moved:\n%s", ansi.Strip(n.View()))
+	}
+	for _, c := range []struct {
+		down, up tea.KeyMsg
+	}{{runeKey("J"), runeKey("K")}, {tea.KeyMsg{Type: tea.KeyCtrlDown}, tea.KeyMsg{Type: tea.KeyCtrlUp}}} {
+		s := press(t, f, c.down)
+		at(s, "Ideate")
+		s = press(t, s, c.down)
+		at(s, "Defog")
+		s = press(t, s, c.down)
+		at(s, "Execute")
+		if n := press(t, s, c.down); ansi.Strip(cursorLine(n)) != ansi.Strip(cursorLine(s)) {
+			t.Errorf("%v at Execute moved to %q", c.down, ansi.Strip(cursorLine(n)))
+		}
+		s = press(t, press(t, s, c.up), c.up)
+		at(s, "Ideate")
+		if n := press(t, s, c.up); ansi.Strip(cursorLine(n)) != ansi.Strip(cursorLine(s)) {
+			t.Errorf("%v at Ideate moved to %q", c.up, ansi.Strip(cursorLine(n)))
+		}
+	}
+	// from a member row, J lands on the next section
+	s := press(t, focusAt(t, f, "t s1"), runeKey("J"))
+	at(s, "Defog")
+	// a folded section is still a stop
+	d := press(t, focusAt(t, f, "Defog"), runeKey(" "))
+	at(press(t, press(t, f, runeKey("J")), runeKey("J")), "Defog")
+	s = press(t, press(t, d, runeKey("K")), runeKey("J"))
+	at(s, "Defog")
+	at(press(t, s, runeKey("J")), "Execute")
+}
+
+// A section jump closes the detail offset like a j/k move.
+func TestFocusSectionJumpResetsDetailOffset(t *testing.T) {
+	m, _ := defaultFocus(t)
+	f := focusAt(t, ideaFocus(t, m), "t s1")
+	f = press(t, f, runeKey("d"))
+	f = press(t, f, tea.KeyMsg{Type: tea.KeyPgDown})
+	f = press(t, f, runeKey("J"))
+	if f.focus.off != 0 {
+		t.Errorf("detail offset after J = %d, want 0", f.focus.off)
+	}
+}
+
+// ? lists J/K section under navigation; the hints bar does not.
+func TestFocusSectionKeyReference(t *testing.T) {
+	m, _ := defaultFocus(t)
+	f := ideaFocus(t, m)
+	for _, row := range []string{"Billing revamp", "Ideate", "t s1"} {
+		at := focusAt(t, f, row)
+		if h := hintsOf(at); strings.Contains(h, "J/K") {
+			t.Errorf("%s: hints bar lists J/K: %q", row, h)
+		}
+		if v := ansi.Strip(press(t, at, runeKey("?")).View()); !strings.Contains(v, "J/K") || !strings.Contains(v, "section") {
+			t.Errorf("%s: ? lacks J/K section:\n%s", row, v)
+		}
 	}
 }

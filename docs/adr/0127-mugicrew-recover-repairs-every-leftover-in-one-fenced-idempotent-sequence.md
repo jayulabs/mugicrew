@@ -55,8 +55,9 @@ Decided on grilling bead mc-yr7o.4 (Chart mc-yr7o).
    (docs/research/live-holders-that-read-dead-under-recover-verdict-rule.md §7
    rows 2 and 6). So it always needs `--force`. Its refusal says a hostless
    claude or its tools may still be writing and to check `pgrep -a claude` and
-   the human's own shells first. A TUI calling recover doesn't count itself if its own run-now
-   map holds nothing on the bead. Otherwise the human needs `--force`, which is
+   the human's own shells first. A TUI calling recover always excludes its own
+   session (a run-now effort is a `mugicrew run <id>` host, found by `Probe` and
+   the flock, ADR 0330). Otherwise the human needs `--force`, which is
    refused while the loop is on. Liveness covers **this host only**.
    Multi-host recovery is out of scope.
 3. **Mid-rebase tree.** Recover finds it through

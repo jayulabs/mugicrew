@@ -458,6 +458,38 @@ func TestCarryLatches(t *testing.T) {
 	}
 }
 
+// CarryTargets sends ordering dependents to one bead and open Latches to another,
+// in one pass; neither walk touches the other's target.
+func TestCarryTargets(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	var adds [][]string
+	run = func(args ...string) (string, error) {
+		switch {
+		case args[1] == "add":
+			adds = append(adds, args)
+		case args[3] == "--direction=down":
+			return `[{"id":"lt-open","status":"open","labels":["kind:latch"]}]`, nil
+		default:
+			return `[{"id":"mc-a","status":"open","dependency_type":"blocks"},{"id":"ws-cp","status":"open","dependency_type":"blocks"}]`, nil
+		}
+		return "", nil
+	}
+	moved, skipped, err := CarryTargets("ws-sig", "ws-cp", "ws-pivot")
+	if err != nil {
+		t.Fatalf("CarryTargets: %v", err)
+	}
+	if want := []string{"mc-a", "lt-open"}; !slices.Equal(moved, want) {
+		t.Errorf("moved = %v, want %v", moved, want)
+	}
+	if want := []CarrySkip{{"ws-cp", "hierarchy"}}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped = %v, want the host as a hierarchy skip", skipped)
+	}
+	if want := [][]string{{"dep", "add", "mc-a", "ws-cp", "-t", "blocks"}, {"dep", "add", "ws-pivot", "lt-open", "-t", "blocks"}}; !reflect.DeepEqual(adds, want) {
+		t.Errorf("adds = %v, want %v", adds, want)
+	}
+}
+
 // An unknown dep-add error returns at once with what landed; a dep-list failure
 // returns err; no dependents is nil/nil/nil.
 func TestCarryErrors(t *testing.T) {
@@ -868,5 +900,29 @@ func TestDrainBlockersOverSkipsOpenMRWatch(t *testing.T) {
 func TestIsMemberExcludesMRWatch(t *testing.T) {
 	if IsMember(contract.KindMRWatch) {
 		t.Error("an MR Watch must not be a member")
+	}
+}
+
+// A pivot Draft's metadata rides the create as --metadata; a Successor without it adds none.
+func TestSuccessorCreateArgsMetadata(t *testing.T) {
+	s := Successor{Kind: contract.KindPivot, Title: "t", DraftedBy: "ws-sig", Metadata: `{"raise_checkpoint":"ws-cp"}`}
+	if args := successorCreateArgs("ws-sig", s); !slices.Contains(args, "--metadata") || !slices.Contains(args, `{"raise_checkpoint":"ws-cp"}`) {
+		t.Errorf("args = %q, want --metadata with the JSON", args)
+	}
+	s.Metadata = ""
+	if args := successorCreateArgs("ws-sig", s); slices.Contains(args, "--metadata") {
+		t.Errorf("args = %q, want no --metadata", args)
+	}
+}
+
+// A raise Draft is discovered-from its creator, never caused-by it: no successor edge.
+func TestCreateRaiseDraftArgsHaveNoCausedBy(t *testing.T) {
+	args := successorCreateArgs("", Successor{Kind: contract.KindCritique, Title: "t", DraftedBy: "ws-task", Parent: "ws-cp"}, "discovered-from:ws-task")
+	i := slices.Index(args, "--deps")
+	if i < 0 || args[i+1] != "discovered-from:ws-task" {
+		t.Errorf("args = %v, want --deps discovered-from:ws-task only", args)
+	}
+	if !slices.Contains(args, "drafted-by:ws-task") && !slices.Contains(args, "kind:critique,drafted-by:ws-task") {
+		t.Errorf("args = %v, want the drafted-by label", args)
 	}
 }

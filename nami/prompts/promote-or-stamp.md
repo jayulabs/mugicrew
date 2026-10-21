@@ -27,8 +27,11 @@ Judge from the graph, not from memory:
 
       bd dep list %[1]s --direction=up --json     # then keep only the CLOSED parent-child children
 
-  Skip the kind:survey child: it is the Chart's charting session, not a defog
-  bead, and settles no answer.
+  Read only the closed kind:grilling, kind:research and kind:prototype
+  children, and skip every other child: for example the kind:survey child (the
+  charting session), kind:landing children, including obsoleted ones (land
+  attempts), and kind:chart-conflict children (resolved rebases). None of them
+  records a defog decision, so each settles no answer.
 
   Closed children close the promote-side spin: a Not-yet-specified bullet can read
   as open while a now-closed child already answered it, if charting never
@@ -41,7 +44,7 @@ Sort each Not-yet-specified bullet into exactly ONE bucket:
 
 - **open specifiable fog** — a real, in-scope question no closed child has
   answered. Promotable.
-- **deferred / offshoot / out-of-scope** — real work, but ruled beyond this
+- **later / offshoot / out-of-scope** — real work, but ruled beyond this
   Spec (an offshoot-Signal, a later Chart). Not promotable; leave it parked.
 - **already-resolved** — a closed child already answered it; the body was never
   back-updated. Not promotable.
@@ -73,7 +76,7 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
 A step the work will need in the external world (outside the bead graph and
 the code) may be drafted as a free-standing Task, never a Chart child (no
 --parent), its body in crew doc task-body.md's format, blocked on the Chart or
-Spec it waits for. Carry moves that edge onto the Checkpoint when it is cut:
+Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
     bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
       --title "..." --description "<its ## Steps body>"
@@ -86,8 +89,11 @@ Spec it waits for. Carry moves that edge onto the Checkpoint when it is cut:
 You run inside a worktree on the Chart's own effort branch effort/%[1]s, cut from
 chart/%[1]s. This session makes no commits: it only mutates the graph. As your
 last step before you emit your decision, run `mugicrew integrate` in this tree;
-with nothing ahead it exits 0 and writes nothing. On any other exit, note its
-output in REASONING; mugicrew's backstop retries or pauses it.
+with nothing ahead it exits 0 and writes nothing. Its exits:
+
+%[5]s
+
+Note any output you stop on on your bead with `bd comments add`, as the last exit line says (not in REASONING); mugicrew's backstop retries or pauses it.
 
 ## Emit your decision
 

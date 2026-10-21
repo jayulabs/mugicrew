@@ -20,6 +20,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/luffy"
 	"jayulabs.org/mugicrew/route"
 )
 
@@ -72,43 +73,65 @@ var hupGrace = 100 * time.Millisecond
 
 // PublishDrafts publishes the Drafts bead's session created (ADR 0059 §4),
 // recording draft.published with the ids, or draft.failed. None records nothing.
-// The batch hands no edges: the carry stays outside it (ADR 0085 §4). It closes
-// the bead only when it is a Signal with a caused-by Chart, Spec or Initiative successor, so
-// a charted Signal closes as its successor becomes visible (ADR 0096; Spec
-// D2), or a Survey whose charting is done (Spec mc-r832 D8); every other prompt
-// closes its own bead (§5). A failed graph read fails the publish, keeping the
-// session for a resume or drop.
+// The batch hands only a raise's gate and merge edges; the carry stays outside
+// it (ADR 0085 §4). It closes the bead only when it is a Signal with a caused-by
+// Chart, Spec or Initiative successor, so a charted Signal closes as its
+// successor becomes visible (ADR 0096; Spec D2), a Signal with reroute Drafts
+// (rerouted: <ids>, with the host's gate), or a Survey whose charting is done
+// (Spec mc-r832 D8); every other prompt closes its own bead (§5). A failed graph
+// read fails the publish, keeping the session for a resume or drop. After a
+// reroute's batch lands, each merge's evidence is posted on its pivot.
 func PublishDrafts(bead string, attrs []any) error {
-	closing, err := sessionClosing(bead)
+	plan, err := sessionPlan(bead)
 	var ids []string
 	if err == nil {
-		ids, err = publish(bead, nil, closing)
+		ids, err = publish(bead, plan.edges, plan.closing)
+	}
+	if err == nil {
+		err = postMerges(plan.creator, plan.merges)
 	}
 	return eventlog.RecordDrafts("draft.published", bead, ids, err, attrs...)
 }
 
-// sessionClosing is PublishDrafts' close: the bead itself when it is a Signal with
-// a Chart, Spec or Initiative successor (any status), or a Survey whose parent
+// publishPlan is what PublishDrafts' batch hands: edges, the bead to close, and the
+// merges whose evidence follows the batch.
+type publishPlan struct {
+	edges   []bd.Edge
+	closing *bd.Closing
+	merges  []luffy.RaiseMerge
+	creator bd.Bead // the session's bead, whose marker line heads each merge's comment
+}
+
+// sessionPlan is PublishDrafts' plan: a Signal or Task with raise Drafts or recorded merges
+// takes raiseSession's; else the close alone: the bead itself when it is a Signal
+// with a Chart, Spec or Initiative successor (any status), or a Survey whose parent
 // Chart is closed (push-back) or whose Drafts include a child of the Chart (fog
 // seeded), else nil. A Go read, since the batch can't read: the keep path's fog
 // and the Survey close then land in one transaction, never a drained fog-less
-// Chart (Spec mc-r832 D8).
-func sessionClosing(bead string) (*bd.Closing, error) {
+// Chart (Spec mc-r832 D8). The widening for a reroute is by kind, not a
+// status-blind SuccessorOf (ADR 0096 §2).
+func sessionPlan(bead string) (publishPlan, error) {
 	b, err := showBead(bead)
 	if err != nil {
-		return nil, err
+		return publishPlan{}, err
 	}
 	var done bool
 	switch b.Kind {
-	case contract.KindSignal:
-		done, err = signalCharted(bead)
+	case contract.KindSignal, contract.KindTask:
+		if plan, ok, err := raiseSession(b); err != nil || ok {
+			plan.creator = b
+			return plan, err
+		}
+		if b.Kind == contract.KindSignal {
+			done, err = signalCharted(bead)
+		}
 	case contract.KindSurvey:
 		done, err = surveyDone(b)
 	}
 	if err != nil || !done {
-		return nil, err
+		return publishPlan{}, err
 	}
-	return &bd.Closing{ID: bead}, nil
+	return publishPlan{closing: &bd.Closing{ID: bead}}, nil
 }
 
 func signalCharted(bead string) (bool, error) {

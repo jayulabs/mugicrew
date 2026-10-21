@@ -373,6 +373,8 @@ type graphData struct {
 	comments  map[commentKey]commentEntry // fetched comments; a miss renders as loading…
 	rollups   map[string]rollupEntry      // fetched ROLLUP totals; a miss renders as loading…
 	extRef    bool                        // Enforce external ID is on: an open Initiative with no ref shows "no ref"
+	landName  string                      // the Workspace land_strategy, cached by the slow tier; "" when unread or unusable
+	landErr   error                       // why it is unusable: the Merge Requests section shows it
 	w, h      int                         // the body's size
 }
 

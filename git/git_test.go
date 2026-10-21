@@ -164,7 +164,7 @@ func TestSquashArgs(t *testing.T) {
 	if got := softResetArgs("deadbeef"); len(got) != 3 || got[0] != "reset" || got[1] != "--soft" || got[2] != "deadbeef" {
 		t.Errorf("softResetArgs = %v, want [reset --soft deadbeef]", got)
 	}
-	commit := squashCommitArgs("chart/mc-x", "abc", "Chart: mc-x", "g1", "")
+	commit := squashCommitArgs("chart/mc-x", "", "abc", "Chart: mc-x", "g1", "")
 	if commit[len(commit)-1] != "Tip: abc\nChart: mc-x\nGraph: g1" {
 		t.Errorf("squashCommitArgs must carry the landed tip, then the trailer, last: %v", commit)
 	}
@@ -1007,7 +1007,7 @@ func TestComposeMovesNothingAndMatchesLandLocal(t *testing.T) {
 	pre := landRepo(t)
 	base := mustGit(t, "rev-parse", Mainline())
 
-	composed, gotBase, gotPin, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	composed, gotBase, gotPin, err := Compose("checkpoint/x", "Checkpoint: x", "", "")
 	if err != nil {
 		t.Fatalf("Compose: %v", err)
 	}
@@ -1033,7 +1033,7 @@ func TestComposeMovesNothingAndMatchesLandLocal(t *testing.T) {
 
 func TestSameBaseLandFastForwardsToComposed(t *testing.T) {
 	pre := landRepo(t)
-	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1051,7 @@ func TestSameBaseLandFastForwardsToComposed(t *testing.T) {
 
 func TestSameBaseLandRefusesMovedBase(t *testing.T) {
 	pre := landRepo(t)
-	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1070,7 @@ func TestSameBaseLandRefusesMovedBase(t *testing.T) {
 
 func TestSameBaseLandRefusesMovedContainer(t *testing.T) {
 	pre := landRepo(t)
-	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "")
+	composed, base, _, err := Compose("checkpoint/x", "Checkpoint: x", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1137,7 +1137,7 @@ func TestRevertArgs(t *testing.T) {
 	if got, want := revertTreeArgs("base", "sq"), []string{"merge-tree", "--write-tree", "--name-only", "--merge-base=sq", "base", "sq^"}; !slices.Equal(got, want) {
 		t.Errorf("revertTreeArgs = %v, want %v", got, want)
 	}
-	if got, want := revertCommitArgs("tree", "base", "sq", "Reverts-Checkpoint: x", "g1"), []string{"commit-tree", "tree", "-p", "base", "-m", "revert sq", "-m", "Reverts-Checkpoint: x\nGraph: g1"}; !slices.Equal(got, want) {
+	if got, want := revertCommitArgs("tree", "base", "feat(app): add x (KEY-1)", "Reverts-Checkpoint: x", "g1"), []string{"commit-tree", "tree", "-p", "base", "-m", "revert: feat(app): add x (KEY-1)", "-m", "Reverts-Checkpoint: x\nGraph: g1"}; !slices.Equal(got, want) {
 		t.Errorf("revertCommitArgs = %v, want %v", got, want)
 	}
 }
@@ -1307,8 +1307,12 @@ func TestConflictPaths(t *testing.T) {
 // The reapply is a plumbing commit of the revert's parent tree on top of the revert,
 // and the seed moves the branch with a CAS from the revert — no HEAD switch.
 func TestReapplyArgs(t *testing.T) {
-	if got, want := reapplyCommitArgs("rv"), []string{"commit-tree", "rv~1^{tree}", "-p", "rv", "-m", "reapply rv"}; !slices.Equal(got, want) {
+	if got, want := reapplyCommitArgs("rv", "revert: feat(app): add x (KEY-1)"), []string{"commit-tree", "rv~1^{tree}", "-p", "rv", "-m", "feat(app): add x (KEY-1)"}; !slices.Equal(got, want) {
 		t.Errorf("reapplyCommitArgs = %v, want %v", got, want)
+	}
+	// A revert written before conventional subjects has no "revert: " prefix.
+	if got, want := reapplyCommitArgs("rv", "revert abc123"), []string{"commit-tree", "rv~1^{tree}", "-p", "rv", "-m", "revert: revert abc123"}; !slices.Equal(got, want) {
+		t.Errorf("legacy reapplyCommitArgs = %v, want %v", got, want)
 	}
 	if got, want := reapplyRefArgs("checkpoint/n", "s", "rv"), []string{"update-ref", "refs/heads/checkpoint/n", "s", "rv"}; !slices.Equal(got, want) {
 		t.Errorf("reapplyRefArgs = %v, want %v", got, want)
@@ -1331,9 +1335,16 @@ func TestReapplySeedsSuccessorAtRevert(t *testing.T) {
 	}
 	head := mustGit(t, "symbolic-ref", "HEAD")
 
+	landSubject := mustGit(t, "log", "-1", "--format=%s", squash)
+	if got, want := mustGit(t, "log", "-1", "--format=%s", revert), "revert: "+landSubject; got != want {
+		t.Errorf("revert subject = %q, want %q", got, want)
+	}
 	sha, err := Reapply("checkpoint/n", revert)
 	if err != nil {
 		t.Fatalf("Reapply: %v", err)
+	}
+	if got := mustGit(t, "log", "-1", "--format=%s", sha); got != landSubject {
+		t.Errorf("reapply subject = %q, want the land subject %q", got, landSubject)
 	}
 	if tip := mustGit(t, "rev-parse", "checkpoint/n"); tip != sha {
 		t.Errorf("branch tip %s != reapply %s", tip, sha)
@@ -2205,11 +2216,11 @@ func TestChangedPathsFromMergeBase(t *testing.T) {
 // Tip:/trailer paragraph stays last, and the cleanup keeps markdown headings.
 func TestSquashCommitArgsDecisionPacket(t *testing.T) {
 	want := []string{"commit", "--allow-empty", "-m", "land chart/c", "-m", "Tip: abc\nChart: c\nGraph: g1"}
-	if got := squashCommitArgs("chart/c", "abc", "Chart: c", "g1", ""); !slices.Equal(got, want) {
+	if got := squashCommitArgs("chart/c", "", "abc", "Chart: c", "g1", ""); !slices.Equal(got, want) {
 		t.Errorf("empty packet argv = %v, want %v", got, want)
 	}
 	want = []string{"commit", "--allow-empty", "--cleanup=whitespace", "-m", "land checkpoint/c", "-m", "## Background\nwhy", "-m", "Tip: abc\nCheckpoint: c\nGraph: g1"}
-	if got := squashCommitArgs("checkpoint/c", "abc", "Checkpoint: c", "g1", "## Background\nwhy"); !slices.Equal(got, want) {
+	if got := squashCommitArgs("checkpoint/c", "", "abc", "Checkpoint: c", "g1", "## Background\nwhy"); !slices.Equal(got, want) {
 		t.Errorf("packet argv = %v, want %v", got, want)
 	}
 }
@@ -2229,13 +2240,50 @@ func TestDecisionPacket(t *testing.T) {
 	}
 }
 
+// The squash commit's -m subject is the passed land subject, with and without a
+// Decision Packet; the trailer block is unchanged, and "" keeps "land <branch>".
+func TestSquashCommitArgsLandSubject(t *testing.T) {
+	const subject = "feat(mugicrew): Add thing (MC-1)"
+	want := []string{"commit", "--allow-empty", "-m", subject, "-m", "Tip: abc\nChart: c\nGraph: g1"}
+	if got := squashCommitArgs("chart/c", subject, "abc", "Chart: c", "g1", ""); !slices.Equal(got, want) {
+		t.Errorf("no packet argv = %v, want %v", got, want)
+	}
+	want = []string{"commit", "--allow-empty", "--cleanup=whitespace", "-m", subject, "-m", "why", "-m", "Tip: abc\nCheckpoint: c\nGraph: g1"}
+	if got := squashCommitArgs("checkpoint/c", subject, "abc", "Checkpoint: c", "g1", "why"); !slices.Equal(got, want) {
+		t.Errorf("packet argv = %v, want %v", got, want)
+	}
+}
+
+// A local land writes the conventional subject onto mainline, trailers unchanged.
+func TestLandLocalWritesConventionalSubject(t *testing.T) {
+	pre := landRepo(t)
+	const subject = "feat(mugicrew): Add thing (MC-1)"
+	repoStrategy, err := LandStrategyFor(LandStrategyLocal, "", subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := Land("checkpoint/x", "Checkpoint: x", repoStrategy)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if got := mustGit(t, "log", "-1", "--format=%s", sha); got != subject {
+		t.Errorf("subject = %q, want %q", got, subject)
+	}
+	if got := mustGit(t, "log", "-1", "--format=%B", sha); !strings.Contains(got, "\n\nTip: "+pre+"\nCheckpoint: x") {
+		t.Errorf("trailers changed:\n%s", got)
+	}
+	if got, err := LandedBase("Checkpoint: x"); err != nil || got != sha {
+		t.Errorf("LandedBase = (%q, %v), want %q", got, err, sha)
+	}
+}
+
 // A multi-section markdown packet survives a real land: headings and table in git
 // log, and LandedBase / LandedTip still read the trailer and tip.
 func TestLandCarriesDecisionPacket(t *testing.T) {
 	pre := landRepo(t)
 	packet := "## Background\n\nWhy it shipped.\n\nTip: not-the-pin prose\n\n## Summary\n\n| change | where |\n|---|---|\n| a | b.go |\n\n# Top heading"
 	sha, err := Land("checkpoint/x", "Checkpoint: x", func(branch, trailer string) (string, error) {
-		composed, base, pin, err := Compose(branch, trailer, packet)
+		composed, base, pin, err := Compose(branch, trailer, packet, "")
 		if err != nil {
 			return "", err
 		}

@@ -670,6 +670,29 @@ func IntegrateSubject(kind, id, title, context string) string {
 	return typ + ": " + title + " [" + id + "]"
 }
 
+// LandSubject is a land commit's subject (and a Land MR's title):
+// "<type>(<context>): <title> (<jiraKey>)", the scope dropped when context is "" and
+// the parenthesised key when jiraKey is "". The type is feat for a checkpoint and docs
+// for a chart; the title is used as is, and one empty after trimming falls back to
+// "land <branch>". Pure.
+func LandSubject(kind, title, context, jiraKey, branch string) string {
+	if strings.TrimSpace(title) == "" {
+		return "land " + branch
+	}
+	typ := "feat"
+	if kind == "chart" {
+		typ = "docs"
+	}
+	if context != "" {
+		typ += "(" + context + ")"
+	}
+	s := typ + ": " + title
+	if jiraKey != "" {
+		s += " (" + jiraKey + ")"
+	}
+	return s
+}
+
 // TrailerBlock is the one trailer block every land commit carries under every
 // strategy (ADR 0187 §1): "Tip: <tip>" (omitted when tip is ""), the "<Kind>: <id>"
 // trailer, then "Graph: <graph>", as whole LF lines. Pure.
@@ -787,6 +810,18 @@ func RecordedMRPath(body string) (path string, iid int) {
 // MRLine is the "MR: ..." body line for iid: "MR: !<iid>" for the Workspace's
 // project (path ""), "MR: <path>!<iid>" for a nested repo's.
 func MRLine(path string, iid int) string { return "MR: " + MRRef(path, iid) }
+
+// MRLinkKey is the body key of an MR's web URL, the one Forge Review bodies use.
+const MRLinkKey = "MR link:"
+
+// MRLinkLine is the "MR link: <web_url>" body line recorded beside an "MR:" line.
+func MRLinkLine(url string) string { return MRLinkKey + " " + url }
+
+// RecordedMRLink is the web URL of the body's "MR link:" line, "" when it has none.
+func RecordedMRLink(body string) string {
+	url, _ := ParseLine(body, MRLinkKey)
+	return url
+}
 
 // MRRef names an MR for a human: "!<iid>" for the Workspace's project (path ""),
 // "<path>!<iid>" for a nested repo's.
@@ -907,7 +942,10 @@ func landRebaseArgs(base string) []string { return []string{"rebase", base} }
 // mainline is still `base`.
 func detachArgs(pin string) []string     { return []string{"checkout", "--detach", pin} }
 func softResetArgs(base string) []string { return []string{"reset", "--soft", base} }
-func squashCommitArgs(branch, pin, trailer, graph, packet string) []string {
+func squashCommitArgs(branch, subject, pin, trailer, graph, packet string) []string {
+	if subject == "" { // a caller with no land subject keeps the old guard
+		subject = "land " + branch
+	}
 	// --allow-empty: a fog-only Chart (all defog settled in bead notes, no ADR /
 	// CONTEXT edit) lands an empty tree, but must still stamp its "Chart: <id>"
 	// anchor — the landed base Zoro cuts from. Same empty-anchor rationale as a
@@ -921,9 +959,9 @@ func squashCommitArgs(branch, pin, trailer, graph, packet string) []string {
 	// an empty packet leaves today's argv untouched.
 	block := TrailerBlock(pin, trailer, graph)
 	if packet == "" {
-		return []string{"commit", "--allow-empty", "-m", "land " + branch, "-m", block}
+		return []string{"commit", "--allow-empty", "-m", subject, "-m", block}
 	}
-	return []string{"commit", "--allow-empty", "--cleanup=whitespace", "-m", "land " + branch, "-m", packet, "-m", block}
+	return []string{"commit", "--allow-empty", "--cleanup=whitespace", "-m", subject, "-m", packet, "-m", block}
 }
 
 // DecisionPacket is an Approval description's Decision Packet: the body with its
@@ -1169,26 +1207,27 @@ func LandStrategyByName(name string) (LandStrategy, error) {
 // LandStrategyFor is the land_strategy seam taking the repo: the empty Repo is
 // LandStrategyByName, and local and gitlab both act on r (Spec D3), so no caller
 // gets a cwd-bound strategy for a child.
-func LandStrategyFor(name string, r Repo) (LandStrategy, error) {
-	if r != "" {
-		switch name {
-		case LandStrategyLocal:
-			return r.landLocal, nil
-		case LandStrategyGitlab:
-			return r.landGitlab, nil
-		}
+func LandStrategyFor(name string, r Repo, subject string) (LandStrategy, error) {
+	switch name {
+	case LandStrategyLocal:
+		return r.landLocal(subject), nil
+	case LandStrategyGitlab:
+		return r.landGitlab(subject), nil
 	}
 	return LandStrategyByName(name)
 }
 
 // landLocal is LandLocal in the child, a Compose plus LandSameBase run through the
 // handle (the Repo must be a tree path for the compose to leave main's checkout alone).
-func (r Repo) landLocal(branch, trailer string) (string, error) {
-	composed, base, pin, err := r.Compose(branch, trailer, "")
-	if err != nil {
-		return "", err
+// The squash commit's subject is subject ("" keeps "land <branch>").
+func (r Repo) landLocal(subject string) LandStrategy {
+	return func(branch, trailer string) (string, error) {
+		composed, base, pin, err := r.Compose(branch, trailer, "", subject)
+		if err != nil {
+			return "", err
+		}
+		return r.LandSameBase(composed, base, pin)(branch, trailer)
 	}
-	return r.LandSameBase(composed, base, pin)(branch, trailer)
 }
 
 // Land is the package Land on the child's trunk: trailer-idempotent under the
@@ -1351,9 +1390,11 @@ func SameHostProject(r Repo, projectOf func(Repo) (forge.Project, error)) (forge
 }
 
 // LandPending is the gitlab strategy's ErrLandPending outcome with where the land
-// waits: the MR's iid, and whether this tick pushed the pin and opened the MR.
+// waits: the MR's iid and absolute web URL, and whether this tick pushed the pin and
+// opened the MR.
 type LandPending struct {
 	MR             int
+	WebURL         string
 	Pushed, Opened bool
 }
 
@@ -1368,15 +1409,21 @@ func (e *LandPending) Is(t error) bool { return t == ErrLandPending }
 // the trailer block in its description, and return *LandPending. It never merges or
 // arms auto-merge: the merge is a human's act (ADR 0189). The plain --force push
 // overwriting a Forge-side Rebase is intended: it carries a re-Approved pin.
-func landGitlab(branch, trailer string) (string, error) { return Repo("").landGitlab(branch, trailer) }
+func landGitlab(branch, trailer string) (string, error) {
+	return Repo("").landGitlab("")(branch, trailer)
+}
 
-// landGitlab is the package landGitlab on the child's branch, remote and project.
-func (r Repo) landGitlab(branch, trailer string) (string, error) {
-	pin, err := r.run("rev-parse", "refs/heads/"+branch)
-	if err != nil {
-		return "", err
+// landGitlab is the package landGitlab on the child's branch, remote and project; the
+// MR is titled subject ("" keeps "land <branch>").
+func (r Repo) landGitlab(subject string) LandStrategy {
+	return func(branch, trailer string) (string, error) {
+		pin, err := r.run("rev-parse", "refs/heads/"+branch)
+		if err != nil {
+			return "", err
+		}
+		title := cmp.Or(subject, "land "+branch)
+		return r.landGitlabAt(branch, MRPresentation{Title: title}, trailer, pin, true)
 	}
-	return r.landGitlabAt(branch, MRPresentation{Title: "land " + branch}, trailer, pin, true)
 }
 
 // MRPresentation is what a Land MR shows a human: its title and the body above the
@@ -1448,7 +1495,7 @@ func (r Repo) landGitlabAt(branch string, pres MRPresentation, trailer, pin stri
 		if err := reuse(mr); err != nil {
 			return "", err
 		}
-		pending.MR = mr.IID
+		pending.MR, pending.WebURL = mr.IID, mr.WebURL
 		return "", pending
 	}
 	if !checked {
@@ -1477,7 +1524,7 @@ func (r Repo) landGitlabAt(branch string, pres MRPresentation, trailer, pin stri
 	default:
 		pending.Opened = true
 	}
-	pending.MR = mr.IID
+	pending.MR, pending.WebURL = mr.IID, mr.WebURL
 	return "", pending
 }
 
@@ -1707,14 +1754,14 @@ func (e *BaseMoved) Error() string {
 // current (pin, base): main clean, base and pin read, numbered-file clash check, detach
 // at the pin, rebase onto base, soft reset, squash commit. Run it in a detached
 // reconcile tree; it moves neither mainline nor the container (ADR 0150).
-func Compose(branch, trailer, packet string) (composed, base, pin string, err error) {
-	return Repo("").Compose(branch, trailer, packet)
+func Compose(branch, trailer, packet, subject string) (composed, base, pin string, err error) {
+	return Repo("").Compose(branch, trailer, packet, subject)
 }
 
 // Compose is the package Compose in the child; run it on a Repo built from the
 // child's detached land-tree path (<tree>/<dir>), where the rebase and squash happen.
 // Main-clean and the ADR-clash check read the child, never the Workspace.
-func (r Repo) Compose(branch, trailer, packet string) (composed, base, pin string, err error) {
+func (r Repo) Compose(branch, trailer, packet, subject string) (composed, base, pin string, err error) {
 	if err := r.mainClean(); err != nil {
 		return "", "", "", err
 	}
@@ -1751,7 +1798,7 @@ func (r Repo) Compose(branch, trailer, packet string) (composed, base, pin strin
 	if err != nil {
 		return "", "", "", err
 	}
-	if _, err := r.run(squashCommitArgs(branch, pin, trailer, graph, packet)...); err != nil {
+	if _, err := r.run(squashCommitArgs(branch, subject, pin, trailer, graph, packet)...); err != nil {
 		return "", "", "", err
 	}
 	if composed, err = r.run("rev-parse", "HEAD"); err != nil {
@@ -1790,11 +1837,7 @@ func (r Repo) LandSameBase(composed, base, pin string) LandStrategy {
 // LandLocal is the local strategy: Compose then LandSameBase in one locked call,
 // with no Decision Packet (a Checkpoint's goes through gatedLand's composeLanding).
 func LandLocal(branch, trailer string) (sha string, err error) {
-	composed, base, pin, err := Compose(branch, trailer, "")
-	if err != nil {
-		return "", err
-	}
-	return LandSameBase(composed, base, pin)(branch, trailer)
+	return Repo("").landLocal("")(branch, trailer)
 }
 
 // LandedTip is the container tip the land squash sha pinned (its TipPin line), ok
@@ -2083,8 +2126,8 @@ func MainlineLogAcross(n int, repos map[string]string) ([]MainlineCommit, error)
 func revertTreeArgs(base, squash string) []string {
 	return []string{"merge-tree", "--write-tree", "--name-only", "--merge-base=" + squash, base, squash + "^"}
 }
-func revertCommitArgs(tree, base, squash, trailer, graph string) []string {
-	return []string{"commit-tree", tree, "-p", base, "-m", "revert " + squash, "-m", TrailerBlock("", trailer, graph)}
+func revertCommitArgs(tree, base, squashSubject, trailer, graph string) []string {
+	return []string{"commit-tree", tree, "-p", base, "-m", "revert: " + squashSubject, "-m", TrailerBlock("", trailer, graph)}
 }
 
 // Revert undoes squash on mainline with one forward commit carrying trailer and
@@ -2146,7 +2189,11 @@ func (r Repo) RevertOnto(base, squash, trailer string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return r.run(revertCommitArgs(tree, base, squash, trailer, graph)...)
+	subject, err := r.run("log", "-1", "--format=%s", squash)
+	if err != nil {
+		return "", err
+	}
+	return r.run(revertCommitArgs(tree, base, subject, trailer, graph)...)
 }
 
 // FirstParentOnMain normalises x to mainline's first-parent line: x itself when it is
@@ -2182,8 +2229,16 @@ func (r Repo) FirstParentOnMain(x string) (string, error) {
 // revert as sole parent — the same tree `git revert <revert>` (ADR 0048 §4) yields,
 // without a checkout — then a CAS update-ref moves branch from revert onto it. No
 // index, worktree or HEAD is touched, like CutBranch.
-func reapplyCommitArgs(revert string) []string {
-	return []string{"commit-tree", revert + "~1^{tree}", "-p", revert, "-m", "reapply " + revert}
+//
+// The reapply's subject is the original land subject: revertSubject with its leading
+// "revert: " stripped. A revert written before conventional subjects lacks the prefix,
+// so its reapply is "revert: <revert subject>", still conventional.
+func reapplyCommitArgs(revert, revertSubject string) []string {
+	subject, ok := strings.CutPrefix(revertSubject, "revert: ")
+	if !ok {
+		subject = "revert: " + revertSubject
+	}
+	return []string{"commit-tree", revert + "~1^{tree}", "-p", revert, "-m", subject}
 }
 func reapplyRefArgs(branch, sha, revert string) []string {
 	return []string{"update-ref", "refs/heads/" + branch, sha, revert}
@@ -2206,7 +2261,11 @@ func (r Repo) reapply(branch, revert string) (sha string, err error) {
 	if err != nil || tip != revert {
 		return tip, err
 	}
-	if sha, err = r.run(reapplyCommitArgs(revert)...); err != nil {
+	subject, err := r.run("log", "-1", "--format=%s", revert)
+	if err != nil {
+		return "", err
+	}
+	if sha, err = r.run(reapplyCommitArgs(revert, subject)...); err != nil {
 		return "", err
 	}
 	if _, err := r.run(reapplyRefArgs(branch, sha, revert)...); err != nil {

@@ -15,7 +15,10 @@ reader can probe, and nothing is written to the graph.
   common dir, like the loop lock (ADR 0089). Bead ids are unique per graph, so
   every Workspace on the graph sees the same hold.
 - **Holder.** Open with `O_RDWR|O_CREATE` (Go's default `O_CLOEXEC` stays on, so
-  child processes never inherit the lock). Lock with `flock(LOCK_EX|LOCK_NB)`,
+  child processes never inherit the lock, with one deliberate exception: the
+  TUI clears it on a run-now hold's fd for the spawned run-now host only, and
+  closes its own copy; see ADR 0330 (mugicrew-a-run-now-host-inherits-the-effort-flock-by-fd…).
+  The host re-arms it, so reconcile and claude children still never inherit it). Lock with `flock(LOCK_EX|LOCK_NB)`,
   retried on `EWOULDBLOCK`/`EINTR` every few ms up to a short cap, as `git.go`
   does for the land lock. A probe briefly takes a free lock, and a single-shot
   acquire lost about a third of its attempts to hammering readers. The retried

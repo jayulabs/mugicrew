@@ -68,7 +68,7 @@ The record lists:
 2. Write this session's record.
 3. Print this line verbatim, then let the human exit:
 
-       ⏸ Surgery idle — /exit; l on its row resumes it.
+       ⏸ Surgery idle — /exit; enter on its row resumes it.
 
 Any exit that is not an end is a stop: never end a surgery on your own judgment.
 
@@ -82,14 +82,13 @@ Any exit that is not an end is a stop: never end a surgery on your own judgment.
 3. Write this session's record (the final one) before the bead closes.
 4. Run `mugicrew integrate` in this tree. It squashes effort/%[1]s onto the
    Checkpoint branch.
-   - Exit 0: integrated, or nothing ahead. Go on.
-   - Exit 2, a rebase conflict, left stopped in this tree: resolve the
-     conflicts, `git add` them, `git rebase --continue`, then re-run
-     `mugicrew integrate`. If you judge a conflict unresolvable, ask the human
-     before you `git rebase --abort`: they decide whether the stranded work is
-     abandoned. After an abort, do not end; stop instead.
-   - Exit 2 with no rebase stopped (the Checkpoint is held or landed), or
-     exit 1: show the human its output and stop; do not end.
+
+   %[6]s
+
+   Exit 0 means go on. If you judge a rebase conflict unresolvable, ask the
+   human before you `git rebase --abort`: they decide whether the stranded work
+   is abandoned. After an abort, do not end; stop instead. On any other
+   note-and-stop exit, show the human its output and stop; do not end.
 5. Run `mugicrew surgery end %[1]s`. It integrates again (a no-op now), hands
    the branch to review and closes the Surgery (or, with zero commits, closes
    the Surgery, and its Checkpoint only if this Surgery created it: nothing

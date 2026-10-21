@@ -256,7 +256,32 @@ func (g graphData) defogBands() (wait, front, paused []dRow) {
 			paused = append(paused, dRow{kind: dACW, key: "act:" + c.ID, b: c, chart: c, depth: 1})
 		}
 	}
+	for _, b := range g.homePaused(tabDefog, idSet(slices.Concat(wait, front, paused), func(r dRow) *bd.Bead { return r.b })) {
+		c := g.beadByID(b.Parent)
+		switch {
+		case b.Kind == contract.KindChart:
+			paused = append(paused, dRow{kind: dACW, key: "act:" + b.ID, b: b, chart: b, depth: 1})
+		case c.Kind != contract.KindChart:
+			paused = append(paused, dRow{kind: dACA, key: "act:" + b.ID, b: b, depth: 1})
+		case isHITL(b.Kind) && !b.Container:
+			paused = append(paused, dRow{kind: dAct, key: "act:" + b.ID, b: b, chart: c, depth: 1})
+		default:
+			paused = append(paused, dRow{kind: dACA, key: "act:" + b.ID, b: b, chart: c, afk: true, depth: 1})
+		}
+	}
 	slices.SortStableFunc(paused, func(a, b dRow) int { return beadCmp(*a.b, *b.b) })
+	return
+}
+
+// homePaused is the paused-band beads (Spec mc-f22wp FR 5, 10): every own-paused, otherwise ready
+// bead whose home tab is tab and not in seen (bead ids). Drafts and events are out.
+func (g graphData) homePaused(tab int, seen map[string]bool) (out []*bd.Bead) {
+	for i := range g.beads {
+		b := &g.beads[i]
+		if !b.Event && !seen[b.ID] && g.ownPausedReady(b) && homeTab(*b, g.beads) == tab {
+			out = append(out, b)
+		}
+	}
 	return
 }
 
@@ -511,7 +536,11 @@ func (t defogTab) selIndex(rows []dRow) int {
 		}
 	}
 	if id, ok := strings.CutPrefix(t.sel, "act:"); ok { // a leaf (AFK child or HITL) left Actionable: its tree twin; a Chart's act: row is excluded
-		if i := at(id); i >= 0 && t.g.beadByID(id).Kind != contract.KindChart {
+		b := t.g.beadByID(id)
+		if i := at(id); i >= 0 && b.Kind != contract.KindChart {
+			return i
+		}
+		if i := at(chartsPrefix + b.Parent); i >= 0 && b.Kind != contract.KindChart && t.g.beadByID(b.Parent).HasLabel("chart:defogged") { // a child of a defogged Chart has no tree row: its Chart's
 			return i
 		}
 	}
@@ -823,7 +852,7 @@ func (t defogTab) line(r dRow, tagW int, gut, trail string, blockers map[string]
 		return gut + ind + dimSt.Render(fmt.Sprintf("%s%d closed", fold, len(r.members))), ""
 	}
 	s := gut + ind + blank + t.g.sbrnLeaf(r.b, leafTitle(r.b, blockers[r.bk()]), tagW, blockers[r.bk()])
-	if r.kind == dAct || r.kind == dLive {
+	if (r.kind == dAct || r.kind == dLive || r.kind == dACA) && r.chart != nil {
 		s += sep() + dimSt.Render("in → "+chartName(r.chart.Title))
 	}
 	return s, suffix()

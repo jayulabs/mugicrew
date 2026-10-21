@@ -83,7 +83,7 @@ func (Jinbe) Launch(_ contract.Ctx, bead contract.Bead) (contract.LaunchCommand,
 // funcs; the jinbe test swaps them.
 var (
 	showBead             = bd.Show
-	jiraPrefix           = bd.JiraPrefixOf
+	jiraKey              = bd.JiraKeyOf
 	closeBead            = bd.Close
 	updateBody           = bd.Update
 	spawnChild           = bd.SpawnChildIfAbsent
@@ -408,8 +408,13 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 	if pin != head {
 		return nested, closeIfOpen(l, "obsolete: branch advanced without landing")
 	}
-	if lg.repo != "" && name == git.LandStrategyLocal { // gitlab overwrites strategy with pinnedGitlab below
-		if strategy, err = strategyFor(name, lg.tree); err != nil {
+	key, err := jiraKey(cp) // computed per Landing, never stored
+	if err != nil {
+		return nested, err
+	}
+	subject := git.LandSubject(string(cp.Kind), cp.Title, bd.ContextOf(cp), key, branch)
+	if name == git.LandStrategyLocal { // gitlab overwrites strategy with pinnedGitlab below
+		if strategy, err = strategyFor(name, lg.tree, subject); err != nil {
 			return nested, err
 		}
 	}
@@ -430,28 +435,24 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 			body = git.DecisionPacket(approval.Description)
 		}
 		if name == git.LandStrategyLocal {
-			return nested, gatedLand(l, cp, branch, trailer, pin, body, lg)
+			return nested, gatedLand(l, cp, branch, trailer, pin, body, subject, lg)
 		}
 	} else if name == git.LandStrategyGitlab {
 		body = contract.ChartSummary(cp.Description)
 	}
 	if name == git.LandStrategyGitlab {
 		// push and stamp the Landing's pin, not whatever the branch is by the lock (FR 9)
-		jira, err := jiraPrefix(cp) // computed per Landing, never stored
-		if err != nil {
-			return nested, err
-		}
-		strategy = pinnedGitlab(lg.repo, pin, git.MRPresentation{Title: jira + cp.Title, Body: body})
+		strategy = pinnedGitlab(lg.repo, pin, git.MRPresentation{Title: subject, Body: body})
 	}
 	sha, err := lg.land(branch, trailer, strategy)
 	var pending *git.LandPending
 	if errors.As(err, &pending) {
 		eventlog.RecordLandPending(l, branch, pending.MR, pending.Pushed, pending.Opened, lg.attrs...)
-		if err := recordMR(l, lg.mrPath, pending.MR); err != nil {
+		if err := recordMR(l, lg.mrPath, pending.MR, pending.WebURL); err != nil {
 			return nested, err
 		}
 		if name == git.LandStrategyGitlab {
-			return nested, spawnMRWatch(cp, lg, pending.MR)
+			return nested, spawnMRWatch(cp, lg, pending.MR, pending.WebURL)
 		}
 		return nested, nil
 	}
@@ -517,6 +518,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 	if err != nil {
 		return true, err // a 429 is held by reconcileLanding
 	}
+	backfillMRLink(&l, cp, iid, mr)
 	if mr.State == forge.StateMerged {
 		// LandedBase missed at the tick's fetch, but the merge may have landed since: fetch
 		// again, and only a second miss is trailerless
@@ -586,7 +588,7 @@ func conflictArm(l *bd.Bead, cp bd.Bead, branch, trailer string, mr *forge.MR, l
 	case mr.HasConflicts || mr.MergeError != "":
 		fileErr = fileConflict(cp, base, nil, lg.head, false)
 	case checkedBase(l.Description) != base:
-		_, _, _, err := lg.compose(branch, trailer, "")
+		_, _, _, err := lg.compose(branch, trailer, "", "")
 		var conflict *git.RebaseConflict
 		var clash *git.NumberClash
 		switch {
@@ -607,6 +609,32 @@ func conflictArm(l *bd.Bead, cp bd.Bead, branch, trailer string, mr *forge.MR, l
 	}
 	landOutcome(lg, *l, eventlog.LandConflict, mr.IID)
 	return true, closeIfOpen(*l, "obsolete: conflict")
+}
+
+// backfillMRLink gives a Landing that predates "MR link:" the line from the MR just read, and
+// likewise the container's open MR Watch on the same MR: reconcileMRWatch skips behind a
+// pending Landing, so this is the Watch's only route. A failed write only warns and the
+// next tick retries, as recordMRStatus does; a link never blocks a land.
+func backfillMRLink(l *bd.Bead, cp bd.Bead, iid int, mr *forge.MR) {
+	if mr.WebURL == "" {
+		return
+	}
+	line := git.MRLinkLine(mr.WebURL)
+	if err := setLine(l, git.MRLinkKey, line); err != nil {
+		slog.Warn("land.mr_link_write_failed", append(eventlog.BeadAttrs(*l), "err", err)...)
+	}
+	watches, err := childrenOfKind(cp.ID, contract.KindMRWatch)
+	if err != nil {
+		slog.Warn("land.mr_link_write_failed", append(eventlog.BeadAttrs(*l), "err", err)...)
+		return
+	}
+	for _, w := range watches {
+		if w.Open() && git.RecordedMR(w.Description) == iid {
+			if err := setLine(&w, git.MRLinkKey, line); err != nil {
+				slog.Warn("land.mr_link_write_failed", append(eventlog.BeadAttrs(w), "err", err)...)
+			}
+		}
+	}
 }
 
 // recordMRStatus sets the Landing's display-only "MR status: <raw>" line (ADR 0227), skipping
@@ -891,10 +919,21 @@ func finalCloseOut(l, cp bd.Bead, branch, sha string, lg legs) error {
 }
 
 // recordMR appends "MR: !<iid>" (or "MR: <group/proj>!<iid>" for a nested repo's project, ADR 0230) to the Landing's body unless it already carries an
-// MR: line, so later ticks and Landings know which MR this attempt was (Spec FR 12).
-func recordMR(l bd.Bead, path string, iid int) error {
-	_, err := bd.SetLineIfUnset(updateBody, l.ID, l.Description, "MR:", git.MRLine(path, iid))
-	return err
+// MR: line, so later ticks and Landings know which MR this attempt was (Spec FR 12). A
+// non-empty webURL is recorded beside it as "MR link:", likewise once.
+func recordMR(l bd.Bead, path string, iid int, webURL string) error {
+	return setMRLines(&l, path, iid, webURL)
+}
+
+// setMRLines sets b's "MR:" line and, for a non-empty webURL, its "MR link:" line.
+func setMRLines(b *bd.Bead, path string, iid int, webURL string) error {
+	if err := setLine(b, "MR:", git.MRLine(path, iid)); err != nil {
+		return err
+	}
+	if webURL == "" {
+		return nil
+	}
+	return setLine(b, git.MRLinkKey, git.MRLinkLine(webURL))
 }
 
 // landOutcome is eventlog.RecordLandOutcome with the legs' nested attrs (context=/repo=/into=), none for a Workspace land.
@@ -909,7 +948,7 @@ type legs struct {
 	tree       git.Repo // the child inside this land tree (<tree>/<dir>), where Compose runs
 	landedBase func(trailer string) (string, error)
 	head       func(ref string) (string, error)
-	compose    func(branch, trailer, packet string) (composed, base, pin string, err error)
+	compose    func(branch, trailer, packet, subject string) (composed, base, pin string, err error)
 	sameBase   func(composed, base, pin string) git.LandStrategy
 	land       func(branch, trailer string, st git.LandStrategy) (string, error)
 	gateAttr   func() string // read only on the gated path
@@ -994,11 +1033,11 @@ const maxGateAttempts = 3
 // 0151). Per attempt: compose; gate build; same-base land. A moved base re-runs the
 // attempt; a moved pin closes the Landing obsolete; an infra failure is returned
 // with the Landing open. Nothing is remembered across ticks.
-func gatedLand(l, cp bd.Bead, branch, trailer, pin, packet string, lg legs) error {
+func gatedLand(l, cp bd.Bead, branch, trailer, pin, packet, subject string, lg legs) error {
 	var lastBase, lastComposed string
 	attr := lg.gateAttr()
 	for attempt := 1; attempt <= maxGateAttempts; attempt++ {
-		composed, base, composedPin, err := lg.compose(branch, trailer, packet)
+		composed, base, composedPin, err := lg.compose(branch, trailer, packet, subject)
 		lastBase, lastComposed = base, composed
 		if err != nil {
 			eventlog.RecordLand(l, branch, "", err, lg.attrs...)
@@ -1305,7 +1344,7 @@ func reconcileGitlabRollback(rb, cp bd.Bead, lg rbLeg, squash, base string) erro
 	if err != nil {
 		return err
 	}
-	if err := setLine(&rb, "MR:", git.MRLine(lg.mrPath, p.MR)); err != nil {
+	if err := setMRLines(&rb, lg.mrPath, p.MR, p.WebURL); err != nil {
 		return err
 	}
 	eventlog.RecordRevertPending(rb, target, p.MR, p.Pushed, p.Opened, pin, lg.attrs...)
@@ -1585,9 +1624,9 @@ func handOff(rb, rolledBack bd.Bead, squash, revert string, conflict *git.Revert
 	cutBranch func(name, base string) (bool, error), reapply func(branch, revert string) (string, error)) (string, error) {
 	target := rolledBack.ID
 	dec := decidingBead(rb, rolledBack)
-	desc := "Successor of " + target + ", reverted on main by Rollback " + rb.ID + " (ADR 0048)."
+	desc := "Successor of " + target + ", reverted on main by Rollback " + rb.ID + " (ADR 0048 (mugicrew-rollback-successor))."
 	if conflict != nil {
-		desc = "Successor of " + target + ", fixing forward for Rollback " + rb.ID + ": its revert conflicted, main is unchanged (ADR 0049).\n" +
+		desc = "Successor of " + target + ", fixing forward for Rollback " + rb.ID + ": its revert conflicted, main is unchanged (ADR 0049 (mugicrew-rollback-revert…)).\n" +
 			git.ConflictPin(conflict)
 	}
 	// The Spec line is required by Spec §4 ("its body states the Spec") for a
@@ -1798,7 +1837,7 @@ func fileConflict(cp bd.Bead, base string, clashes []string, head func(string) (
 		if err != nil {
 			return err
 		}
-		body = where + "numbered-file clash (ADR 0219): checkpoint/" + cp.ID + " adds a numbered file whose number mainline already holds in its sequence under another filename. Franky rebases onto the pinned base, then reads crew doc sequence-renumber.md and renumbers the branch's file to the next free number (fixing references to it), then this bead closes and " + after + ".\nclashes:\n- " + strings.Join(clashes, "\n- ") + "\n"
+		body = where + "numbered-file clash (ADR 0219 (mugicrew-the-adr…)): checkpoint/" + cp.ID + " adds a numbered file whose number mainline already holds in its sequence under another filename. Franky rebases onto the pinned base, then reads crew doc sequence-renumber.md and renumbers the branch's file to the next free number (fixing references to it), then this bead closes and " + after + ".\nclashes:\n- " + strings.Join(clashes, "\n- ") + "\n"
 		if widened {
 			body += "own beads: " + strings.Join(beads, ", ") + "\n"
 		}

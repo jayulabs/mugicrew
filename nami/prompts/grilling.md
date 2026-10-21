@@ -29,14 +29,17 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
    A step the work will need in the external world (outside the bead graph and
    the code) may be drafted as a free-standing Task, never a Chart child (no
    --parent), its body in crew doc task-body.md's format, blocked on the Chart or
-   Spec it waits for. Carry moves that edge onto the Checkpoint when it is cut:
+   Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
        bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
          --title "..." --description "<its ## Steps body>"
        bd dep add <task> <chartID>
 
-5. **Record, integrate and close**: run `mugicrew integrate` in this tree
-   (the skeleton says what each exit means), and only after it exits 0 close
-   with:
+5. **Record, integrate and close**: run `mugicrew integrate` in this tree.
+   Its exits:
+
+%[3]s
+
+   Only after it exits 0 close with:
 
        bd close %[1]s --reason "answered: <one-line summary>"

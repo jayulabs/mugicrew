@@ -304,3 +304,14 @@ func TestIdeateActionableBackloggedInitiativeGroup(t *testing.T) {
 		t.Errorf("header:\n%s", v)
 	}
 }
+
+// Spec mc-f22wp FR 5: the home-tab pass adds no duplicates, and a Backlog Signal stays out.
+func TestIdeateActionableHomePausedBacklog(t *testing.T) {
+	paused := func(b bd.Bead) bd.Bead { b.Labels = []string{"paused:manual"}; return b }
+	m, _ := drainedModel(t, []bd.Bead{
+		paused(sig("p1", "open", 1, "")), paused(sig("p3", "open", 3, "")), paused(sig("p4", "open", 4, "")),
+	}, nil)
+	if got := actKeys(m); got != "act:p1" {
+		t.Errorf("act %q, want act:p1 once", got)
+	}
+}

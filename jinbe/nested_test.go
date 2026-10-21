@@ -145,7 +145,7 @@ func TestNestedLandingRefusesOnStampDrift(t *testing.T) {
 func landNestedCheckpoint(t *testing.T, child git.Repo) string {
 	t.Helper()
 	tree := git.Repo(filepath.Join(".", "child"))
-	composed, base, pin, err := tree.Compose("checkpoint/ws-cp", checkpointTrailer("ws-cp"), "")
+	composed, base, pin, err := tree.Compose("checkpoint/ws-cp", checkpointTrailer("ws-cp"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func nestedGitlab(t *testing.T, r *jinbeSeamRec) (tip string, child git.Repo, g 
 	landStrategy = func() (string, git.LandStrategy, error) { return "gitlab", git.LandLocal, nil }
 	oStrategy := strategyFor
 	t.Cleanup(func() { strategyFor = oStrategy })
-	strategyFor = func(string, git.Repo) (git.LandStrategy, error) { return git.LandLocal, nil }
+	strategyFor = func(string, git.Repo, string) (git.LandStrategy, error) { return git.LandLocal, nil }
 	oPinned := pinnedGitlab
 	t.Cleanup(func() { pinnedGitlab = oPinned })
 	pinnedGitlab = func(repo git.Repo, _ string, p git.MRPresentation) git.LandStrategy {

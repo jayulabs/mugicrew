@@ -1,16 +1,16 @@
 {
   "name": "@jayulabs/mugicrew",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Agent crew dispatch CLI",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/jayulabs/mugicrew.git" },
   "bin": { "mugicrew": "bin/mugicrew.js" },
   "files": ["bin/mugicrew.js", "README.md"],
   "optionalDependencies": {
-    "@jayulabs/mugicrew-linux-x64": "0.3.0",
-    "@jayulabs/mugicrew-linux-arm64": "0.3.0",
-    "@jayulabs/mugicrew-darwin-arm64": "0.3.0",
-    "@jayulabs/mugicrew-darwin-x64": "0.3.0"
+    "@jayulabs/mugicrew-linux-x64": "0.4.0",
+    "@jayulabs/mugicrew-linux-arm64": "0.4.0",
+    "@jayulabs/mugicrew-darwin-arm64": "0.4.0",
+    "@jayulabs/mugicrew-darwin-x64": "0.4.0"
   },
   "publishConfig": { "access": "public" }
 }

@@ -20,6 +20,7 @@ import (
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/nami"
+	"jayulabs.org/mugicrew/promptguard"
 )
 
 type stubCtx struct{}
@@ -63,37 +64,38 @@ type jinbeSeamRec struct {
 	pivots         []bd.Bead       // the Checkpoint's open pivots
 	blockers       []bd.Bead       // the Checkpoint's open incoming blockers (the land hold)
 
-	gated          bool               // land_strategy resolves to local (the gate applies to a Checkpoint)
-	composeErr     error              // non-nil → composeLanding fails
-	gateErr        error              // non-nil → gateBuild fails
-	landErrs       []error            // gated: sameBaseLand outcomes per attempt, then success
-	composes       int                // composeLanding calls
-	composePackets []string           // the Decision Packet composeLanding saw per call
-	composePins    []string           // composeLanding's pin per call (default r.head); a moved container
-	gates          int                // gateBuild calls
-	sbLands        int                // landBranch calls carrying the same-base strategy
-	fetches        int                // fetchForge calls
-	presentation   git.MRPresentation // the presentation pinnedGitlab last received (nestedGitlab)
-	fetchRepos     []git.Repo         // the repo each fetchForge call named
-	projects       []forge.Project    // the project each Forge seam call named, in order
-	fetchErr       error              // non-nil → fetchForge fails
-	fetchLands     bool               // a successful fetch brings the trailer onto main
-	landsOnFetch   int                // the Nth fetch (1-based) brings the trailer onto main
-	bodies         []string           // Landing bodies written by updateBody
-	mr             *forge.MR          // forgeMR's snapshot
-	mrErr          error              // non-nil → forgeMR fails
-	mrReads        int                // forgeMR calls
-	descAsserts    []string           // pins forgeAssertDesc was asked to assert
-	jobReads       int                // forgeJobs calls
-	assertErr      error              // non-nil → forgeAssertDesc fails
-	retries        []int              // forgeRetry calls, one per POST
-	jobs           []forge.Job
-	retryErr       error // non-nil → forgeRetry fails
-	jobsErr        error // non-nil → forgeJobs fails
-	targetSHA      string
-	sourceSHA      string   // forgeSource: the merged-results commit's second parent
-	landedTip      string   // the Tip: of the landed squash; "" → none
-	signals        []string // offshoot Signal bodies spawnSignal filed
+	gated           bool               // land_strategy resolves to local (the gate applies to a Checkpoint)
+	composeErr      error              // non-nil → composeLanding fails
+	gateErr         error              // non-nil → gateBuild fails
+	landErrs        []error            // gated: sameBaseLand outcomes per attempt, then success
+	composes        int                // composeLanding calls
+	composeSubjects []string           // the land subject composeLanding saw per call
+	composePackets  []string           // the Decision Packet composeLanding saw per call
+	composePins     []string           // composeLanding's pin per call (default r.head); a moved container
+	gates           int                // gateBuild calls
+	sbLands         int                // landBranch calls carrying the same-base strategy
+	fetches         int                // fetchForge calls
+	presentation    git.MRPresentation // the presentation pinnedGitlab last received (nestedGitlab)
+	fetchRepos      []git.Repo         // the repo each fetchForge call named
+	projects        []forge.Project    // the project each Forge seam call named, in order
+	fetchErr        error              // non-nil → fetchForge fails
+	fetchLands      bool               // a successful fetch brings the trailer onto main
+	landsOnFetch    int                // the Nth fetch (1-based) brings the trailer onto main
+	bodies          []string           // Landing bodies written by updateBody
+	mr              *forge.MR          // forgeMR's snapshot
+	mrErr           error              // non-nil → forgeMR fails
+	mrReads         int                // forgeMR calls
+	descAsserts     []string           // pins forgeAssertDesc was asked to assert
+	jobReads        int                // forgeJobs calls
+	assertErr       error              // non-nil → forgeAssertDesc fails
+	retries         []int              // forgeRetry calls, one per POST
+	jobs            []forge.Job
+	retryErr        error // non-nil → forgeRetry fails
+	jobsErr         error // non-nil → forgeJobs fails
+	targetSHA       string
+	sourceSHA       string   // forgeSource: the merged-results commit's second parent
+	landedTip       string   // the Tip: of the landed squash; "" → none
+	signals         []string // offshoot Signal bodies spawnSignal filed
 
 	discussions     []forge.Discussion // forgeDiscussions' answer
 	discussionsErr  error
@@ -132,9 +134,9 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	t.Cleanup(func() { subtreeIDs = oSubtree })
 	causedBy = func(string, contract.Kind) (string, bool, error) { return "", false, nil }
 	t.Cleanup(func() { causedBy = oCausedBy })
-	oJira := jiraPrefix
-	jiraPrefix = func(bd.Bead) (string, error) { return "", nil }
-	t.Cleanup(func() { jiraPrefix = oJira })
+	oJira := jiraKey
+	jiraKey = func(bd.Bead) (string, error) { return "", nil }
+	t.Cleanup(func() { jiraKey = oJira })
 	t.Cleanup(func() { postLandClashes = oClash })
 	postLandClashes = func(string) ([]git.PostLandClash, error) { r.clashRead++; return r.clashes, r.clashErr }
 	probeBase = func(repo git.Repo) (string, error) { r.probeRepos = append(r.probeRepos, repo); return "basesha", nil }
@@ -257,8 +259,9 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		}
 		return "gitlab", nil, r.strategyErr
 	}
-	composeLanding = func(_, _, packet string) (string, string, string, error) {
+	composeLanding = func(_, _, packet, subject string) (string, string, string, error) {
 		r.composes++
+		r.composeSubjects = append(r.composeSubjects, subject)
 		r.composePackets = append(r.composePackets, packet)
 		pin := r.head
 		if r.composes <= len(r.composePins) {
@@ -690,7 +693,10 @@ func TestSequenceClashRaisesClashVariantConflictBead(t *testing.T) {
 	if base, ok := git.ParseBase(conf.Description); !ok || base != "basesha" {
 		t.Errorf("the conflict member must carry the Base: pin, got %q", conf.Description)
 	}
-	if !strings.Contains(conf.Description, "numbered-file clash") || !strings.Contains(conf.Description, "ADR 0219") || !strings.Contains(conf.Description, "sequence-renumber.md") || !strings.Contains(conf.Description, clash) {
+	if bare := promptguard.BareADRCitations(conf.Description); len(bare) > 0 {
+		t.Errorf("clash body cites %q by bare number: %q", bare, conf.Description)
+	}
+	if !strings.Contains(conf.Description, "numbered-file clash") || !strings.Contains(conf.Description, "ADR 0219 (") || !strings.Contains(conf.Description, "sequence-renumber.md") || !strings.Contains(conf.Description, clash) {
 		t.Errorf("want the clash-variant body naming %q, got %q", clash, conf.Description)
 	}
 	if !slices.Equal(r.closed, []string{"ws-land"}) || r.reasons[0] != "obsolete: conflict" {
@@ -790,6 +796,26 @@ func TestLandingPendingRecordsTheMROnce(t *testing.T) {
 	}
 	if e := (*evs)[0]; e.Name != "land.pending" || e.Attrs["mr"] != int64(7) && e.Attrs["mr"] != 7 {
 		t.Errorf("event = %+v, want land.pending with mr 7", e)
+	}
+}
+
+// A pending Landing records MR link: beside MR: when the land reported a web URL (a nested
+// repo's included, never a derived one), and no MR link: line when it did not.
+func TestLandingPendingRecordsTheMRLinkBesideTheMR(t *testing.T) {
+	for _, tc := range []struct{ name, url, want string }{
+		{"workspace", "https://gl.example.com/ns/p/-/merge_requests/7", "Commit: cafef00d\nMR: !7\nMR link: https://gl.example.com/ns/p/-/merge_requests/7"},
+		{"empty url", "", "Commit: cafef00d\nMR: !7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7, WebURL: tc.url}}
+			stubJinbeSeams(t, r)
+			if err := reconcileLanding(openLanding("cafef00d")); err != nil {
+				t.Fatal(err)
+			}
+			if len(r.bodies) == 0 || strings.TrimSpace(r.bodies[len(r.bodies)-1]) != tc.want {
+				t.Errorf("bodies = %q, want last %q", r.bodies, tc.want)
+			}
+		})
 	}
 }
 
@@ -1306,6 +1332,7 @@ type rollbackRec struct {
 
 	gitlab      bool       // land_strategy gitlab: the revert goes through an MR
 	pushes      []string   // pushRevertMR pins, one per push
+	mrURL       string     // pushRevertMR's MR web URL
 	pushRepos   []git.Repo // the repo each pushRevertMR call named
 	built       int        // revertOnto calls
 	mrClosed    []int      // forgeCloseMR iids
@@ -1338,7 +1365,7 @@ func stubRollbackSeams(t *testing.T, r *rollbackRec) {
 	pushRevertMR = func(repo git.Repo, id, trailer, pin string) (*git.LandPending, error) {
 		r.pushRepos = append(r.pushRepos, repo)
 		r.pushes = append(r.pushes, id+" "+trailer+" "+pin)
-		return &git.LandPending{MR: 9, Pushed: true, Opened: len(r.pushes) == 1}, nil
+		return &git.LandPending{MR: 9, WebURL: r.mrURL, Pushed: true, Opened: len(r.pushes) == 1}, nil
 	}
 	firstParent = func(x string) (string, error) { return cmp.Or(r.mergedAt, x), nil }
 	forgeCloseMR = func(p forge.Project, iid int) error {
@@ -1446,6 +1473,10 @@ func assertHandedOff(t *testing.T, r *rollbackRec) {
 	}
 	if len(r.successors) != 1 || r.successors[0].Kind != contract.KindCheckpoint || !r.successors[0].Container {
 		t.Errorf("successors = %+v, want one container Checkpoint", r.successors)
+	} else if bare := promptguard.BareADRCitations(r.successors[0].Description); len(bare) > 0 {
+		t.Errorf("successor body %q cites %q by bare number", r.successors[0].Description, bare)
+	} else if !strings.Contains(r.successors[0].Description, "ADR ") {
+		t.Errorf("successor body %q must cite its ADR with a slug", r.successors[0].Description)
 	} else if !strings.Contains(r.successors[0].Description, "Spec: ws-spec") {
 		t.Errorf("successor body %q must state the Spec", r.successors[0].Description)
 	}
@@ -2658,6 +2689,25 @@ func TestCheckpointApprovalCountsOnlyApprovedClose(t *testing.T) {
 	}
 }
 
+// A Rollback's revert MR records MR link: beside MR:, and no MR link: line when the land
+// reported no URL.
+func TestGitlabRollbackRecordsTheMRLink(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"https://gl.example.com/ns/p/-/merge_requests/9", "MR link: https://gl.example.com/ns/p/-/merge_requests/9"},
+		{"", ""},
+	} {
+		r := gitlabRollback()
+		r.mrURL = tc.url
+		stubRollbackSeams(t, r)
+		if err := reconcileRollback(r.rollback()); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(r.body, "MR: !9") || git.RecordedMRLink(r.body) != strings.TrimPrefix(tc.want, "MR link: ") || (tc.url == "" && strings.Contains(r.body, "MR link:")) {
+			t.Errorf("url %q: body = %q, want MR: !9 and %q", tc.url, r.body, tc.want)
+		}
+	}
+}
+
 // gitlabRollback is a landed target's Rollback under gitlab, as the graph holds it.
 func gitlabRollback() *rollbackRec {
 	return &rollbackRec{gitlab: true, target: "ws-cp", targetSt: "closed", onMain: true, body: "main broke because …"}
@@ -2830,7 +2880,7 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 		{"checkpoint packet", "checkpoint", git.CommitPin("cafef00d") + "\n\n## Background\n\nwhy\n", "## Background\n\nwhy", ""},
 		{"packet-less approval", "checkpoint", git.CommitPin("cafef00d"), "", ""},
 		{"chart summary", "chart", "", "Go here.", ""},
-		{"jira prefix", "chart", "", "Go here.", "ABC-1: "},
+		{"jira key", "chart", "", "Go here.", "ABC-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &jinbeSeamRec{head: "cafef00d", approvalBody: tc.approval, landErr: &git.LandPending{MR: 5}}
@@ -2845,7 +2895,7 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 				return b, nil
 			}
 			if tc.jira != "" {
-				jiraPrefix = func(bd.Bead) (string, error) { return tc.jira, nil }
+				jiraKey = func(bd.Bead) (string, error) { return tc.jira, nil }
 			}
 			var got git.MRPresentation
 			o := pinnedGitlab
@@ -2857,7 +2907,15 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 			if err := landingRun(r, "cafef00d"); err != nil {
 				t.Fatal(err)
 			}
-			if want := (git.MRPresentation{Title: tc.jira + "Ship it", Body: tc.want}); got != want {
+			typ := "feat"
+			if tc.kind == "chart" {
+				typ = "docs"
+			}
+			wantTitle := typ + ": Ship it"
+			if tc.jira != "" {
+				wantTitle += " (" + tc.jira + ")"
+			}
+			if want := (git.MRPresentation{Title: wantTitle, Body: tc.want}); got != want {
 				t.Errorf("presentation = %+v, want %+v", got, want)
 			}
 		})
@@ -2970,4 +3028,20 @@ func TestOpenForgeReviewHoldsAFreshLandingOverAnApprovalAtHead(t *testing.T) {
 		t.Fatalf("reconcileCheckpoint: %v", err)
 	}
 	landingsSpawned(t, r, "cafef00d", "ws-appr0")
+}
+
+// A local Checkpoint Landing composes its squash with the conventional land subject,
+// the Jira key at the end.
+func TestLocalLandingComposesWithTheConventionalSubject(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", gated: true}
+	stubJinbeSeams(t, r)
+	jiraKey = func(bd.Bead) (string, error) { return "MC-9", nil }
+	approvedAtHead = func(string, string) bool { return true }
+	t.Cleanup(func() { approvedAtHead = git.ApprovedAtHead })
+	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"feat: Ship the thing (MC-9)"}; !slices.Equal(r.composeSubjects, want) {
+		t.Errorf("compose subjects = %q, want %q", r.composeSubjects, want)
+	}
 }

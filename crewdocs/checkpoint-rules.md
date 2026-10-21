@@ -64,3 +64,16 @@ Raise one pivot per distinct wrong FR. Go sees a pivot discovered-from your
 bead, freezes the Checkpoint (the pivot blocks it until it closes) and closes
 your bead `pivoted: <pivot>` in the same publish as your Drafts. Never
 improvise a redesign for that FR; your prompt says what you do next.
+
+A **Task raiser** differs: a Task stuck on a wrong FR stays stuck, claimed and
+open, and is never closed `pivoted:`. It holds the Checkpoint's land, and its
+step still has to happen. Its pivot is `discovered-from` the Task, and the pivot
+is paired with a Critique carrying the Ask, which is the refile that an effort
+raiser's unfinished FR would otherwise get.
+
+A Signal reroute raises a pivot too, but Go closes the Signal `rerouted: <ids>`
+in the publish (not `pivoted:`), and the pivot is caused-by the Signal. The
+pivot's **Ask Critique**, the Critique discovered-from it, carries the Signal's
+Ask. Zoro rewrites or closes it on dismiss (the dismiss refile), comments
+`AMENDMENT (<pivot>): …` on it on amend, and the sweep closes it obsolete on
+confirm or escalate. The Signal is never reopened.

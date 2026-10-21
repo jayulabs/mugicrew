@@ -1918,7 +1918,7 @@ func TestBeadSplitQuotesExe(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("beadSplit %s = %q, want it to contain %q", name, got, want)
 		}
-		for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1", "-l 40%"} {
+		for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1", "set-option -p remain-on-exit off", "-l 40%"} {
 			if !strings.Contains(got, w) {
 				t.Errorf("beadSplit %s lacks %q: %q", name, w, got)
 			}

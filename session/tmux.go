@@ -310,11 +310,16 @@ func beadSplitSide(exe string) string {
 	return beadSplit(exe, "split-window -h -l 40%")
 }
 
+// beadSplit also turns remain-on-exit off for the pane, in the same command list
+// as @beadpane so it is never alive without it. ADR 0037 §2 keeps failed agent
+// panes so a human can resume or drop them; that doesn't apply to a less viewer,
+// and on tmux 3.4 q can end less in a state recorded as failed, leaving a blank
+// dead pane. Render errors stay readable: stderr rides the pipe into less until q.
 func beadSplit(exe, split string) string {
 	sh := "'" + strings.ReplaceAll(exe, "'", `'\''`) + "'"
 	sh += ` bead-detail "$(tmux display-message -p '#{@bead}')" "$(tmux display-message -p '#{pane_width}')" 2>&1 | less -R`
 	sh = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(sh)
-	return split + ` -c '#{?pane_current_path,#{pane_current_path},#{session_path}}' "` + sh + `" ; set-option -p @beadpane 1`
+	return split + ` -c '#{?pane_current_path,#{pane_current_path},#{session_path}}' "` + sh + `" ; set-option -p @beadpane 1 ; set-option -p remain-on-exit off`
 }
 
 // ttyOption is the user option a TUI session carries naming its own client's tty

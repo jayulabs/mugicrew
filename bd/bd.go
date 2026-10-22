@@ -139,14 +139,19 @@ func NewSignal(title, description string) (string, error) {
 }
 
 // NewOffshoot files an offshoot Signal as draftedBy's Draft in one atomic create (ADR 0267):
-// discovered-from cause, plus edge ("blocked-by:<id>" or "blocks:<id>") when ordered.
-func NewOffshoot(title, body, draftedBy, cause, edge string) (string, error) {
+// discovered-from cause, plus edge ("blocked-by:<id>" or "blocks:<id>") when ordered, and
+// born a direct child of the Initiative parent when set (ADR 0348 §6, §7).
+func NewOffshoot(title, body, draftedBy, cause, edge, parent string) (string, error) {
 	deps := "discovered-from:" + cause
 	if edge != "" {
 		deps += "," + edge
 	}
-	args := unparentedArgs(Successor{Kind: contract.KindSignal, DraftedBy: draftedBy}, title, body)
-	return run(append(args, "--deps", deps)...)
+	if parent == "" {
+		args := unparentedArgs(Successor{Kind: contract.KindSignal, DraftedBy: draftedBy}, title, body)
+		return run(append(args, "--deps", deps)...)
+	}
+	s := Successor{Kind: contract.KindSignal, DraftedBy: draftedBy, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindSignal)), Description: body}
+	return run(successorCreateArgs("", s, deps)...)
 }
 
 // NewSignalWithRef is NewSignal carrying an external ref (a jira-<KEY> intake).
@@ -371,7 +376,9 @@ union select i.id from issues i join labels l on l.issue_id=i.id where i.status=
 union select d.depends_on_issue_id from dependencies d join issues i on i.id=d.issue_id join labels l on l.issue_id=i.id
   join issues p on p.id=d.depends_on_issue_id join labels lp on lp.issue_id=p.id
  where d.type='parent-child' and i.status='closed' and l.label='kind:landing' and i.close_reason like 'landed: %'
-  and i.closed_at>=utc_timestamp()-interval 24 hour and lp.label='kind:checkpoint' and p.status='closed'`
+  and i.closed_at>=utc_timestamp()-interval 24 hour and lp.label='kind:checkpoint' and p.status='closed'
+union select p.id from dependencies d join issues w on w.id=d.issue_id join labels l on l.issue_id=w.id join issues p on p.id=d.depends_on_issue_id
+ where d.type='parent-child' and l.label='kind:mr-watch' and w.status!='closed' and p.status='closed'`
 
 // DefaultIDs is the ids of the default set (ADR 0232): the first of the slow
 // tier's two bd calls, ListByID the second.
@@ -725,6 +732,13 @@ func Pause(id, cause string) error {
 	return err
 }
 
+// AddLabel adds label to id: one commutative label add (ADR 0070 §3), as Pause
+// is, for a marker a human removes with bd label remove.
+func AddLabel(id, label string) error {
+	_, err := run("update", id, "--add-label", label)
+	return err
+}
+
 // NotBuiltNote is the body of id's newest "Not built:" comment, prefix and
 // surrounding space trimmed; "" when none, or when the read fails (the pause it
 // decorates must not wait on it).
@@ -734,6 +748,17 @@ func NotBuiltNote(id string) string {
 		return ""
 	}
 	return notBuiltFrom(cs)
+}
+
+// RationaleNote is the body of id's newest "Rationale:" comment, prefix and
+// surrounding space trimmed; "" when none, or when the read fails (the close it
+// decorates must not wait on it). Mirrors NotBuiltNote.
+func RationaleNote(id string) string {
+	cs, err := Comments(id)
+	if err != nil {
+		return ""
+	}
+	return rationaleFrom(cs)
 }
 
 // Comment is one `bd comments --json` element.
@@ -766,9 +791,14 @@ func parseComments(js []byte) ([]Comment, error) {
 	return cs, nil
 }
 
-func notBuiltFrom(cs []Comment) string {
+func notBuiltFrom(cs []Comment) string { return newestNote(cs, "Not built:") }
+
+func rationaleFrom(cs []Comment) string { return newestNote(cs, "Rationale:") }
+
+// newestNote is the trimmed body of the newest comment starting with prefix.
+func newestNote(cs []Comment, prefix string) string {
 	for i := len(cs) - 1; i >= 0; i-- {
-		if note, ok := strings.CutPrefix(strings.TrimSpace(cs[i].Text), "Not built:"); ok {
+		if note, ok := strings.CutPrefix(strings.TrimSpace(cs[i].Text), prefix); ok {
 			return strings.TrimSpace(note)
 		}
 	}
@@ -921,13 +951,30 @@ var SpawnBlockingTask = SpawnBlockingTaskIfAbsent
 // foreign sha), and return the refusal so a Landing stays open. It is the one home
 // of this land policy: Jinbe, Nami and the loop all call it; tests swap SpawnBlockingTask.
 func HoldForeign(cp Bead, foreign *git.ForeignLanding) error {
-	where := "Mainline"
+	where, probe := "Mainline", "mugicrew probe foreign"
 	if c := ContextOf(cp); RepoStampOf(cp) != "" && c != "" {
-		where = "Mainline of context " + c
+		where, probe = "Mainline of context "+c, "mugicrew probe foreign --context "+c
 	}
-	body := fmt.Sprintf("%s holds %q at %s under another Bead Graph.\nForeign: %s\nGraph (theirs): %s\nGraph (ours): %s\n"+
-		"Fix: the two graphs share an issue_prefix. `bd rename-prefix` to a prefix distinct from the other graph's (a per-bead rename leaves loop start refused on the peer's trailer), then re-cut the branch and MR, and close this Task.\n",
-		where, foreign.Trailer, foreign.Sha, foreign.Sha, foreign.Theirs, foreign.Ours)
+	branch := git.BranchName(string(cp.Kind), cp.ID)
+	body := TaskBody(
+		fmt.Sprintf("%s holds %q at %s under another Bead Graph.", where, foreign.Trailer, foreign.Sha),
+		[]string{"Foreign: " + foreign.Sha, "Graph (theirs): " + foreign.Theirs, "Graph (ours): " + foreign.Ours},
+		[]TaskStep{{
+			Title:   fmt.Sprintf("Close the merge request for %s.", branch),
+			Markers: []string{"irreversible"},
+			Do:      fmt.Sprintf("close the Forge merge request whose source branch is %s.", branch),
+			Check:   fmt.Sprintf("`mugicrew probe mr --branch %s` prints `none`.", branch),
+		}, {
+			Title: "Stop the loop.",
+			Do:    "run `mugicrew loop stop`.",
+			Ask:   "is the loop stopped?",
+		}, {
+			Title: "Give this graph a prefix distinct from the other graph's.",
+			Do: "after this Task closes, run `bd rename-prefix` to a prefix distinct from the other graph's (not a per-bead rename), " +
+				"re-cut each open container branch under its new id, and restart the loop. " +
+				"`" + probe + "` may be run first to confirm the foreign land.",
+			Ask: "will you run the rename, the branch re-cuts and the loop restart after this Task closes?",
+		}}, "")
 	if _, _, err := SpawnBlockingTask(cp.ID, "Foreign: "+foreign.Sha+"\n", cp.Title+": mainline holds a foreign land of this bead", body); err != nil {
 		return err
 	}

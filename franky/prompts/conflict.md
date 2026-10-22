@@ -52,6 +52,11 @@ prints a description and comments).
 Keep every commit message and its trailers (`Surgery: <id>`, `Build: <id>`)
 when resolving: review and the end rule attribute commits by trailer.
 
+Any commit you author while resolving uses `<type>(<bead-id>): <subject>`, with
+the bead id `{{.BeadID}}` and the type chosen by the change (feat, fix, refactor,
+test, docs, chore, …); that rule covers only your own commits, never the replayed
+ones.
+
 ## Commit to your effort branch — only if dirty — then integrate
 
 Roll forward, don't double-resolve. Inspect the state FIRST: if the rebase reports

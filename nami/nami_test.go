@@ -617,7 +617,7 @@ func TestLaunchSurveyRendersChartingPromptWithBothIDs(t *testing.T) {
 		"bd supersede ws-chart --with",
 		"mugicrew chart drop ws-chart Destination",
 		"mugicrew chart append ws-chart Destination",
-		"bd dep add <task> ws-chart",
+		"mugicrew task new --drafted-by ws-srv --after ws-chart",
 		strings.Join(strings.Fields(contract.DraftInstruction("ws-srv")), " "),
 	} {
 		if !strings.Contains(got, want) {
@@ -752,6 +752,25 @@ func TestAFKPromptsSkillFree(t *testing.T) {
 	}
 }
 
+// Spec FR 1-4, 6, 11, 12: every rendered Nami prompt dictates only
+// Conventional-Commits types and states the rule wherever it tells Nami to
+// commit; prompts that commit nothing pass unchanged.
+func TestNamiPromptsConventionalCommits(t *testing.T) {
+	for name, got := range map[string]string{
+		"charting":         chartingPrompt("mc-srv", "mc-x"),
+		"grilling":         grillingPrompt("mc-x"),
+		"grilling-source":  sourceGrillingPrompt("mc-x"),
+		"speccing":         speccingPrompt("mc-x"),
+		"promote-or-stamp": promoteOrStampPrompt("mc-x"),
+		"research":         researchPrompt("mc-x"),
+		"chart-conflict":   chartConflictPrompt("mc-x"),
+	} {
+		if v := promptguard.CommitRuleViolations(got); len(v) > 0 {
+			t.Errorf("%s prompt breaks the conventional-commit rule: %q", name, v)
+		}
+	}
+}
+
 // Spec D6.5 / FR 35: promote-or-stamp splices the stamp label from
 // contract.LabelDefogged, so it can't drift from the loop's dispatch gate.
 func TestPromoteOrStampSplicesLabelDefogged(t *testing.T) {
@@ -837,18 +856,23 @@ func TestSpecTemplateOptionalTasksAfterFurtherNotes(t *testing.T) {
 	}
 }
 
-// Spec D5 (FR 4, 10): charting, grilling and promote-or-stamp may draft
-// a free-standing Task blocked on a Chart or Spec, never a Chart child.
-func TestChartSessionsMayDraftFreeStandingTask(t *testing.T) {
-	for name, c := range map[string]struct{ p, drafter string }{
-		"charting":         {chartingPrompt("mc-srv", "mc-x"), "mc-srv"},
-		"grilling":         {grillingPrompt("mc-x"), "mc-x"},
-		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), "mc-x"},
+// Spec decision C (FR14–FR17): charting, grilling and promote-or-stamp file a
+// Task through mugicrew task new, ordered after the Chart, never a Chart child.
+func TestChartSessionsFileTaskThroughTaskNew(t *testing.T) {
+	for name, c := range map[string]struct{ p, drafter, chart string }{
+		"charting":         {chartingPrompt("mc-srv", "mc-x"), "mc-srv", "mc-x"},
+		"grilling":         {grillingPrompt("mc-x"), "mc-x", "<chartID>"},
+		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), "mc-x", "mc-x"},
 	} {
 		flat := strings.Join(strings.Fields(c.p), " ")
-		for _, want := range []string{"-l kind:task," + contract.DraftedBy(c.drafter), "never a Chart child", "Carry copies"} {
+		for _, want := range []string{"mugicrew task new --drafted-by " + c.drafter + " --after " + c.chart, "never a Chart child", "Carry copies"} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s prompt missing %q", name, want)
+			}
+		}
+		for _, bad := range []string{"free-standing", "-l kind:task,", "bd dep add <task>"} {
+			if strings.Contains(flat, bad) {
+				t.Errorf("%s prompt still carries %q", name, bad)
 			}
 		}
 	}
@@ -970,7 +994,8 @@ func stubChartSeams(t *testing.T, show func(id string) (bd.Bead, error)) *[]stri
 	})
 	swap(t, &carry, func(string, string) ([]string, []bd.CarrySkip, error) { return nil, nil, nil })
 	swap(t, &branchHead, func(string) (string, error) { return "chartsha", nil })
-	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return nil, nil })
+	swap(t, &postLandClashes, func(string, string) ([]git.PostLandClash, error) { return nil, nil })
+	swap(t, &commitEmpty, func(string) (bool, error) { return false, nil })
 	swap(t, &forgeProject, func(git.Repo) (forge.Project, error) { return forge.Project{}, nil })
 	swap(t, &forgeFindOpenMR, func(forge.Project, string) (*forge.MR, error) { return nil, nil })
 	return closed
@@ -1765,8 +1790,8 @@ func TestSourceGrillingPromptRendersCleanly(t *testing.T) {
 	if strings.Contains(got, "%!") {
 		t.Errorf("stray format error in prompt:\n%s", got)
 	}
-	if want := sourceGrillingTmpl + "\n" + grillingPrompt("mc-y"); got != want {
-		t.Errorf("prompt != preamble + grillingPrompt:\n%s", got)
+	if !strings.HasPrefix(got, sourceGrillingTmpl+"\n") {
+		t.Errorf("prompt lacks the Source preamble:\n%s", got)
 	}
 }
 
@@ -1774,7 +1799,7 @@ func TestSourceGrillingPromptRendersCleanly(t *testing.T) {
 // with no edit, and its close reason is relayed whole, not as one line.
 func TestSourceGrillingPromptRules(t *testing.T) {
 	got := sourceGrillingPrompt("mc-y")
-	for _, want := range []string{"answer it in the close reason", "Not needed, or already fixed", "Edit only when a change is asked", "relayed whole"} {
+	for _, want := range []string{"answer it in the close reason", "Already fixed", "Edit only when a change is asked", "relayed whole"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("source grilling prompt lacks %q", want)
 		}
@@ -1809,7 +1834,12 @@ func stubRenumberChart(t *testing.T, clashes []git.PostLandClash, clashErr error
 	swap(t, &landingsOf, func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil })
 	swap(t, &landedTip, func(string) (string, bool) { return "", false })
 	swap(t, &closeBead, func(id, _ string) error { *seq = append(*seq, "close "+id); return nil })
-	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return clashes, clashErr })
+	swap(t, &postLandClashes, func(string, string) ([]git.PostLandClash, error) { return clashes, clashErr })
+	swap(t, &commitEmpty, func(string) (bool, error) { return false, nil })
+	swap(t, &mergeShaOf, func(string) (string, string, error) {
+		t.Error("the resolver runs only for an empty landed commit")
+		return "", "", nil
+	})
 	swap(t, &initiativeOf, func(bd.Bead) (string, error) { return "", nil })
 	swap(t, &subtreeIDs, func(string) ([]string, error) { return nil, nil })
 	swap(t, &cutBranch, func(string, string) (bool, error) { return true, nil })
@@ -1838,6 +1868,38 @@ func TestReconcileChartLaterSideMintsRenumberFirst(t *testing.T) {
 	}
 }
 
+// A Chart landed behind an empty trailer commit reads its clashes from the MR's merge.
+func TestReconcileChartEmptyLandPassesResolvedMergeSha(t *testing.T) {
+	seq, _ := stubRenumberChart(t, nil, nil)
+	var got string
+	swap(t, &commitEmpty, func(string) (bool, error) { return true, nil })
+	swap(t, &mergeShaOf, func(string) (string, string, error) { return "mergesha", "", nil })
+	swap(t, &postLandClashes, func(_, merge string) ([]git.PostLandClash, error) { got = merge; return nil, nil })
+	evs := eventlogtest.Capture(t)
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if n := countEvents(*evs, "land.merge_sha_missing"); got != "mergesha" || n != 0 || !slices.Contains(*seq, "spec") {
+		t.Errorf("merge %q, %d warnings, seq %v, want the resolved sha, no warning, and the Spec", got, n, *seq)
+	}
+}
+
+// An empty land with no recorded merge sha warns once, reads as today, and still closes.
+func TestReconcileChartEmptyLandWithoutMergeShaWarnsOnce(t *testing.T) {
+	seq, _ := stubRenumberChart(t, nil, nil)
+	got := "unset"
+	swap(t, &commitEmpty, func(string) (bool, error) { return true, nil })
+	swap(t, &mergeShaOf, func(string) (string, string, error) { return "", "no hold Task", nil })
+	swap(t, &postLandClashes, func(_, merge string) ([]git.PostLandClash, error) { got = merge; return nil, nil })
+	evs := eventlogtest.Capture(t)
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	if n := countEvents(*evs, "land.merge_sha_missing"); got != "" || n != 1 || !slices.Equal(*seq, []string{"close ws-landing", "spec"}) {
+		t.Errorf("merge %q, %d warnings, seq %v, want a plain read, one warning, close and Spec", got, n, *seq)
+	}
+}
+
 // The earlier side (no clashes) files nothing and proceeds as today.
 func TestReconcileChartEarlierSideFilesNoRenumber(t *testing.T) {
 	seq, builds := stubRenumberChart(t, nil, nil)
@@ -1860,7 +1922,7 @@ func TestReconcileChartCheckErrorLeavesChartOpenAndRerunDoesNotDuplicate(t *test
 	if len(*seq) != 0 {
 		t.Errorf("seq = %v, want nothing closed or spawned", *seq)
 	}
-	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) { return clashes, nil })
+	swap(t, &postLandClashes, func(string, string) ([]git.PostLandClash, error) { return clashes, nil })
 	for range 2 {
 		if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
 			t.Fatalf("reconcileChart: %v", err)
@@ -1878,7 +1940,7 @@ func TestReconcileChartCheckErrorLeavesChartOpenAndRerunDoesNotDuplicate(t *test
 func TestReconcileChartLocalStrategyRunsNoClashCheck(t *testing.T) {
 	stubRenumberChart(t, nil, nil)
 	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyLocal, nil })
-	swap(t, &postLandClashes, func(string) ([]git.PostLandClash, error) {
+	swap(t, &postLandClashes, func(string, string) ([]git.PostLandClash, error) {
 		t.Error("the clash check must not run under local")
 		return nil, nil
 	})
@@ -2185,5 +2247,29 @@ func TestPromptsCarryIntegrateExits(t *testing.T) {
 		if !strings.Contains(got, contract.IntegrateExits()) {
 			t.Errorf("%s prompt lacks the integrate exit block", name)
 		}
+	}
+}
+
+// Spec D7: a filed grilling carries exactly one close instruction, with the
+// four verdict prefixes; the plain grilling keeps its answered: line.
+func TestFiledGrillingPromptCarriesVerdictClose(t *testing.T) {
+	got := sourceGrillingPrompt("ws-grl")
+	for _, want := range []string{`"answered: <the answer>"`, `"accepted: `, `"rejected: `, `"deferred: `} {
+		if !strings.Contains(got, want) {
+			t.Errorf("filed grilling prompt must contain %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "answered: <one-line summary>") {
+		t.Errorf("filed grilling prompt must not carry the plain close line:\n%s", got)
+	}
+	if !strings.Contains(got, contract.DraftInstruction("ws-grl")) {
+		t.Errorf("Draft instruction must carry over to the Source variant:\n%s", got)
+	}
+	draft := strings.Index(got, "drafted-by:ws-grl")
+	if closeAt := strings.Index(got, "bd close ws-grl"); draft < 0 || draft > closeAt {
+		t.Errorf("fog Drafts (at %d) must precede the close (at %d)", draft, closeAt)
+	}
+	if plain := grillingPrompt("ws-grl"); !strings.Contains(plain, `bd close ws-grl --reason "answered: <one-line summary>"`) || strings.Contains(plain, "rejected:") {
+		t.Errorf("plain grilling prompt must keep its answered: line only:\n%s", plain)
 	}
 }

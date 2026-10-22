@@ -1,9 +1,10 @@
 // Package brook holds Brook, the crewmate whose domain is the external world:
 // everything outside the bead graph and the code (ADR 0115). He owns the one
-// kind `task`, a free-standing HITL bead whose body is a numbered ## Steps list
-// (ADR 0116). Task is HITL, so the loop never dispatches it: Launch composes the
-// in-session guide a human starts with l/b (ADR 0114), and Run is a loud error.
-// The Task body is never read by Go; the guide does. He also owns kind:latch, an
+// kind `task`, a HITL bead (a direct Initiative child when ordered against a
+// member, else outside) whose body is a numbered ## Steps list (ADR 0116). Task is
+// HITL, so the loop never dispatches it: Launch composes the in-session guide a
+// human starts with l/b (ADR 0114), and Run is a loud error. The Task body is
+// never read by Go; the guide does. He also owns kind:latch, an
 // AFK leaf Run checks in-process with no session: Go reads a latch's Watches:
 // line and the Jira status. Both run at RepoRoot (route's default): no worktree,
 // commits or integrate.

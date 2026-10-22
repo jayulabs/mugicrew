@@ -1,7 +1,9 @@
 # ADR 0221: Require Initiatives gates surgery, release and reconcile, and exempts Rollback successors and Tasks
 
 Status: Accepted
+Amended by ADR 0352 (every-task-joins-the-initiative…) (§3 and its Tasks Considered Option: a Task is no longer exempt).
 Amended by ADR 0241 (§1: the U form's picker is now the Surgery form's target list).
+Amended by ADR 0349 (a-member-task-can-be-released…) (§3, §4: a member Task can be released under Require Initiatives and from a cancel).
 Date: 2026-10-16
 
 From Chart mc-8ymw.5 (Opt-in Require Initiatives and Enforce external ID

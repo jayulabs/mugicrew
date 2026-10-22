@@ -267,3 +267,52 @@ func TestCancelReopenKeepsReleaseChoices(t *testing.T) {
 		t.Errorf("reopened dialog lost the release choice: %+v", m.modals)
 	}
 }
+
+// cancelPlanWithTask is cancelPlan plus an unclosed member Task, tk, leading the Set as
+// the verb orders it; locked chains are all of them (Require Initiatives) but never tk.
+func cancelPlanWithTask(locked ...withdraw.Lock) func() withdraw.Plan {
+	return func() withdraw.Plan {
+		p := cancelPlan(locked...)()
+		tk := bd.Bead{ID: "tk", Kind: contract.KindTask, Status: "open", Title: "T-tk", Parent: "ini", Created: epoch}
+		p.Tasks = []bd.Bead{tk}
+		p.Set = append([]bd.Bead{tk}, p.Set...)
+		p.Withdrawn = []string{"tk"}
+		return p
+	}
+}
+
+func TestCancelDialogGivesEachMemberTaskACloseReleaseRow(t *testing.T) {
+	m, calls := cancelOpenAt(t, 160, cancelPlanWithTask())
+	v := viewOf(m)
+	for _, want := range []string{"T-tk", "Closes 2 chains (4 beads) · releases 0 chains.", "Withdraws 1 Task"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("view lacks %q:\n%s", want, v)
+		}
+	}
+	m = press(t, press(t, press(t, m, runeKey("j")), runeKey("j")), runeKey("r")) // release tk
+	v = viewOf(m)
+	for _, want := range []string{"Closes 2 chains (3 beads) · releases 0 chains.", "Withdraws 0 Tasks", "releases 1 Task"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("after r the view lacks %q:\n%s", want, v)
+		}
+	}
+	m = press(t, m, enterKey())
+	v = viewOf(m)
+	for _, want := range []string{"Withdraws 0 Tasks:", "Releases 1 Task:", "T-tk"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("review lacks %q:\n%s", want, v)
+		}
+	}
+	press(t, m, runeKey("y"))
+	if want := fmt.Sprint([]cancelCall{{[]string{"tk"}, true}}); fmt.Sprint(*calls) != want {
+		t.Errorf("cancel calls = %v, want %s", *calls, want)
+	}
+}
+
+func TestCancelTaskRowStaysToggleableWhileChainsAreLocked(t *testing.T) {
+	m, _ := cancelOpenAt(t, 160, cancelPlanWithTask(withdraw.Lock{Head: "ca", Why: "Require Initiatives: adopt"}, withdraw.Lock{Head: "cb", Why: "Require Initiatives: adopt"}))
+	m = press(t, press(t, press(t, m, runeKey("j")), runeKey("j")), runeKey("r"))
+	if v := viewOf(m); !strings.Contains(v, "releases 1 Task") || strings.Contains(v, "stays closed") {
+		t.Errorf("Task release was locked:\n%s", v)
+	}
+}

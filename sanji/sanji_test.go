@@ -123,6 +123,14 @@ func TestRunIsLoudHITLError(t *testing.T) {
 func TestPrototypePromptSkillFree(t *testing.T) {
 	got := prototypePrompt("mc-x", "/tmp/mugicrew-wt-1/wt")
 	promptguard.Check(t, "prototype", got)
+	if v := promptguard.CommitRuleViolations(got); v != nil {
+		t.Errorf("prototype prompt breaks the conventional-commit rule: %q", v)
+	}
+	for _, form := range []string{"docs(", "chore("} {
+		if !strings.Contains(got, form) {
+			t.Errorf("prototype prompt names no %s commit form", form)
+		}
+	}
 	refs := promptguard.CrewDocRefs(got)
 	for _, d := range []string{"prototype.md", "defog-session.md", "chart-body.md", "ADR-FORMAT.md"} {
 		if !slices.Contains(refs, d) {

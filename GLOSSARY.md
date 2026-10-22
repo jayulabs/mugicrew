@@ -265,7 +265,8 @@ otherwise ready (not blocked, Live, waiting, launching or exited), HITL and AFK 
 own-paused, otherwise-ready bead whose home tab is that tab (ADR 0183), whatever container it sits under; each tab's
 own container kind joins it when own-paused, open and unblocked: Ideate's P0–P2 Initiatives
 (as ADR 0180's combined row; a P3 or P4 one is Actionable only while its cut session waits, ADR 0314), Defog's Charts and Execute's Checkpoints (as their
-section rows); beads paused only by an ancestor stay out. A live session the agent is
+section rows); beads paused only by an ancestor stay out. On Defog, a listed stamped Chart's
+review grillings join the queue like any listed Chart's leaves. A live session the agent is
 working is not Actionable (ADR 0179). _Avoid:_ ready, queue, todo.
 
 **Live:** the section directly below Actionable on the Ideate, Defog and Execute
@@ -277,14 +278,24 @@ the tab, in bead order; the whole header is bold in the live green (ADR 0179). _
 **Specs:** the section between Live and Checkpoints on the Execute tab: every open
 published Spec, headed `Specs (N)`; status only, unfolded by default.
 
+**Merge Requests:** the section right below Live on the Execute and Defog tabs,
+under the gitlab land strategy only (hidden under local; an unusable strategy
+shows its resolve error), headed `Merge Requests (N)`: one row per open MR Watch
+whose container is the tab's own kind (Checkpoint on Execute, Chart on Defog), so
+no MR is on both tabs. `w` opens the MR and `d` shows its link (ADR 0333). Unfolded
+by default. _Avoid:_ MRs tab.
+
 **Initiatives:** the section below Live on the Ideate and Defog tabs, and below
 Checkpoints on the Execute tab: the
-tab's Initiative groups only, headed `Initiatives (N)` for N groups; on Ideate a P3 or
+tab's Initiative groups only, headed `Initiatives (N)` for N groups (on Defog, a stamped
+chart:defogged Chart is listed while it is open or in_progress with an open child); on Ideate a P3 or
 P4 Initiative's whole group sits in Backlog instead while ADR 0314 puts it there (ADR 0315). _Avoid:_ tree, all.
 
 **No Initiative:** the top-level section below Initiatives on the Ideate, Defog and
-Execute tabs: the freestanding beads that sit under no Initiative, headed
-`No Initiative (N)`. Always shown, folded by default. _Avoid:_ loose group.
+Execute tabs: the Checkpoints and Specs with no Initiative parent, and the
+outside Tasks and Pivots (on Defog, stamped Charts with an open child
+included), headed `No Initiative (N)`. Always shown, folded by default.
+_Avoid:_ loose group.
 
 **Backlog:** the last top-level section of the Ideate tab: the listed P3 and P4
 Initiatives with no cut session alive or launching and no member in triage, each with
@@ -302,6 +313,14 @@ options (top, bottom), the selected bead's moves (Initiative focus, reveal in
 Graph, scoped Logs, parent, cause) and its one-hop related beads, each fired by
 its key (ADR 0228). It replaces the standalone `i`, `G` and `L` keys. _Avoid:_
 command palette, jump menu.
+
+**Graph scope:** the Graph query's group-head facet, set by a Goto menu bead move
+(ADR 0334): Graph shows that group's whole subtree, closed beads included, and esc
+clears it last. The **group head** is the outermost container on the bead's parent chain
+(the Initiative when it nests under one, else its Chart or Checkpoint); a bead with no
+container ancestor **self-scopes** to itself alone. A scope is a visit, never saved.
+_Avoid:_ reveal (for the Graph scope; reveal is the bead-and-ancestors filter ADR 0228 §5
+keeps for other senders).
 
 - **Nami** — chart the course and eliminate fog: map a Chart toward its Spec in its Survey's human-started charting session (ADR 0129,
   ADR 0140); owns `survey`, `grilling`, `research`, `chart-conflict`; steward of the `chart`
@@ -529,10 +548,15 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     undraining it; at most one open per container); AFK, Mechanical
   - _Operations:_ spawned when the first MR is recorded for the container → read
     the MR each `landing_poll_interval` (skipped while a Landing is pending, whose
-    own tick reads it) → close when the MR is merged or closed, or the container
-    closes. Its body is the `MR:` line plus the `MR link:` line, copied from the
-    Landing.
-  - _Notes:_ See ADR 0185 §8.
+    own tick reads it) → close once no filed child still owes a close-out and
+    either the MR is merged or closed or the container closes; until then it
+    outlives its container, answering late closes; a close-out still failing 7
+    days after the container closed is abandoned and carried by a filed
+    Signal. Its body is the `MR:` line plus the `MR link:` line, copied from
+    the Landing, and, once its container is closed, the `Close-outs due:` /
+    `Close-outs failing:` lines.
+  - _Notes:_ See ADR 0185 §8, ADR 0343 (an-mr-watch-closes-once-nothing-is-owed…)
+    and ADR 0345 (an-outliving-mr-watch-carries-its-close-out-lines…).
 - **Approval** — the stamp that gates the land.
   - _Owner:_ Luffy
   - _Structure:_ leaf (one per Checkpoint)
@@ -545,6 +569,13 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Notes:_ Spawned on demand when a Review closes clean, in **succession** to
     that Review, so it certifies that Review's exact commit; if the branch
     advances past it, it is **obsoleted and respawned** off the new clean Review.
+  - _Auto-approve:_ while the shared `[approvals] auto_approve` setting is on, an
+    unmarked Approval is AFK: the loop dispatches it and an AFK Luffy session writes
+    the Decision Packet, ending its Approval History with `auto-approved (AFK,
+    Workspace auto-approve on)`; Go closes it `approved`. Off, or marked, it is HITL.
+    A third consecutive failed AFK session adds the sticky `auto-approve:failed`
+    **fallback marker**, which makes it an ordinary HITL Approval until it closes or
+    a human removes the label (ADR 0341; ADR 0346).
 - **Decision Packet** — the written case for approving a Checkpoint, kept on its
   Approval and carried into its land commit (and, for a remote-truth Workspace,
   its Merge Request body). Sections: Background, Summary, Evidence, Merge Danger,
@@ -710,10 +741,13 @@ when the URL is unknown).
   (outside the bead graph and the code), such as creating a repo or minting a
   token.
   - _Owner:_ Brook
-  - _Structure:_ leaf, free-standing (never a Chart child, Checkpoint member or
-    Spec child). Its body is a numbered `## Steps` list of Do/Check steps (crew
-    doc `task-body.md`); its run record is comments: one value-free `passed`
-    per step, `amended` for an approved rewrite, one `stuck` on a stuck exit.
+  - _Structure:_ leaf: a direct Initiative child when ordered against a member,
+    else outside (never a Chart child, Checkpoint member or Spec child). Its
+    body is a numbered `## Steps` list of Do/Check steps, optionally after a
+    lead and fact lines and before a `## Diagnostics` section the guide never
+    walks (crew doc `task-body.md`); its run record is comments: one
+    value-free `passed` per step, `amended` for an approved rewrite, one
+    `stuck` on a stuck exit.
     Ordered only by `blocks` edges: after a land (blocked by the Checkpoint),
     before a land (the Checkpoint blocked by it), or after another Task.
     A Spec's `## Tasks` entry may adopt an existing open Task by id (`task:
@@ -723,16 +757,27 @@ when the URL is unknown).
     is, and closes the Task itself only after a final all-checks pass and the
     human's in-session yes. It may raise a pivot or Critique on the one
     Checkpoint it holds. An interrupted or stuck Task stays claimed and
-    **idle**; `x` unclaims it. Abandoning one is the human's own `bd close`.
+    **idle**; `x` unclaims it. Abandoning one is a **withdraw**, with `X` or
+    `mugicrew withdraw <task>`, not a hand `bd close`.
   - _Notes:_ Not a defog kind: a Chart never contains one (ADR 0013). Agents
-    never file one mid-work; they file an offshoot Signal. See ADR 0113, ADR
-    0114, ADR 0115, ADR 0116, ADR 0117, ADR 0118.
+    never file one mid-work; they file an offshoot Signal. Going forward only:
+    an earlier free-standing Task is not migrated, and a later Chart adopt does
+    not carry the Tasks its session drafted. See ADR 0352, ADR 0113, ADR
+    0114, ADR 0115, ADR 0116, ADR 0117, ADR 0118, ADR 0335, ADR 0342.
+- **Hold Task** — a Task Go files to block a container or Rollback until a
+  Forge or mainline condition clears (a closed or trailerless merge request, a
+  failed pipeline, a foreign land), found again by a whole fact line such as
+  `Closed MR: !N`. Its Checks probe through `mugicrew probe` (ADR 0336). It
+  joins its container's Initiative like any Task (ADR 0352).
+  _Avoid:_ "foreign hold" for the foreign-land Task (that term names a
+  checked-out effort branch), "blocker".
 - **Latch** — a bead that blocks other work until a fact in the outside world
   is true; today, a Jira ticket reaching a done status, or a GitLab MR being merged.
   - _Owner:_ Brook
   - _Structure:_ leaf, free-standing like a Task (never a Chart child,
     Checkpoint member, Spec child or Initiative member). Placed only by the
-    `blocks` edges it holds; it may block any bead.
+    `blocks` edges it holds; it may block any bead but an
+    Initiative (ADR 0348).
   - _Operations:_ filed by a human or a session (as a Draft) through one verb,
     at most one open per watched item; re-checked unattended by the loop on an
     interval, no session; closes itself once when the fact holds and never
@@ -794,7 +839,8 @@ when the URL is unknown).
     Initiative itself, and landed work stays. **Withdrawing** a member chain
     closes its unclosed head and leaves the Initiative going. Neither runs
     while a member effort is in flight, and withdraw also waits until no
-    unclosed member is ordered after the chain.
+    unclosed member is ordered after the chain, except a Task, which the
+    withdraw sweeps instead (ADR 0342).
     A **parked member** is a later-phase Signal closed with a `later:` reason
     and kept under the Initiative; it never holds the drain (ADR 0255).
   - _Lifecycle:_ derived, first match wins: **closed** → **drained** (no
@@ -803,9 +849,13 @@ when the URL is unknown).
   - _Bodyless:_ an open Initiative whose body lacks `## Done when`. A render-time
     qualifier, not a lifecycle state; its cut session settles the body first
     (ADR 0182).
-  - _Notes:_ A bead belongs to at most one Initiative. An offshoot of a member
-    is born outside it and joins only by adoption. Single-Checkpoint work never
-    needs one, unless the Workspace sets Require Initiatives. A manual pause on
+  - _Notes:_ A bead belongs to at most one Initiative. Its members include the
+    Tasks and the ordered offshoots filed against a member: every Task joins the
+    Initiative of the member it is ordered against, and a follow-up or
+    prerequisite offshoot joins its cause's, while an unordered offshoot, a
+    Latch and a Pivot stay outside and join only by adoption (ADR 0352).
+    Single-Checkpoint work never needs one, unless the Workspace sets Require
+    Initiatives. A manual pause on
     it pauses every member (ADR 0081). It carries no defog of its own: a
     question shared across phases is defogged on the first phase's Chart that
     needs it, and its doc is pointed to from the Initiative's Notes. See ADR 0128, ADR 0132, ADR 0133, ADR 0134, ADR 0135, ADR 0252.
@@ -869,9 +919,9 @@ Named domain relationships, each on one bd edge (ADR 0002):
 - **Carry** — when a Signal, Chart or Spec closes in **succession**, the beads it
   _orders_ (blocks) become ordered by its successor, so a dependent waits for
   the real work, not the stage that described it. Outgoing ordering only,
-  except that an open Latch blocking it also comes to block its successor
-  (ADR 0223); the old edge stays as lineage. A Spec's dependents therefore wait for its
-  Checkpoint to **land**. A Checkpoint obsoleted by a confirmed or escalated
+  except that an open Latch blocking it also comes to block its
+  successor (ADR 0223); the old edge stays as lineage. A Spec's dependents
+  therefore wait for its Checkpoint to **land**. A Checkpoint obsoleted by a confirmed or escalated
   **pivot** carries the same way, to the corrected Spec or the escalated Chart.
   _Avoid:_ "moving" edges (nothing is removed).
 
@@ -973,12 +1023,18 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   `mugicrew abort` or TUI `x`: its bead is paused _manual_ first, then its
   processes are terminated, and a live host cleans up as for a failure (ADR 0083).
   _Avoid:_ calling it abandoned, which leaves its claim and tree behind.
-- **Withdraw** — the human dropping one unfinished chain, inside an Initiative
-  or not: its unclosed head and every unclosed bead under it close with reason
-  `withdrawn` and no successor, and their effort worktrees and branches go with
-  them. Dropping a whole Initiative is **cancel** (ADR 0310).
+- **Withdraw** — the human dropping one unfinished chain or one Task, inside an
+  Initiative or not: its unclosed head (a chain head, or a Task) and every
+  unclosed bead under it close with reason `withdrawn` and no successor, and
+  their effort worktrees and branches go with them. A chain's withdraw also
+  **sweeps** the Tasks ordered after what it closes, closing them with reason
+  `withdrawn: <head>`, and **before-closes** the Tasks ordered before what
+  it closes the same way, unless one still holds a bead outside it, which is
+  **left open** (ADR 0342, ADR 0351). Dropping a whole Initiative is **cancel**
+  (ADR 0310).
   _Avoid:_ "abandon" (an abandoned effort), "cancel" for one chain, "reject"
-  (a triage verdict on a Signal).
+  (a triage verdict on a Signal), "swept" for a before-closed Task (swept is the
+  Tasks after).
 - **Auto-exit (HITL session)** — the visible countdown that a session's
   closing line starts. When it runs out, the session exits by itself just as a
   human `/exit` would, and ends _finished_. A reply cancels it, and so does its

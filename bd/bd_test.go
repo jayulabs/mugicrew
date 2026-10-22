@@ -977,7 +977,7 @@ func TestDefaultIDsIsOneFlatUnionQuery(t *testing.T) {
 	if len(calls) != 1 || calls[0][0] != "sql" || strings.Contains(calls[0][len(calls[0])-1], "with ") {
 		t.Errorf("calls = %v", calls)
 	}
-	for _, want := range []string{"depends_on_issue_id", "kind:landing", "'caused-by'"} {
+	for _, want := range []string{"depends_on_issue_id", "kind:landing", "'caused-by'", "kind:mr-watch"} {
 		if !strings.Contains(defaultIDsSQL, want) {
 			t.Errorf("sql lacks %q", want)
 		}
@@ -1018,6 +1018,10 @@ var defaultSetFixture = []fixtureIssue{
 	{id: "older-cp", label: "kind:checkpoint", status: "closed", closedAgo: 900},
 	{id: "unlanded", label: "kind:landing", status: "closed", reason: "abandoned", parent: "unlanded-cp", closedAgo: 1},
 	{id: "unlanded-cp", label: "kind:checkpoint", status: "closed", closedAgo: 900},
+	{id: "swept-cp", label: "kind:checkpoint", status: "closed", closedAgo: 900},
+	{id: "swept-cp.w", label: "kind:mr-watch", status: "open", parent: "swept-cp"},
+	{id: "quiet-cp", label: "kind:checkpoint", status: "closed", closedAgo: 900},
+	{id: "quiet-cp.w", label: "kind:mr-watch", status: "closed", parent: "quiet-cp", closedAgo: 900},
 }
 
 // defaultSetOf is the default set computed client-side, from the rule in
@@ -1044,8 +1048,12 @@ func defaultSetOf(rows []fixtureIssue) []string {
 			hasParent && p.status != "closed" && slices.Contains([]string{"kind:chart", "kind:checkpoint", "kind:initiative"}, p.label),
 			hasParent && p.status == "closed" && p.label == "kind:initiative",
 			hasParent && recent(p),
+			r.label == "kind:mr-watch" && r.status != "closed", // the open Watch itself
 			r.causedBy != "" && recent(byID[r.causedBy]):
 			set[r.id] = true
+		}
+		if r.label == "kind:mr-watch" && r.status != "closed" && hasParent {
+			set[p.id] = true // a closed container that still owes replies
 		}
 		if landed(r) && hasParent && p.label == "kind:checkpoint" && p.status == "closed" {
 			set[p.id] = true
@@ -1063,7 +1071,7 @@ func TestDefaultSetClientSideComputation(t *testing.T) {
 	want := []string{
 		"closed-init", "closed-init.1", "in-chart", "in-chart.1", "in-landing", "in-spec",
 		"old-cp", "open-chart", "open-chart.1", "open-cp", "open-cp.1", "open-cp.land",
-		"open-init", "open-init.1", "open-task",
+		"open-init", "open-init.1", "open-task", "swept-cp", "swept-cp.w",
 	}
 	if got := defaultSetOf(defaultSetFixture); !slices.Equal(got, want) {
 		t.Errorf("default set\n got %v\nwant %v", got, want)
@@ -1079,6 +1087,16 @@ func TestKindsReadsLabelsTable(t *testing.T) {
 	ks, err := Kinds()
 	if err != nil || ks["mc-1"] != contract.KindBuild || ks["mc-1.2"] != contract.KindChart || len(ks) != 2 {
 		t.Fatalf("Kinds = %v, %v", ks, err)
+	}
+}
+
+func TestRationaleFrom(t *testing.T) {
+	cs := []Comment{{Text: "Rationale: first"}, {Text: "Not built: x"}, {Text: "  Rationale:  newest \n"}, {Text: "hi"}}
+	if got := rationaleFrom(cs); got != "newest" {
+		t.Errorf("rationaleFrom = %q, want newest", got)
+	}
+	if got := rationaleFrom([]Comment{{Text: "Not built: x"}}); got != "" {
+		t.Errorf("rationaleFrom with none = %q, want empty", got)
 	}
 }
 
@@ -1249,5 +1267,52 @@ func TestTaskChildrenPropagatesListError(t *testing.T) {
 	run = func(...string) (string, error) { return "", errors.New("boom") }
 	if _, err := TaskChildren("spec-1"); err == nil {
 		t.Error("a failing dep list must error")
+	}
+}
+
+// The foreign-land Hold Task body (Spec D8): lead, the Foreign: key line whole before
+// ## Steps, then the three steps with markers and the probe Check, and no Fix: line.
+func TestHoldForeignBodyCarriesSteps(t *testing.T) {
+	o := SpawnBlockingTask
+	t.Cleanup(func() { SpawnBlockingTask = o })
+	var body string
+	SpawnBlockingTask = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
+	HoldForeign(Bead{ID: "cp", Kind: "checkpoint"}, f)
+	lines := strings.Split(body, "\n")
+	idx := func(want string) int { return slices.Index(lines, want) }
+	key, steps := idx("Foreign: f00d"), idx("## Steps")
+	if !(key > 0 && steps > key && idx("Graph (theirs): b") > 0 && idx("Graph (ours): a") > 0) {
+		t.Fatalf("layout wrong (key %d steps %d) in %q", key, steps, body)
+	}
+	for _, want := range []string{
+		"1. Close the merge request",
+		"[irreversible]",
+		"Check: `mugicrew probe mr --branch checkpoint/cp` prints `none`.",
+		"Do: run `mugicrew loop stop`.",
+		"Ask: is the loop stopped?",
+		"Ask: will you run the rename, the branch re-cuts and the loop restart after this Task closes?",
+		"`bd rename-prefix`",
+		"`mugicrew probe foreign`",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %q lacks %q", body, want)
+		}
+	}
+	if strings.Contains(body, "Fix:") {
+		t.Errorf("body %q carries a Fix: line", body)
+	}
+}
+
+// A nested container's foreign-land body names its context on the probe foreign hint.
+func TestHoldForeignNestedHintsContext(t *testing.T) {
+	o := SpawnBlockingTask
+	t.Cleanup(func() { SpawnBlockingTask = o })
+	var body string
+	SpawnBlockingTask = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
+	HoldForeign(Bead{ID: "cp", Kind: "checkpoint", Labels: []string{"context:nest", "repo:nest"}}, f)
+	if !strings.Contains(body, "`mugicrew probe foreign --context nest`") {
+		t.Errorf("body %q lacks the --context hint", body)
 	}
 }

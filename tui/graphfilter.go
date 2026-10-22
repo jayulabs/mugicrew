@@ -33,10 +33,13 @@ const (
 )
 
 // query is the filter: whitespace words over title and id, a status and a kind
-// facet (kind "" for any).
+// facet (kind "" for any), inside a scope: a group head's id, "" for none. A set scope
+// keeps only that head's subtree (visible), a visit never saved (Spec "Goto bead rows
+// and reveal land on Graph scoped to the bead's group head", Decision 1).
 type query struct {
 	words, status string
 	kind          contract.Kind
+	scope         string
 }
 
 // baseline is the query a new Graph starts at and esc returns to (ADR 0175): a
@@ -147,12 +150,15 @@ func (g graphTab) header(w int) string {
 // headerWith is header around the rendered filter input.
 func (g graphTab) headerWith(input string) string {
 	var segs []string
+	if g.q.scope != "" {
+		segs = append(segs, "in "+g.q.scope)
+	}
 	if g.typing {
 		segs = append(segs, "/ "+input)
 	} else if g.q.words != "" {
 		segs = append(segs, "/ "+g.q.words)
 	}
-	if g.q.status != baseline.status {
+	if g.q.status != baseline.status || g.q.scope != "" { // under a scope any is shown, not hidden
 		segs = append(segs, g.q.status)
 	}
 	if g.q.kind != "" {
@@ -178,8 +184,9 @@ func (g graphTab) typingKey(k tea.KeyMsg) graphTab {
 }
 
 // clearOne is esc in normal mode: the text, then the status, then the kind (FR42). On
-// an untouched scoped reveal it goes straight to the baseline (Spec "G reveal scopes
-// Graph to the revealed bead", FR6).
+// an untouched scoped reveal or scope it goes straight to the baseline (Spec "G reveal
+// scopes Graph to the revealed bead", FR6); under a scope the status unwinds to the
+// scope's forced any and the scope itself goes last.
 func (g graphTab) clearOne() graphTab {
 	g.visit = false
 	switch {
@@ -187,10 +194,14 @@ func (g graphTab) clearOne() graphTab {
 		g.q = baseline
 	case g.q.words != "":
 		g.q.words = ""
-	case g.q.status != baseline.status:
+	case g.q.scope != "" && g.q.status != statusAny:
+		g.q.status = statusAny
+	case g.q.scope == "" && g.q.status != baseline.status:
 		g.q.status = baseline.status
-	default:
+	case g.q.kind != "":
 		g.q.kind = ""
+	default:
+		g.q = baseline // only a scope is left
 	}
 	return g.rebuild()
 }

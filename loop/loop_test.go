@@ -7,8 +7,10 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/looplock"
+	"jayulabs.org/mugicrew/registry"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -1379,6 +1381,57 @@ func TestThreeFailuresPause(t *testing.T) {
 	}
 }
 
+// An Approval reaching PauseAfter failures gets auto-approve:failed instead of
+// paused:failing, and its count restarts; limits, aborts and held cuts don't
+// count (Spec D6, ADR 0341).
+func TestThreeApprovalFailuresWriteFallbackMarker(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		steps []step
+		mark  bool
+	}{
+		{"three failures", []step{stepFailed, stepCutErr, stepFailed}, true},
+		{"clean return resets", []step{stepFailed, stepFailed, stepOK, stepFailed}, false},
+		{"limits don't count", []step{stepLimit, stepLimit, stepLimit}, false},
+		{"aborts don't count", []step{stepAbort, stepAbort, stepAbort}, false},
+		{"held doesn't count", []step{stepHeld, stepHeld, stepHeld}, false},
+	} {
+		l, b, pauses := failLoop(t, c.steps...)
+		b.Kind = contract.KindApproval
+		l.Crew = map[string]contract.Crewmate{ownerOf(b): idleCrew{}}
+		var marks []string
+		oMark := markBead
+		t.Cleanup(func() { markBead = oMark })
+		markBead = func(id, label string) error { marks = append(marks, id+" "+label); return nil }
+		play(l, b, len(c.steps))
+		if got := slices.Contains(marks, b.ID+" auto-approve:failed"); got != c.mark {
+			t.Errorf("%s: marks = %q, want marker %v", c.name, marks, c.mark)
+		}
+		if slices.Contains(*pauses, b.ID+" failing") {
+			t.Errorf("%s: pauses = %q, want no failing pause for an Approval", c.name, *pauses)
+		}
+	}
+}
+
+// The Approval fallback logs effort.fell_back at Warn with the last error, so a
+// human can see why the Approval came back.
+func TestApprovalFallbackLogsLastError(t *testing.T) {
+	evs := captureEvents(t)
+	l, b, _ := failLoop(t, stepFailed, stepCutErr, stepFailed)
+	b.Kind = contract.KindApproval
+	l.Crew = map[string]contract.Crewmate{ownerOf(b): idleCrew{}}
+	oMark := markBead
+	t.Cleanup(func() { markBead = oMark })
+	markBead = func(string, string) error { return nil }
+	play(l, b, 3)
+	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"effort.fell_back"}) {
+		t.Fatalf("events = %v, want one effort.fell_back", got)
+	}
+	if e := (*evs)[0]; e.Level != slog.LevelWarn || e.Attrs["cause"] != registry.AutoApproveFailedLabel || e.Attrs["failures"] != 3 || e.Attrs["error"] != "handler exploded" || e.Attrs["bead"] != b.ID {
+		t.Errorf("effort.fell_back = %+v", e)
+	}
+}
+
 // A latch whose Jira read keeps failing is paused like any bead (Spec mc-8ymw.9 D5).
 func TestThreeFailedLatchChecksPause(t *testing.T) {
 	l, b, pauses := failLoop(t, stepCutErr, stepCutErr, stepFailed)
@@ -2039,6 +2092,25 @@ func TestTickRetiresStragglersOfObsoleteCheckpoint(t *testing.T) {
 	}
 	if len(hits) != 1 || hits[0].Level != slog.LevelWarn || hits[0].Attrs["checkpoint"] != "ws-cp" {
 		t.Errorf("events = %+v, want one Warn sweep.straggler for ws-cp", *evs)
+	}
+}
+
+// An open MR Watch child of an obsolete:-closed Checkpoint outlives the sweep to
+// answer the MR's reviewers; every other straggler is still retired.
+func TestTickSparesMRWatchOfObsoleteCheckpoint(t *testing.T) {
+	critique := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"}
+	watch := bd.Bead{ID: "ws-watch", Kind: contract.KindMRWatch, Status: "open", Parent: "ws-cp"}
+	stubStragglers(t, []bd.Bead{critique}, []bd.Bead{critique, watch})
+	showBead = func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Kind: contract.KindCheckpoint, Status: "closed", CloseReason: bd.ObsoleteReason + " x"}, nil
+	}
+	var closed []string
+	forceCloseBeads = func(ids []string, _ string) error { closed = ids; return nil }
+	if err := (&Loop{Crew: map[string]contract.Crewmate{ownerOf(critique): idleCrew{}}}).tick(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ws-crit"}; !reflect.DeepEqual(closed, want) {
+		t.Errorf("force-closed %v, want %v", closed, want)
 	}
 }
 
@@ -3463,5 +3535,76 @@ func TestLandingPacingLeavesOtherKinds(t *testing.T) {
 	)
 	if want := []string{"latch", "res"}; !slices.Equal(got, want) {
 		t.Errorf("candidates = %v, want %v", got, want)
+	}
+}
+
+func stubAutoApprove(t *testing.T, on *bool) {
+	t.Helper()
+	o := ReadAutoApprove
+	t.Cleanup(func() { ReadAutoApprove = o; registry.ResetAutoApprove() })
+	ReadAutoApprove = func() cfglayer.Approvals { return cfglayer.Approvals{AutoApprove: *on} }
+}
+
+// An open Approval is a loop candidate only while the tick's auto-approve stamp is
+// on and the bead lacks auto-approve:failed; a flip between ticks moves it in or
+// out of candidacy, and a claimed one counts in the pool (ADR 0346).
+func TestTickDispatchesApprovalOnlyWhileAutoApproveIsOn(t *testing.T) {
+	oReady, oIP, oOpen, oClaim, oRun := readyBeads, inProgressBeads, openBeads, claimBead, runEffort
+	t.Cleanup(func() {
+		readyBeads, inProgressBeads, openBeads, claimBead, runEffort = oReady, oIP, oOpen, oClaim, oRun
+	})
+	on := false
+	stubAutoApprove(t, &on)
+	cp := bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Status: "open"}
+	plain := bd.Bead{ID: "plain", Kind: contract.KindApproval, Status: "open", Parent: "cp"}
+	marked := bd.Bead{ID: "marked", Kind: contract.KindApproval, Status: "open", Parent: "cp", Labels: []string{registry.AutoApproveFailedLabel}}
+	readyBeads = func() ([]bd.Bead, error) { return []bd.Bead{plain, marked}, nil }
+	openBeads = func() ([]bd.Bead, error) { return []bd.Bead{cp, plain, marked}, nil }
+	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
+	var claimed []string
+	claimBead = func(b bd.Bead) (*liveness.Hold, error) {
+		claimed = append(claimed, b.ID)
+		return nil, errors.New("stop")
+	}
+	l := &Loop{Crew: map[string]contract.Crewmate{"luffy": nil}}
+	tick := func() []string {
+		claimed = nil
+		if err := l.tick(); err != nil {
+			t.Fatal(err)
+		}
+		l.wg.Wait()
+		return claimed
+	}
+	if got := tick(); len(got) != 0 {
+		t.Errorf("off: claimed %v, want none", got)
+	}
+	on = true
+	if got := tick(); !slices.Equal(got, []string{"plain"}) {
+		t.Errorf("on: claimed %v, want only the unmarked Approval", got)
+	}
+	on = false
+	if got := tick(); len(got) != 0 {
+		t.Errorf("flipped off: claimed %v, want none", got)
+	}
+}
+
+func TestCountInflightCountsClaimedApprovalOnlyWhileAutoApproveIsOn(t *testing.T) {
+	on := false
+	stubAutoApprove(t, &on)
+	claimed := bd.Bead{Kind: contract.KindApproval, Status: "in_progress"}
+	registry.SetAutoApprove(false)
+	if n := CountInflight([]bd.Bead{claimed}); n != 0 {
+		t.Errorf("off: CountInflight = %d, want 0 (a HITL Approval takes no slot)", n)
+	}
+	registry.SetAutoApprove(true)
+	if n := CountInflight([]bd.Bead{claimed}); n != 1 {
+		t.Errorf("on: CountInflight = %d, want 1", n)
+	}
+	if !IsActiveAFKEffort(claimed) {
+		t.Error("on: a claimed Approval should be an active AFK effort")
+	}
+	claimed.Labels = []string{registry.AutoApproveFailedLabel}
+	if n := CountInflight([]bd.Bead{claimed}); n != 0 || IsAFKLeaf(claimed) {
+		t.Errorf("marked: CountInflight = %d, IsAFKLeaf = %v; want 0, false", n, IsAFKLeaf(claimed))
 	}
 }

@@ -108,16 +108,12 @@ func (m Model) gotoOpts() (opts []gotoOpt) {
 		return opts
 	}
 	id, kids := b.ID, b.Container
-	if m.tab != tabGraph {
-		opts = append(opts, gotoOpt{[]string{"r"}, "reveal", "", func(m Model) (Model, tea.Cmd) {
-			return m, func() tea.Msg { return revealMsg{id} }
-		}})
-	}
+	opts = append(opts, gotoOpt{[]string{"r"}, "reveal", "", func(m Model) (Model, tea.Cmd) { return m.gotoLand(id) }})
 	opts = append(opts, gotoOpt{[]string{"l"}, "logs", "", func(m Model) (Model, tea.Cmd) {
 		return m, func() tea.Msg { return scopeLogsMsg{id, kids} }
 	}})
 	jump := func(id string) func(Model) (Model, tea.Cmd) {
-		return func(m Model) (Model, tea.Cmd) { return m.recentsJump(id) }
+		return func(m Model) (Model, tea.Cmd) { return m.gotoLand(id) }
 	}
 	return append(opts, m.beadOpts(b, jump)...)
 }

@@ -1,6 +1,7 @@
 # ADR 0133: mugicrew Initiative lifecycle: derived state, a human "done" on drain, and guarded cancel and withdraw
 
 Status: Accepted
+Amended by ADR 0352 (every-task-joins-the-initiative…) (§8: a member Task is closed by a cancel).
 Date: 2026-10-11
 
 ## Context

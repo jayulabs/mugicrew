@@ -132,7 +132,7 @@ func TestSettingsAutoExitSave(t *testing.T) {
 // An (unset) save deletes the local key.
 func TestSettingsKindUnsetDeletesKey(t *testing.T) {
 	m, saved := settingsModel(t)
-	for range 5 { // pool, Auto-exit, Initiatives, default, approval, build
+	for range 6 { // pool, Auto-exit, Initiatives, Auto-approve, default, approval, build
 		m, _ = send(t, m, runeKey("j"))
 	}
 	m, _ = send(t, m, runeKey("+")) // opus → sonnet
@@ -178,9 +178,9 @@ func TestSettingsKindRowsScroll(t *testing.T) {
 // Binding coverage in both Settings modes: row unstaged, and staged.
 func TestSettingsBindingCoverage(t *testing.T) {
 	m, _ := settingsModel(t)
-	m, _ = send(t, m, runeKey("j"))
-	m, _ = send(t, m, runeKey("j"))
-	m, _ = send(t, m, runeKey("j")) // default kind row: every of j/k/+/- changes the frame
+	for range firstKindRow {
+		m, _ = send(t, m, runeKey("j")) // default kind row: every of j/k/+/- changes the frame
+	}
 	checkCoverage(t, "Settings unstaged", m, true, "*")
 	m, _ = send(t, m, runeKey("+"))
 	checkCoverage(t, "Settings staged", m, true, "*")
@@ -208,6 +208,41 @@ func TestSettingsInitiativesRowReadOnly(t *testing.T) {
 		}
 		m, _ = send(t, m, runeKey("j"))
 		m, _ = send(t, m, runeKey("j"))
+		for _, k := range []tea.Msg{runeKey("+"), runeKey("-"), tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEsc}} {
+			var cmd tea.Cmd
+			m, cmd = send(t, m, k)
+			run(t, m, cmd)
+		}
+		if len(*saved) != 0 {
+			t.Errorf("%s: wrote %v", tc.name, *saved)
+		}
+	}
+}
+
+// The Auto-approve row shows the shared value and file, or unusable, right after
+// Initiatives; +/-/enter/esc on it write nothing.
+func TestSettingsAutoApproveRowReadOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   cfglayer.Approvals
+		want string
+	}{
+		{"off", cfglayer.Approvals{Path: "/w/.mugicrew/config.toml"}, "off  (/w/.mugicrew/config.toml)"},
+		{"on", cfglayer.Approvals{AutoApprove: true, Path: "/w/c.toml"}, "on  (/w/c.toml)"},
+		{"unusable", cfglayer.Approvals{Unusable: true, Path: "/w/c.toml"}, "unusable  (/w/c.toml)"},
+	} {
+		m, saved := settingsModel(t)
+		m, _ = send(t, m, loadedMsg{slowTier: true, approvals: tc.in})
+		v := strings.Join(lines(m.View()), "\n")
+		if !strings.Contains(v, "Auto-approve  "+tc.want) || !strings.Contains(v, "shared [approvals] in .mugicrew/config.toml: edit the file to change it") {
+			t.Errorf("%s: row lacks %q:\n%s", tc.name, tc.want, v)
+		}
+		if strings.Index(v, "Auto-approve  ") < strings.Index(v, "Initiatives  ") {
+			t.Errorf("%s: Auto-approve not after Initiatives", tc.name)
+		}
+		for range autoApproveRow {
+			m, _ = send(t, m, runeKey("j"))
+		}
 		for _, k := range []tea.Msg{runeKey("+"), runeKey("-"), tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEsc}} {
 			var cmd tea.Cmd
 			m, cmd = send(t, m, k)
@@ -365,7 +400,7 @@ func TestSettingsStepKeysAcceptShiftedAndUnshifted(t *testing.T) {
 			t.Errorf("%q: pool staged %s, want %s", c.k, got, c.pool)
 		}
 		m, _ = settingsModel(t) // the build row holds the declared name opus, between haiku and sonnet
-		m = down(m, 5)
+		m = down(m, 6)
 		m, _ = send(t, m, runeKey(c.k))
 		want := map[string]string{"+": "sonnet", "=": "sonnet", "-": "haiku", "_": "haiku"}[c.k]
 		if got := m.kindStaged["build"].to; got != want {
@@ -373,7 +408,7 @@ func TestSettingsStepKeysAcceptShiftedAndUnshifted(t *testing.T) {
 		}
 		m, _ = settingsModel(t) // an undeclared name: up to the first slot, down to the last (unset)
 		m.kinds.local["build"] = "gone"
-		m = down(m, 5)
+		m = down(m, 6)
 		m, _ = send(t, m, runeKey(c.k))
 		want = map[string]string{"+": "haiku", "=": "haiku", "-": "", "_": ""}[c.k]
 		if got := m.kindStaged["build"].to; got != want {

@@ -30,6 +30,7 @@ func mrGraph(status string) graphData {
 		dbead("w4", w, "open", "ch", 2),
 		dbead("wd", w, "deferred", "cp", 2, labeled("drafted-by:x")),
 		dbead("wc", w, "closed", "cp", 3, described("MR: !3")),
+		dbead("wo", w, "open", "gone", 1, described("MR: !13")),
 	}}
 }
 
@@ -43,10 +44,21 @@ func mrShape(g graphData) []string {
 	return out
 }
 
+// dmrShape is the Watch ids of Defog's Merge Requests rows.
+func dmrShape(g graphData) []string {
+	var out []string
+	for _, r := range g.defogList(map[string]bool{}) {
+		if r.kind == dMR {
+			out = append(out, r.b.ID)
+		}
+	}
+	return out
+}
+
 func TestMRSectionRowsAndPlacement(t *testing.T) {
 	g := mrGraph("mergeable")
-	if got := mrShape(g); !slices.Equal(got, []string{"w1", "w2", "w3", "w4"}) {
-		t.Errorf("rows %v: want one per open non-Draft Watch, Chart's and nested included, by container", got)
+	if got := mrShape(g); !slices.Equal(got, []string{"w1", "w2"}) {
+		t.Errorf("rows %v: want one per open non-Draft Checkpoint Watch, nested included, by container", got)
 	}
 	var keys []string
 	for _, r := range g.execList(map[string]bool{}) {
@@ -57,8 +69,79 @@ func TestMRSectionRowsAndPlacement(t *testing.T) {
 	if i := slices.Index(keys, mrsKey); i < 1 || keys[i-1] != liveKey {
 		t.Errorf("sections %v: s:mrs must sit right below s:live", keys)
 	}
-	if rows := g.execList(map[string]bool{}); !strings.Contains(rows[slices.IndexFunc(rows, func(r eRow) bool { return r.key == mrsKey })].title, "(4)") {
+	if rows := g.execList(map[string]bool{}); !strings.Contains(rows[slices.IndexFunc(rows, func(r eRow) bool { return r.key == mrsKey })].title, "(2)") {
 		t.Errorf("header not counted like Live")
+	}
+}
+
+func TestDefogMRSectionRowsAndPlacement(t *testing.T) {
+	g := mrGraph("mergeable")
+	if got := dmrShape(g); !slices.Equal(got, []string{"w3", "w4"}) {
+		t.Errorf("rows %v: want the Chart's Watches only; an unresolved parent shows on neither tab", got)
+	}
+	if slices.Contains(mrShape(g), "wo") {
+		t.Error("a Watch whose parent is missing shows on Execute")
+	}
+	rows := g.defogList(map[string]bool{})
+	var keys []string
+	for _, r := range rows {
+		if r.kind == dSec {
+			keys = append(keys, r.key)
+		}
+	}
+	if i := slices.Index(keys, mrsKey); i < 1 || keys[i-1] != liveKey || keys[i+1] != chartsKey {
+		t.Errorf("sections %v: s:mrs must sit between s:live and s:charts", keys)
+	}
+	if i := slices.IndexFunc(rows, func(r dRow) bool { return r.key == mrsKey }); !strings.Contains(rows[i].title, "Merge Requests (2)") {
+		t.Errorf("header %q", rows[i].title)
+	}
+	if rows := g.defogList(map[string]bool{mrsKey: true}); slices.ContainsFunc(rows, func(r dRow) bool { return r.kind == dMR }) {
+		t.Error("flipping s:mrs should fold it")
+	}
+}
+
+func TestDefogMRSectionGate(t *testing.T) {
+	g := mrGraph("mergeable")
+	g.landName = "local"
+	if slices.ContainsFunc(g.defogList(nil), func(r dRow) bool { return r.key == mrsKey }) {
+		t.Error("local shows no section")
+	}
+	g.landName, g.landErr = "", errors.New(`land_strategy "x" in c.toml is unusable`)
+	rows := g.defogList(map[string]bool{})
+	i := slices.IndexFunc(rows, func(r dRow) bool { return r.key == mrsKey })
+	if i < 0 || rows[i+1].kind != dPlace || !strings.Contains(rows[i+1].title, "unusable") || len(dmrShape(g)) != 0 {
+		t.Errorf("an error shows the section with one placeholder row carrying the text")
+	}
+	g = graphData{landName: git.LandStrategyGitlab}
+	rows = g.defogList(map[string]bool{})
+	i = slices.IndexFunc(rows, func(r dRow) bool { return r.key == mrsKey })
+	if i < 0 || rows[i+1].key != mrsNone || rows[i+1].title != "" {
+		t.Errorf("gitlab with no Watch shows the none placeholder")
+	}
+}
+
+func TestDefogMRSectionFoldPersists(t *testing.T) {
+	g := mrGraph("mergeable")
+	flip := map[string]bool{mrsKey: true}
+	tab := defogTab{g: g, flip: flip, path: t.TempDir() + "/folds"}
+	if err := tab.save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadFolds(tab.path, "defog"); !got[mrsKey] {
+		t.Errorf("s:mrs fold lost across a restart: %v", got)
+	}
+}
+
+func TestExecuteListsNoChartLandPhase(t *testing.T) {
+	g := mrGraph("mergeable")
+	g.beads = append(g.beads,
+		dbead("cl", contract.KindLanding, "open", "ch", 1, described("MR: !11")),
+		dbead("fr", contract.KindForgeReview, "open", "ch", 2),
+	)
+	for _, r := range g.execList(map[string]bool{}) {
+		if r.b != nil && (r.b.ID == "w3" || r.b.ID == "w4" || r.b.ID == "cl" || r.b.ID == "fr") {
+			t.Errorf("Execute row %s (%s) is a Chart's land phase", r.key, r.b.ID)
+		}
 	}
 }
 
@@ -112,8 +195,25 @@ func TestMRRowText(t *testing.T) {
 	if l := text(g, "w2"); !strings.Contains(l, "web!9") {
 		t.Errorf("nested line %q: want context-qualified ref", l)
 	}
-	if l := text(g, "w4"); strings.Contains(l, "!") || !strings.Contains(l, "t ch") {
-		t.Errorf("link-less Watch line %q should still list", l)
+	dtext := func(g graphData, id string) string {
+		tab := defogTab{g: g}
+		for _, r := range g.defogList(map[string]bool{}) {
+			if r.kind == dMR && r.b.ID == id {
+				l, _ := tab.line(r, 0, "", "", nil)
+				return ansi.Strip(l)
+			}
+		}
+		t.Fatalf("no Defog row %s", id)
+		return ""
+	}
+	if l := dtext(g, "w4"); strings.Contains(l, "!") || !strings.Contains(l, "t ch") {
+		t.Errorf("link-less Chart Watch line %q should still list", l)
+	}
+	if l := dtext(g, "w3"); !strings.Contains(l, "!11") {
+		t.Errorf("Chart Watch line %q: want its ref", l)
+	}
+	if l := text(g, "w2"); strings.Contains(l, "!") && !strings.Contains(l, "web!9") {
+		t.Errorf("Checkpoint line %q", l)
 	}
 	g.beads[3].Labels = append(g.beads[3].Labels, "paused:manual")
 	if l := text(g, "w1"); strings.Contains(l, "awaiting merge") {
@@ -122,6 +222,26 @@ func TestMRRowText(t *testing.T) {
 	g = mrGraph("weird_status")
 	if l := text(g, "w1"); strings.Contains(l, "weird") {
 		t.Errorf("unmapped status shown: %q", l)
+	}
+}
+
+// An outliving Watch (its container closed) swaps the Landing status word for closing out and
+// the nonzero counts from its own Close-outs lines.
+func TestMRRowTextClosingOut(t *testing.T) {
+	for body, want := range map[string]string{
+		"MR: !7\n":                    "closing out",
+		"MR: !7\nClose-outs due: 2\n": "closing out · 2 due",
+		"MR: !7\nClose-outs failing: 1: reply: boom\n":          "closing out · 1 failing",
+		"MR: !7\nClose-outs due: 2\nClose-outs failing: 1: x\n": "closing out · 2 due · 1 failing",
+		"MR: !7\nClose-outs due: 0\nClose-outs failing: 0: \n":  "closing out",
+	} {
+		g := mrGraph("mergeable")
+		g.beads[0].Status = "closed" // cp
+		g.beads[4].Description = body
+		l := ansi.Strip(g.mrLine(&g.beads[4], &g.beads[0]))
+		if !strings.HasSuffix(l, " · "+want) || strings.Contains(l, "awaiting merge") {
+			t.Errorf("%q: line %q, want suffix %q and no Landing word", body, l, want)
+		}
 	}
 }
 
@@ -136,6 +256,22 @@ func TestMRDetailShowsLinkOnlyFromLine(t *testing.T) {
 		has := strings.Contains(d, "MR link  ") && strings.Contains(d, "https://gl.example/g/p/-/merge_requests/7")
 		if (r.b.ID == "w1") != has {
 			t.Errorf("%s detail link field = %v:\n%s", r.b.ID, has, d)
+		}
+	}
+	dt := defogTab{g: g}
+	for _, r := range g.defogList(map[string]bool{}) {
+		if r.kind != dMR {
+			continue
+		}
+		d := ansi.Strip(dt.rowText(r))
+		if strings.Contains(d, "MR link  ") {
+			t.Errorf("%s has no MR link: line, so no field:\n%s", r.b.ID, d)
+		}
+	}
+	g.beads[g.beadIndex("w3")].Description = "MR: !11\nMR link: https://gl.example/g/p/-/merge_requests/11"
+	for _, r := range g.defogList(map[string]bool{}) {
+		if r.kind == dMR && r.b.ID == "w3" && (!strings.Contains(ansi.Strip(dt.rowText(r)), "MR link  ") || !strings.Contains(ansi.Strip(dt.rowText(r)), "https://gl.example/g/p/-/merge_requests/11")) {
+			t.Errorf("w3 detail lacks the link field:\n%s", ansi.Strip(dt.rowText(r)))
 		}
 	}
 	cp := g.beadByID("cp")

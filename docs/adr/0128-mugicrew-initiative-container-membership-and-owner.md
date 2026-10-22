@@ -1,6 +1,7 @@
 # ADR 0128: mugicrew Initiative: a Luffy-owned container whose membership spans every bead of its member chains
 
 Status: Accepted
+Amended by ADR 0352 (every-task-joins-the-initiative…) (§6: follow-up and prerequisite offshoots join their cause's Initiative).
 Date: 2026-10-11
 
 ## Context

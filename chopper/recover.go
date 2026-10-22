@@ -90,8 +90,7 @@ const stepCheck = "check"
 
 // afk reports whether b's kind runs AFK (the registry's Mode).
 func afk(b bd.Bead) bool {
-	e, err := registry.Lookup(b.Kind)
-	return err == nil && e.Mode == registry.AFK
+	return registry.IsMode(b.Kind, b.Labels, registry.AFK)
 }
 
 // Judge is the verdict (ADR 0127 §2 as amended on mc-yr7o.6), pure: a verdict

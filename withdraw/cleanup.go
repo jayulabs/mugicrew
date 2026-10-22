@@ -19,6 +19,8 @@ const (
 	ItemTree   ItemKind = "tree"
 	ItemBranch ItemKind = "branch"
 	ItemDrafts ItemKind = "drafts"
+	// ItemSession is a Task's exited pane, killed with no tree behind it.
+	ItemSession ItemKind = "session"
 )
 
 // Item is one thing cleanup removed or kept. Err is why a failed removal stayed;
@@ -114,6 +116,21 @@ func cleanup(inv Inventory, target string, set []bd.Bead) (removed, kept []Item)
 		if c.Tree != nil {
 			tree(c.ID, c.Repo, *c.Tree)
 		}
+	}
+	// a HITL bead's dead pane: no work in it, so killing it is no discard (D6)
+	for _, b := range inv.Beads {
+		if b.Session == "" {
+			continue
+		}
+		it := Item{Kind: ItemSession, Bead: b.ID, Path: b.Session}
+		if err := killTmux(b.Session); err != nil {
+			it.Err = err.Error()
+			slog.Warn("session.kept", append(base(b.ID), "session", b.Session, "err", it.Err)...)
+			kept = append(kept, it)
+			continue
+		}
+		slog.Info("session.removed", append(base(b.ID), "session", b.Session)...)
+		removed = append(removed, it)
 	}
 	// drafts
 	for _, b := range inv.Beads {

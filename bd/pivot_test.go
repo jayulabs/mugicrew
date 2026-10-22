@@ -180,3 +180,22 @@ func TestSignalTitled(t *testing.T) {
 		t.Errorf("exact title = %q, %v; want mc-d, true", id, ok)
 	}
 }
+
+// A carrier read keeps Signals, Specs and Charts, whatever their status, and drops the rest.
+func TestCarriersOnlyKeepsSignalSpecAndChart(t *testing.T) {
+	found := []Bead{
+		{ID: "a", Kind: contract.KindSignal, Status: "closed"},
+		{ID: "b", Kind: contract.KindSpec, Status: "deferred"},
+		{ID: "c", Kind: contract.KindChart},
+		{ID: "d", Kind: contract.KindCritique},
+		{ID: "e", Kind: contract.KindPivot},
+		{ID: "f", Kind: contract.KindBuild},
+	}
+	var ids []string
+	for _, b := range carriersOnly(found) {
+		ids = append(ids, b.ID)
+	}
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("carriers = %v, want %v", ids, want)
+	}
+}

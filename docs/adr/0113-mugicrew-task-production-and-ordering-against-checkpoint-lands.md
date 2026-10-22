@@ -1,6 +1,7 @@
 # ADR 0113: mugicrew Task — free-standing, filed by Zoro, a session or a human, ordered against Checkpoint lands by blocking edges
 
 Status: Accepted
+Amended by ADR 0352 (every-task-joins-the-initiative…) (§2: a Task joins the Initiative of the member it is ordered against).
 Date: 2026-10-09
 
 Amends: ADR 0013 §3 (gives the reserved `task` kind a place in the graph; its

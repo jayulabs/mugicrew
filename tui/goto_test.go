@@ -113,14 +113,14 @@ func TestGotoMenuBindingCoverage(t *testing.T) {
 	checkCoverage(t, "goto menu", m, false)
 }
 
-func TestGotoRevealHiddenOnGraph(t *testing.T) {
+func TestGotoRevealOfferedOnGraphAndScopesInPlace(t *testing.T) {
 	m := selectBead(t, graphModel(t, 120, 30), "run")
-	menu := press(t, m, runeKey("g")).View()
-	if strings.Contains(menu, "reveal") || !strings.Contains(menu, "logs") {
-		t.Errorf("Graph menu:\n%s", menu)
+	if menu := press(t, m, runeKey("g")).View(); !strings.Contains(menu, "reveal") {
+		t.Errorf("Graph menu lacks r:\n%s", menu)
 	}
-	if n := gotoKey(t, m, "r"); n.tab != tabGraph || gotoOpen(n) == false {
-		t.Errorf("r fired on Graph")
+	n := gotoKey(t, m, "r")
+	if g := gr(n); gotoOpen(n) || n.tab != tabGraph || g.q.scope == "" || g.sel != "run" {
+		t.Errorf("r on Graph: tab %d scope %q sel %q", n.tab, g.q.scope, g.sel)
 	}
 }
 
@@ -221,15 +221,18 @@ func TestGotoPCHiddenWithoutLinks(t *testing.T) {
 	}
 }
 
-func TestGotoJumpsLikeRecents(t *testing.T) {
+// landedOn asserts m is on Graph scoped to head with id selected.
+func landedOn(t *testing.T, name string, m Model, head, id string) {
+	t.Helper()
+	if g := gr(m); gotoOpen(m) || m.tab != tabGraph || g.q.scope != head || g.sel != id {
+		t.Errorf("%s: tab %d scope %q sel %q, want Graph scoped to %q on %q", name, m.tab, g.q.scope, g.sel, head, id)
+	}
+}
+
+func TestGotoBeadRowsLandOnGraphScopedToHead(t *testing.T) {
 	m := relModel(t, relBeads(), "B")
-	for _, c := range []struct{ keys, id string }{{"p", "P"}, {"c", "C"}, {"1", "bbY"}} {
-		open := press(t, m, runeKey("g"))
-		got := press(t, open, runeKey(c.keys))
-		want, _ := m.recentsJump(c.id)
-		if gotoOpen(got) || got.tab != want.tab || got.View() != want.View() {
-			t.Errorf("g %s: tab %d, want %d (Recents jump to %s)", c.keys, got.tab, want.tab, c.id)
-		}
+	for _, c := range []struct{ keys, head, id string }{{"p", "P", "P"}, {"c", "C", "C"}, {"1", "bbY", "bbY"}} {
+		landedOn(t, "g "+c.keys, gotoKey(t, m, c.keys), c.head, c.id)
 	}
 }
 
@@ -244,10 +247,7 @@ func TestGotoRowsPastNineViaJK(t *testing.T) {
 	}
 	// k wraps to the last row; enter jumps there
 	n := press(t, press(t, m, runeKey("k")), enterKey())
-	want, _ := m.recentsJump("relB")
-	if gotoOpen(n) || n.tab != want.tab || sel(n) != sel(want) {
-		t.Errorf("k enter did not jump to the last related row: tab %d sel %q, want %d %q", n.tab, sel(n), want.tab, sel(want))
-	}
+	landedOn(t, "k enter", n, "relB", "relB")
 }
 
 func TestGotoWritesNoRecents(t *testing.T) {
@@ -299,12 +299,8 @@ func TestGotoOriginRow(t *testing.T) {
 		}
 		at += i + len(w)
 	}
-	// g o is the Recents jump and writes no Recents entry
-	got := press(t, press(t, m, runeKey("g")), runeKey("o"))
-	want, _ := m.recentsJump("orA")
-	if gotoOpen(got) || got.tab != want.tab || got.View() != want.View() {
-		t.Errorf("g o is not the Recents jump to orA")
-	}
+	// g o lands on the origin's group and writes no Recents entry
+	landedOn(t, "g o", press(t, press(t, m, runeKey("g")), runeKey("o")), "orA", "orA")
 	if _, cmd := send(t, press(t, m, runeKey("g")), runeKey("o")); cmd != nil {
 		if _, ok := cmd().(recentsMsg); ok {
 			t.Error("g o recorded a Recents interaction")
@@ -328,9 +324,7 @@ func TestGotoOriginRowsKeepEdgeOrder(t *testing.T) {
 		t.Errorf("o went to %q, want orC", sel(got))
 	}
 	got := press(t, press(t, m, runeKey("g")), runeKey("1"))
-	if want, _ := m.recentsJump("orO"); got.tab != want.tab || got.View() != want.View() {
-		t.Errorf("1 did not jump to orO (origin rows are keyed from 1)")
-	}
+	landedOn(t, "1 (origin rows are keyed from 1)", got, "orO", "orO")
 }
 
 func TestGotoNoOriginWhenNoSources(t *testing.T) {

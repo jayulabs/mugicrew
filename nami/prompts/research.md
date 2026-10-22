@@ -32,7 +32,7 @@ Then a ## Purpose section, numbered ## N. ... sections, and end with a
 Commit the doc — exactly one file under docs/research/:
 
     git add docs/research/<slug>.md
-    git commit -m "research(%[1]s): <subject>"
+    git commit -m "docs(%[1]s): <subject>"
 
 Then run `mugicrew integrate` in this tree. It squashes your effort branch onto
 the Chart branch.

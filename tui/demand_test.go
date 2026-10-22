@@ -320,3 +320,13 @@ func TestGotoMenuStreamsInUnloadedOrigin(t *testing.T) {
 		t.Errorf("origin not fetched/shown (asked %v):\n%s", asked, m.View())
 	}
 }
+
+// The subtree read is a package-level seam, so TUI tests stub it instead of running bd.
+func TestListSubtreeIsStubbable(t *testing.T) {
+	seam(t, &listSubtree, func(id string, _ map[string]bd.Bead) (bd.Subtree, bool, error) {
+		return bd.Subtree{Head: "h", IDs: []string{"h", id}}, true, nil
+	})
+	if st, ok, err := listSubtree("x", nil); err != nil || !ok || st.Head != "h" {
+		t.Errorf("st=%+v ok=%v err=%v", st, ok, err)
+	}
+}

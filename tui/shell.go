@@ -268,6 +268,7 @@ type Model struct {
 	demandGen   int                         // the newest reveal fetch; an older one landing is dropped
 	searchGen   int                         // the newest closed search; an older one landing is dropped
 	gotoGen     int                         // the newest Goto menu open; an older menu's fetch landing is dropped
+	subtree     map[string]bool             // the Graph scope's whole subtree, closed beads included; claimed while Graph is the tab (ADR 0232 §1, Spec "Goto bead rows and reveal land on Graph scoped to the bead's group head" Decision 4)
 	hits        map[string]bool             // the closed word search's hits and their groups; claimed while Graph is the tab
 	searched    query                       // the query the hits answer; words "" when no search has run
 	openIDs     map[string]bool             // the open set's ids at the last load, for drop-out detection
@@ -533,6 +534,9 @@ func (m Model) graphQueryKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	g, isGraph := m.tabAt(m.tab).(graphTab)
 	wasAll := m.claimsAllClosed()
 	next, cmd := m.tabKey(k)
+	if isGraph {
+		next = next.(Model).scopeChanged(g.q)
+	}
 	if isGraph && !(g.visit && key.Matches(k, keyClear)) { // esc out of a visit restores the baseline, not a saved query
 		next = next.(Model).saveGraphFilter(g.q)
 	}
@@ -548,7 +552,7 @@ func (m Model) graphQueryKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // goes on the status line, the query kept in memory (ADR 0176 §4).
 func (m Model) saveGraphFilter(old query) Model {
 	g := m.tabAt(tabGraph).(graphTab)
-	if g.q == old || g.visit {
+	if g.q == old || g.visit || g.q.scope != "" || old.scope != "" { // a scope is a visit: nothing in or out of it is saved
 		return m
 	}
 	if err := g.saveQuery(); err != nil {
@@ -608,7 +612,7 @@ func (m Model) enter(i int) (tea.Model, tea.Cmd) {
 	if i == tabGraph {
 		m.tabs = slices.Clone(m.tabs)
 		g := m.tabAt(tabGraph).(graphTab)
-		if g.sel != "" && !slices.ContainsFunc(m.beads, func(b bd.Bead) bool { return b.ID == g.sel }) && (m.claimsAllClosed() || m.hits[g.sel] || m.revealed[g.sel]) {
+		if g.sel != "" && !slices.ContainsFunc(m.beads, func(b bd.Bead) bool { return b.ID == g.sel }) && (m.claimsAllClosed() || m.hits[g.sel] || m.revealed[g.sel] || m.subtree[g.sel]) {
 			g.searching, g.entry = true, true // the entry load re-reads the cursor bead: park, don't forget it
 		}
 		m.tabs[tabGraph] = g.rebuild() // catch up on loads that skipped it

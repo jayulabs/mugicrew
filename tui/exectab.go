@@ -19,6 +19,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/registry"
 )
 
 // Row kinds.
@@ -53,7 +54,7 @@ const (
 	mrsPrefix    = "mrs:"           // a Merge Requests row's key is mrsPrefix + the Watch's id
 	mrsNone      = mrsKey + "/none" // the empty Merge Requests section's placeholder
 	mrsEmpty     = "no open Merge Requests"
-	mrsDetail    = "Every open Merge Request the crew is waiting on, under the gitlab land strategy. d shows its link."
+	mrsDetail    = "Every open Checkpoint Merge Request, under the gitlab land strategy. d shows its link."
 	specsPrefix  = "specs:"           // a Specs row's key is specsPrefix + the bead id
 	specsNone    = specsKey + "/none" // the empty Specs section's placeholder
 	specsEmpty   = "no open Specs"
@@ -166,7 +167,7 @@ func (r eRow) cpAct() bool { return r.kind == eAct && r.b.Container }
 
 // leaf is whether enter routes the row as an open HITL leaf (blocked and paused refuse).
 func (r eRow) leaf() bool {
-	return r.b != nil && r.kind != eClosed && isHITL(r.b.Kind) && !r.b.Container
+	return r.b != nil && r.kind != eClosed && isHITL(r.b) && !r.b.Container
 }
 
 // selectable is whether the cursor may rest on the row: not on a placeholder.
@@ -291,7 +292,7 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 		var cand []*bd.Bead
 		var rel []string
 		for _, m := range open {
-			if (m.Kind == contract.KindApproval || m.Kind == contract.KindSurgery) && !m.Container {
+			if (m.Kind == contract.KindSurgery || m.Kind == contract.KindApproval && isHITL(m)) && !m.Container { // a waiting AFK Approval is the loop's, not Actionable's (Spec D5)
 				cand, rel = append(cand, m), append(rel, "member")
 			} else if !m.Container && g.ownPausedReady(m) { // paused band only (Spec mc-llx8 FR 1-2, 9)
 				memberPaused = append(memberPaused, eRow{kind: eAct, key: "act:" + m.ID, b: m, cp: cp, rel: "member", depth: 1})
@@ -432,10 +433,11 @@ func (g graphData) cpsRows() []eRow {
 	return rows
 }
 
-// mrRows is the Merge Requests section's rows and whether the section shows (Spec D5): an
-// unusable land_strategy shows it with no rows, gitlab with every open non-Draft MR Watch,
-// local not at all. Rows run in their container's beadCmp order.
-func (g graphData) mrRows() (rows []eRow, shown bool) {
+// mrRows is a tab's Merge Requests section rows and whether the section shows (Spec D1): an
+// unusable land_strategy shows it with no rows, gitlab with every open non-Draft MR Watch
+// whose resolved container is of kind cont (Checkpoint on Execute, Chart on Defog), local
+// not at all. Rows run in their container's beadCmp order.
+func (g graphData) mrRows(cont contract.Kind) (rows []eRow, shown bool) {
 	if g.landErr != nil {
 		return nil, true
 	}
@@ -446,7 +448,7 @@ func (g graphData) mrRows() (rows []eRow, shown bool) {
 		if w.Kind != contract.KindMRWatch || w.Event || !w.Unclosed() || bd.IsDraft(w) {
 			continue
 		}
-		if p := g.beadIndex(w.Parent); p >= 0 {
+		if p := g.beadIndex(w.Parent); p >= 0 && g.beads[p].Kind == cont {
 			rows = append(rows, eRow{kind: eMR, key: mrsPrefix + w.ID, b: &g.beads[i], cp: &g.beads[p], rel: "watches", depth: 1})
 		}
 	}
@@ -457,6 +459,7 @@ func (g graphData) mrRows() (rows []eRow, shown bool) {
 // mrLine is an MR row's text: the ref (the context named only for the nested body form, as
 // the rollup qualifier does), the Watch's container title, and the status word of the
 // container's open unpaused Landing, left out when it has none or the status is unmapped.
+// A closed container instead reads closing out · N due · M failing from the Watch's own lines.
 func (g graphData) mrLine(w, cp *bd.Bead) string {
 	var parts []string
 	if path, iid := git.RecordedMRPath(w.Description); iid != 0 {
@@ -467,6 +470,17 @@ func (g graphData) mrLine(w, cp *bd.Bead) string {
 		parts = append(parts, git.MRRef(ctxName, iid))
 	}
 	parts = append(parts, cp.Title)
+	if !cp.Unclosed() { // an outliving Watch: its container is closed, so it has no Landing word
+		parts = append(parts, "closing out")
+		for _, c := range []struct{ prefix, word string }{{contract.CloseOutsDuePrefix, "due"}, {contract.CloseOutsFailingPrefix, "failing"}} {
+			raw, _ := git.ParseLine(w.Description, strings.TrimSpace(c.prefix))
+			n, _, _ := strings.Cut(raw, ":")
+			if k, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && k > 0 {
+				parts = append(parts, fmt.Sprintf("%d %s", k, c.word))
+			}
+		}
+		return strings.Join(parts, " · ")
+	}
 	for _, j := range g.children(cp.ID) {
 		l := g.beads[j]
 		if l.Kind != contract.KindLanding || !l.Unclosed() || len(bd.PausedCauses(l)) > 0 {
@@ -565,7 +579,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 		rows = append(rows, live...)
 	}
 
-	if mrRows, shown := g.mrRows(); shown {
+	if mrRows, shown := g.mrRows(contract.KindCheckpoint); shown {
 		mh := eRow{kind: eSec, key: mrsKey, title: fmt.Sprintf("Merge Requests (%d)", len(mrRows))}
 		rows = append(rows, mh)
 		if !ecollapsed(flip, mh) {
@@ -944,15 +958,7 @@ func (m Model) execKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		return nm, cmd, true
 	}
 	if r.kind == eMR && key.Matches(k, keyOpenMR) {
-		ref := "its MR"
-		if path, iid := git.RecordedMRPath(r.b.Description); iid != 0 {
-			ctxName := ""
-			if path != "" && r.cp != nil {
-				ctxName = bd.ContextOf(*r.cp)
-			}
-			ref = git.MRRef(ctxName, iid)
-		}
-		next, cmd := m.openMR(r.b, ref)
+		next, cmd := m.openMRRow(r.b, r.cp)
 		return next, cmd, true
 	}
 	if r.kind == eLanded && (key.Matches(k, keyLaunch) || key.Matches(k, keyBg)) {
@@ -1093,6 +1099,9 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 		s += sep() + dimSt.Render(g.rollup(r.b).label())
 	} else if (r.kind == eAct || r.kind == eSide || r.kind == eLive) && r.cp != nil && r.cp != r.b {
 		s += sep() + dimSt.Render(relText(r.rel)+" "+r.cp.Title)
+	}
+	if r.kind == eAct && r.b.HasLabel(registry.AutoApproveFailedLabel) {
+		s += sep() + warnSt.Render(autoApproveFailedWord)
 	}
 	if r.kind == eLanded {
 		s += sep() + dimSt.Render("landed "+sha8(strings.TrimPrefix(r.members[0].CloseReason, "landed: "))+" · "+HumanAge(r.members[0].Closed))

@@ -64,6 +64,20 @@ type noBrowserErr struct{}
 
 func (noBrowserErr) Error() string { return "no browser candidate" }
 
+// openMRRow is w on a Merge Requests row of either tab: Watch w and the container cp it waits on
+// name the MR (the context only for the nested body form), then openMR launches it.
+func (m Model) openMRRow(w, cp *bd.Bead) (tea.Model, tea.Cmd) {
+	ref := "its MR"
+	if path, iid := git.RecordedMRPath(w.Description); iid != 0 {
+		ctxName := ""
+		if path != "" && cp != nil {
+			ctxName = bd.ContextOf(*cp)
+		}
+		ref = git.MRRef(ctxName, iid)
+	}
+	return m.openMR(w, ref)
+}
+
 // openMR is w on a Merge Requests row: the TUI stays up while the browser launches.
 func (m Model) openMR(w *bd.Bead, ref string) (tea.Model, tea.Cmd) {
 	url := git.RecordedMRLink(w.Description)

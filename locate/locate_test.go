@@ -85,7 +85,7 @@ func deps(r git.Repo, ids ...string) Deps {
 	return Deps{
 		Checkpoints: func() ([]bd.Bead, error) { return beads, nil },
 		RepoOf:      func(bd.Bead) git.Repo { return r },
-		Repos:       func() ([]git.Repo, error) { return []git.Repo{r}, nil },
+		Repos:       func() ([]Declared, error) { return []Declared{{Repo: r}}, nil },
 		Strategy:    func() (string, error) { return git.LandStrategyLocal, nil },
 	}
 }
@@ -292,7 +292,7 @@ func TestInvalidTokenOrGitFailureWarnsInsteadOfPassingSilently(t *testing.T) {
 	commit(t, d, "change")
 	sh(t, d, "checkout", "-q", "main")
 	dd := deps(git.Repo(d), "mc-a")
-	dd.Repos = func() ([]git.Repo, error) { return []git.Repo{git.Repo(d)}, nil }
+	dd.Repos = func() ([]Declared, error) { return []Declared{{Repo: git.Repo(d)}}, nil }
 	// A pathspec outside the repository makes git diff fail.
 	res := run(t, dd, nil, []string{"../outside"})
 	if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "../outside") }) {
@@ -304,9 +304,116 @@ func TestInvalidTokenOrGitFailureWarnsInsteadOfPassingSilently(t *testing.T) {
 func TestLocateWarnsWhenDeclaredReposCannotBeResolved(t *testing.T) {
 	r := synthetic(t)
 	d := deps(r)
-	d.Repos = func() ([]git.Repo, error) { return []git.Repo{r}, errors.New("not a git repo") }
+	d.Repos = func() ([]Declared, error) { return []Declared{{Repo: r}}, errors.New("not a git repo") }
 	res := run(t, d, []string{"nothing"}, nil)
 	if !slices.ContainsFunc(res.Warnings, func(w string) bool { return strings.Contains(w, "not a git repo") }) {
 		t.Errorf("warnings = %q, want one naming the repo-root failure", res.Warnings)
+	}
+}
+
+// ctxRepo is a context repo declared at caselaw-corpus: main has migrations/V1__a.sql;
+// checkpoint/cc-1 adds migrations/V216__x.sql.
+func ctxRepo(t *testing.T) git.Repo {
+	t.Helper()
+	d := t.TempDir()
+	sh(t, d, "init", "-q", "-b", "main")
+	write(t, d, "migrations/V1__a.sql", "select 1;\n")
+	commit(t, d, "base")
+	sh(t, d, "checkout", "-qb", "checkpoint/cc-1")
+	write(t, d, "migrations/V216__x.sql", "select 216;\n")
+	commit(t, d, "v216")
+	sh(t, d, "checkout", "-q", "main")
+	return git.Repo(d)
+}
+
+// prefixDeps searches the Workspace repo ws and the context repo cr declared at dir.
+func prefixDeps(ws, cr git.Repo, dir string) Deps {
+	d := deps(ws, "mc-a")
+	d.RepoOf = func(b bd.Bead) git.Repo {
+		if b.ID == "cc-1" {
+			return cr
+		}
+		return ws
+	}
+	d.Checkpoints = func() ([]bd.Bead, error) {
+		return []bd.Bead{
+			{ID: "mc-a", Kind: contract.KindCheckpoint, Status: "open"},
+			{ID: "cc-1", Kind: contract.KindCheckpoint, Status: "open"},
+		}, nil
+	}
+	d.Repos = func() ([]Declared, error) { return []Declared{{Repo: ws}, {Repo: cr, Dir: dir}}, nil }
+	return d
+}
+
+func TestPrefixedPathMatchesContextRepoCheckpoint(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "caselaw-corpus")
+	const p = "caselaw-corpus/migrations/V216__x.sql"
+	res := run(t, d, nil, []string{p})
+	if res.Verdict != "only" || res.Checkpoint != "cc-1" {
+		t.Errorf("verdict %q %q, want only cc-1", res.Verdict, res.Checkpoint)
+	}
+	if h := res.Hits[0]; h.Ask != p || !slices.Equal(h.Checkpoints, []string{"cc-1"}) {
+		t.Errorf("hit = %+v, want ask as given on cc-1", h)
+	}
+	if !slices.Equal(res.Considered, []string{"cc-1", "mc-a"}) {
+		t.Errorf("considered %v, want both repos' Checkpoints", res.Considered)
+	}
+}
+
+func TestNonCleanDeclaredDirAndPathStillStrip(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "./caselaw-corpus/")
+	res := run(t, d, nil, []string{"caselaw-corpus//migrations/V216__x.sql"})
+	if res.Verdict != "only" || res.Checkpoint != "cc-1" {
+		t.Errorf("verdict %q %q, want only cc-1", res.Verdict, res.Checkpoint)
+	}
+}
+
+func TestUnprefixedPathStillMatchesContextRepo(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "caselaw-corpus")
+	res := run(t, d, nil, []string{"migrations/V216__x.sql"})
+	if res.Verdict != "only" || res.Checkpoint != "cc-1" {
+		t.Errorf("verdict %q %q, want only cc-1", res.Verdict, res.Checkpoint)
+	}
+}
+
+func TestPrefixIsNotStrippedInOtherRepos(t *testing.T) {
+	ws := synthetic(t)
+	d := prefixDeps(ws, ctxRepo(t), "caselaw-corpus")
+	// src/idx.py exists in the Workspace repo only; under the context's prefix it must not match there.
+	res := run(t, d, nil, []string{"caselaw-corpus/src/idx.py"})
+	if res.Verdict != "none" || !res.Hits[0].Unknown {
+		t.Errorf("verdict %q hit %+v, want none and unknown", res.Verdict, res.Hits[0])
+	}
+	// a path under another declared dir is not stripped by this repo either
+	res = run(t, prefixDeps(ws, ctxRepo(t), "other"), nil, []string{"caselaw-corpus/migrations/V216__x.sql"})
+	if res.Verdict != "none" {
+		t.Errorf("verdict %q, want none", res.Verdict)
+	}
+}
+
+func TestPrefixedPathUnchangedOnContextMainlineIsMain(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "caselaw-corpus")
+	res := run(t, d, nil, []string{"caselaw-corpus/migrations/V1__a.sql"})
+	if res.Verdict != "main" || !res.Hits[0].OnMain {
+		t.Errorf("verdict %q hit %+v, want main", res.Verdict, res.Hits[0])
+	}
+}
+
+func TestPathEqualToContextDirIsMainWhenNoCheckpointChangedTheRepo(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "caselaw-corpus")
+	d.Checkpoints = func() ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "mc-a", Kind: contract.KindCheckpoint, Status: "open"}}, nil
+	}
+	res := run(t, d, nil, []string{"caselaw-corpus"})
+	if h := res.Hits[0]; res.Verdict != "main" || !h.OnMain || h.Ask != "caselaw-corpus" {
+		t.Errorf("verdict %q hit %+v, want main and on_main as given", res.Verdict, h)
+	}
+}
+
+func TestPathEqualToContextDirGivesTheCheckpointChangingTheRepo(t *testing.T) {
+	d := prefixDeps(synthetic(t), ctxRepo(t), "caselaw-corpus")
+	res := run(t, d, nil, []string{"caselaw-corpus"})
+	if res.Verdict != "only" || res.Checkpoint != "cc-1" {
+		t.Errorf("verdict %q %q, want only cc-1", res.Verdict, res.Checkpoint)
 	}
 }

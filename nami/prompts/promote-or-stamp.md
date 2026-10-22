@@ -74,13 +74,12 @@ Spawn each with chart-body.md's defog-create command, filled in for this Chart
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 A step the work will need in the external world (outside the bead graph and
-the code) may be drafted as a free-standing Task, never a Chart child (no
+the code) may be drafted as a Task, never a Chart child (no
 --parent), its body in crew doc task-body.md's format, blocked on the Chart or
 Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
-    bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
+    mugicrew task new --drafted-by %[1]s --after %[1]s \
       --title "..." --description "<its ## Steps body>"
-    bd dep add <task> %[1]s
 
 %[3]s
 

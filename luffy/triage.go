@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -323,7 +324,82 @@ func memberSectionFor(sig bd.Bead) string {
 	}
 	slices.SortFunc(sibs, func(a, b bd.Bead) int { return strings.Compare(a.ID, b.ID) })
 	slices.SortFunc(others, func(a, b bd.Bead) int { return strings.Compare(a.ID, b.ID) })
-	return memberSection(sig.ID, ini, sibs, initiativesSetting().Required, others)
+	return memberSection(sig.ID, ini, sibs, initiativesSetting().Required, others) + orderedSection(sig, ini, all)
+}
+
+// orderedSection is the Go-built Ordered: line and its triage rules (ADR 0347)
+// for a member Signal ordered against a container; "" for every other member, so
+// their prompt is unchanged (ADR 0252 §8). A failing edge read drops it (logged).
+func orderedSection(sig bd.Bead, ini bd.Bead, all []bd.Bead) string {
+	order := orderOf(sig.Description)
+	if order == "" { // the filing wrote no Order: line, so a blocks edge to a sibling is not an order
+		return ""
+	}
+	blockedBy, blocks, err := orderEdges(sig.ID)
+	if err != nil {
+		slog.Warn("member.ordered.skipped", "bead", sig.ID, "err", err.Error())
+		return ""
+	}
+	edges := blockedBy
+	if order == "prerequisite" {
+		edges = blocks
+	}
+	ctr := containerAmong(edges, all, ini)
+	if ctr.ID == "" {
+		return ""
+	}
+	// Real Phases lines are prose naming the Signal or Chart a phase came from, so a
+	// title match is the exception: "not named on Phases" is the expected fallback.
+	phase := "not named on Phases"
+	// a member container is a direct Initiative child, so it is the Phases entry itself
+	phaseLine := regexp.MustCompile(`^\s*(?:\d+\.|[-*])\s+` + regexp.QuoteMeta(ctr.Title) + `(?:\s|$)`)
+	for _, line := range strings.Split(phases(ini.Description), "\n") {
+		if ctr.Title != "" && phaseLine.MatchString(line) {
+			phase = strings.TrimSpace(line)
+			break
+		}
+	}
+	rules := fmt.Sprintf("- Ordered member: place it by the Ordered: line, never by the sibling rules against %[1]s. It is never merged into %[1]s or parked against it; a closed same-context sibling does not count toward the one-member-per-context or sibling rules.\n", ctr.Title)
+	if order == "follow-up" {
+		rules += "- Place a follow-up in its cause's phase (the phase under way if that one has drained) and leave it blocked if the cause hasn't landed, also when triaged early by a run-now. Never park it.\n"
+	} else {
+		rules += fmt.Sprintf("- Place a prerequisite as a co-member of the cause's phase (an exception to ADR 0252 §3), with the Phases entry `<title> [<context>, prerequisite of %s]`. Its blocks edge keeps the order. Never park it.\n", ctr.Title)
+	}
+	return fmt.Sprintf("\nOrdered: %s of %s (phase: %s)\n%s", order, ctr.Title, phase, rules)
+}
+
+// orderOf is "follow-up" or "prerequisite" from the body's `Order: <order> of ` line
+// (written by signal offshoot); "" for an unordered or unmarked Signal.
+func orderOf(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		for _, o := range []string{"follow-up", "prerequisite"} {
+			if strings.HasPrefix(line, "Order: "+o+" of ") {
+				return o
+			}
+		}
+	}
+	return ""
+}
+
+// containerAmong is the first of edges that is a Chart, Spec or Checkpoint in all, or a
+// Task that is a member of ini (its own container, FR23). Status is not checked: a
+// follow-up is normally triaged after its container has closed (ADR 0347).
+func containerAmong(edges, all []bd.Bead, ini bd.Bead) bd.Bead {
+	for _, e := range edges {
+		i := slices.IndexFunc(all, func(b bd.Bead) bool { return b.ID == e.ID })
+		if i < 0 {
+			continue
+		}
+		switch all[i].Kind {
+		case contract.KindChart, contract.KindSpec, contract.KindCheckpoint:
+			return all[i]
+		case contract.KindTask:
+			if all[i].Parent == ini.ID {
+				return all[i]
+			}
+		}
+	}
+	return bd.Bead{}
 }
 
 // initiativeAbove climbs src's parents at most two levels (a member, or a defog

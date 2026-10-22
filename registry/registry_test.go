@@ -109,3 +109,59 @@ func TestAllKindsSortedCoversEveryKind(t *testing.T) {
 		}
 	}
 }
+
+// ModeOf is Lookup's Mode except for one case (ADR 0346): an Approval is AFK while
+// the auto-approve snapshot is on and the bead lacks auto-approve:failed.
+func TestModeOfApprovalFollowsAutoApproveSnapshot(t *testing.T) {
+	cases := []struct {
+		name   string
+		on     bool
+		kind   contract.Kind
+		labels []string
+		want   Mode
+	}{
+		{"off unmarked approval", false, contract.KindApproval, nil, HITL},
+		{"off marked approval", false, contract.KindApproval, []string{AutoApproveFailedLabel}, HITL},
+		{"on unmarked approval", true, contract.KindApproval, []string{"kind:approval"}, AFK},
+		{"on marked approval", true, contract.KindApproval, []string{AutoApproveFailedLabel}, HITL},
+		{"on build", true, contract.KindBuild, nil, AFK},
+		{"on pivot", true, contract.KindPivot, nil, HITL},
+		{"on signal", true, contract.KindSignal, nil, HITL},
+		{"on checkpoint", true, contract.KindCheckpoint, nil, AFK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			SetAutoApprove(tc.on)
+			t.Cleanup(ResetAutoApprove)
+			if got := ModeOf(tc.kind, tc.labels); got != tc.want {
+				t.Errorf("ModeOf(%s, %v) = %s, want %s", tc.kind, tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestModeOfUnknownKindIsHITL(t *testing.T) {
+	SetAutoApprove(true)
+	t.Cleanup(ResetAutoApprove)
+	if got := ModeOf("nope", nil); got != HITL {
+		t.Errorf("ModeOf(unknown) = %s, want hitl", got)
+	}
+}
+
+func TestLookupStaysStaticWhileAutoApproveIsOn(t *testing.T) {
+	SetAutoApprove(true)
+	t.Cleanup(ResetAutoApprove)
+	e, err := Lookup(contract.KindApproval)
+	if err != nil || e.Mode != HITL {
+		t.Errorf("Lookup(approval) = %+v, %v; want static HITL", e, err)
+	}
+}
+
+func TestIsModeUnknownKindIsInNoMode(t *testing.T) {
+	if IsMode("nope", nil, HITL) || IsMode("nope", nil, AFK) {
+		t.Error("IsMode(unknown) true, want false for both modes")
+	}
+	if !IsMode(contract.KindResearch, nil, AFK) || IsMode(contract.KindResearch, nil, HITL) {
+		t.Error("IsMode(research) should be AFK only")
+	}
+}

@@ -3,6 +3,7 @@
 Status: Accepted
 Date: 2026-10-09
 
+Amended by: ADR 0342 (mugicrew-withdraw-takes-a-task…) §2.
 Amends: ADR 0116 §2 (a third marker) and §5 (one non-pass record). Settles the
 rollback fog in ADR 0113's Consequences.
 

@@ -272,8 +272,20 @@ func (Nami) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 var grillingTmpl string
 
 func grillingPrompt(grillingID string) string {
-	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID), contract.IntegrateExits())
+	return grillingPromptClosing(grillingID, fmt.Sprintf("       bd close %s --reason \"answered: <one-line summary>\"", grillingID))
 }
+
+// grillingPromptClosing renders the grilling workflow with closeBlock as its
+// one close instruction, so a framing that owns the close line (the Source
+// variant) never leaves the plain one beside it.
+func grillingPromptClosing(grillingID, closeBlock string) string {
+	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID), contract.IntegrateExits(), closeBlock)
+}
+
+// sourceCloseTmpl is the verdict-prefixed close block of a filed grilling (ADR 0339).
+//
+//go:embed prompts/grilling-source-close.md
+var sourceCloseTmpl string
 
 // sourceGrillingTmpl frames a Merge Request review thread's grilling: the
 // reviewer left a question or ask on the Chart, so the session answers it in the
@@ -284,7 +296,7 @@ var sourceGrillingTmpl string
 
 // sourceGrillingPrompt is the plain grilling prompt under the Source: framing, so the Draft instruction and the close contract carry over.
 func sourceGrillingPrompt(grillingID string) string {
-	return sourceGrillingTmpl + "\n" + grillingPrompt(grillingID)
+	return sourceGrillingTmpl + "\n" + grillingPromptClosing(grillingID, strings.TrimRight(fmt.Sprintf(sourceCloseTmpl, grillingID), "\n"))
 }
 
 // hasSourceLine reports a "Source:" key line in a grilling body; a quoted
@@ -491,7 +503,9 @@ var (
 	edgesOnPublish     = bd.EdgesOnPublish
 	carry              = bd.Carry
 	initiativeOf       = bd.InitiativeOf
-	postLandClashes    = git.PostLandClashes
+	postLandClashes    = git.PostLandClashesAt
+	commitEmpty        = git.IsEmptyCommit
+	mergeShaOf         = bd.MergeShaOf
 	subtreeIDs         = bd.SubtreeIDs
 	cutBranch          = git.CutBranch
 	buildChildren      = bd.BuildChildren
@@ -723,7 +737,11 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 // so an error leaves the Chart open and the re-run files no duplicate. Nami only
 // calls the mint: the Checkpoint routes to Jinbe from then on.
 func mintRenumber(chart bd.Bead, sha string) error {
-	clashes, err := postLandClashes(sha)
+	merge, err := mergeBehindEmptyLand(chart, sha)
+	if err != nil {
+		return err
+	}
+	clashes, err := postLandClashes(sha, merge)
 	if err != nil {
 		return err
 	}
@@ -732,6 +750,25 @@ func mintRenumber(chart bd.Bead, sha string) error {
 		SpawnBuild: spawnChildIfAbsent, InitiativeOf: initiativeOf, SubtreeIDs: subtreeIDs, CausedBy: bd.CausedBy,
 	})
 	return err
+}
+
+// mergeBehindEmptyLand is the MR merge sha post-land clash detection diffs when sha, the
+// landed commit, is an empty trailer commit (a human stamped the trailer the merge
+// dropped), else "". When the empty land has no recorded merge sha it logs one warning
+// and returns "": detection runs as for any land and never holds the Chart open.
+func mergeBehindEmptyLand(chart bd.Bead, sha string) (string, error) {
+	empty, err := commitEmpty(sha)
+	if err != nil || !empty {
+		return "", err
+	}
+	merge, why, err := mergeShaOf(chart.ID)
+	if err != nil {
+		return "", err
+	}
+	if merge == "" {
+		slog.Warn("land.merge_sha_missing", append(eventlog.BeadAttrs(chart), "sha", sha, "why", why)...)
+	}
+	return merge, nil
 }
 
 // The chart-conflict variants name which leg the resolve session runs (ADR 0030

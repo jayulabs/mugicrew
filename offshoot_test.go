@@ -9,7 +9,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 )
 
-type offshootCall struct{ title, body, by, cause, edge string }
+type offshootCall struct{ title, body, by, cause, edge, parent string }
 
 // offshootWorld fakes the bd legs of `signal offshoot`: beads by id, and a
 // create that refuses an ordered pair with ordered (when set) and records calls.
@@ -25,8 +25,8 @@ func offshootWorld(t *testing.T, beads map[string]bd.Bead, ordered error, unorde
 		}
 		return b, nil
 	}
-	newOffshoot = func(title, body, by, cause, edge string) (string, error) {
-		calls = append(calls, offshootCall{title, body, by, cause, edge})
+	newOffshoot = func(title, body, by, cause, edge, parent string) (string, error) {
+		calls = append(calls, offshootCall{title, body, by, cause, edge, parent})
 		if edge != "" && ordered != nil {
 			return "", ordered
 		}
@@ -39,19 +39,27 @@ func offshootWorld(t *testing.T, beads map[string]bd.Bead, ordered error, unorde
 }
 
 func TestSignalOffshoot(t *testing.T) {
-	cp := bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Status: "open", Title: "The Checkpoint"}
+	cp := bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Status: "open", Title: "The Checkpoint", Parent: "init"}
 	ch := bd.Bead{ID: "ch", Kind: contract.KindChart, Status: "open", Title: "The Chart"}
 	world := map[string]bd.Bead{
 		"cp": cp, "ch": ch, "init": {ID: "init", Kind: contract.KindInitiative, Status: "open", Title: "Init"},
-		"closed":   {ID: "closed", Kind: contract.KindCheckpoint, Status: "closed", Title: "Done CP"},
-		"build":    {ID: "build", Kind: contract.KindBuild, Parent: "cp", Title: "A Build"},
-		"defog":    {ID: "defog", Kind: contract.KindPrototype, Parent: "ch", Title: "A defog"},
-		"survey":   {ID: "survey", Kind: contract.KindSurvey, Parent: "ch", Title: "A Survey"},
-		"task":     {ID: "task", Kind: contract.KindTask, Parent: "init", Title: "A Task"},
-		"disc":     {ID: "disc", Kind: contract.KindDiscussion, Parent: "init", Title: "A Discussion"},
-		"orphan":   {ID: "orphan", Kind: contract.KindBuild, Title: "Orphan"},
-		"inclosed": {ID: "inclosed", Kind: contract.KindBuild, Parent: "closed", Title: "Child of closed"},
+		"closed":     {ID: "closed", Kind: contract.KindCheckpoint, Status: "closed", Title: "Done CP"},
+		"build":      {ID: "build", Kind: contract.KindBuild, Parent: "cp", Title: "A Build"},
+		"defog":      {ID: "defog", Kind: contract.KindPrototype, Parent: "ch", Title: "A defog"},
+		"survey":     {ID: "survey", Kind: contract.KindSurvey, Parent: "ch", Title: "A Survey"},
+		"task":       {ID: "task", Kind: contract.KindTask, Parent: "init", Title: "A Task"},
+		"disc":       {ID: "disc", Kind: contract.KindDiscussion, Parent: "init", Title: "A Discussion"},
+		"orphan":     {ID: "orphan", Kind: contract.KindBuild, Title: "Orphan"},
+		"inclosed":   {ID: "inclosed", Kind: contract.KindBuild, Parent: "closed", Title: "Child of closed"},
+		"cinit":      {ID: "cinit", Kind: contract.KindInitiative, Status: "closed", Title: "Old Init"},
+		"cpc":        {ID: "cpc", Kind: contract.KindCheckpoint, Status: "open", Title: "CP in closed Init", Parent: "cinit"},
+		"buildc":     {ID: "buildc", Kind: contract.KindBuild, Parent: "cpc", Title: "Build in closed Init"},
+		"cpo":        {ID: "cpo", Kind: contract.KindCheckpoint, Status: "open", Title: "CP outside"},
+		"buildo":     {ID: "buildo", Kind: contract.KindBuild, Parent: "cpo", Title: "Build outside"},
+		"closedtask": {ID: "closedtask", Kind: contract.KindTask, Status: "closed", Parent: "init", Title: "Done Task"},
+		"outtask":    {ID: "outtask", Kind: contract.KindTask, Title: "Outside Task"},
 	}
+	const unordered = "Initiative: outside (unordered)"
 	errCycle := errors.New("bd create: would create a cycle")
 	errClash := errors.New("bd create: already exists with type related")
 	errHier := errors.New("bd create: cannot be blocked by its ancestor")
@@ -59,19 +67,27 @@ func TestSignalOffshoot(t *testing.T) {
 		name, from, order string
 		ordered           error
 		wantEdge, wantOrd string
+		wantParent        string
+		wantPlace         string
 	}{
-		{"build follow-up", "build", "follow-up", nil, "blocked-by:cp", "Order: follow-up of The Checkpoint"},
-		{"build prerequisite", "build", "prerequisite", nil, "blocks:cp", "Order: prerequisite of The Checkpoint"},
-		{"defog under chart", "defog", "follow-up", nil, "blocked-by:ch", "Order: follow-up of The Chart"},
-		{"survey under chart", "survey", "follow-up", nil, "blocked-by:ch", "Order: follow-up of The Chart"},
-		{"task has no container", "task", "follow-up", nil, "", "Order: unordered (A Task has no container)"},
-		{"discussion has no container", "disc", "prerequisite", nil, "", "Order: unordered (A Discussion has no container)"},
-		{"unparented", "orphan", "follow-up", nil, "", "Order: unordered (Orphan has no container)"},
-		{"closed container", "inclosed", "follow-up", nil, "", "Order: unordered (Done CP is closed)"},
-		{"cycle", "build", "prerequisite", errCycle, "", "Order: unordered (cycle)"},
-		{"type clash", "build", "follow-up", errClash, "", "Order: unordered (type-clash)"},
-		{"hierarchy", "defog", "prerequisite", errHier, "", "Order: unordered (hierarchy)"},
-		{"none", "build", "none", nil, "", "Order: none"},
+		{"build follow-up", "build", "follow-up", nil, "blocked-by:cp", "Order: follow-up of The Checkpoint", "init", "Initiative: Init"},
+		{"build prerequisite", "build", "prerequisite", nil, "blocks:cp", "Order: prerequisite of The Checkpoint", "init", "Initiative: Init"},
+		{"defog under chart", "defog", "follow-up", nil, "blocked-by:ch", "Order: follow-up of The Chart", "", "Initiative: outside (The Chart has no Initiative)"},
+		{"survey under chart", "survey", "follow-up", nil, "blocked-by:ch", "Order: follow-up of The Chart", "", "Initiative: outside (The Chart has no Initiative)"},
+		{"member task follow-up", "task", "follow-up", nil, "blocked-by:task", "Order: follow-up of A Task", "init", "Initiative: Init"},
+		{"member task prerequisite", "task", "prerequisite", nil, "blocks:task", "Order: prerequisite of A Task", "init", "Initiative: Init"},
+		{"closed task", "closedtask", "follow-up", nil, "", "Order: unordered (Done Task has no container)", "", unordered},
+		{"outside task", "outtask", "follow-up", nil, "", "Order: unordered (Outside Task has no container)", "", unordered},
+		{"discussion has no container", "disc", "prerequisite", nil, "", "Order: unordered (A Discussion has no container)", "", unordered},
+		{"unparented", "orphan", "follow-up", nil, "", "Order: unordered (Orphan has no container)", "", unordered},
+		{"closed container", "inclosed", "follow-up", nil, "", "Order: unordered (Done CP is closed)", "", unordered},
+		{"closed initiative", "buildc", "follow-up", nil, "blocked-by:cpc", "Order: follow-up of CP in closed Init", "", "Initiative: outside (Old Init is closed)"},
+		{"checkpoint outside initiative", "buildo", "prerequisite", nil, "blocks:cpo", "Order: prerequisite of CP outside", "", "Initiative: outside (CP outside has no Initiative)"},
+		{"cycle", "build", "prerequisite", errCycle, "", "Order: unordered (cycle)", "", unordered},
+		{"type clash", "build", "follow-up", errClash, "", "Order: unordered (type-clash)", "", unordered},
+		{"hierarchy", "defog", "prerequisite", errHier, "", "Order: unordered (hierarchy)", "", unordered},
+		{"none", "build", "none", nil, "", "Order: none", "", unordered},
+		{"none of task", "task", "none", nil, "", "Order: none", "", unordered},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -83,10 +99,10 @@ func TestSignalOffshoot(t *testing.T) {
 			}
 			last := (*calls)[len(*calls)-1]
 			wantBody := "D\n\n" + c.wantOrd
-			if last.title != "T" || last.body != wantBody || last.by != "mc-me" || last.cause != c.from || last.edge != c.wantEdge {
-				t.Errorf("created %+v, want body %q edge %q", last, wantBody, c.wantEdge)
+			if last.title != "T" || last.body != wantBody || last.by != "mc-me" || last.cause != c.from || last.edge != c.wantEdge || last.parent != c.wantParent {
+				t.Errorf("created %+v, want body %q edge %q parent %q", last, wantBody, c.wantEdge, c.wantParent)
 			}
-			if out.String() != "mc-new\n"+c.wantOrd+"\n" {
+			if out.String() != "mc-new\n"+c.wantOrd+"\n"+c.wantPlace+"\n" {
 				t.Errorf("stdout %q", out.String())
 			}
 			if n := len(*calls); c.ordered != nil && n != 2 || c.ordered == nil && n != 1 {

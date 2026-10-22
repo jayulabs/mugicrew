@@ -145,3 +145,73 @@ func TestEnterOnMRRowUnchanged(t *testing.T) {
 		t.Errorf("enter launched a browser (verb %q, cmd %v)", before, cmd)
 	}
 }
+
+// defogMRRowModel is a gitlab Defog tab with the cursor on the Chart Watch id.
+func defogMRRowModel(t *testing.T, id string) Model {
+	t.Helper()
+	stubCommonDir(t, t.TempDir())
+	stubActions(t)
+	m := sized(t, 160, 40)
+	m.landName = "gitlab"
+	g := mrGraph("mergeable")
+	g.beads[g.beadIndex("w3")].Description = "MR: !11\nMR link: " + mrURL
+	m, _ = send(t, m, loadedMsg{beads: g.beads, live: map[string]bool{}})
+	m = press(t, m, runeKey("2"))
+	d := m.tabAt(tabDefog).(defogTab)
+	d.sel = mrsPrefix + id
+	m.tabs = slices.Clone(m.tabs)
+	m.tabs[tabDefog] = d
+	return m
+}
+
+func TestDefogWOpensChartMR(t *testing.T) {
+	yankLog(t)
+	t.Setenv("BROWSER", "a")
+	ran := stubLaunch(t, nil)
+	m := runW(t, defogMRRowModel(t, "w3"))
+	if len(*ran) != 1 || m.status != "opened !11 in browser" {
+		t.Errorf("ran %q status %q", *ran, m.status)
+	}
+}
+
+func TestDefogWFailureCopiesOSC52(t *testing.T) {
+	got := yankLog(t)
+	t.Setenv("BROWSER", "a")
+	stubLaunch(t, func([]string) error { return errors.New("exit 1") })
+	m := runW(t, defogMRRowModel(t, "w3"))
+	if m.status != "couldn't open a browser; copied !11's link" || !slices.Equal(*got, []string{mrURL}) {
+		t.Errorf("status %q, copied %v", m.status, *got)
+	}
+}
+
+func TestDefogWWithoutLinkRunsNothing(t *testing.T) {
+	got := yankLog(t)
+	ran := stubLaunch(t, nil)
+	t.Setenv("BROWSER", "x")
+	m := runW(t, defogMRRowModel(t, "w4"))
+	if len(*ran) != 0 || len(*got) != 0 || !strings.Contains(m.status, "no link yet") {
+		t.Errorf("ran %v copied %v status %q", *ran, *got, m.status)
+	}
+}
+
+func TestDefogWHintOnlyOnMRRows(t *testing.T) {
+	hasW := func(m Model) bool {
+		for _, b := range m.tabAt(tabDefog).(defogTab).bindings() {
+			if b.Keys()[0] == "w" {
+				return true
+			}
+		}
+		return false
+	}
+	m := defogMRRowModel(t, "w3")
+	if !hasW(m) {
+		t.Error("w missing from the hints on an MR row")
+	}
+	d := m.tabAt(tabDefog).(defogTab)
+	d.sel = mrsKey
+	m.tabs = slices.Clone(m.tabs)
+	m.tabs[tabDefog] = d
+	if hasW(m) {
+		t.Error("w hinted on the section header")
+	}
+}

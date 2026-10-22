@@ -14,6 +14,7 @@ import (
 
 var (
 	listWithAncestors = bd.ListWithAncestors
+	listSubtree       = bd.ListSubtree // a bead's group head and whole subtree in two bd calls
 	listChildren      = bd.ListChildren
 	listDependents    = bd.DependentIDs
 )
@@ -28,6 +29,10 @@ type demandMsg struct {
 	id      string            // a reveal fetch's bead
 	undo    func(Model) Model // puts back the Graph query and tab a G scoped, when bd has no such bead
 	then    func(Model, string) (Model, tea.Cmd)
+	land    bool // a goto landing's subtree read: id is the landed bead, prov its provisional scope
+	prov    string
+	st      bd.Subtree
+	stOK    bool // false when bd lacks the bead
 }
 
 // fetchReveal fetches id with its ancestors, then runs then. G (scope) shows Graph scoped
@@ -38,13 +43,9 @@ func (m Model) fetchReveal(id string, scope bool, then func(Model, string) (Mode
 	gen := m.demandGen
 	var undo func(Model) Model
 	if scope {
-		g, tab := m.tabAt(tabGraph).(graphTab), m.tab
-		prev := g
-		undo = func(m Model) Model {
-			m.tabs = slices.Clone(m.tabs)
-			m.tabs[tabGraph], m.tab = prev, tab
-			return m
-		}
+		g := m.tabAt(tabGraph).(graphTab)
+		undo = m.graphUndo()
+		m.subtree = nil // the reveal replaces any scope
 		g.q, g.typing, g.visit, g.searching, g.want = query{words: id, status: statusAny}, false, false, true, id
 		m.searched = g.q // a scoped reveal is not a word search
 		m.searchGen++    // an in-flight word search for the old words is stale
@@ -56,6 +57,33 @@ func (m Model) fetchReveal(id string, scope bool, then func(Model, string) (Mode
 		beads, err := listWithAncestors(id)
 		return demandMsg{gen: gen, beads: beads, err: err, id: id, then: then, undo: undo}
 	}
+}
+
+// graphUndo puts back the Graph tab and current tab as they are now: what a scoped
+// fetch does when bd lacks the bead.
+func (m Model) graphUndo() func(Model) Model {
+	prev, tab, prevSub := m.tabAt(tabGraph).(graphTab), m.tab, m.subtree
+	return func(m Model) Model {
+		m.tabs = slices.Clone(m.tabs)
+		m.tabs[tabGraph], m.tab = prev, tab
+		m.subtree = prevSub
+		return m
+	}
+}
+
+// foldBeads takes fetched beads into the on-demand set and the snapshot index.
+func (m Model) foldBeads(beads []bd.Bead) Model {
+	extra := maps.Clone(m.extra)
+	if extra == nil {
+		extra = map[string]bd.Bead{}
+	}
+	for _, b := range beads {
+		extra[b.ID] = b
+	}
+	m.extra = extra
+	m = m.withExtra()
+	m.idx = newSnapIndex(m.beads)
+	return m
 }
 
 // gotoFetch brings in the selected bead's one-hop neighbours that are not loaded: the
@@ -104,6 +132,9 @@ func (m Model) foldDemand(msg demandMsg) (Model, tea.Cmd) {
 	if (!msg.forGoto && msg.gen != m.demandGen) || (msg.forGoto && msg.gen != m.gotoGen) {
 		return m, nil
 	}
+	if msg.land {
+		return m.foldLanding(msg)
+	}
 	if msg.err != nil {
 		m.setStatus("fetch failed: " + msg.err.Error())
 		if !msg.forGoto { // a failed G must not leave searching… and the remembered cursor behind
@@ -114,16 +145,12 @@ func (m Model) foldDemand(msg demandMsg) (Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	extra, held := maps.Clone(m.extra), map[string]bool{}
-	if extra == nil {
-		extra = map[string]bd.Bead{}
-	}
+	held := map[string]bool{}
 	moved := msg.undo != nil && m.tabAt(tabGraph).(graphTab).want == "" // a cursor move cancelled G's landing
 	if !msg.forGoto {
 		m.revealed = map[string]bool{}
 	}
 	for _, b := range msg.beads {
-		extra[b.ID] = b
 		if !msg.forGoto {
 			m.revealed[b.ID] = true
 		} else {
@@ -133,9 +160,7 @@ func (m Model) foldDemand(msg demandMsg) (Model, tea.Cmd) {
 	if msg.forGoto {
 		m.gotoHeld = held
 	}
-	m.extra = extra
-	m = m.withExtra()
-	m.idx = newSnapIndex(m.beads)
+	m = m.foldBeads(msg.beads)
 	if m.tab == tabGraph {
 		g := m.tabAt(tabGraph).(graphTab).rebuild() // still searching: a remembered cursor bead returns
 		if !msg.forGoto {
@@ -168,6 +193,35 @@ func (m Model) foldDemand(msg demandMsg) (Model, tea.Cmd) {
 
 func gotoShown(m Model) bool { return len(m.modals) > 0 && m.modals[len(m.modals)-1].gotoMenu }
 
+// seedSubtree makes ids the Graph scope's subtree claim, replacing any earlier one. It
+// is seeded at press time with the landed bead and its known chain, so a bead the Goto
+// claim held is not evicted when the menu closes.
+func (m Model) seedSubtree(ids ...string) Model {
+	m.subtree = map[string]bool{}
+	return m.fillSubtree(ids...)
+}
+
+// fillSubtree adds ids to the subtree claim: the subtree read's ids.
+func (m Model) fillSubtree(ids ...string) Model {
+	m.subtree = maps.Clone(m.subtree)
+	if m.subtree == nil {
+		m.subtree = map[string]bool{}
+	}
+	for _, id := range ids {
+		m.subtree[id] = true
+	}
+	return m
+}
+
+// scopeChanged releases the subtree claim when the Graph scope is no longer old's: esc
+// cleared it, or a newer scope replaced it (which seeds its own).
+func (m Model) scopeChanged(old query) Model {
+	if len(m.subtree) > 0 && m.tabAt(tabGraph).(graphTab).q.scope != old.scope {
+		m.subtree = nil
+	}
+	return m
+}
+
 // demandClaims is the ids this file's fetches keep loaded now: the last reveal's bead
 // and ancestors while Graph is the tab, the Goto menu's neighbours while it is open.
 func (m Model) demandClaims() map[string]bool {
@@ -175,6 +229,9 @@ func (m Model) demandClaims() map[string]bool {
 	if m.tab == tabGraph {
 		maps.Copy(c, m.revealed)
 		maps.Copy(c, m.hits)
+		if m.tabAt(tabGraph).(graphTab).q.scope != "" { // the claim lives only while the scope does
+			maps.Copy(c, m.subtree)
+		}
 	}
 	if gotoShown(m) {
 		maps.Copy(c, m.gotoHeld)

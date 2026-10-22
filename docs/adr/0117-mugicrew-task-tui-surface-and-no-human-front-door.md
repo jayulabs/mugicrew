@@ -1,6 +1,7 @@
 # ADR 0117: mugicrew Task — an ordinary HITL row, idle like a Surgery, and no human front door for now
 
 Status: Accepted
+Amended by ADR 0352 (every-task-joins-the-initiative…) (§3: a Task is filed through task new).
 Date: 2026-10-09
 
 Amends: ADR 0113 §1 (the human producer keeps no CLI/TUI affordance). Builds on

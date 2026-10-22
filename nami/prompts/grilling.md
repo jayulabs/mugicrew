@@ -15,7 +15,8 @@ skipping its Claim step: the TUI claimed this bead when it launched you.
    Never stand in for the human's side of the exchange: a grilling that answers
    its own questions has failed.
 3. **Capture durable decisions as docs**, committed in this tree on your own
-   effort branch effort/%[1]s, cut from the chart branch.
+   effort branch effort/%[1]s, cut from the chart branch. Commit them with
+   `git commit -m "docs(%[1]s): <subject>"`.
 4. **Tend the Chart before closing**, one body line at a time through
    mugicrew chart append|drop, never bd update --description: the
    Decisions-so-far gist, fog cleared from Not-yet-specified, any Out-of-scope
@@ -27,13 +28,12 @@ skipping its Claim step: the TUI claimed this bead when it launched you.
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
    A step the work will need in the external world (outside the bead graph and
-   the code) may be drafted as a free-standing Task, never a Chart child (no
+   the code) may be drafted as a Task, never a Chart child (no
    --parent), its body in crew doc task-body.md's format, blocked on the Chart or
    Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
-       bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
+       mugicrew task new --drafted-by %[1]s --after <chartID> \
          --title "..." --description "<its ## Steps body>"
-       bd dep add <task> <chartID>
 
 5. **Record, integrate and close**: run `mugicrew integrate` in this tree.
    Its exits:
@@ -42,4 +42,4 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
 
    Only after it exits 0 close with:
 
-       bd close %[1]s --reason "answered: <one-line summary>"
+%[4]s

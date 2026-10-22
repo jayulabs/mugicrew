@@ -2,6 +2,7 @@ package zoro
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"jayulabs.org/mugicrew/bd"
@@ -18,6 +19,10 @@ var (
 	forceClose      = bd.ForceClose
 	openPivots      = bd.OpenPivots
 	spawnSurvey     = bd.SpawnSurveyIfAbsent
+	carryEdge       = bd.DiscoveredFrom
+	filedChildren   = func(cp string) ([]bd.Bead, error) {
+		return bd.ChildrenOfKind(cp, contract.FiledKind(contract.KindCheckpoint))
+	}
 )
 
 // Confirm is the confirm sweep (`mugicrew pivot confirm`, FR39–42, ADR 0043 §8,
@@ -31,16 +36,22 @@ var (
 //  2. a fast-laned (Chart-less) Spec: pin its fresh Anchor: <sha> on the Spec bead
 //     through bd.Anchor, as Luffy's fast lane does, under every land strategy (no
 //     commit lands on main), so its Checkpoint cuts from that tip;
-//  3. Supersede(old Spec, new Spec), then carry the Checkpoint's Ordering edges to
-//     the new Spec (ADR 0085), so its dependents wait for the corrected work;
+//  3. Supersede(old Spec, new Spec), then record each --carries Critique as new Spec
+//     discovered-from Critique (carryCritiques), then carry the Checkpoint's Ordering
+//     edges to the new Spec (ADR 0085), so its dependents wait for the corrected work;
 //  4. force-close every open member, then the frozen Checkpoint, obsolete;
 //  5. close each open sibling pivot 'superseded: <pivot>';
 //  6. close the pivot 'confirmed' — last, so a closed pivot means a finished sweep.
 //
-// A closed pivot is therefore a no-op. title defaults to the old Spec's.
-func Confirm(pivotID, title, body string) error {
+// A closed pivot is therefore a no-op. title defaults to the old Spec's. carries are
+// the open filed Critiques whose ask the session folded into body (FR 19–21); a bad
+// id refuses before any write.
+func Confirm(pivotID, title, body string, carries []string) error {
 	cp, oldSpec, open, err := openSweep("confirm", "corrected Spec body", pivotID, body)
 	if err != nil || !open {
+		return err
+	}
+	if err := checkCarries("confirm", cp, pivotID, carries); err != nil {
 		return err
 	}
 	newSpec, err := spawnCorrectedSpec(pivotID, cp, oldSpec, title, body)
@@ -50,10 +61,13 @@ func Confirm(pivotID, title, body string) error {
 	if err := supersede(oldSpec, newSpec); err != nil {
 		return err
 	}
+	if err := carryCritiques(newSpec, carries); err != nil {
+		return err
+	}
 	if err := carryCheckpoint(cp, newSpec); err != nil {
 		return err
 	}
-	if err := closeOut(cp, pivotID, obsoleteReason(oldSpec, newSpec, pivotID)); err != nil {
+	if err := closeOut(cp, pivotID, bd.ObsoleteSuperseded(oldSpec, newSpec, pivotID)); err != nil {
 		return err
 	}
 	return closeBead(pivotID, "confirmed")
@@ -73,14 +87,18 @@ func Confirm(pivotID, title, body string) error {
 //     this — caused-by the Signal is the new Chart's only link (the recorded
 //     decision: ADR 0046 §6 asks nothing more, and no Spec→Chart supersede edge
 //     exists anywhere else in the graph);
+//     then record each --carries Critique as new Chart discovered-from Critique,
 //     then carry the Checkpoint's Ordering edges to the new Chart (ADR 0085);
 //     4–5. the same Checkpoint, member and sibling-pivot close-out as Confirm;
 //  6. close the pivot 'escalated', last.
 //
 // The Survey's charting session then maps the Chart with a human.
-func Escalate(pivotID, evidence string) error {
+func Escalate(pivotID, evidence string, carries []string) error {
 	cp, oldSpec, open, err := openSweep("escalate", "evidence", pivotID, evidence)
 	if err != nil || !open {
+		return err
+	}
+	if err := checkCarries("escalate", cp, pivotID, carries); err != nil {
 		return err
 	}
 	oldChart, charted, err := causedBy(oldSpec, contract.KindChart)
@@ -142,10 +160,13 @@ func Escalate(pivotID, evidence string) error {
 			return err
 		}
 	}
+	if err := carryCritiques(newChart, carries); err != nil {
+		return err
+	}
 	if err := carryCheckpoint(cp, newChart); err != nil {
 		return err
 	}
-	if err := closeOut(cp, pivotID, escalateReason(oldSpec, newChart, pivotID)); err != nil {
+	if err := closeOut(cp, pivotID, bd.ObsoleteEscalated(oldSpec, newChart, pivotID)); err != nil {
 		return err
 	}
 	return closeBead(pivotID, "escalated")
@@ -260,6 +281,46 @@ func spawnCorrectedSpec(pivotID, cp, oldSpecID, title, body string) (string, err
 	return id, err
 }
 
+// checkCarries refuses, before any write, a --carries id that is not an open filed
+// child of the swept Checkpoint: its container's filed kind, with a Source: line.
+// One this very pivot's close-out already closed is still accepted, so a re-run
+// after a partial sweep converges.
+func checkCarries(verb, cp, pivotID string, carries []string) error {
+	if len(carries) == 0 {
+		return nil
+	}
+	kids, err := filedChildren(cp)
+	if err != nil {
+		return err
+	}
+	for _, id := range carries {
+		i := slices.IndexFunc(kids, func(k bd.Bead) bool { return k.ID == id })
+		if i < 0 {
+			return fmt.Errorf("pivot %s: --carries %s is not a filed %s child of %s", verb, id, contract.FiledKind(contract.KindCheckpoint), cp)
+		}
+		k := kids[i]
+		if !k.Unclosed() && !strings.Contains(k.CloseReason, fmt.Sprintf("(pivot %s ", pivotID)) {
+			return fmt.Errorf("pivot %s: --carries %s is already closed", verb, id)
+		}
+		if len(contract.SourcesOf(k.Description+"\n"+k.Notes)) == 0 {
+			return fmt.Errorf("pivot %s: --carries %s has no %q line, so it is not a filed Critique", verb, id, strings.TrimSpace(contract.SourcePrefix))
+		}
+	}
+	return nil
+}
+
+// carryCritiques records each --carries Critique as succ discovered-from Critique
+// (add-if-absent, so a re-run adds no duplicate), before carryCheckpoint and closeOut:
+// any Watch pass sees the mark before the Critique closes (FR 21).
+func carryCritiques(succ string, carries []string) error {
+	for _, id := range carries {
+		if err := carryEdge(succ, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // carryCheckpoint carries the obsoleted Checkpoint's Ordering edges to its
 // successor (a Draft by the pivot) before closeOut, and records the carry (ADR
 // 0085). An error fails the sweep before the obsolete close; a re-run re-carries
@@ -270,7 +331,7 @@ func carryCheckpoint(cp, succ string) error {
 }
 
 // closeOut retires the Checkpoint for the sweep (ADR 0043 §8, ADR 0045 §5): every
-// open member, then the Checkpoint — both forced, since bd refuses to close a bead
+// open member but an MR Watch, then the Checkpoint — both forced, since bd refuses to close a bead
 // with an open blocker (a sibling member; the pivots themselves, and closing those
 // first would unfreeze the Checkpoint mid-sweep) — then the open sibling pivots. The lead pivot is the caller's to close.
 func closeOut(cp, pivotID, reason string) error {
@@ -279,6 +340,9 @@ func closeOut(cp, pivotID, reason string) error {
 		return err
 	}
 	for _, m := range members {
+		if m.Kind == contract.KindMRWatch { // outlives the sweep to answer the MR's reviewers
+			continue
+		}
 		if err := forceClose(m.ID, reason); err != nil { // a member blocked by an open sibling refuses a plain close
 			return err
 		}
@@ -304,12 +368,4 @@ func closeOut(cp, pivotID, reason string) error {
 		}
 	}
 	return nil
-}
-
-func obsoleteReason(oldSpec, newSpec, pivotID string) string {
-	return fmt.Sprintf("%s Spec %s superseded by %s (pivot %s confirmed)", bd.ObsoleteReason, oldSpec, newSpec, pivotID)
-}
-
-func escalateReason(oldSpec, newChart, pivotID string) string {
-	return fmt.Sprintf("%s Spec %s escalated to Chart %s (pivot %s escalated)", bd.ObsoleteReason, oldSpec, newChart, pivotID)
 }

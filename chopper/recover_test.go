@@ -14,6 +14,7 @@ import (
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/looplock"
+	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/route"
 	"jayulabs.org/mugicrew/session"
 )
@@ -758,5 +759,26 @@ func TestRecoverStrandedInitiative(t *testing.T) {
 	want := []string{"lock", "probe", "pause recovering", "lock", "probe", "delete drafts", "unclaim", "unpause recovering"}
 	if !slices.Equal(w.calls, want) {
 		t.Errorf("calls = %q\nwant    %q", w.calls, want)
+	}
+}
+
+// With auto-approve on, an Approval is judged as an AFK bead: a held flock is
+// Alive first, and an abandoned one on the repo root is ambiguous. A marked
+// Approval is HITL, so a gone session is dead.
+func TestJudgeApprovalFollowsAutoApprove(t *testing.T) {
+	ap := bd.Bead{ID: "mc-a", Kind: contract.KindApproval, Parent: "mc-cp", Status: "in_progress", Labels: []string{"paused:abandoned"}}
+	marked := ap
+	marked.Labels = []string{"paused:abandoned", registry.AutoApproveFailedLabel}
+	registry.SetAutoApprove(true)
+	t.Cleanup(registry.ResetAutoApprove)
+
+	if _, err := Judge(Holder{Bead: ap, Placement: route.RepoRoot, Held: true}); err == nil || !strings.Contains(err.Error(), "held by its dispatcher") {
+		t.Errorf("held AFK Approval: err = %v, want the held-flock refusal", err)
+	}
+	if _, err := Judge(Holder{Bead: ap, Placement: route.RepoRoot, LockFree: true}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("abandoned AFK Approval on the repo root: err = %v, want the AFK arm's --force refusal", err)
+	}
+	if v, err := Judge(Holder{Bead: marked}); err != nil || v != Dead {
+		t.Errorf("marked Approval = %q, %v; want %s", v, err, Dead)
 	}
 }

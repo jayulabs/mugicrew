@@ -12,6 +12,7 @@ import (
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/liveness"
+	"jayulabs.org/mugicrew/registry"
 )
 
 type closeCall struct {
@@ -150,12 +151,12 @@ func TestCancelLockedUnderRequire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Locked) != 3 || p.Locked[0].Why != bd.ReleaseRequiredWhy(p.Locked[0].Head) {
+	if len(p.Locked) != 3 || p.Locked[0].Why != bd.ReleaseRequiredWhy(bd.Bead{ID: p.Locked[0].Head}) {
 		t.Errorf("locked = %v", p.Locked)
 	}
 	_, err = Cancel("in", Opts{Release: []string{"cp"}})
 	var re *RefusedError
-	if !errors.As(err, &re) || re.Refusals[0].Kind != ReleaseLocked || re.Refusals[0].Fix != bd.ReleaseRequiredWhy("cp") {
+	if !errors.As(err, &re) || re.Refusals[0].Kind != ReleaseLocked || re.Refusals[0].Fix != bd.ReleaseRequiredWhy(bd.Bead{ID: "cp"}) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(*calls) != 0 || len(*rel) != 0 {
@@ -555,4 +556,103 @@ func TestInFlightRereadUnderFence(t *testing.T) {
 		t.Errorf("closed %v", *calls)
 	}
 	free(t, "spec", "b1", "b2", "cp")
+}
+
+// An open Approval is CAS-claimed as a HITL bead while auto-approve is off; while
+// it is on, the Approval is an AFK effort the liveness hold fences, not a claim.
+func TestFencesApprovalByAutoApproveMode(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		on      bool
+		labels  []string
+		claimed bool
+	}{
+		{"setting off", false, nil, true},
+		{"setting on", true, nil, false},
+		{"setting on, marked failed", true, []string{registry.AutoApproveFailedLabel}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ap := b("ap", contract.KindApproval, "cp")
+			ap.Labels = tc.labels
+			graph(t, append(fixture(), ap)...)
+			registry.SetAutoApprove(tc.on)
+			t.Cleanup(registry.ResetAutoApprove)
+			if _, err := Withdraw("cp", Opts{}); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(cas, "claim ap"); got != tc.claimed {
+				t.Errorf("claimed ap = %v, want %v (cas %v)", got, tc.claimed, cas)
+			}
+		})
+	}
+}
+
+// An Approval in the busy set follows the live auto-approve mode: AFK on, it is
+// reported under the in-flight effort refusal; off, under the HITL session one.
+func TestInFlightRefusalsFollowApprovalMode(t *testing.T) {
+	for _, tc := range []struct {
+		on  bool
+		fix string
+	}{{true, inFlightFix}, {false, sessionFix}} {
+		registry.SetAutoApprove(tc.on)
+		t.Cleanup(registry.ResetAutoApprove)
+		got := inFlightRefusals([]bd.Bead{b("ap", contract.KindApproval, "cp")})
+		if len(got) != 1 || got[0].Kind != InFlight || got[0].Fix != tc.fix || !slices.Equal(got[0].Beads, []string{"ap"}) {
+			t.Errorf("auto-approve %v: got %+v, want one InFlight with fix %q", tc.on, got, tc.fix)
+		}
+	}
+}
+
+// ADR 0349: a member Task closes first, withdrawn: <initiative>; a released one is
+// kept out of the set and the ordered-after refusal, its edges untouched.
+func TestCancelWithdrawsMemberTaskAndReleasesOne(t *testing.T) {
+	g := append(fixture(),
+		b("tk", contract.KindTask, "in"),
+		b("keep", contract.KindTask, "in", "b2"),
+	)
+	calls := graph(t, g...)
+	rel := stubRelease(t)
+	p, err := plan("in", g, Opts{Release: []string{"keep"}})
+	if err != nil || len(p.Refusals) != 0 || len(p.Tasks) != 2 || len(p.Locked) != 0 {
+		t.Fatalf("plan = %+v, %v", p, err)
+	}
+	if _, err := Cancel("in", Opts{Release: []string{"keep"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 2 || !slices.Equal((*calls)[0].ids, []string{"tk"}) || (*calls)[0].reason != "withdrawn: in" || (*calls)[1].reason != "cancelled: in" ||
+		slices.Contains((*calls)[1].ids, "keep") || !slices.Equal(*rel, []string{"keep"}) {
+		t.Errorf("calls = %v released %v", *calls, *rel)
+	}
+}
+
+// Under Require Initiatives a Task is not locked and --release accepts it; a
+// Checkpoint stays locked.
+func TestCancelTaskNotLockedUnderRequire(t *testing.T) {
+	g := append(fixture(), b("tk", contract.KindTask, "in"))
+	graph(t, g...)
+	required = func() bool { return true }
+	p, err := plan("in", g, Opts{Release: []string{"tk"}})
+	if err != nil || len(p.Refusals) != 0 || !slices.Equal(p.Released, []string{"tk"}) {
+		t.Fatalf("plan = %+v, %v", p, err)
+	}
+	for _, l := range p.Locked {
+		if l.Head == "tk" {
+			t.Errorf("task locked: %v", p.Locked)
+		}
+	}
+	if _, err := plan("in", g, Opts{Release: []string{"b1"}}); err == nil || !strings.Contains(err.Error(), "member chain head or member Task") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// A kept-outside Task ordered after a member is not in the set: the cancel refuses.
+func TestCancelRefusesKeptOutsideTask(t *testing.T) {
+	g := append(fixture(), b("out", contract.KindTask, "", "b2"))
+	graph(t, g...)
+	stubRelease(t)
+	_, err := Cancel("in", Opts{})
+	var re *RefusedError
+	if !errors.As(err, &re) || re.Refusals[0].Kind != OrderedAfter || !slices.Equal(re.Refusals[0].Beads, []string{"out"}) {
+		t.Fatalf("err = %v", err)
+	}
 }

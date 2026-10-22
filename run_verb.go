@@ -57,6 +57,7 @@ func runSignals() (<-chan os.Signal, func()) {
 // runRun is the hidden `mugicrew run <id> --lock-fd=N` (ADR 0330, ADR 0332): it
 // hosts one already-claimed effort and returns its exit code.
 func runRun(argv []string) int {
+	loop.StampAutoApprove()
 	sig, stop := runSignals()
 	defer stop()
 	return runHost(argv, sig, os.Stdout)

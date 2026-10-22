@@ -7,6 +7,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/forge"
+	"jayulabs.org/mugicrew/git"
 )
 
 // A nested hold names the MR by its project in title and body while the idempotency key
@@ -14,15 +15,19 @@ import (
 func TestHoldTrailerlessNamesNestedMR(t *testing.T) {
 	o := bd.SpawnBlockingTask
 	t.Cleanup(func() { bd.SpawnBlockingTask = o })
+	defer git.SetGraphID("g1")()
+	oClash := postLandClashes
+	t.Cleanup(func() { postLandClashes = oClash })
+	postLandClashes = func(string, string) ([]git.PostLandClash, error) { return nil, nil }
 	var key, title, body string
 	bd.SpawnBlockingTask = func(_, k, ti, b string) (string, bool, error) { key, title, body = k, ti, b; return "t", true, nil }
-	holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", "merge request", "MR", "Spec: x", 7, "abc")
+	holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", mrNaming{noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
 	if wantTitle := "C: merge request !7 merged without its trailer"; title != wantTitle ||
 		!strings.HasPrefix(body, "MR !7 for cp was merged at abc, but no \"Spec: x\" trailer reached mainline.\n") {
 		t.Errorf("workspace hold reworded: title %q body %q", title, body)
 	}
 	for path, want := range map[string]string{"grp/proj": "grp/proj!7", "": " !7"} {
-		holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, path, "merge request", "MR", "Spec: x", 7, "abc")
+		holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", mrNaming{path: path, noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
 		if key != "Merged MR: !7\n" || !strings.Contains(title, want) || !strings.Contains(body, want) {
 			t.Errorf("path %q: key %q title %q body %q", path, key, title, body)
 		}
@@ -70,7 +75,11 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 					s := r.spawned[0]
 					title, body = s.Title, s.Description
 				}
-				if want == "" {
+				if c.name != "critique" {
+					if !strings.Contains(body, "Merge request: "+path+"!7\n") {
+						t.Errorf("Task body %q lacks its Merge request: fact", body)
+					}
+				} else if want == "" {
 					if strings.Contains(title, " on merge request") || strings.Contains(body, "Merge Request:") {
 						t.Errorf("Workspace title %q body %q must not name an MR", title, body)
 					}
@@ -79,5 +88,29 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A Workspace's pipeline-failure Critique body is byte-identical to the pre-Task-body
+// string for the same pipeline and two failing jobs (Spec Testing Decisions).
+func TestPipelineFailureCritiqueBodyGolden(t *testing.T) {
+	o := forgeTrace
+	t.Cleanup(func() { forgeTrace = o })
+	forgeTrace = func(_ forge.Project, job int) (string, error) { return map[int]string{1: "boom one", 2: "boom two"}[job], nil }
+	pl := forge.Pipeline{ID: 42, WebURL: "https://gl/p/42"}
+	jobs := []forge.Job{
+		{ID: 1, Name: "build", WebURL: "https://gl/j/1", FailureReason: "script_failure"},
+		{ID: 2, Name: "test", WebURL: "https://gl/j/2", FailureReason: "runner_system_failure"},
+	}
+	facts, tails, err := pipelineParts(forge.Project{}, pl, jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := mrLead("", 7) + joinPipelineParts(facts, tails)
+	want := "Pipeline: 42\nPipeline URL: https://gl/p/42\n\n" +
+		"Job: build\nJob URL: https://gl/j/1\nfailure_reason: script_failure\n```\nboom one\n```\n\n" +
+		"Job: test\nJob URL: https://gl/j/2\nfailure_reason: runner_system_failure\n```\nboom two\n```\n"
+	if got != want {
+		t.Errorf("Critique details = %q; want %q", got, want)
 	}
 }

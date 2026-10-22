@@ -36,6 +36,7 @@ func TestMain(m *testing.M) {
 	listChildren = func(string) ([]bd.Bead, error) { return nil, nil }
 	listDependents = func(string) ([]string, error) { return nil, nil }
 	listWithAncestors = func(string) ([]bd.Bead, error) { return nil, nil }
+	listSubtree = mirrorSubtree
 	searchClosed = func(string) ([]bd.Bead, error) { return nil, nil }
 	readKinds = func() (map[string]contract.Kind, error) { return nil, nil }
 	readSessions = func() (map[string]session.Info, error) { return nil, nil }
@@ -822,4 +823,27 @@ func TestHeaderIgnoresOldGraphPushFailed(t *testing.T) {
 	if strings.Contains(header(m), "graph push failed") {
 		t.Errorf("header %q warns of an old graph.push_failed", header(m))
 	}
+}
+
+// mirrorSubtree is the default subtree read: the group of id among mirrorBeads, found by
+// the same parent chain the real read follows. A bead the mirror lacks is not found.
+func mirrorSubtree(id string, _ map[string]bd.Bead) (bd.Subtree, bool, error) {
+	if beadIndex(mirrorBeads, id) < 0 {
+		return bd.Subtree{}, false, nil
+	}
+	head := id
+	if p := beadIndex(mirrorBeads, mirrorBeads[beadIndex(mirrorBeads, id)].Parent); p >= 0 {
+		head = mirrorBeads[p].ID
+		if gp := mirrorBeads[p].Parent; gp != "" {
+			head = gp
+		} else if !mirrorBeads[p].Container {
+			head = id
+		}
+	}
+	var in []string
+	for k := range scopeSubtree(mirrorBeads, head) {
+		in = append(in, k)
+	}
+	slices.Sort(in)
+	return bd.Subtree{Head: head, IDs: in}, true, nil
 }

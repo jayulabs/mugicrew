@@ -310,6 +310,7 @@ func (m Model) recentsJump(id string) (Model, tea.Cmd) {
 		g, _, _ = g.rebuild().reveal(id)
 		m.tabs = slices.Clone(m.tabs)
 		m.tabs[tabGraph], m.tab, m.focus = g, tabGraph, focus{}
+		m.subtree = nil // the visit replaces any scope
 		m.setStatus("not on " + tabNames[home] + " → Graph (scoped to " + id + ", esc clears)")
 		return m, m.graphEntered()
 	}

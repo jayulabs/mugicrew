@@ -1,6 +1,7 @@
 # ADR 0313: mugicrew's `X` dialogs show the chain as a tree, confirm loss with `D`, and open barred on a refusal
 
 Status: Proposed
+Amended by ADR 0349 (a-member-task-can-be-released…) (§3–§5: a member Task gets its own close/release row in the cancel dialog).
 Date: 2026-10-19
 
 Chart mc-1k3gq (Withdraw or cancel any unclosed chain from the TUI, with

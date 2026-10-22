@@ -11,6 +11,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/registry"
 )
 
@@ -65,6 +66,9 @@ func (t defogTab) rowText(r dRow) string {
 		if r.key == liveKey {
 			return liveHeaderText(r.title)
 		}
+		if r.key == mrsKey {
+			return r.title + "\n\n" + mrsDetailD + "\n\nenter does nothing here (space folds)."
+		}
 		if r.key == chartsKey {
 			return r.title + "\n\n" + chartsDetail + "\n\nenter does nothing here (space folds)."
 		}
@@ -86,6 +90,8 @@ func (t defogTab) rowText(r dRow) string {
 			return r.title
 		case r.key == liveNone:
 			return liveEmpty
+		case r.key == mrsNone:
+			return mrsEmpty
 		}
 		return "nothing waits on you"
 	case dSum:
@@ -103,6 +109,11 @@ func (t defogTab) rowText(r dRow) string {
 		title = chartName(b.Title)
 	}
 	h.WriteString(g.sbrn(b, title, true, 0) + "\n\n")
+	if r.kind == dMR {
+		if url := git.RecordedMRLink(b.Description); url != "" { // read through the helper only: never derived from the iid, path or host
+			field(&h, "MR link", url)
+		}
+	}
 	if b.Kind == contract.KindChart {
 		hitl, afk, _ := chartKids(g.beads, b)
 		secs, order := chartSections(b.Description)
@@ -142,7 +153,7 @@ func (t defogTab) rowText(r dRow) string {
 		return strings.Join(parts, "\n\n")
 	}
 	mode := "AFK"
-	if isHITL(b.Kind) {
+	if isHITL(b) {
 		mode = "HITL"
 	}
 	owner := "—"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -199,4 +200,33 @@ func IntegratesBeforeClose(text string) bool {
 	i := strings.Index(text, "mugicrew integrate")
 	c := strings.Index(text, "bd close")
 	return i >= 0 && (c < 0 || i < c)
+}
+
+// conventionalTypes is the Conventional-Commits / Angular type set.
+var conventionalTypes = []string{"feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"}
+
+var (
+	dictatedCommit = regexp.MustCompile(`commit -m "(\w+)\(`)
+	commitNegation = regexp.MustCompile(`(?i)commit nothing[^.]*\.|no commits?\b|never\b[^.\n]*\bcommit`)
+	commitMention  = regexp.MustCompile(`(?i)\bcommit`)
+	commitRule     = regexp.MustCompile(`<type>\(<bead-id>\)|commit -m "(` + strings.Join(conventionalTypes, "|") + `)\(`)
+)
+
+// CommitRuleViolations returns the conventional-commit problems of one
+// rendered prompt: each dictated `commit -m "<word>(` whose word is not a
+// Conventional-Commits type, and, when the prompt tells the crewmate to commit
+// (outside a "commit nothing", "no commits" or "never … commit" negation) yet
+// states no rule (the literal <type>(<bead-id>) form or a dictated -m with an
+// allowed type), one note that the rule is missing.
+func CommitRuleViolations(text string) []string {
+	var out []string
+	for _, m := range dictatedCommit.FindAllStringSubmatch(text, -1) {
+		if !slices.Contains(conventionalTypes, m[1]) {
+			out = append(out, m[0])
+		}
+	}
+	if commitMention.MatchString(commitNegation.ReplaceAllString(text, "")) && !commitRule.MatchString(text) {
+		out = append(out, "commits without stating the <type>(<bead-id>): <subject> rule")
+	}
+	return out
 }

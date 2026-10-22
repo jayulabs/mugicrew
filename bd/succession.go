@@ -83,6 +83,44 @@ const FixForwardReason = "fix-forward:"
 // the Checkpoint it closes out (pivot confirmed or escalated).
 const ObsoleteReason = "obsolete:"
 
+// SweptReason is a confirm or escalate sweep's close reason, parsed back: OldSpec is the swept
+// Spec, Successor the corrected Spec (confirm) or the fresh Chart (Escalated), Pivot the
+// pivot that drove it.
+type SweptReason struct {
+	OldSpec, Successor, Pivot string
+	Escalated                 bool
+}
+
+// ObsoleteSuperseded is the close reason a confirm sweep gives the swept Checkpoint and
+// its members.
+func ObsoleteSuperseded(oldSpec, newSpec, pivotID string) string {
+	return fmt.Sprintf("%s Spec %s superseded by %s (pivot %s confirmed)", ObsoleteReason, oldSpec, newSpec, pivotID)
+}
+
+// ObsoleteEscalated is the close reason an escalate sweep gives the swept Checkpoint and
+// its members.
+func ObsoleteEscalated(oldSpec, newChart, pivotID string) string {
+	return fmt.Sprintf("%s Spec %s escalated to Chart %s (pivot %s escalated)", ObsoleteReason, oldSpec, newChart, pivotID)
+}
+
+var (
+	supersededRe = regexp.MustCompile(`^obsolete: Spec (\S+) superseded by (\S+) \(pivot (\S+) confirmed\)$`)
+	escalatedRe  = regexp.MustCompile(`^obsolete: Spec (\S+) escalated to Chart (\S+) \(pivot (\S+) escalated\)$`)
+)
+
+// ParseSweptReason reads back the two shapes ObsoleteSuperseded and ObsoleteEscalated
+// write; any other reason (container landed, a retired Draft's, free text) is not ok.
+func ParseSweptReason(reason string) (SweptReason, bool) {
+	reason = strings.TrimSpace(reason)
+	if m := supersededRe.FindStringSubmatch(reason); m != nil {
+		return SweptReason{OldSpec: m[1], Successor: m[2], Pivot: m[3]}, true
+	}
+	if m := escalatedRe.FindStringSubmatch(reason); m != nil {
+		return SweptReason{OldSpec: m[1], Successor: m[2], Pivot: m[3], Escalated: true}, true
+	}
+	return SweptReason{}, false
+}
+
 // NothingToLandReason prefixes the close reason of a Checkpoint whose Spec laid
 // Tasks and no Builds: there is nothing to land. It deliberately does not start
 // with ObsoleteReason, which drives retireStragglers' cascade and the backstop's
@@ -620,7 +658,9 @@ func SpawnChildIfAbsent(parentID string, s Successor) (id string, created bool, 
 
 // SpawnBlockingTaskIfAbsent files a Brook-owned HITL Task that blocks containerID
 // (the land hold), unless one of its open blocking Tasks already carries key in its
-// body: idempotent on (container, key). Born unparented, so it is no member.
+// body: idempotent on (container, key), whatever the existing Task's parent. It joins the
+// Initiative of the container it holds (a Rollback climbs through the Checkpoint it
+// undoes) and is born outside, with the reason in its body, when there is none (ADR 0348).
 func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string, created bool, err error) {
 	open, err := OpenBlockersOfKind(containerID, contract.KindTask)
 	if err != nil {
@@ -631,9 +671,45 @@ func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string,
 			return t.ID, false, nil
 		}
 	}
+	parent, line, err := taskPlacement(TaskFiling{Before: []string{containerID}})
+	if err != nil {
+		return "", false, err
+	}
 	// --deps is atomic with the create: no orphan Task that blocks nothing
-	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindTask}, title, body), "--deps", "blocks:"+containerID)...)
-	return id, err == nil, err
+	s := Successor{Kind: contract.KindTask, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindTask)), Description: withFactLine(body, line)}
+	id, err = run(successorCreateArgs("", s, "blocks:"+containerID)...)
+	if err != nil {
+		return "", false, err
+	}
+	// a hold that outlives its closed Task re-files related to it (ADR 0338);
+	// the new body and the closed Task stay untouched
+	if prev, ok, err := latestClosedWithKey(containerID, key); err != nil {
+		return id, true, err
+	} else if ok {
+		_, err = run("dep", "add", id, prev, "-t", "related")
+		return id, true, err
+	}
+	return id, true, nil
+}
+
+// latestClosedWithKey is the id of the most recently closed Task blocking
+// containerID whose body carries key.
+func latestClosedWithKey(containerID, key string) (string, bool, error) {
+	targets, err := depTargets(containerID, "down", "blocks")
+	if err != nil {
+		return "", false, err
+	}
+	var best Bead
+	found := false
+	for _, t := range targets {
+		if t.Kind != contract.KindTask || t.Open() || !strings.Contains(t.Description, key) {
+			continue
+		}
+		if !found || t.Closed.After(best.Closed) {
+			best, found = t, true
+		}
+	}
+	return best.ID, found, nil
 }
 
 // ChildrenOfKind reads a container's children of kind, in ANY status — closed

@@ -31,13 +31,12 @@ downstream as a kind:build under the Checkpoint the Spec cuts. Never create an
 doing the build is not.
 
 A step the work will need in the external world (outside the bead graph and
-the code) may be drafted as a free-standing Task, never a Chart child (no
+the code) may be drafted as a Task, never a Chart child (no
 --parent), its body in crew doc task-body.md's format, blocked on the Chart or
 Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
-    bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
+    mugicrew task new --drafted-by %[1]s --after %[4]s \
       --title "..." --description "<its ## Steps body>"
-    bd dep add <task> %[4]s
 
 ## The Chart
 

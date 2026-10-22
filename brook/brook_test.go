@@ -110,6 +110,8 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		"raised Critique <id> merged into pivot <id> on Checkpoint <id>, wait for Critique <id> to close",
 		"enter on its row resumes it",
 		"pivot <id> dismissed", "amended:",
+		"`X` in the TUI, or `mugicrew withdraw ws-task`, never a hand\n`bd close`",
+		"withdrawing the Task releases that Checkpoint's land",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("Task prompt missing %q", want)

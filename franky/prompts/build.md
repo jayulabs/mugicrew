@@ -55,12 +55,25 @@ Franky's backstop pauses the bead for a human with your reason.
 ## A Critique that needs no change
 
 If this is a filed Critique and, on reading the code, it is not needed or is
-already fixed, commit nothing and close it yourself with the full reason, which
-is relayed whole (up to 2000 characters) to whoever filed it:
+already fixed, commit nothing and close it yourself with a verdict-prefixed
+reason. The reason is relayed whole (up to 2000 characters) to whoever filed it:
 
-    bd close {{.BeadID}} --reason "<why it is not needed, or what already fixed it>"
+    bd close {{.BeadID}} --reason "rejected: <why it is not needed>"
+    bd close {{.BeadID}} --reason "accepted: <what already fixed it>"
+    bd close {{.BeadID}} --reason "deferred: <why it is valid, and what carries it>"
 
-A Build is never closed this way.
+Use deferred: when the defect is valid but the work belongs elsewhere (the
+offshoot Signal you filed carries it). A Build is never closed this way.
+
+## A Critique you changed code for
+
+If this is a filed Critique and you changed code for it, leave a rationale
+comment before you integrate, naming any part you declined:
+
+    bd comments add {{.BeadID}} "Rationale: <what changed and why>"
+
+The newest Rationale: comment wins. Do not close the bead: Franky closes it
+accepted: with that rationale.
 
 ## Commit to your effort branch — only if dirty — then integrate
 
@@ -71,7 +84,9 @@ if the tree is dirty:
 - Clean tree, no staged work → commit nothing. Commits the log shows ahead of
   the Checkpoint are a prior run's; the integrate below carries them.
 - Dirty tree → stage your change and commit it to effort/{{.BeadID}} with a
-  conventional-commit message naming the bead.
+  conventional-commit message naming the bead: `<type>(<bead-id>): <subject>`,
+  with the bead id `{{.BeadID}}` and the type chosen by the change (feat, fix,
+  refactor, test, docs, chore, …).
 
 Then, as your last step, run `mugicrew integrate` in this tree. It squashes your
 effort branch onto checkpoint/{{.Checkpoint}}; until it does, your bead stays

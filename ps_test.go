@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/loop"
+	"jayulabs.org/mugicrew/registry"
 )
 
 // stubPs points the ps verb's bd read and probe at fakes; the probe records the
@@ -140,5 +143,22 @@ func TestPsAndAbortResolveGraphWithoutBeadsDir(t *testing.T) {
 	abortEffort = func(string, string) ([]int, bool, error) { seen = os.Getenv("BEADS_DIR"); return nil, true, nil }
 	if err := runAbort([]string{"mc-b"}, io.Discard); err != nil || seen != graph {
 		t.Errorf("abort ran under BEADS_DIR %q, %v; want %q", seen, err, graph)
+	}
+}
+
+func TestPsListsRunningAFKApproval(t *testing.T) {
+	o := loop.ReadAutoApprove
+	t.Cleanup(func() { loop.ReadAutoApprove = o; registry.ResetAutoApprove() })
+	loop.ReadAutoApprove = func() cfglayer.Approvals { return cfglayer.Approvals{AutoApprove: true} }
+	stubPs(t, []bd.Bead{
+		{ID: "mc-ap", Kind: contract.KindApproval, Status: "in_progress", Parent: "ws-cp"},
+	}, map[string]bool{"mc-ap": true})
+
+	var out bytes.Buffer
+	if err := runPs([]string{"--json"}, &out); err != nil {
+		t.Fatalf("ps --json: %v", err)
+	}
+	if !strings.Contains(out.String(), "mc-ap") {
+		t.Errorf("ps omits the running AFK Approval:\n%s", out.String())
 	}
 }

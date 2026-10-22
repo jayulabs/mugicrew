@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
@@ -68,32 +69,6 @@ func TestMRWatchSkipsWhileALandingIsPending(t *testing.T) {
 	}
 }
 
-func TestMRWatchClosesWhenItsMRIsMergedOrClosed(t *testing.T) {
-	for _, state := range []string{"merged", "closed"} {
-		r := &jinbeSeamRec{}
-		if err := watchTick(t, r, state, 0); err != nil {
-			t.Fatal(err)
-		}
-		if !slices.Equal(r.closed, []string{"ws-watch"}) {
-			t.Errorf("%s: closed %v, want the Watch", state, r.closed)
-		}
-	}
-}
-
-func TestMRWatchClosesWithItsContainer(t *testing.T) {
-	r := &jinbeSeamRec{}
-	stubJinbeSeams(t, r)
-	showBead = func(string) (bd.Bead, error) {
-		return bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "closed"}, nil
-	}
-	if err := reconcileMRWatch(openWatch()); err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(r.closed, []string{"ws-watch"}) || r.mrReads != 0 {
-		t.Errorf("closed %v reads %d, want the Watch closed with no MR read", r.closed, r.mrReads)
-	}
-}
-
 func TestMRWatchHoldsAForgeRateLimit(t *testing.T) {
 	r := &jinbeSeamRec{mrErr: forge.ErrRateLimited}
 	stubJinbeSeams(t, r)
@@ -127,7 +102,7 @@ func TestMRWatchClosesOutAFiledBeadBetweenLandings(t *testing.T) {
 	if err := watchTick(t, r, "opened", 1, filed("ws-a", "closed", "not needed: by design", disc1+" 1")); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"reply " + disc1 + " 🤖 mugicrew: addressed by **Fix ws-a** (ws-a@jinbe): not needed: by design\n" + marker("ws-a", "g00d", "jinbe"), "resolve " + disc1}
+	want := []string{"reply " + disc1 + " 🤖 mugicrew — ☑️ Closed · **Fix ws-a** (ws-a@jinbe)\n\n**Rationale:** not needed: by design\n" + marker("ws-a", "g00d", "jinbe"), "resolve " + disc1}
 	if got := slices.DeleteFunc(slices.Clone(r.sends), func(s string) bool { return !strings.HasPrefix(s, "reply ") && !strings.HasPrefix(s, "resolve ") }); !slices.Equal(got, want) {
 		t.Errorf("sends %q, want %q", got, want)
 	}
@@ -211,5 +186,262 @@ func TestMRLinkBackfillWriteFailureDoesNotFailTheReconcile(t *testing.T) {
 	}
 	if err := reconcileMRWatch(openWatch()); err != nil {
 		t.Errorf("Watch reconcile = %v, want nil", err)
+	}
+}
+
+// lateWatch runs one Watch tick over a container in status (a closed one with landings),
+// an MR in state, and the filed kids; closed-out notes land on the kids as they are written.
+func lateWatch(t *testing.T, r *jinbeSeamRec, status, state string, kids ...bd.Bead) error {
+	t.Helper()
+	cp := openCheckpoint()
+	cp.Status = status
+	return lateWatchOf(t, r, cp, state, kids...)
+}
+
+// lateWatchSeed is appended to the Watch's body before a late tick (lines it already holds).
+var lateWatchSeed string
+
+// bodies is the description each bead holds, rewritten as lateWatchOf's updateBody stand-in is called.
+type bodies map[string]string
+
+// lateWatchOf is lateWatch over the container cp itself.
+func lateWatchOf(t *testing.T, r *jinbeSeamRec, cp bd.Bead, state string, kids ...bd.Bead) error {
+	t.Helper()
+	_, err := lateWatchBodies(t, r, cp, state, kids...)
+	return err
+}
+
+// lateWatchBodies is lateWatchOf that also returns the container's and the Watch's description as the tick leaves them.
+func lateWatchBodies(t *testing.T, r *jinbeSeamRec, cp bd.Bead, state string, kids ...bd.Bead) (bodies, error) {
+	t.Helper()
+	r.mr = &forge.MR{IID: 7, State: state, SHA: "pushed", UserNotesCount: 1, WebURL: mrLinkURL}
+	r.threadKids = kids
+	stubJinbeSeams(t, r)
+	oHas, oFetch, oReach, oAppend, oShow, oUpdate := hasCommit, fetchCommit, isReachable, appendNotes, showBead, updateBody
+	t.Cleanup(func() {
+		hasCommit, fetchCommit, isReachable, appendNotes, showBead, updateBody = oHas, oFetch, oReach, oAppend, oShow, oUpdate
+	})
+	hasCommit = func(git.Repo, string) bool { return true }
+	fetchCommit = func(git.Repo, string) error { return nil }
+	isReachable = func(git.Repo, string, string) bool { return r.reachable }
+	appendNotes = func(id, line string) error {
+		for i := range r.threadKids {
+			if r.threadKids[i].ID == id {
+				r.threadKids[i].Notes += line + "\n"
+			}
+		}
+		return nil
+	}
+	w := openWatch()
+	w.Description += lateWatchSeed
+	held := bodies{cp.ID: cp.Description, w.ID: w.Description}
+	showBead = func(id string) (bd.Bead, error) {
+		if id == w.ID {
+			w.Description = held[id]
+			return w, nil
+		}
+		cp.Description = held[id]
+		return cp, nil
+	}
+	updateBody = func(id string, args []string) error {
+		held[id] = args[1]
+		return nil
+	}
+	return held, reconcileMRWatch(w)
+}
+
+func landedLanding(sha string) bd.Bead {
+	l := openLanding("cafef00d")
+	l.Status, l.CloseReason, l.Closed = "closed", "landed: "+sha, testNow
+	return l
+}
+
+func TestMRWatchStaysOpenWhileAFiledBeadIsOwedThenClosesWithItsReason(t *testing.T) {
+	for _, c := range []struct{ status, state, reason string }{
+		{"closed", "opened", "container closed"},
+		{"open", "merged", "obsolete: merge request merged"},
+		{"open", "closed", "obsolete: merge request closed"},
+	} {
+		open := filed("ws-a", "open", "", disc1+" 1")
+		r := &jinbeSeamRec{discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+		if err := lateWatch(t, r, c.status, c.state, open); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.closed) != 0 || len(r.reviewSpawned) != 0 {
+			t.Errorf("%+v: closed %v spawned %v, want the Watch open and no Forge Review", c, r.closed, r.reviewSpawned)
+		}
+		done := filed("ws-a", "closed", "not needed: by design", disc1+" 1")
+		r = &jinbeSeamRec{discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+		if err := lateWatch(t, r, c.status, c.state, done); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(r.closed, []string{"ws-watch"}) || r.reasons[0] != c.reason {
+			t.Errorf("%+v: closed %v %v, want the Watch closed %q once closed out", c, r.closed, r.reasons, c.reason)
+		}
+		if len(replies(r)) != 1 || len(r.reviewSpawned) != 0 {
+			t.Errorf("%+v: replies %q spawned %v, want one reply and no Forge Review", c, replies(r), r.reviewSpawned)
+		}
+	}
+}
+
+func TestMRWatchLandedLatePassReadsTrailersFromTheTip(t *testing.T) {
+	r := &jinbeSeamRec{landedTip: "tip5678", reachable: true, integrateSHA: "abcdef123456", landings: []bd.Bead{landedLanding("merge1234")}, discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+	if err := lateWatch(t, r, "closed", "merged", filed("ws-a", "closed", "renamed", disc1+" 1")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.trailerRefs, []string{"tip5678"}) {
+		t.Errorf("trailer read from %q, want the Tip, the container branch being gone", r.trailerRefs)
+	}
+	if got := replies(r); len(got) != 1 || !strings.Contains(got[0], "fixed in abcdef12") {
+		t.Errorf("replies %q, want one naming the fix", got)
+	}
+	if !slices.Equal(r.closed, []string{"ws-watch"}) {
+		t.Errorf("closed %v, want the Watch", r.closed)
+	}
+}
+
+func TestMRWatchSweptLatePassMakesAnUnpushedCommitDueAtOnce(t *testing.T) {
+	r := &jinbeSeamRec{integrateSHA: "abcdef123456", discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+	if err := lateWatch(t, r, "closed", "opened", filed("ws-a", "closed", "renamed", disc1+" 1")); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.trailerRefs, []string{"checkpoint/ws-cp"}) {
+		t.Errorf("trailer read from %q, want the kept container branch", r.trailerRefs)
+	}
+	if got := replies(r); len(got) != 1 {
+		t.Errorf("replies %q, want one reply though the commit was never pushed", got)
+	}
+}
+
+func TestMRWatchSweptLatePassWithTheBranchGoneClosesOutWithNoFix(t *testing.T) {
+	r := &jinbeSeamRec{branchGone: true, integrateSHA: "abcdef123456", discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+	if err := lateWatch(t, r, "closed", "opened", filed("ws-a", "closed", "renamed", disc1+" 1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.trailerRefs) != 0 {
+		t.Errorf("trailer read from %q, want no read of a deleted branch", r.trailerRefs)
+	}
+	if got := replies(r); len(got) != 1 || strings.Contains(got[0], "abcdef12") {
+		t.Errorf("replies %q, want one reply showing no sha", got)
+	}
+}
+
+// brokenReply is a late pass's one filed child whose reply the Forge refuses.
+func brokenReply() *jinbeSeamRec {
+	return &jinbeSeamRec{replyErr: errors.New("403 locked"), discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+}
+
+func closedContainer(closedAgo time.Duration) bd.Bead {
+	cp := openCheckpoint()
+	cp.Status, cp.Closed = "closed", testNow.Add(-closedAgo)
+	cp.Description = contract.CloseOutsDuePrefix + "1\n" + contract.CloseOutsFailingPrefix + "1: old\nSpec: ws-spec\n"
+	return cp
+}
+
+func TestMRWatchLatePassWritesTheCloseOutLinesOnTheWatchAndClearsTheContainers(t *testing.T) {
+	held, err := lateWatchBodies(t, brokenReply(), closedContainer(time.Hour), "opened", filed("ws-a", "closed", "done", disc1+" 1"))
+	if err != nil {
+		t.Fatalf("a late failure is recorded and retried, not returned: %v", err)
+	}
+	if !strings.Contains(held["ws-watch"], contract.CloseOutsFailingPrefix+"1: 403 locked") {
+		t.Errorf("Watch body %q, want the failing line", held["ws-watch"])
+	}
+	if held["ws-cp"] != "Spec: ws-spec\n" {
+		t.Errorf("container body %q, want its close-out lines removed", held["ws-cp"])
+	}
+}
+
+func TestMRWatchLateFailureUnderALandedContainerIsRecordedNotReturned(t *testing.T) {
+	r := brokenReply()
+	r.landings = []bd.Bead{landedLanding("merge1234")}
+	held, err := lateWatchBodies(t, r, closedContainer(time.Hour), "merged", filed("ws-a", "closed", "done", disc1+" 1"))
+	if err != nil || !strings.Contains(held["ws-watch"], contract.CloseOutsFailingPrefix+"1:") || len(r.closed) != 0 {
+		t.Errorf("err %v body %q closed %v, want the failure on the Watch, nothing returned, the Watch open", err, held["ws-watch"], r.closed)
+	}
+}
+
+func TestMRWatchLateRateLimitIsHeldNotReturned(t *testing.T) {
+	r := brokenReply()
+	r.replyErr = forge.ErrRateLimited
+	if err := lateWatchOf(t, r, closedContainer(time.Hour), "opened", filed("ws-a", "closed", "done", disc1+" 1")); err != nil {
+		t.Errorf("err = %v, want the 429 held", err)
+	}
+}
+
+func TestMRWatchOpenContainerStillReturnsAMergedFailure(t *testing.T) {
+	r := brokenReply()
+	r.landings = []bd.Bead{landedLanding("merge1234")}
+	cp := openCheckpoint()
+	if err := lateWatchOf(t, r, cp, "merged", filed("ws-a", "closed", "done", disc1+" 1")); !errors.Is(err, r.replyErr) {
+		t.Errorf("err = %v, want the failure returned to hold the open container", err)
+	}
+}
+
+func TestMRWatchAbandonsAfterSevenDaysFilingOneSignal(t *testing.T) {
+	r := brokenReply()
+	cp := closedContainer(7 * 24 * time.Hour)
+	kid := filed("ws-a", "closed", "done", disc1+" 1")
+	held, err := lateWatchBodies(t, r, cp, "opened", kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.closed, []string{"ws-watch"}) || r.reasons[0] != "obsolete: close-out abandoned; carried by ws-aband0" {
+		t.Errorf("closed %v %v, want the Watch closed carried by the Signal", r.closed, r.reasons)
+	}
+	if len(r.abandons) != 1 {
+		t.Fatalf("abandons %q, want one", r.abandons)
+	}
+	head, body, _ := strings.Cut(r.abandons[0], "\n")
+	if head != "ws-watch Ship the thing: close-outs abandoned on !7" {
+		t.Errorf("origin and title %q", head)
+	}
+	for _, want := range []string{"swept", "!7", mrLinkURL, "ws-a", disc1, "403 locked", "Fix:"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %q lacks %q", body, want)
+		}
+	}
+	if !strings.Contains(held["ws-watch"], contract.CloseOutsFailingPrefix+"1:") {
+		t.Errorf("Watch body %q, want its lines kept beside the close reason", held["ws-watch"])
+	}
+	// a retry (the close failed after filing) dedups by title
+	r.closed, r.reasons = nil, nil
+	if _, err := lateWatchBodies(t, r, cp, "opened", kid); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.abandons) != 1 || r.reasons[0] != "obsolete: close-out abandoned; carried by ws-aband0" {
+		t.Errorf("abandons %q reasons %v, want still one Signal and the same carrier", r.abandons, r.reasons)
+	}
+}
+
+func TestMRWatchDoesNotAbandonBeforeSevenDays(t *testing.T) {
+	r := brokenReply()
+	if err := lateWatchOf(t, r, closedContainer(7*24*time.Hour-time.Minute), "opened", filed("ws-a", "closed", "done", disc1+" 1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.abandons) != 0 || len(r.closed) != 0 {
+		t.Errorf("abandons %q closed %v, want the Watch left polling", r.abandons, r.closed)
+	}
+}
+
+func TestMRWatchStaysOpenWhenFilingTheAbandonSignalFails(t *testing.T) {
+	r := brokenReply()
+	r.abandonErr = errors.New("bd down")
+	err := lateWatchOf(t, r, closedContainer(8*24*time.Hour), "opened", filed("ws-a", "closed", "done", disc1+" 1"))
+	if err == nil || len(r.closed) != 0 {
+		t.Errorf("err %v closed %v, want the failure returned before the close", err, r.closed)
+	}
+}
+
+func TestMRWatchNothingOwedCloseClearsItsLines(t *testing.T) {
+	r := &jinbeSeamRec{discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
+	cp := closedContainer(time.Hour)
+	lateWatchSeed = contract.CloseOutsFailingPrefix + "1: 403 locked\n"
+	t.Cleanup(func() { lateWatchSeed = "" })
+	held, err := lateWatchBodies(t, r, cp, "opened", filed("ws-a", "closed", "done", disc1+" 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.closed, []string{"ws-watch"}) || strings.Contains(held["ws-watch"], "Close-outs") {
+		t.Errorf("closed %v body %q, want the Watch closed with no lines", r.closed, held["ws-watch"])
 	}
 }

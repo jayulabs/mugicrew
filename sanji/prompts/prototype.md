@@ -12,7 +12,7 @@ Prototype under way: %[1]s (read it with: bd show %[1]s)
 You were launched inside a linked worktree on your own effort branch
 effort/%[1]s, cut from chart/<chart-id> (the Chart is this bead's parent). Any
 ADR/GLOSSARY commits happen there and reach chart/<chart-id> when you run
-mugicrew integrate. The throwaway does NOT: it is never integrated onto your effort branch
+mugicrew integrate. Commit them as git commit -m "docs(%[1]s): <subject>". The throwaway does NOT: it is never integrated onto your effort branch
 or chart/<chart-id>, only pushed to the side ref below.
 
 ## Push the throwaway to the side ref
@@ -23,7 +23,8 @@ branch), commit there, push HEAD to the side ref, then remove the tree. If %[3]s
 is left over from an earlier attempt, remove it the same way first.
 
     git worktree add --detach %[3]s chart/<chart-id>
-    # ... build the prototype inside %[3]s, commit it there ...
+    # ... build the prototype inside %[3]s, then commit it there:
+    git -C %[3]s commit -m "chore(%[1]s): <subject>"
     git -C %[3]s update-ref %[2]s HEAD
     git worktree remove --force %[3]s
     rm -rf "$(dirname %[3]s)"

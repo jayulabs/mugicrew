@@ -1,9 +1,11 @@
 // Package withdraw is the verbs that drop unfinished work from the bead graph
-// (Spec mc-5rttm D6, ADR 0310): Withdraw closes any unclosed chain head with its
-// caused-by predecessors and everything under them, and Cancel closes a whole
-// Initiative. Plan is their read-only view. The verbs own the act and its
-// events; package bd stays event-blind and supplies the sets (bd.WithdrawSet,
-// bd.CancelSet, bd.OrderedAfter).
+// (Spec mc-5rttm D6, ADR 0310, ADR 0342): Withdraw closes any unclosed chain head or
+// Task with its caused-by predecessors and everything under them (a chain's withdraw
+// also sweeps the Tasks ordered after it), and Cancel closes a whole
+// Initiative, withdrawing each member Task unless it is released (ADR 0349).
+// Plan is their read-only view. The verbs own the act and its events; package bd
+// stays event-blind and supplies the sets (bd.WithdrawSet, bd.CancelSet,
+// bd.OrderedAfter).
 package withdraw
 
 import (
@@ -68,13 +70,24 @@ func (r Refusal) Reason(k Kind) string {
 // Plan is the read-only view of a verb: what it would close and what refuses it.
 // Building one writes nothing and records no event.
 type Plan struct {
-	Kind     Kind
-	Target   string
-	Set      []bd.Bead // leaves first, target last
-	Refusals []Refusal
-	Chains   []Chain  // cancel: every unclosed member chain, released ones included
-	Locked   []Lock   // cancel: member chains that must close, not be released
-	Released []string // cancel: the heads --release names, kept out of Set
+	Kind      Kind
+	Target    string
+	Set       []bd.Bead // leaves first, target last
+	Refusals  []Refusal
+	Chains    []Chain   // cancel: every unclosed member chain, released ones included
+	Tasks     []bd.Bead // cancel: every unclosed member Task, released ones included (ADR 0349)
+	Locked    []Lock    // cancel: member chains that must close, not be released
+	Withdrawn []string  // cancel: the member Tasks Set closes withdrawn, ahead of the rest
+	Released  []string  // cancel: the chain heads and member Tasks --release names, kept out of Set
+
+	// Swept, Before, LeftOpen and Releases are a withdraw's Task sweep (Spec
+	// mc-xw3ez D3, mc-d5zdj D2): the Tasks closed with the set (before the target in
+	// Set, swept ones first), the Tasks spared, and the Checkpoints whose land hold
+	// the withdraw lets go.
+	Swept    []bd.Swept
+	Before   []bd.BeforeClosed
+	LeftOpen []bd.Held
+	Releases []string
 
 	// Inventory is the cleanup the verb would perform (Spec D4), for the dialog to
 	// tag rows from and the CLI to print before a discard.
@@ -97,6 +110,12 @@ type Lock struct {
 type Result struct {
 	Closed   []string
 	Released []string
+	// Swept, Before, LeftOpen and Holds are a withdraw's Task sweep, as Plan names
+	// them: Holds are the Checkpoints whose land hold it released.
+	Swept    []bd.Swept
+	Before   []bd.BeforeClosed
+	LeftOpen []bd.Held
+	Holds    []string
 	// Removed and Kept are cleanup's outcome (Spec D5): what it took down and what
 	// it left, with the holder or error. A kept item never undoes the close.
 	Removed, Kept []Item
@@ -174,7 +193,7 @@ var (
 )
 
 // PlanOf reads the graph and plans the verb target names: cancel for an Initiative,
-// withdraw otherwise. A target that is no unclosed chain head (or Initiative) is a
+// withdraw (a chain head or a Task) otherwise. A target that is no unclosed chain head, Task or Initiative is a
 // plain error, not a Refusal.
 func PlanOf(target string, o Opts) (Plan, error) {
 	all, err := listAll()
@@ -203,50 +222,78 @@ func plan(target string, all []bd.Bead, o Opts) (Plan, error) {
 			return Plan{}, err
 		}
 		p.Set = bd.CancelSet(target, all, p.Released...)
-	case bd.IsChainHead(t, all):
+		// The member Tasks close first, withdrawn: <initiative>; p.Withdrawn names them.
+		var tasks, rest []bd.Bead
+		for _, b := range p.Set {
+			if b.Kind == contract.KindTask && b.Parent == target {
+				tasks = append(tasks, b)
+			} else {
+				rest = append(rest, b)
+			}
+		}
+		p.Withdrawn = bd.IDs(tasks)
+		p.Set = append(tasks, rest...)
+	case bd.IsWithdrawable(t, all):
 		if len(o.Release) > 0 {
 			return Plan{}, fmt.Errorf("--release applies to an Initiative cancel, not a withdraw of %s", target)
 		}
 		p.Kind, p.Set = KindWithdraw, bd.WithdrawSet(target, all)
+		sw := bd.SweepTasks(p.Set, all, t.Kind != contract.KindTask)
+		p.Swept, p.Before, p.LeftOpen, p.Releases = sw.Swept, sw.Before, sw.LeftOpen, sw.Releases
+		tasks := make([]bd.Bead, 0, len(sw.Swept)+len(sw.Before))
+		for _, w := range sw.Swept {
+			tasks = append(tasks, w.Bead)
+		}
+		for _, w := range sw.Before {
+			tasks = append(tasks, w.Bead)
+		}
+		p.Set = append(tasks, p.Set...) // swept, then before-closed Tasks first; the target stays last
 	default:
-		return Plan{}, fmt.Errorf("%s is not a chain head: only an unclosed Signal, Chart, Spec, Checkpoint or Rollback with nothing caused by it, or an unclosed Initiative, can be dropped", target)
+		return Plan{}, fmt.Errorf("%s is not a chain head or a Task: only an unclosed Signal, Chart, Spec, Checkpoint or Rollback with nothing caused by it, an unclosed Task, or an unclosed Initiative, can be dropped", target)
 	}
 	if o.InFlight != nil {
-		if busy := bd.IDs(bd.Filter(p.Set, o.InFlight)); len(busy) > 0 {
-			p.Refusals = append(p.Refusals, Refusal{Kind: InFlight, Beads: busy, Fix: inFlightFix})
-		}
+		p.Refusals = append(p.Refusals, inFlightRefusals(bd.Filter(p.Set, o.InFlight))...)
 	}
 	rs, err := landingRefusals(p.Set, all, p.Kind)
 	if err != nil {
 		return Plan{}, err
 	}
 	p.Refusals = append(p.Refusals, rs...)
-	if after := bd.IDs(bd.OrderedAfter(p.Set, all)); len(after) > 0 {
+	after := bd.IDs(bd.Filter(bd.OrderedAfter(p.Set, all), func(x bd.Bead) bool {
+		return !slices.Contains(p.Releases, x.ID) && !(x.Kind == contract.KindTask && slices.Contains(p.Released, x.ID))
+	}))
+	if len(after) > 0 {
 		p.Refusals = append(p.Refusals, Refusal{Kind: OrderedAfter, Beads: after, Fix: "they are ordered after a bead this would close: withdraw them first, or drop that ordering with bd dep remove"})
 	}
 	return p, nil
 }
 
-// planRelease fills p.Locked (under Require Initiatives every unclosed member
-// chain) and p.Released, and refuses a --release naming a locked head. A head that
-// is no unclosed member chain head of the Initiative is a plain error.
+// planRelease fills p.Chains, p.Tasks, p.Locked (under Require Initiatives every
+// unclosed member except a Task, ADR 0349) and p.Released, and refuses a --release
+// naming a locked head. A name that is no unclosed member chain head or member Task
+// of the Initiative is a plain error.
 func planRelease(p *Plan, all []bd.Bead, release []string) error {
 	for _, m := range all {
 		if m.Parent == p.Target && bd.IsChainHead(m, all) {
 			p.Chains = append(p.Chains, Chain{m, bd.IDs(bd.WithdrawSet(m.ID, all))})
 		}
+		if isMemberTask(m, p.Target) {
+			p.Tasks = append(p.Tasks, m)
+		}
 	}
 	if required() {
 		for _, m := range all {
 			if m.Parent == p.Target && m.Unclosed() {
-				p.Locked = append(p.Locked, Lock{m.ID, bd.ReleaseRequiredWhy(m.ID)})
+				if why := bd.ReleaseRequiredWhy(m); why != "" {
+					p.Locked = append(p.Locked, Lock{m.ID, why})
+				}
 			}
 		}
 	}
 	for _, h := range release {
 		i := slices.IndexFunc(all, func(b bd.Bead) bool { return b.ID == h })
-		if i < 0 || all[i].Parent != p.Target || !bd.IsChainHead(all[i], all) {
-			return fmt.Errorf("--release %s: not an unclosed member chain head of %s", h, p.Target)
+		if i < 0 || all[i].Parent != p.Target || !bd.IsChainHead(all[i], all) && !isMemberTask(all[i], p.Target) {
+			return fmt.Errorf("--release %s: not an unclosed member chain head or member Task of %s", h, p.Target)
 		}
 		if j := slices.IndexFunc(p.Locked, func(l Lock) bool { return l.Head == h }); j >= 0 {
 			p.Refusals = append(p.Refusals, Refusal{Kind: ReleaseLocked, Beads: []string{h}, Fix: p.Locked[j].Why})
@@ -257,12 +304,20 @@ func planRelease(p *Plan, all []bd.Bead, release []string) error {
 	return nil
 }
 
-// Withdraw closes head, its unclosed caused-by predecessors and every unclosed bead
-// under them, leaves first and head last, with reason withdrawn and no successor.
+// isMemberTask reports whether m is an unclosed Task directly under initiative.
+func isMemberTask(m bd.Bead, initiative string) bool {
+	return m.Kind == contract.KindTask && m.Parent == initiative && m.Unclosed()
+}
+
+// Withdraw closes head (a chain head or a Task), its unclosed caused-by predecessors
+// and every unclosed bead under them, leaves first and head last, with reason
+// withdrawn and no successor. The Tasks ordered after what it closes close first,
+// with reason withdrawn: <head>.
 func Withdraw(head string, o Opts) (Result, error) { return run(head, KindWithdraw, o) }
 
-// Cancel closes an Initiative's unclosed member chains, then the Initiative, with
-// reason cancelled: <initiative>.
+// Cancel closes an Initiative's unclosed member Tasks first, with reason
+// withdrawn: <initiative>, then its member chains and the Initiative, with reason
+// cancelled: <initiative>.
 func Cancel(initiative string, o Opts) (Result, error) { return run(initiative, KindCancel, o) }
 
 func run(target string, want Kind, o Opts) (Result, error) {
@@ -293,7 +348,11 @@ func run(target string, want Kind, o Opts) (Result, error) {
 	}
 	if blocked != "" {
 		f.drop()
-		p.Refusals = []Refusal{{Kind: InFlight, Beads: []string{blocked}, Fix: inFlightFix}}
+		fix := inFlightFix
+		if i := slices.IndexFunc(p.Set, func(x bd.Bead) bool { return x.ID == blocked }); i >= 0 && isHITL(p.Set[i]) {
+			fix = sessionFix
+		}
+		p.Refusals = []Refusal{{Kind: InFlight, Beads: []string{blocked}, Fix: fix}}
 		return Result{}, refuse(p)
 	}
 	all, err = listAll()
@@ -340,27 +399,83 @@ func run(target string, want Kind, o Opts) (Result, error) {
 	if p.Kind == KindCancel {
 		reason = "cancelled: " + target
 	}
-	if err := forceClose(ids, reason); err != nil {
+	// D4: the swept and before-closed Tasks (a cancel's member Tasks) close first
+	// with the reason naming the target, then the rest.
+	tasks := slices.Clone(p.Withdrawn)
+	for _, w := range p.Swept {
+		tasks = append(tasks, w.Bead.ID)
+	}
+	swept := slices.Clone(tasks)
+	for _, w := range p.Before {
+		tasks = append(tasks, w.Bead.ID)
+	}
+	if len(tasks) > 0 {
+		if err := forceClose(tasks, "withdrawn: "+target); err != nil {
+			f.dropAfterClose()
+			return Result{}, failed(p.Kind, t, "close", err, ids, nil)
+		}
+	}
+	if err := forceClose(slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return slices.Contains(tasks, id) }), reason); err != nil {
 		f.dropAfterClose()
 		return Result{Released: p.Released}, failed(p.Kind, t, "close", err, ids, p.Released)
 	}
 	attrs := append(eventlog.BeadAttrs(t), "closed", ids, "reason", reason)
 	if p.Kind == KindCancel {
 		attrs = append(attrs, "released", append([]string{}, p.Released...))
+	} else {
+		attrs = append(attrs, "swept", append([]string{}, swept...),
+			"swept_before", append([]string{}, tasks[len(swept):]...), "left_open", bd.IDs(heldTasks(p.LeftOpen)))
+		if len(p.Releases) > 0 {
+			attrs = append(attrs, "released", p.Releases)
+		}
 	}
 	slog.Info(string(p.Kind)+".done", attrs...)
 	removed, kept := cleanup(inv, target, p.Set)
 	f.release() // D6: close → cleanup → release, so no claim lands on a bead mid-cleanup
-	return Result{Closed: ids, Released: p.Released, Removed: removed, Kept: kept}, nil
+	return Result{Closed: ids, Released: p.Released, Swept: p.Swept, Before: p.Before, LeftOpen: p.LeftOpen, Holds: p.Releases, Removed: removed, Kept: kept}, nil
 }
 
-const inFlightFix = "abort the running effort first (x in the TUI, or mugicrew abort), then try again"
+const (
+	inFlightFix = "abort the running effort first (x in the TUI, or mugicrew abort), then try again"
+	sessionFix  = "finish or drop its session first (x in the TUI), then try again"
+)
+
+// inFlightRefusals is one InFlight Refusal per fix: a HITL bead (a Task) is walked
+// in a session, any other busy bead is an AFK effort.
+func inFlightRefusals(busy []bd.Bead) []Refusal {
+	var afk, hitl []bd.Bead
+	for _, b := range busy {
+		if isHITL(b) {
+			hitl = append(hitl, b)
+		} else {
+			afk = append(afk, b)
+		}
+	}
+	var out []Refusal
+	if len(afk) > 0 {
+		out = append(out, Refusal{Kind: InFlight, Beads: bd.IDs(afk), Fix: inFlightFix})
+	}
+	if len(hitl) > 0 {
+		out = append(out, Refusal{Kind: InFlight, Beads: bd.IDs(hitl), Fix: sessionFix})
+	}
+	return out
+}
+
+func heldTasks(hs []bd.Held) []bd.Bead {
+	out := make([]bd.Bead, len(hs))
+	for i, h := range hs {
+		out[i] = h.Bead
+	}
+	return out
+}
 
 // refuse records <verb>.refused on the target and returns p's refusals as an error.
 func refuse(p Plan) error {
 	var reasons, blocking, mrs []string
 	for _, r := range p.Refusals {
-		reasons = append(reasons, r.Reason(p.Kind))
+		if !slices.Contains(reasons, r.Reason(p.Kind)) {
+			reasons = append(reasons, r.Reason(p.Kind))
+		}
 		blocking = append(blocking, r.Beads...)
 		if r.MR != "" {
 			mrs = append(mrs, r.MR)
@@ -398,7 +513,7 @@ func fence(set []bd.Bead) (f *held, blocked string, err error) {
 		f.holds = append(f.holds, h)
 	}
 	for _, b := range set {
-		if b.Status != "open" || !isHITL(b.Kind) {
+		if b.Status != "open" || !isHITL(b) {
 			continue
 		}
 		if err := casClaim(b.ID); err != nil {
@@ -450,9 +565,8 @@ func (f *held) dropExcept(skip []string) {
 	f.release()
 }
 
-func isHITL(k contract.Kind) bool {
-	e, err := registry.Lookup(k)
-	return err == nil && e.Mode == registry.HITL
+func isHITL(b bd.Bead) bool {
+	return registry.IsMode(b.Kind, b.Labels, registry.HITL)
 }
 
 // failed records <verb>.failed at Error and returns err. On a close, closed names

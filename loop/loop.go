@@ -590,6 +590,7 @@ func (l *Loop) poll() {
 // tick is one poll (spec §6.4): re-derive inflight + candidates from bd, then
 // for each candidate the AFK pool admits, claim synchronously and dispatch Run.
 func (l *Loop) tick() error {
+	StampAutoApprove() // live: an Approval's mode follows this tick's setting (ADR 0346)
 	effortSet.Store(memoEfforts(effortRefsAcross))
 	ready, err := readyBeads()
 	if err != nil {
@@ -646,7 +647,7 @@ func (l *Loop) tick() error {
 }
 
 // retireStragglers is the sweep-side backstop (ADR 0124, Spec D4): every
-// listed child of an obsolete:-closed Checkpoint (a Draft born after the sweep's
+// listed child (but an open MR Watch) of an obsolete:-closed Checkpoint (a Draft born after the sweep's
 // listing, Usopp's Approval, Jinbe's spawns) is force-closed with that
 // Checkpoint's own reason, one sweep.straggler each, before the tick dispatches.
 // A parent absent from open is closed, so only those are read, once each; a
@@ -667,6 +668,9 @@ func retireStragglers(open []bd.Bead) (map[string]bool, error) {
 		if kids[b.Parent] == nil {
 			parents = append(parents, b.Parent)
 		}
+		if b.Kind == contract.KindMRWatch && b.Status != "deferred" { // an open Watch outlives the sweep (it closes itself)
+			continue
+		}
 		kids[b.Parent] = append(kids[b.Parent], b.ID)
 	}
 	retired := map[string]bool{}
@@ -676,6 +680,9 @@ func retireStragglers(open []bd.Bead) (map[string]bool, error) {
 			return nil, err
 		}
 		if cp.Status != "closed" || !strings.HasPrefix(cp.CloseReason, bd.ObsoleteReason) {
+			continue
+		}
+		if len(kids[p]) == 0 { // only a spared Watch listed
 			continue
 		}
 		if err := forceCloseBeads(kids[p], cp.CloseReason); err != nil {
@@ -1028,7 +1035,7 @@ func (l *Loop) countHold(b bd.Bead, id string, o dispatch.Outcome) {
 		l.resetCount(&l.held, b.ID)
 		return
 	}
-	l.tally(&l.held, b, bd.PausedForeignHold, "skips", "effort", id, "branch", o.Branch, "holder", o.Holder.Path)
+	l.tally(&l.held, b, bd.PausedForeignHold, pauseBead, "skips", "effort", id, "branch", o.Branch, "holder", o.Holder.Path)
 }
 
 // countFailure keeps b's consecutive failed-effort count (ADR 0078 §2): an effort
@@ -1037,8 +1044,10 @@ func (l *Loop) countHold(b bd.Bead, id string, o dispatch.Outcome) {
 // clean return resets it, and busy/held and a stranded integrate leave it alone,
 // as does a limited effort and a failure whose release re-read showed paused:manual (an abort, ADR
 // 0083 §8). At PauseAfter it writes paused:failing and logs effort.paused with the
-// last error.
-func (l *Loop) countFailure(b bd.Bead, id string, o dispatch.Outcome, err error) {
+// last error; an Approval instead gets the sticky auto-approve:failed marker that
+// hands it back to the human (Spec D6, ADR 0341 §1) and logs effort.fell_back with
+// the last error.
+func (l *Loop) countFailure(b bd.Bead, effortID string, o dispatch.Outcome, err error) {
 	switch {
 	case o.Cut == dispatch.CutBusy || o.Cut == dispatch.CutHeld: // nothing ran
 	case o.Limit != nil: // a Plan usage limit hit blames no bead (Spec D4)
@@ -1046,8 +1055,17 @@ func (l *Loop) countFailure(b bd.Bead, id string, o dispatch.Outcome, err error)
 	case err == nil:
 		l.resetCount(&l.failing, b.ID)
 	case o.Aborted: // the human's stop, not the bead's failure
+	case b.Kind == contract.KindApproval:
+		fellBack := func(id, cause string) error {
+			if merr := markBead(id, cause); merr != nil {
+				return merr
+			}
+			slog.Warn("effort.fell_back", append(eventlog.BeadAttrs(b), "cause", cause, "failures", PauseAfter, "effort", effortID, "error", err.Error())...)
+			return nil
+		}
+		l.tally(&l.failing, b, registry.AutoApproveFailedLabel, fellBack, "failures")
 	default:
-		l.tally(&l.failing, b, bd.PausedFailing, "failures", "effort", id, "error", err.Error())
+		l.tally(&l.failing, b, bd.PausedFailing, pauseBead, "failures", "effort", effortID, "error", err.Error())
 	}
 }
 
@@ -1058,11 +1076,12 @@ func (l *Loop) resetCount(m *map[string]int, id string) {
 	l.mu.Unlock()
 }
 
-// tally adds one to b's count in *m. At PauseAfter it writes paused:<cause> and
+// tally adds one to b's count in *m. At PauseAfter it calls write(b.ID, cause) (a
+// pause, or the Approval fallback marker, which logs its own event) and otherwise
 // logs effort.paused at Warn {cause, countKey: n, attrs…}; a failed write restores
 // the count, so the next one retries it. The count resets under the same lock it
 // reaches PauseAfter in, so a racing re-dispatch never writes the pause twice.
-func (l *Loop) tally(m *map[string]int, b bd.Bead, cause, countKey string, attrs ...any) {
+func (l *Loop) tally(m *map[string]int, b bd.Bead, cause string, write func(id, cause string) error, countKey string, attrs ...any) {
 	l.mu.Lock()
 	if *m == nil {
 		*m = map[string]int{}
@@ -1076,11 +1095,14 @@ func (l *Loop) tally(m *map[string]int, b bd.Bead, cause, countKey string, attrs
 	if n < PauseAfter {
 		return
 	}
-	if err := pauseBead(b.ID, cause); err != nil {
+	if err := write(b.ID, cause); err != nil {
 		slog.Error("loop.tick_failed", "err", err.Error())
 		l.mu.Lock()
 		(*m)[b.ID] = max((*m)[b.ID], n)
 		l.mu.Unlock()
+		return
+	}
+	if len(attrs) == 0 {
 		return
 	}
 	slog.Warn("effort.paused", append(append(eventlog.BeadAttrs(b), attrs...), "cause", cause, countKey, n)...)
@@ -1203,6 +1225,7 @@ var (
 	gateTargets, closeBead      = bd.GateTargets, bd.Close
 	claimBead, runEffort        = dispatch.Claim, dispatch.Dispatch
 	pauseBead, unpauseBead      = bd.Pause, bd.Unpause
+	markBead                    = bd.AddLabel
 	declaredContexts            = contexts.Contexts
 	declaredRepos               = contexts.Repos
 	rootHasBranch               = git.Repo("").HasBranch
@@ -1240,7 +1263,7 @@ func LiveAFK(list func() ([]bd.Bead, error), alive func([]string) map[string]boo
 // what the loop itself would dispatch (Spec FR5) — never re-spelled.
 func IsAFKLeaf(b bd.Bead) bool {
 	e, err := registry.Lookup(b.Kind)
-	return err == nil && e.Mode == registry.AFK && !e.Container
+	return err == nil && registry.ModeOf(b.Kind, b.Labels) == registry.AFK && !e.Container
 }
 
 // IsActiveAFKEffort reports whether a bead is an active AFK effort — the rows the
@@ -1250,8 +1273,7 @@ func IsAFKLeaf(b bd.Bead) bool {
 // a different process boundary, never given a fabricated alive/dead. LiveAFK reads
 // it to classify a refused cut's holder and a paused bead's (ADR 0054/0068).
 func IsActiveAFKEffort(b bd.Bead) bool {
-	e, err := registry.Lookup(b.Kind)
-	return err == nil && e.Mode == registry.AFK && b.Status == "in_progress"
+	return registry.IsMode(b.Kind, b.Labels, registry.AFK) && b.Status == "in_progress"
 }
 
 // IsDrainedChartCandidate reports whether a ready bead is a Chart the loop should
@@ -1453,7 +1475,7 @@ func ownerOf(b bd.Bead) string {
 func CountInflight(inProgress []bd.Bead) int {
 	n := 0
 	for _, b := range inProgress {
-		if e, err := registry.Lookup(b.Kind); err == nil && e.Mode == registry.AFK {
+		if registry.IsMode(b.Kind, b.Labels, registry.AFK) {
 			n++
 		}
 	}

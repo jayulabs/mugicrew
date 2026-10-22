@@ -80,6 +80,7 @@ func (Franky) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchComma
 var (
 	showBead  = bd.Show
 	closeBead = bd.Close
+	rationale = bd.RationaleNote
 
 	openPivots           = bd.OpenPivots
 	pivotsDiscoveredFrom = bd.PivotsDiscoveredFrom
@@ -387,10 +388,16 @@ func afterRun(ctx contract.Ctx, id string) error {
 // only closes the bead. Jinbe spawns the Review from drained-Checkpoint state, so
 // no member races another over deciding it is last (ADR 0103). The Open() guard
 // makes a re-dispatch after a committed-but-not-closed crash converge without a
-// double close.
+// double close. A Critique alone is closed "accepted: <rationale>" when its build
+// session left a Rationale: comment (Spec D5, D6); everything else closes bare.
 func finish(bead bd.Bead) error {
 	if !bead.Open() {
 		return nil // already closed by a prior dispatch: no double close
+	}
+	if bead.Kind == contract.KindCritique {
+		if note := rationale(bead.ID); note != "" {
+			return closeBead(bead.ID, "accepted: "+note)
+		}
 	}
 	return closeBead(bead.ID, "")
 }

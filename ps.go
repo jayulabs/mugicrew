@@ -43,6 +43,7 @@ func runPs(argv []string, w io.Writer) error {
 		return errors.New("usage: mugicrew ps [--json]")
 	}
 	inheritGraph()
+	loop.StampAutoApprove()
 	all, err := inProgress()
 	if err != nil {
 		return err

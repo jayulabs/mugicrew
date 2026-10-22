@@ -142,6 +142,8 @@ func main() {
 		err = runSignalTriage(args[2:])
 	case args[0] == "signal" && len(args) >= 2 && args[1] == "offshoot":
 		err = runSignalOffshoot(args[2:], os.Stdout)
+	case args[0] == "task" && len(args) >= 2 && args[1] == "new":
+		err = runTaskNew(args[2:], os.Stdout)
 	case args[0] == "intake" && len(args) >= 2 && args[1] == "jira":
 		err = runIntakeJira(args[2:], os.Stdout)
 	case args[0] == "latch" && len(args) >= 2 && args[1] == "jira":
@@ -150,6 +152,8 @@ func main() {
 		err = runLatchMR(args[2:], os.Stdout)
 	case args[0] == "triage" && len(args) >= 2 && args[1] == "locate":
 		err = runTriageLocate(args[2:], os.Stdout)
+	case args[0] == "probe":
+		err = runProbe(args[1:], os.Stdout)
 	case args[0] == "surgery" && len(args) >= 2 && args[1] == "new":
 		err = runSurgeryNew(args[2:])
 	case args[0] == "surgery" && len(args) >= 2 && args[1] == "end":
@@ -217,6 +221,7 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew -C <dir> ...       run in the Workspace containing <dir>
   mugicrew signal new --title T --description D            file a Signal
   mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none --title T --description D  file an offshoot Signal ordered against its cause's container
+  mugicrew task new --drafted-by <bead> [--after <bead>]... [--before <bead>]... [--outside] --title T --description D  file a Task in the Initiative of the member it is ordered against
   mugicrew intake jira <KEY>                                file a Jira work item as a Signal
   mugicrew latch jira <KEY> --blocks <bead>...             hold beads until a Jira ticket is Done
   mugicrew latch mr <ref> --blocks <bead>...               hold beads until a GitLab merge request is merged
@@ -224,11 +229,12 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew triage locate [--signal <id>] --token <t>... --path <p>... [--json]  say whether a Signal's code is only on one live Checkpoint
   mugicrew surgery new --title T [--problem P] [--checkpoint ID]  file a Surgery on a fresh Checkpoint, or join ID
   mugicrew surgery end <surgery-id>                         end a Surgery
+  mugicrew probe mr (<ref> | --branch <b>) | pipeline <ref> (<id> | --main) | landed <id> | foreign [--context <c>]  print one word of MR or pipeline state, read-only
   mugicrew checkup <bead> [--problem "<one line>"]          repair a broken bead in a Chopper session
-  mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>]  file a pivot's corrected Spec
-  mugicrew pivot escalate <pivot-id> --evidence <file>      re-chart a pivot from its evidence
+  mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>] [--carries <id,…>]  file a pivot's corrected Spec
+  mugicrew pivot escalate <pivot-id> --evidence <file> [--carries <id,…>]  re-chart a pivot from its evidence
   mugicrew pivot raise <task> [--pivot <f>] [--critique <f>] [--merge-into <pivot> <f>]  probe a Task's held Checkpoint, or raise a pivot or Critique on it
-  mugicrew withdraw <head> [--discard]  drop any unclosed chain head (initiative withdraw is its alias)
+  mugicrew withdraw <head> [--discard]  drop any unclosed chain head or Task (initiative withdraw is its alias)
   mugicrew initiative cancel <initiative> [--release <head>]... [--discard]  drop an Initiative and its member chains
   mugicrew initiative adopt <head> <initiative> | release <head>  move a chain into or out of an Initiative
   mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>]  drive a bead to its next state
@@ -303,7 +309,9 @@ func requireGraph(args []string) error {
 	user := len(args) == 0 ||
 		args[0] == "loop" && (len(args) == 1 || args[1] == watchArg || !strings.HasPrefix(args[1], "--") || os.Getenv("BEADS_DIR") == "") ||
 		args[0] == "signal" && len(args) >= 2 && (args[1] == "new" || args[1] == "triage" || args[1] == "offshoot") ||
+		args[0] == "task" && len(args) >= 2 && args[1] == "new" ||
 		args[0] == "triage" && len(args) >= 2 && args[1] == "locate" ||
+		args[0] == "probe" ||
 		args[0] == "intake" && len(args) >= 2 && args[1] == "jira" ||
 		args[0] == "latch" && len(args) >= 2 && (args[1] == "jira" || args[1] == "mr") ||
 		args[0] == "surgery" && len(args) >= 2 && (args[1] == "new" || args[1] == "end") ||
@@ -369,6 +377,7 @@ var (
 // acted, then any pause left, and exits 0 repaired or nothing to recover, 1
 // refused or a usage error, 2 a failed step (ADR 0127 §9).
 func runRecover(argv []string, w, errw io.Writer) int {
+	loop.StampAutoApprove()
 	if len(argv) == 0 {
 		if err := listStranded(w); err != nil {
 			fmt.Fprintln(errw, err)
@@ -1499,7 +1508,7 @@ func crewFor(kind contract.Kind) (contract.Crewmate, error) {
 // retires the old Checkpoint (zoro.Confirm). Idempotent, so the session re-runs it
 // after a partial failure. --title defaults to the old Spec's.
 func runPivotConfirm(argv []string) error {
-	const usage = "usage: mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>]"
+	const usage = "usage: mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>] [--carries <id,…>]"
 	if len(argv) < 1 {
 		return errors.New(usage)
 	}
@@ -1507,6 +1516,7 @@ func runPivotConfirm(argv []string) error {
 	fs.SetOutput(io.Discard) // main prints the error once
 	specFile := fs.String("spec", "", "file holding the corrected Spec body")
 	title := fs.String("title", "", "corrected Spec title (default: the old Spec's)")
+	carries := fs.String("carries", "", "comma-separated open filed Critiques whose ask the corrected Spec folds")
 	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || *specFile == "" {
 		return errors.New(usage)
 	}
@@ -1514,20 +1524,32 @@ func runPivotConfirm(argv []string) error {
 	if err != nil {
 		return err
 	}
-	return zoro.Confirm(argv[0], *title, string(body))
+	return zoro.Confirm(argv[0], *title, string(body), splitCarries(*carries))
+}
+
+// splitCarries is the ids of a --carries value, trimmed, without blanks or repeats.
+func splitCarries(v string) []string {
+	var ids []string
+	for _, id := range strings.Split(v, ",") {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // runPivotEscalate is the escalate sweep verb the pivot triage session calls (ADR
 // 0046 §5): it seeds a fresh Chart with the evidence file the session gathered
 // and retires the old Checkpoint (zoro.Escalate). Idempotent, like confirm.
 func runPivotEscalate(argv []string) error {
-	const usage = "usage: mugicrew pivot escalate <pivot-id> --evidence <file>"
+	const usage = "usage: mugicrew pivot escalate <pivot-id> --evidence <file> [--carries <id,…>]"
 	if len(argv) < 1 {
 		return errors.New(usage)
 	}
 	fs := flag.NewFlagSet("pivot escalate", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // main prints the error once
 	evidenceFile := fs.String("evidence", "", "file holding the escalation evidence")
+	carries := fs.String("carries", "", "comma-separated open filed Critiques whose ask the evidence folds")
 	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || *evidenceFile == "" {
 		return errors.New(usage)
 	}
@@ -1535,7 +1557,7 @@ func runPivotEscalate(argv []string) error {
 	if err != nil {
 		return err
 	}
-	return zoro.Escalate(argv[0], string(evidence))
+	return zoro.Escalate(argv[0], string(evidence), splitCarries(*carries))
 }
 
 // runPivotRaise is `mugicrew pivot raise <task> [--pivot <body-file>]... [--critique
@@ -1655,6 +1677,22 @@ var (
 	blocksEdge = bd.Blocks
 )
 
+// checkLatchTargets refuses a --blocks target that does not exist or is an
+// Initiative: blocking one would freeze every member Task through bd's block
+// cascade, so the Latch belongs on the member actually waiting (Spec FR32).
+func checkLatchTargets(verb, typed string, blocks []string) error {
+	for _, id := range blocks {
+		b, err := showBead(id)
+		if err != nil {
+			return fmt.Errorf("latch %s %s: no bead %s to block: %w", verb, typed, id, err)
+		}
+		if b.Kind == contract.KindInitiative {
+			return fmt.Errorf("latch %s %s: %s is an Initiative; block the member that is actually waiting, not the Initiative", verb, typed, id)
+		}
+	}
+	return nil
+}
+
 // runLatchJira files (or reuses) the one latch for a Jira key and makes it block
 // each --blocks bead (Spec D4), then prints the latch id. Everything is read and
 // checked before anything is filed. --drafted-by files the latch as that bead's
@@ -1674,10 +1712,8 @@ func runLatchJira(argv []string, w io.Writer) error {
 	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || len(blocks) == 0 {
 		return errors.New(usage)
 	}
-	for _, id := range blocks {
-		if _, err := showBead(id); err != nil {
-			return fmt.Errorf("latch jira %s: no bead %s to block: %w", typed, id, err)
-		}
+	if err := checkLatchTargets("jira", typed, blocks); err != nil {
+		return err
 	}
 	root, err := git.RepoRoot()
 	if err != nil {
@@ -1735,10 +1771,8 @@ func runLatchMR(argv []string, w io.Writer) error {
 	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || len(blocks) == 0 {
 		return errors.New(usage)
 	}
-	for _, id := range blocks {
-		if _, err := showBead(id); err != nil {
-			return fmt.Errorf("latch mr %s: no bead %s to block: %w", typed, id, err)
-		}
+	if err := checkLatchTargets("mr", typed, blocks); err != nil {
+		return err
 	}
 	if name, err := git.LandStrategyName(); err != nil {
 		return fmt.Errorf("latch mr %s: %w", typed, err)
@@ -1959,6 +1993,7 @@ var (
 // an active AFK effort or has a live session; a session table that can't be read
 // refuses the act rather than guess.
 func runWithdraw(argv []string) error {
+	loop.StampAutoApprove()
 	argv, discard := cutDiscard(argv)
 	if len(argv) != 1 || argv[0] == "" {
 		return errors.New("usage: mugicrew withdraw <head> [--discard]")
@@ -1971,6 +2006,7 @@ func runWithdraw(argv []string) error {
 	res, err := withdrawChain(argv[0], o)
 	if err == nil {
 		fmt.Println("withdrawn", argv[0]+": closed", strings.Join(res.Closed, " "))
+		printSwept(os.Stdout, argv[0], res)
 		printKept(os.Stdout, res)
 	}
 	return err
@@ -1989,6 +2025,24 @@ func cutDiscard(argv []string) (rest []string, discard bool) {
 	return rest, discard
 }
 
+// printSwept names the Tasks a withdraw of head closed with it (those ordered after
+// the set, then those ordered before it), the Tasks it left open, and each land hold
+// it released (Spec mc-xw3ez D9, mc-d5zdj D4).
+func printSwept(w io.Writer, head string, res withdraw.Result) {
+	for _, s := range res.Swept {
+		fmt.Fprintf(w, "swept %s (withdrawn: %s)\n", s.Bead.ID, head)
+	}
+	for _, x := range res.Before {
+		fmt.Fprintf(w, "swept %s (withdrawn: %s; before %s)\n", x.Bead.ID, head, x.Before)
+	}
+	for _, h := range res.LeftOpen {
+		fmt.Fprintf(w, "left open %s: also before %s\n", h.Bead.ID, strings.Join(h.Also, ", "))
+	}
+	for _, c := range res.Holds {
+		fmt.Fprintf(w, "land hold released: %s\n", c)
+	}
+}
+
 // printKept names each cleanup item that stayed behind, for the human to clear by
 // hand or with mugicrew recover; the close stands.
 func printKept(w io.Writer, res withdraw.Result) {
@@ -2001,6 +2055,7 @@ func printKept(w io.Writer, res withdraw.Result) {
 // (runWithdraw), and `adopt <head> <initiative>` / `release <head>` (Spec D5), the
 // TUI's a/A as verbs.
 func runInitiative(argv []string) error {
+	loop.StampAutoApprove()
 	const usage = "usage: mugicrew initiative cancel <initiative> [--release <head>]... [--discard] | withdraw <head> [--discard] | adopt <head> <initiative> | release <head>"
 	switch {
 	case len(argv) == 3 && argv[0] == "adopt":

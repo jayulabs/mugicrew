@@ -39,7 +39,7 @@ insisting doesn't make it sharp.
 A reroute applies only when the code the Signal reports lives on exactly one
 open, unlanded Checkpoint's branch, and not on main or another Checkpoint.
 Pick what the Signal names: identifiers or literal strings from the defect as
---token, repo-relative paths as --path. Then run:
+--token, repo-relative or context-prefixed paths (e.g. <context dir>/…) as --path. Then run:
 
     mugicrew triage locate --signal %[1]s --token <t>... --path <p>... [--json]
 

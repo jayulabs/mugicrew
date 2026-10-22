@@ -40,7 +40,8 @@ on the human's explicit word.
 - Before each commit, run the Workspace's build and tests and commit only when
   they pass, unless the human explicitly overrides.
 - Commit once per change the human accepts, with a conventional-commit message
-  naming the Surgery (%[1]s). A clean exit integrates the effort branch onto
+  naming the Surgery: `<type>(<bead-id>): <subject>`, with the bead id %[1]s and
+  the type chosen by the change (feat, fix, refactor, test, docs, chore, …). A clean exit integrates the effort branch onto
   the Checkpoint, then deletes the worktree, so an uncommitted change is lost.
 - If a dictated change looks too big for a surgery, say so once and offer to
   file an offshoot Signal for it, then follow the human's call. The offshoot is

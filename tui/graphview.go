@@ -291,6 +291,10 @@ func (g graphData) sessionLine(b *bd.Bead) (string, bool) {
 	return word + softSt.Render(" · "+s.Worktree), true
 }
 
+// autoApproveFailedWord is the qualifier on an Approval that fell back from AFK
+// to the human (Spec D7, ADR 0341); it reads the marker label, there is no state.
+const autoApproveFailedWord = "auto-approve failed"
+
 // rowSuffix is a row's trailing chrome: its age, then the in-flight markers of
 // ADR 0107 (launching…, a pending write's verb), closing… (ADR 0108 §3), the
 // armed auto-exit, done — /exit (ADR 0067 §2) or the waiting word (ADR 0099): all
@@ -496,7 +500,7 @@ func idSet[R any](rows []R, bead func(R) *bd.Bead) map[string]bool {
 }
 
 // initiativesHeaderText is the detail of a queue tab's Initiatives section header.
-const initiativesHeaderText = "The Initiative groups and No Initiative.\n\nenter does nothing here (space folds)."
+const initiativesHeaderText = "The Initiative groups, and No Initiative: the Checkpoints and Specs with no Initiative parent, and the outside Tasks and Pivots.\n\nenter does nothing here (space folds)."
 
 // running is whether b's effort is Live, launching or launched but not yet seen alive.
 func (g graphData) running(b *bd.Bead) bool {
@@ -687,13 +691,16 @@ func (g graphTab) detailBody() string {
 		owner = e.Owner
 	}
 	mode := "AFK"
-	if isHITL(b.Kind) {
+	if isHITL(b) {
 		mode = "HITL"
 	}
 	var h strings.Builder
 	fmt.Fprintf(&h, "%s  %s\n\n", g.sbrn(b, b.Title, !g.noDot, 0), softSt.Render(mode))
 	field := func(k, v string) { h.WriteString(labelField(k, v) + "\n") }
 	field("owner", owner)
+	if b.HasLabel(registry.AutoApproveFailedLabel) {
+		field("approval", warnSt.Render(autoApproveFailedWord))
+	}
 	if b.Assignee != "" {
 		field("claimed by", b.Assignee)
 	}
@@ -712,7 +719,7 @@ func (g graphTab) detailBody() string {
 	} else if !b.Container && b.Parent != "" {
 		field("chart", b.Parent)
 	}
-	if l := g.liveOf(b); l != na || (b.Status == "in_progress" && isHITL(b.Kind)) {
+	if l := g.liveOf(b); l != na || (b.Status == "in_progress" && isHITL(b)) {
 		field("liveness", livenessLine(l, b))
 	}
 	if v, ok := g.sessionLine(b); ok {
@@ -796,7 +803,7 @@ func forgeReviewFields(b *bd.Bead) [][2]string {
 		if c, ok := contract.ParseForgeReviewCounts(b.CloseReason); ok && !b.Unclosed() {
 			out = append(out, [2]string{"counts", fmt.Sprintf("filed %d · folded %d · skipped %d", c.Filed, c.Folded, c.Skipped)})
 		}
-	case contract.KindCheckpoint, contract.KindChart:
+	case contract.KindCheckpoint, contract.KindChart, contract.KindMRWatch:
 		due, hasDue := git.ParseLine(b.Description, strings.TrimSpace(contract.CloseOutsDuePrefix))
 		failing, hasFail := git.ParseLine(b.Description, strings.TrimSpace(contract.CloseOutsFailingPrefix))
 		var parts []string
@@ -875,7 +882,7 @@ func (g graphTab) launchPreview(b *bd.Bead) string {
 	if strandable(b) { // enter refuses (launchWhy): the preview agrees
 		return softSt.Render(claimLine(b))
 	}
-	if b.Status == "in_progress" && isHITL(b.Kind) {
+	if b.Status == "in_progress" && isHITL(b) {
 		return softSt.Render(string(b.Kind)+" is idle — ") + selMarker.Render("enter") + softSt.Render(" resumes it against its claim.")
 	}
 	if b.Container && b.Kind != contract.KindInitiative { // an Initiative's launch is the ideate/graph enter path, not a container watch
@@ -1265,7 +1272,7 @@ func (g graphData) rowBgShown(b *bd.Bead, leaf bool) bool {
 	case session.Exited:
 		return true
 	}
-	return isHITL(b.Kind) && leaf
+	return isHITL(b) && leaf
 }
 
 // rowBgWhy is why b does nothing on the row: enter's refusals, then HITL-only.

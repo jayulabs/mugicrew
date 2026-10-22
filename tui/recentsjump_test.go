@@ -253,3 +253,19 @@ func TestRecentsJumpChartLandingNotLiveScopesGraph(t *testing.T) {
 		t.Errorf("tab %d status %q", m.tab, m.status)
 	}
 }
+
+func TestRecentsJumpChartMRWatchSelectsDefogMergeRequestsRow(t *testing.T) {
+	common := t.TempDir()
+	old := commonDir
+	commonDir = func() (string, error) { return common, nil }
+	t.Cleanup(func() { commonDir = old })
+	beads := append(focusFixture(), dbead("mw", contract.KindMRWatch, "open", "c", 1, described("MR: !4")))
+	m := recentsModel(t, nil, "mw")
+	m.landName = "gitlab"
+	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
+	m = press(t, m, runeKey("6"))
+	m = recentJump(t, m, "mw")
+	if b := m.selection(); m.tab != tabDefog || b == nil || b.ID != "mw" || m.tabAt(tabDefog).(defogTab).sel != mrsPrefix+"mw" {
+		t.Errorf("tab %d selection %v sel %q", m.tab, b, m.tabAt(tabDefog).(defogTab).sel)
+	}
+}

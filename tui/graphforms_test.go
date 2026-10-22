@@ -573,3 +573,16 @@ func TestNewMenuRebaseFlashPerOutcome(t *testing.T) {
 		})
 	}
 }
+
+// ADR 0349: under Require Initiatives A still releases a member Task.
+func TestReleaseTaskPassesWhenRequired(t *testing.T) {
+	var released string
+	seam(t, &releaseChain, func(h string) error { released = h; return nil })
+	m := formModel(t)
+	m.initiatives.Required = true
+	m, _ = send(t, m, loadedMsg{beads: append(stubBeads(), bd.Bead{ID: "tk", Kind: contract.KindTask, Status: "open", Parent: "ini", Created: epoch}), live: map[string]bool{}, sessions: map[string]session.Info{}})
+	press(t, selectBead(t, m, "tk"), runeKey("A"))
+	if released != "tk" {
+		t.Errorf("released %q", released)
+	}
+}

@@ -32,8 +32,8 @@ var locateDeps = func() locate.Deps {
 			return cps, nil
 		},
 		RepoOf: contexts.RepoOf,
-		Repos: func() ([]git.Repo, error) {
-			repos := []git.Repo{""}
+		Repos: func() ([]locate.Declared, error) {
+			repos := []locate.Declared{{}}
 			root, err := git.RepoRoot()
 			if err != nil {
 				return repos, err
@@ -42,7 +42,7 @@ var locateDeps = func() locate.Deps {
 			for _, dir := range contexts.Repos() {
 				if !seen[dir] {
 					seen[dir] = true
-					repos = append(repos, git.Repo(filepath.Join(root, dir)))
+					repos = append(repos, locate.Declared{Repo: git.Repo(filepath.Join(root, dir)), Dir: dir})
 				}
 			}
 			return repos, nil
@@ -79,8 +79,10 @@ func runTriageLocate(argv []string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		only := contexts.RepoOf(b)
-		d.Only = &only
+		if bd.ContextOf(b) != "" { // a loose Signal has no context yet: search every repo
+			only := d.RepoOf(b)
+			d.Only = &only
+		}
 	}
 	res, err := d.Locate(locate.Query{Tokens: tokens, Paths: paths})
 	if err != nil {

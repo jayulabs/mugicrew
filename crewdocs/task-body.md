@@ -1,4 +1,4 @@
-<!-- hand-kept · summarises ADR 0113 (ordering is blocks edges only), ADR 0114 (the in-session guide), ADR 0116 (steps, checks and record), ADR 0118 (the irreversible marker) -->
+<!-- hand-kept · summarises ADR 0113 (ordering is blocks edges only), ADR 0114 (the in-session guide), ADR 0116 (steps, checks and record), ADR 0335 (mugicrew-a-task-body-may-carry…), ADR 0118 (the irreversible marker) -->
 
 # The Task body
 
@@ -25,6 +25,14 @@ paragraph and a `Check:` paragraph:
     3. Add the Publisher remote.
        Do: `git -C "$CLONE" remote add publisher <repo url>`
        Check: `git -C "$CLONE" remote get-url publisher` equals the repo url.
+
+A body may also carry a one-paragraph lead, whole-line fact lines (`Key: value`)
+before `## Steps`, and a trailing `## Diagnostics`. The first fact line is the
+`Initiative:` line (the Initiative the Task joined, or why it was born outside
+one); it is written by `mugicrew task new`, not the author, so never write it. The
+guide walks only
+`## Steps`: the lead and facts are context it may quote, and Diagnostics is
+reference it reads on demand. It never checks or records a non-step.
 
 ## Markers
 

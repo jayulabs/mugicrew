@@ -193,6 +193,51 @@ func RetryPipeline(p Project, id int) error {
 	return err
 }
 
+// GetPipeline reads one pipeline by id.
+func GetPipeline(p Project, id int) (*Pipeline, error) {
+	body, err := call(p, "GET", fmt.Sprintf("pipelines/%d", id), "")
+	if err != nil {
+		return nil, err
+	}
+	var pl Pipeline
+	if err := json.Unmarshal(body, &pl); err != nil {
+		return nil, fmt.Errorf("forge: decode pipeline: %w", err)
+	}
+	return &pl, nil
+}
+
+// MainPipeline is the latest pipeline on the project's default branch, nil when it
+// has none.
+func MainPipeline(p Project) (*Pipeline, error) {
+	body, err := call(p, "GET", "", "")
+	if err != nil {
+		return nil, err
+	}
+	var proj struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	err = json.Unmarshal(body, &proj)
+	if err == nil && proj.DefaultBranch == "" {
+		err = errors.New("no default branch")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("forge: read default branch of %s: %w", p.Path(), err)
+	}
+	q := url.Values{"ref": {proj.DefaultBranch}, "order_by": {"id"}, "sort": {"desc"}, "per_page": {"1"}}
+	body, err = call(p, "GET", "pipelines?"+q.Encode(), "")
+	if err != nil {
+		return nil, err
+	}
+	var pls []Pipeline
+	if err := json.Unmarshal(body, &pls); err != nil {
+		return nil, fmt.Errorf("forge: decode pipeline list: %w", err)
+	}
+	if len(pls) == 0 {
+		return nil, nil
+	}
+	return &pls[0], nil
+}
+
 // FailedJobs lists a pipeline's failed jobs.
 func FailedJobs(p Project, pipeline int) ([]Job, error) {
 	body, err := call(p, "GET", fmt.Sprintf("pipelines/%d/jobs?scope=failed", pipeline), "")

@@ -273,3 +273,24 @@ func TestNoHeldOrLandedExitLine(t *testing.T) {
 		t.Error("defog-session.md must point at \"your prompt's integrate exits\"")
 	}
 }
+
+func TestCommitRuleViolations(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		bad  bool
+	}{
+		{`git commit -m "research(x): note"`, true},
+		{`git commit -m "docs(x): note"`, false},
+		{"Commit your change to the branch.", true},
+		{"Clean tree: commit nothing and return.", false},
+		{"Commit nothing: you run detached, so any commit here is lost.", false},
+		{"No commits here. Never run git commit yourself.", false},
+		{"Commit with <type>(<bead-id>): <subject>.", false},
+		{"Do not stage anything.", false},
+		{"commit nothing. Then commit the ADR.", true},
+	} {
+		if got := CommitRuleViolations(c.text); (len(got) > 0) != c.bad {
+			t.Errorf("CommitRuleViolations(%q) = %q, want bad=%v", c.text, got, c.bad)
+		}
+	}
+}

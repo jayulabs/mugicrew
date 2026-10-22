@@ -98,7 +98,7 @@ failed-session stderr-tail research §5).
    | `initiative.adopt.refused` | Warn | `reason`, `blocking` (ids, a list) |
    | `initiative.release` | Info | `initiative` (a member chain head's parent cleared, on the head) |
    | `initiative.release.refused` | Warn | `reason`, `blocking` (ids, a list) |
-   | `withdraw.done` | Info | on the chain head: `closed` (ids, leaves first, head last), `reason` (`withdrawn`); ADR 0310 |
+   | `withdraw.done` | Info | on the chain head: `closed` (ids, leaves first, head last), `reason` (`withdrawn`), and for a withdraw `swept` (Task ids closed `withdrawn: <head>`, ordered after the set), `swept_before` (Task ids closed `withdrawn: <head>`, ordered before the set; empty when none), `left_open` (Task ids left open, holding a bead outside the set) and `released` (Checkpoint ids whose land hold it let go); ADR 0310, ADR 0342, ADR 0351 |
    | `withdraw.refused` | Warn | `reason` (`in-flight effort` \| `ordered after the chain` \| `open Landing`; several join with `; `), `blocking` (ids, a list), `mr` when a refusal names one; nothing written |
    | `withdraw.failed` | Error | `step` (`read` \| `plan` \| `fence` \| `inventory` \| `close`), `err`, `closed` (on `close`: ids a re-read finds closed) |
    | `cancel.done` | Info | on the Initiative: `closed` (member chains, then the Initiative), `released` (heads), `reason` (`cancelled: <initiative>`) |

@@ -153,9 +153,10 @@ raise, once the Critique to wait for has closed).
 ## 5. Abandon
 
 If the human wants to give up on the Task, never close it yourself: a failed
-Task is never closed by you. Abandoning it is the human's own `bd close` outside
-this session. If `bd show %[1]s` lists a Checkpoint under BLOCKS, warn them
-that closing the Task releases that Checkpoint's land even though the step never
+Task is never closed by you. Abandoning it is the human's own withdraw outside
+this session: `X` in the TUI, or `mugicrew withdraw %[1]s`, never a hand
+`bd close`. If `bd show %[1]s` lists a Checkpoint under BLOCKS, warn them
+that withdrawing the Task releases that Checkpoint's land even though the step never
 happened.
 
 ## 6. Done

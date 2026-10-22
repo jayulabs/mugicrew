@@ -1,12 +1,17 @@
 // Package registry is the static kind → {owner, mode, container} map — the
 // total owner-from-kind function and the AFK/HITL source. Nothing is derived or
-// stored elsewhere (spec §4.2).
+// stored elsewhere (spec §4.2), with one live exception: ModeOf derives an
+// Approval's mode from the Workspace auto-approve snapshot and the bead's
+// auto-approve:failed label — AFK while the snapshot is on and the label is
+// absent (ADR 0346, mugicrew-an-approval-is-afk-while…; fallback to HITL per
+// ADR 0341, mugicrew-a-failing-afk-approval-falls-back…).
 package registry
 
 import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"jayulabs.org/mugicrew/contract"
 )
@@ -51,8 +56,8 @@ var table = map[contract.Kind]Entry{
 	contract.KindCritique:    {Owner: "franky", Mode: AFK, Container: false},
 	contract.KindConflict:    {Owner: "franky", Mode: AFK, Container: false},
 	contract.KindReview:      {Owner: "usopp", Mode: AFK, Container: false},
-	contract.KindForgeReview: {Owner: "usopp", Mode: AFK, Container: false}, // copies Review's row: Usopp's Forge Review pass over a container's MR notes
-	contract.KindApproval:    {Owner: "luffy", Mode: HITL, Container: false},
+	contract.KindForgeReview: {Owner: "usopp", Mode: AFK, Container: false},  // copies Review's row: Usopp's Forge Review pass over a container's MR notes
+	contract.KindApproval:    {Owner: "luffy", Mode: HITL, Container: false}, // HITL is the setting-off default; ModeOf derives AFK live (ADR 0346)
 
 	contract.KindRollback:   {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0047: human-filed, Jinbe's first leaf kind (amends ADR 0002)
 	contract.KindLanding:    {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // ADR 0145/0147: lands its parent container; copies Rollback's row
@@ -74,6 +79,44 @@ func Lookup(kind contract.Kind) (Entry, error) {
 		return Entry{}, fmt.Errorf("registry: unknown kind %q has no owner", kind)
 	}
 	return e, nil
+}
+
+// AutoApproveFailedLabel is the sticky fallback marker on an Approval whose AFK
+// session failed three times in a row (ADR 0341): it makes the Approval HITL again.
+const AutoApproveFailedLabel = "auto-approve:failed"
+
+// autoApprove is the Workspace auto-approve snapshot, stamped by the loop at the
+// start of every tick (as git.LandStrategyName is wired from loop config), so
+// registry never imports cfglayer. Off until set.
+var autoApprove atomic.Bool
+
+// SetAutoApprove stamps the auto-approve snapshot ModeOf reads.
+func SetAutoApprove(on bool) { autoApprove.Store(on) }
+
+// ResetAutoApprove turns the snapshot off; tests call it in Cleanup.
+func ResetAutoApprove() { autoApprove.Store(false) }
+
+// ModeOf is a bead's dispatch mode: Lookup's static Mode, except an Approval is
+// AFK while the auto-approve snapshot is on and labels lack auto-approve:failed
+// (ADR 0346). An unknown kind reads HITL, so nothing unowned is dispatched.
+func ModeOf(kind contract.Kind, labels []string) Mode {
+	e, err := Lookup(kind)
+	if err != nil {
+		return HITL
+	}
+	if kind == contract.KindApproval && autoApprove.Load() && !slices.Contains(labels, AutoApproveFailedLabel) {
+		return AFK
+	}
+	return e.Mode
+}
+
+// IsMode reports whether a bead's ModeOf is mode; an unknown kind is in no mode
+// (not even HITL), so callers need no separate Lookup guard.
+func IsMode(kind contract.Kind, labels []string, mode Mode) bool {
+	if _, err := Lookup(kind); err != nil {
+		return false
+	}
+	return ModeOf(kind, labels) == mode
 }
 
 // SessionKinds is every non-Mechanical kind, sorted: the kinds whose sessions

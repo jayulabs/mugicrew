@@ -31,12 +31,12 @@ func searchWanted(q query) bool {
 }
 
 // searchSync starts, replaces or ends the closed search after the Graph query may have
-// changed. A scoped reveal or a Recents visit is not a search; a status change between
+// changed. A scoped reveal, a scope or a Recents visit is not a search; a status change between
 // wanted statuses keeps the hits.
 func (m Model) searchSync() (Model, tea.Cmd) {
 	g := m.tabAt(tabGraph).(graphTab)
 	q := g.query()
-	if !searchWanted(q) || g.visit || q == g.scopedTo {
+	if !searchWanted(q) || g.visit || q == g.scopedTo || q.scope != "" {
 		if m.searched.words == "" {
 			return m, nil
 		}

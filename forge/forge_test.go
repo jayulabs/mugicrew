@@ -455,3 +455,34 @@ func TestAwardEmoji(t *testing.T) {
 		t.Errorf("argv %q lacks %q", b, want)
 	}
 }
+
+func TestGetPipelineReadsStatus(t *testing.T) {
+	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"id":42,"status":"running","ref":"main"}`)
+	pl, err := GetPipeline(proj, 42)
+	if err != nil || pl.Status != "running" || pl.ID != 42 {
+		t.Fatalf("GetPipeline = %+v, %v", pl, err)
+	}
+	b, _ := os.ReadFile(log)
+	if !strings.Contains(string(b), "projects/ns%2Fp/pipelines/42") {
+		t.Errorf("argv %q lacks the pipeline endpoint", b)
+	}
+}
+
+func TestMainPipelineReadsTheLatestOnTheDefaultBranch(t *testing.T) {
+	log := fakeGlab(t,
+		"HTTP/2.0 200 OK\n\n"+`{"default_branch":"trunk"}`,
+		"HTTP/2.0 200 OK\n\n"+`[{"id":9,"status":"success"},{"id":8,"status":"failed"}]`,
+		"HTTP/2.0 200 OK\n\n"+`{"default_branch":"trunk"}`,
+		"HTTP/2.0 200 OK\n\n[]")
+	pl, err := MainPipeline(proj)
+	if err != nil || pl == nil || pl.ID != 9 {
+		t.Fatalf("MainPipeline = %+v, %v", pl, err)
+	}
+	b, _ := os.ReadFile(log)
+	if !strings.Contains(string(b), "pipelines?") || !strings.Contains(string(b), "ref=trunk") {
+		t.Errorf("argv %q lacks the default-branch pipeline list", b)
+	}
+	if pl, err := MainPipeline(proj); err != nil || pl != nil {
+		t.Errorf("no pipelines = %+v, %v; want nil, nil", pl, err)
+	}
+}

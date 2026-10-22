@@ -34,6 +34,9 @@ type fakeGraph struct {
 	parent     map[string]string        // id → its parent (membership edge)
 	labels     map[string][]string      // id → its labels
 	surveys    [][3]string              // SpawnSurveyIfAbsent calls: {chart, title, drafter}
+	critiques  map[string]string        // id → description of a Checkpoint member that is a kind:critique
+	edges      map[string]bool          // "from to" discovered-from edges written
+	watches    map[string]bool          // id → a Checkpoint member that is an MR Watch
 }
 
 func newFakeGraph(chart string) *fakeGraph {
@@ -59,10 +62,20 @@ func (g *fakeGraph) bead(id string) bd.Bead {
 		kind = contract.KindPivot
 	}
 	desc := ""
+	if d, ok := g.critiques[id]; ok {
+		kind, desc = contract.KindCritique, d
+	}
+	if g.watches[id] {
+		kind = contract.KindMRWatch
+	}
 	if sha, ok := g.pins[id]; ok {
 		desc = "Anchor: " + sha + "\n"
 	}
-	return bd.Bead{ID: id, Kind: kind, Status: g.status[id], Title: "Spec: old", Description: desc, Parent: g.parent[id], Labels: g.labels[id]}
+	reason := ""
+	if r := g.closes[id]; len(r) > 0 {
+		reason = r[len(r)-1]
+	}
+	return bd.Bead{ID: id, CloseReason: reason, Kind: kind, Status: g.status[id], Title: "Spec: old", Description: desc, Parent: g.parent[id], Labels: g.labels[id]}
 }
 
 func (g *fakeGraph) close(id, reason string) error {
@@ -78,15 +91,25 @@ func (g *fakeGraph) close(id, reason string) error {
 
 func stubSweepSeams(t *testing.T, g *fakeGraph) {
 	t.Helper()
-	oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey :=
-		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey
+	oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey, oEdge, oFiled :=
+		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey, carryEdge, filedChildren
 	t.Cleanup(func() {
-		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey =
-			oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey
+		showBead, pivotCheckpoint, pivotSpec, causedBy, spawnDiscovered, supersede, openChildBeads, closeBead, forceClose, openPivots, cutBranch, carry, spawnSurvey, carryEdge, filedChildren =
+			oShow, oCp, oSpec, oCause, oSpawn, oSup, oKids, oClose, oForce, oPiv, oCut, oCarry, oSurvey, oEdge, oFiled
 	})
 	spawnSurvey = func(chart, title, drafter string) (string, bool, error) {
 		g.surveys = append(g.surveys, [3]string{chart, title, drafter})
 		return "mc-survey", len(g.surveys) == 1, nil
+	}
+	carryEdge = func(from, to string) error {
+		if g.edges == nil {
+			g.edges = map[string]bool{}
+		}
+		if key := from + " " + to; !g.edges[key] {
+			g.edges[key] = true
+			g.seq = append(g.seq, "edge "+key)
+		}
+		return nil
 	}
 	carry = func(pred, succ string) ([]string, []bd.CarrySkip, error) {
 		g.seq = append(g.seq, "carry "+pred+" "+succ)
@@ -138,6 +161,15 @@ func stubSweepSeams(t *testing.T, g *fakeGraph) {
 		return out, nil
 	}
 	closeBead = g.close
+	filedChildren = func(string) ([]bd.Bead, error) {
+		var out []bd.Bead
+		for _, id := range g.kids {
+			if _, ok := g.critiques[id]; ok {
+				out = append(out, g.bead(id))
+			}
+		}
+		return out, nil
+	}
 	forceClose = func(id, reason string) error { g.forced = append(g.forced, id); return g.close(id, reason) }
 	cutBranch = func(name, base string) (bool, error) {
 		_, had := g.cuts[name]
@@ -180,7 +212,7 @@ func carryBetween(t *testing.T, g *fakeGraph, supersede, succ string) {
 func TestConfirmChartedSweep(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	stubSweepSeams(t, g)
-	if err := Confirm("ws-pv", "", "corrected body"); err != nil {
+	if err := Confirm("ws-pv", "", "corrected body", nil); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 	if g.pred != "ws-chart" {
@@ -197,7 +229,7 @@ func TestConfirmChartedSweep(t *testing.T) {
 	}
 	carryBetween(t, g, "supersede ws-old ws-new", "ws-new")
 	for _, id := range []string{"ws-b1", "ws-c1", "ws-a1", "ws-cp"} {
-		if r := g.closes[id]; len(r) != 1 || r[0] != obsoleteReason("ws-old", "ws-new", "ws-pv") {
+		if r := g.closes[id]; len(r) != 1 || r[0] != bd.ObsoleteSuperseded("ws-old", "ws-new", "ws-pv") {
 			t.Errorf("%s closes = %v, want one obsolete close", id, r)
 		}
 	}
@@ -223,7 +255,7 @@ func TestConfirmChartedSweep(t *testing.T) {
 func TestConfirmFastLanedAnchorsNewSpec(t *testing.T) {
 	g := newFakeGraph("")
 	stubSweepSeams(t, g)
-	if err := Confirm("ws-pv", "Spec: fixed", "body"); err != nil {
+	if err := Confirm("ws-pv", "Spec: fixed", "body", nil); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 	if g.pred != "ws-sig" {
@@ -247,19 +279,19 @@ func TestConfirmRerunConverges(t *testing.T) {
 	g := newFakeGraph("")
 	g.failClose = "ws-pv2"
 	stubSweepSeams(t, g)
-	if err := Confirm("ws-pv", "", "body"); err == nil {
+	if err := Confirm("ws-pv", "", "body", nil); err == nil {
 		t.Fatal("first run: want the injected close failure")
 	}
 	if g.status["ws-pv"] == "closed" {
 		t.Fatal("pivot closed before the sweep finished; it must close last")
 	}
-	if err := Confirm("ws-pv", "", "body"); err != nil {
+	if err := Confirm("ws-pv", "", "body", nil); err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
 	// The re-run re-carries (add-only, a no-op in bd); the pivot is closed now, so
 	// the third run is a no-op and carries nothing again.
 	n := len(g.seq)
-	if err := Confirm("ws-pv", "", "body"); err != nil {
+	if err := Confirm("ws-pv", "", "body", nil); err != nil {
 		t.Fatalf("third run: %v", err)
 	}
 	if len(g.seq) != n {
@@ -281,14 +313,14 @@ func TestConfirmCarryErrorStopsBeforeCloseOut(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	g.carryErr = errors.New("bd down")
 	stubSweepSeams(t, g)
-	if err := Confirm("ws-pv", "", "body"); err == nil {
+	if err := Confirm("ws-pv", "", "body", nil); err == nil {
 		t.Fatal("a carry error must fail the sweep")
 	}
 	if len(g.closes) != 0 {
 		t.Errorf("closes after a failed carry: %v", g.closes)
 	}
 	g.carryErr = nil
-	if err := Confirm("ws-pv", "", "body"); err != nil {
+	if err := Confirm("ws-pv", "", "body", nil); err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
 	if len(g.spawned) != 1 || g.status["ws-pv"] != "closed" {
@@ -300,10 +332,10 @@ func TestConfirmCarryErrorStopsBeforeCloseOut(t *testing.T) {
 func TestConfirmRefusesBadInput(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	stubSweepSeams(t, g)
-	if err := Confirm("ws-b1", "", "body"); err == nil {
+	if err := Confirm("ws-b1", "", "body", nil); err == nil {
 		t.Error("Confirm over a non-pivot must error")
 	}
-	if err := Confirm("ws-pv", "", "  \n"); err == nil {
+	if err := Confirm("ws-pv", "", "  \n", nil); err == nil {
 		t.Error("Confirm with an empty body must error")
 	}
 	if len(g.spawned)+len(g.closes)+len(g.superseded) != 0 {
@@ -320,7 +352,7 @@ func TestConfirmRefusesBadInput(t *testing.T) {
 func TestEscalateChartedSweep(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	stubSweepSeams(t, g)
-	if err := Escalate("ws-pv", "the FR3 assumption is wrong"); err != nil {
+	if err := Escalate("ws-pv", "the FR3 assumption is wrong", nil); err != nil {
 		t.Fatalf("Escalate: %v", err)
 	}
 	if g.pred != "ws-sig" {
@@ -358,7 +390,7 @@ func TestEscalateChartedSweep(t *testing.T) {
 		t.Errorf("escalate wrote anchors %v, want none", g.anchors)
 	}
 	for _, id := range []string{"ws-b1", "ws-c1", "ws-a1", "ws-cp"} {
-		if r := g.closes[id]; len(r) != 1 || r[0] != escalateReason("ws-old", "mc-newchart", "ws-pv") {
+		if r := g.closes[id]; len(r) != 1 || r[0] != bd.ObsoleteEscalated("ws-old", "mc-newchart", "ws-pv") {
 			t.Errorf("%s closes = %v, want one obsolete close", id, r)
 		}
 	}
@@ -376,7 +408,7 @@ func TestEscalateChartedSweep(t *testing.T) {
 func TestEscalateFastLanedSkipsSupersede(t *testing.T) {
 	g := newFakeGraph("")
 	stubSweepSeams(t, g)
-	if err := Escalate("ws-pv", "evidence"); err != nil {
+	if err := Escalate("ws-pv", "evidence", nil); err != nil {
 		t.Fatalf("Escalate: %v", err)
 	}
 	if g.pred != "ws-sig" || len(g.spawned) != 1 {
@@ -396,14 +428,14 @@ func TestEscalateRerunConverges(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	g.failClose = "ws-pv2"
 	stubSweepSeams(t, g)
-	if err := Escalate("ws-pv", "evidence"); err == nil {
+	if err := Escalate("ws-pv", "evidence", nil); err == nil {
 		t.Fatal("first run: want the injected close failure")
 	}
-	if err := Escalate("ws-pv", "evidence"); err != nil {
+	if err := Escalate("ws-pv", "evidence", nil); err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
 	n := len(g.seq)
-	if err := Escalate("ws-pv", "evidence"); err != nil {
+	if err := Escalate("ws-pv", "evidence", nil); err != nil {
 		t.Fatalf("third run: %v", err)
 	}
 	if len(g.seq) != n {
@@ -425,7 +457,7 @@ func TestEscalateCarryErrorStopsBeforeCloseOut(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	g.carryErr = errors.New("bd down")
 	stubSweepSeams(t, g)
-	if err := Escalate("ws-pv", "evidence"); err == nil {
+	if err := Escalate("ws-pv", "evidence", nil); err == nil {
 		t.Fatal("a carry error must fail the sweep")
 	}
 	if len(g.closes) != 0 {
@@ -437,10 +469,10 @@ func TestEscalateCarryErrorStopsBeforeCloseOut(t *testing.T) {
 func TestEscalateRefusesBadInput(t *testing.T) {
 	g := newFakeGraph("ws-chart")
 	stubSweepSeams(t, g)
-	if err := Escalate("ws-b1", "evidence"); err == nil {
+	if err := Escalate("ws-b1", "evidence", nil); err == nil {
 		t.Error("Escalate over a non-pivot must error")
 	}
-	if err := Escalate("ws-pv", " "); err == nil {
+	if err := Escalate("ws-pv", " ", nil); err == nil {
 		t.Error("Escalate with empty evidence must error")
 	}
 	if len(g.spawned)+len(g.closes)+len(g.superseded) != 0 {
@@ -458,7 +490,7 @@ func TestEscalateChartJoinsTheChainsInitiative(t *testing.T) {
 			g.parent = map[string]string{"ws-cp": tc.parent}
 			stubSweepSeams(t, g)
 			stubInitiative(t)
-			if err := Escalate("ws-pv", "the FR3 assumption is wrong"); err != nil {
+			if err := Escalate("ws-pv", "the FR3 assumption is wrong", nil); err != nil {
 				t.Fatalf("Escalate: %v", err)
 			}
 			if len(g.spawned) != 1 || g.spawned[0].Parent != tc.want {
@@ -475,7 +507,7 @@ func TestConfirmSpecJoinsTheChainsInitiative(t *testing.T) {
 			g.parent = map[string]string{"ws-cp": tc.parent}
 			stubSweepSeams(t, g)
 			stubInitiative(t)
-			if err := Confirm("ws-pv", "", "the corrected body"); err != nil {
+			if err := Confirm("ws-pv", "", "the corrected body", nil); err != nil {
 				t.Fatalf("Confirm: %v", err)
 			}
 			if len(g.spawned) != 1 || g.spawned[0].Parent != tc.want {
@@ -493,8 +525,8 @@ func TestSweepSuccessorsCopyTheHeadsContext(t *testing.T) {
 		want   string
 	}{{[]string{"kind:checkpoint", "context:apps-x", "repo:vendor/x"}, "apps-x"}, {[]string{"kind:checkpoint"}, ""}} {
 		for name, run := range map[string]func() error{
-			"confirm":  func() error { return Confirm("ws-pv", "", "the corrected body") },
-			"escalate": func() error { return Escalate("ws-pv", "the FR3 assumption is wrong") },
+			"confirm":  func() error { return Confirm("ws-pv", "", "the corrected body", nil) },
+			"escalate": func() error { return Escalate("ws-pv", "the FR3 assumption is wrong", nil) },
 		} {
 			g := newFakeGraph("ws-chart")
 			g.labels = map[string][]string{"ws-cp": tc.labels}
@@ -520,7 +552,7 @@ func TestConfirmGitlabPinsCorrectedDirectSpec(t *testing.T) {
 		swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
 		swap(t, &fetchForge, func() (string, error) { return "forgesha", nil })
 		swap(t, &updateBody, func(id string, a []string) error { pinned = append(pinned, id+a[1]); return nil })
-		if err := Confirm("ws-pv", "", "corrected body"); err != nil {
+		if err := Confirm("ws-pv", "", "corrected body", nil); err != nil {
 			t.Fatalf("Confirm: %v", err)
 		}
 		want := []string{"ws-new\nAnchor: forgesha\n"}
@@ -544,7 +576,7 @@ func TestConfirmGitlabPinsNestedCorrectedSpecInChild(t *testing.T) {
 	swap(t, &fetchForge, func() (string, error) { return "wssha", nil })
 	swap(t, &repoFetch, func(r git.Repo) (string, error) { return "childsha", nil })
 	swap(t, &updateBody, func(id string, a []string) error { pinned = append(pinned, id+a[1]); return nil })
-	if err := Confirm("ws-pv", "", "corrected body"); err != nil {
+	if err := Confirm("ws-pv", "", "corrected body", nil); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
 	if want := []string{"ws-new\nAnchor: childsha\n"}; !slices.Equal(pinned, want) || len(g.anchors) != 0 {
@@ -556,4 +588,107 @@ func swap[T any](t *testing.T, seam *T, v T) {
 	old := *seam
 	t.Cleanup(func() { *seam = old })
 	*seam = v
+}
+
+// withCritiques adds three Checkpoint members: an open filed Critique (ws-k1, with a
+// Source: line), an open Critique without one (ws-k2) and a closed filed one (ws-k3).
+func withCritiques(g *fakeGraph) {
+	src := "Source: !7 d1 9\n> quoted\n"
+	g.critiques = map[string]string{"ws-k1": src, "ws-k2": "no source", "ws-k3": src}
+	g.status["ws-k1"], g.status["ws-k2"], g.status["ws-k3"] = "open", "open", "closed"
+	g.kids = append(g.kids, "ws-k1", "ws-k2", "ws-k3")
+}
+
+// --carries (FR 19–21): each id is recorded as successor discovered-from Critique
+// after the successor spawn and the supersede, before carryCheckpoint and every close.
+func TestSweepCarriesWriteTheEdgeBeforeCarryCheckpointAndCloseOut(t *testing.T) {
+	for name, tc := range map[string]struct {
+		succ string
+		run  func() error
+	}{
+		"confirm":  {"ws-new", func() error { return Confirm("ws-pv", "", "body", []string{"ws-k1"}) }},
+		"escalate": {"mc-newchart", func() error { return Escalate("ws-pv", "evidence", []string{"ws-k1"}) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newFakeGraph("ws-chart")
+			withCritiques(g)
+			stubSweepSeams(t, g)
+			if err := tc.run(); err != nil {
+				t.Fatal(err)
+			}
+			edge := slices.Index(g.seq, "edge "+tc.succ+" ws-k1")
+			carry := slices.Index(g.seq, "carry ws-cp "+tc.succ)
+			firstClose := slices.IndexFunc(g.seq, func(s string) bool { return strings.HasPrefix(s, "close ") })
+			if edge < 0 || carry < 0 || firstClose < 0 || !(edge < carry && carry < firstClose) {
+				t.Errorf("seq = %v, want the edge before the carry before every close", g.seq)
+			}
+			if i := slices.Index(g.seq, "supersede ws-old "+tc.succ); i >= 0 && i > edge {
+				t.Errorf("seq = %v: the edge ran before the supersede", g.seq)
+			}
+		})
+	}
+}
+
+// A re-run after a partial failure adds no duplicate edge (FR 21).
+func TestSweepCarriesRerunAddsNoDuplicateEdge(t *testing.T) {
+	g := newFakeGraph("ws-chart")
+	withCritiques(g)
+	g.failClose = "ws-pv2"
+	stubSweepSeams(t, g)
+	// The seam double dedups like bd's add-if-absent, so count the calls instead.
+	var calls int
+	inner := carryEdge
+	carryEdge = func(from, to string) error { calls++; return inner(from, to) }
+	if err := Confirm("ws-pv", "", "body", []string{"ws-k1"}); err == nil {
+		t.Fatal("first run: want the injected close failure")
+	}
+	if err := Confirm("ws-pv", "", "body", []string{"ws-k1"}); err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+	if n := strings.Count(strings.Join(g.seq, "\n"), "edge ws-new ws-k1"); n != 1 {
+		t.Errorf("seq = %v, want one edge write", g.seq)
+	}
+	if calls != 2 {
+		t.Errorf("edge seam called %d times, want 2 (it is the idempotent one)", calls)
+	}
+}
+
+// A bad --carries id (not a child, not filed, no Source:, already closed) is refused
+// before any write (FR 20).
+func TestSweepCarriesRefusesBadIDBeforeAnyWrite(t *testing.T) {
+	for _, bad := range []string{"ws-nope", "ws-b1", "ws-k2", "ws-k3"} {
+		for name, run := range map[string]func(g *fakeGraph) error{
+			"confirm":  func(*fakeGraph) error { return Confirm("ws-pv", "", "body", []string{"ws-k1", bad}) },
+			"escalate": func(*fakeGraph) error { return Escalate("ws-pv", "evidence", []string{"ws-k1", bad}) },
+		} {
+			g := newFakeGraph("ws-chart")
+			withCritiques(g)
+			stubSweepSeams(t, g)
+			if err := run(g); err == nil {
+				t.Errorf("%s with --carries %s: want a refusal", name, bad)
+			}
+			if len(g.spawned)+len(g.closes)+len(g.superseded)+len(g.edges)+len(g.seq) != 0 {
+				t.Errorf("%s with --carries %s wrote: spawned %v seq %v", name, bad, g.spawned, g.seq)
+			}
+		}
+	}
+}
+
+// A sweep leaves the Checkpoint's open MR Watch open so it can answer the swept
+// MR's reviewers; every other member and the Checkpoint still force-close.
+func TestSweepLeavesTheMRWatchOpen(t *testing.T) {
+	g := newFakeGraph("ws-chart")
+	g.status["ws-w"] = "open"
+	g.kids = append(g.kids, "ws-w")
+	g.watches = map[string]bool{"ws-w": true}
+	stubSweepSeams(t, g)
+	if err := Confirm("ws-pv", "", "corrected body", nil); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if len(g.closes["ws-w"]) != 0 || g.status["ws-w"] != "open" {
+		t.Errorf("MR Watch closes = %v, status %s, want left open", g.closes["ws-w"], g.status["ws-w"])
+	}
+	if want := []string{"ws-b1", "ws-c1", "ws-a1", "ws-cp"}; !reflect.DeepEqual(g.forced, want) {
+		t.Errorf("forced = %v, want %v", g.forced, want)
+	}
 }

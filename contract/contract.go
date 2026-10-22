@@ -26,8 +26,9 @@ type Kind string
 // Signal is Luffy's to triage (ADR 0129), the rest Nami's. Plus kinds other
 // crewmates own: Spec (Zoro's) — the terminal artifact a drained Chart
 // spawns in succession (§8.4); Prototype (Sanji's), an Inbox HITL kind (§9.2);
-// and Task (Brook's), a free-standing HITL walk-through of external-world steps
-// (ADR 0115; ADR 0013 had removed it from the defog set and reserved the name).
+// and Task (Brook's), a HITL walk-through of external-world steps, a direct
+// Initiative child when ordered against a member, else outside (ADR 0352;
+// ADR 0115; ADR 0013 had removed it from the defog set and reserved the name).
 const (
 	KindSignal        Kind = "signal"
 	KindGrilling      Kind = "grilling"

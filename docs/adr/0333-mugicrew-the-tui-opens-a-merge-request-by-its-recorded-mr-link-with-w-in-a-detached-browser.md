@@ -1,6 +1,6 @@
 # ADR 0333: The TUI opens a Merge Request by its recorded MR link with w, in a detached browser
 
-Status: Accepted; amends ADR 0226 (a-gitlab-landing-s-mr-iid-and-sub-state-ride-the-rollup…) §3 and its Considered Options.
+Status: Accepted; amends ADR 0226 (a-gitlab-landing-s-mr-iid-and-sub-state-ride-the-rollup…) §3 and its Considered Options. Amended by Spec mc-j3mw8: §1–§3 and the last Considered Option now name two Merge Requests sections, Execute's for Checkpoint MRs and Defog's for Chart MRs.
 Date: 2026-10-21
 
 Spec mc-rqbew (Merge Requests section in the Execute tab, backed by MR link:
@@ -15,12 +15,14 @@ writes, so the TUI has one to show and open.
 ## Decision
 
 1. **The URL is `MR link: <web_url>`**, read only from that body line, never
-   derived from the iid, project path or Forge host. The Execute tab's Merge
-   Requests section shows it in `d` and opens it with `w`. ADR 0226's rejection
-   of "MR URL in `d`" is reversed for that section only.
-2. **Everywhere else stays URL-free.** The rollup's `!iid` qualifier, its `d`
+   derived from the iid, project path or Forge host. The Merge Requests
+   sections of the Execute and Defog tabs show it in `d` and open it with `w`.
+   Each lists its own container kind's MR Watches (Checkpoint on Execute,
+   Chart on Defog), and no MR is on both. ADR 0226's rejection of "MR URL in
+   `d`" is reversed for those two sections only.
+2. **Everywhere else stays URL-free**, meaning outside those two sections. The rollup's `!iid` qualifier, its `d`
    `why:` line and the Checkpoint rows are unchanged.
-3. **The section shows the status word for Chart MRs too**, which ADR 0226 §4
+3. **The status word for Chart MRs shows in Defog's section**, which ADR 0226 §4
    kept off the rollup. The word still comes from the container's open,
    unpaused Landing, and is left out for a paused one (§2) or an unmapped status.
 4. **`w` launches from an ordinary command, never `tea.ExecProcess`**, which
@@ -57,5 +59,5 @@ writes, so the TUI has one to show and open.
   and self-hosted GitLab make it a guess; `web_url` is GitLab's own.
 - **Gating `$BROWSER` on a display too.** Rejected. A terminal browser needs
   none, and the operator chose it.
-- **URL on the rollup qualifier or its `why:` line.** Rejected. The section is
-  the one open-in-browser place.
+- **URL on the rollup qualifier or its `why:` line.** Rejected. The Merge
+  Requests sections are the open-in-browser places.

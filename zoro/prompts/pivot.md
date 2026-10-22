@@ -46,6 +46,12 @@ never send the human to a bead id or to `bd show` in place of its content.
   the same `bd dep list %[2]s --direction=down -t blocks --json` read. A
   confirm or escalate must account for each.
 
+- The Checkpoint's open filed Critiques: the open `kind:critique` children of
+  `bd dep list %[2]s --direction=down -t parent-child --json` whose body or notes
+  carry a `Source:` line (a reviewer's Merge Request comment). `bd show` each. A
+  confirm or escalate sweeps them closed, so each needs a fold or leave-out
+  decision.
+
 - The effective Spec: `bd show %[3]s` (body plus `AMENDMENT` comments).
 - The built work, for hunks the human asks for; never the whole diff unasked:
 
@@ -82,14 +88,19 @@ Show each as a pivot card of exactly this shape and field order:
     **Built so far** — short summary of work toward this FR; hunks on request.
     **Recommendation** — outcome and reason, citing the amend line.
 
+For EACH open filed Critique from step 2, also recommend **fold** (its ask
+survives into the corrected Spec or the new Chart) or **leave out** (it does not),
+quoting its ask and reason; the human decides. Only a confirm or escalate acts on
+it.
+
 ## 4. Decide all pivots together
 
 After all the cards, a decision summary table, one row per pivot:
 
     | Pivot | FR | Recommended outcome | Reason |
 
-Get every pivot's decision together, in one reply, so outcomes cannot
-contradict (e.g. amending a Spec a confirm discards).
+Get every pivot's decision, and every filed Critique's fold or leave-out, together,
+in one reply, so outcomes cannot contradict (e.g. amending a Spec a confirm discards).
 
 ## 5. Re-read the open pivots
 
@@ -177,6 +188,7 @@ If it fails with *already exists* or *1213*, re-run the same create: nothing was
 4. Only if the amendment is architectural beyond this Spec, write an ADR (Read
    crew doc ADR-FORMAT.md) and commit it in its own worktree, never on `main`:
    `git worktree add ../pivot-adr-<pivotID> -b adr/<pivotID> {{MAINLINE}}`;
+   the ADR commit is conventional: `git commit -m "docs(<pivotID>): <subject>"`;
    tell the human the branch to land, then `git worktree remove` it.
 
 ### Confirm
@@ -199,7 +211,12 @@ confirmed, write no dismiss or amend.
 2. Run the sweep on the LEAD pivot, even if a sibling was confirmed (only the
    lead's Drafts publish; the sibling's fixed FR is already in the body):
 
-       mugicrew pivot confirm %[1]s --spec "$body" --title "<title>"
+       mugicrew pivot confirm %[1]s --spec "$body" --title "<title>" [--carries <id,…>]
+
+   Write each folded Critique's FR into the body, and pass its id in `--carries`
+   (comma-separated; omit the flag if none folded). Go refuses, before any write,
+   an id that is not an open filed Critique child of this Checkpoint, and records
+   each accepted one as the corrected Spec discovered-from the Critique.
 
    Go drafts the corrected Spec (caused-by the old Spec's Chart, so its Checkpoint cuts from the Chart's landed base; for a fast-laned Spec, with a
    fresh `Anchor:` pin on the Spec bead), supersedes %[3]s, closes this Checkpoint, its
@@ -218,7 +235,10 @@ An escalate re-opens charting and, like a confirm, settles EVERY open pivot. If 
 2. Run the sweep on the LEAD pivot, as for confirm; name a sibling escalated
    pivot in the evidence:
 
-       mugicrew pivot escalate %[1]s --evidence "$evidence"
+       mugicrew pivot escalate %[1]s --evidence "$evidence" [--carries <id,…>]
+
+   Write each folded Critique's FR into the evidence, and pass its id in
+   `--carries` as for confirm; the new Chart is recorded discovered-from it.
 
    Go files a fresh Chart caused-by the original Signal, cuts its `chart/` branch,
    supersedes the old Chart (a fast-laned Spec has none — nothing is superseded),

@@ -28,7 +28,11 @@ func (r Repo) FetchTracking(remote string) (string, error) {
 
 // ChangedOn reports whether path differs between base and branch's merge-base: the
 // three-dot diff --name-only, i.e. the branch's own change. A git failure is the error.
+// An empty path is the repo root.
 func (r Repo) ChangedOn(base, branch, path string) (bool, error) {
+	if path == "" {
+		path = "." // the repo root
+	}
 	out, err := r.run("diff", "--name-only", base+"..."+branch, "--", path)
 	return err == nil && out != "", err
 }
@@ -62,7 +66,7 @@ func (r Repo) GrepAt(ref, token string) (bool, error) {
 	return err == nil, err
 }
 
-// PathAt reports whether path exists in ref's tree.
+// PathAt reports whether path exists in ref's tree. An empty path is the root tree.
 func (r Repo) PathAt(ref, path string) bool {
 	_, err := r.run("cat-file", "-e", ref+":"+path)
 	return err == nil

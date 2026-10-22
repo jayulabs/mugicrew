@@ -96,6 +96,8 @@ type jinbeSeamRec struct {
 	sourceSHA       string   // forgeSource: the merged-results commit's second parent
 	landedTip       string   // the Tip: of the landed squash; "" → none
 	signals         []string // offshoot Signal bodies spawnSignal filed
+	abandons        []string // "<origin> <title>\n<body>" of each distinct Signal fileAbandoned created
+	abandonErr      error    // non-nil → fileAbandoned fails
 
 	discussions     []forge.Discussion // forgeDiscussions' answer
 	discussionsErr  error
@@ -107,6 +109,9 @@ type jinbeSeamRec struct {
 	replyErr        error
 	resolveErr      error
 	integrateSHA    string        // newestByTrailer's answer
+	trailerRefs     []string      // the ref each newestByTrailer read was given
+	branchGone      bool          // hasBranch answers false
+	reachable       bool          // isReachable's answer in the late-pass tests
 	awards          []string      // "<noteID> <emoji>" forgeAward was asked for, in order
 	awardErrs       map[int]error // per-note forgeAward failure
 
@@ -117,6 +122,12 @@ type jinbeSeamRec struct {
 	clashes   []git.PostLandClash // postLandClashes' answer: the landed container is the later side
 	clashErr  error
 	clashRead int // postLandClashes calls
+
+	landedEmpty  bool   // commitEmpty's answer: the landed commit is an empty trailer commit
+	mergeSha     string // mergeShaOf's answer
+	mergeWhy     string // mergeShaOf's reason when mergeSha is ""
+	mergeLookups int    // mergeShaOf calls
+	clashMerge   string // the merge sha postLandClashes was last passed
 
 	openMR     *forge.MR // forgeFindOpenMR's answer: the MR open on the branch, nil when none
 	findErr    error     // non-nil → forgeFindOpenMR fails
@@ -138,7 +149,15 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	jiraKey = func(bd.Bead) (string, error) { return "", nil }
 	t.Cleanup(func() { jiraKey = oJira })
 	t.Cleanup(func() { postLandClashes = oClash })
-	postLandClashes = func(string) ([]git.PostLandClash, error) { r.clashRead++; return r.clashes, r.clashErr }
+	postLandClashes = func(_, merge string) ([]git.PostLandClash, error) {
+		r.clashRead++
+		r.clashMerge = merge
+		return r.clashes, r.clashErr
+	}
+	oEmpty, oMerge := commitEmpty, mergeShaOf
+	t.Cleanup(func() { commitEmpty, mergeShaOf = oEmpty, oMerge })
+	commitEmpty = func(string) (bool, error) { return r.landedEmpty, nil }
+	mergeShaOf = func(string) (string, string, error) { r.mergeLookups++; return r.mergeSha, r.mergeWhy, nil }
 	probeBase = func(repo git.Repo) (string, error) { r.probeRepos = append(r.probeRepos, repo); return "basesha", nil }
 	probeConflict = func(git.Repo, string, string) error { r.probeCalls++; return r.probeErr }
 	oStrategy, oLandings, oShow := landStrategy, landingsOf, showBead
@@ -169,7 +188,13 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		return r.awardErrs[note]
 	}
 	forgeUser = func() (string, error) { return "jinbe", nil }
-	newestByTrailer = func(git.Repo, string, string) (string, error) { return r.integrateSHA, nil }
+	newestByTrailer = func(_ git.Repo, ref, _ string) (string, error) {
+		r.trailerRefs = append(r.trailerRefs, ref)
+		return r.integrateSHA, nil
+	}
+	oBranch := hasBranch
+	t.Cleanup(func() { hasBranch = oBranch })
+	hasBranch = func(git.Repo, string) bool { return !r.branchGone }
 	git.SetGraphID("g00d")
 	forgeDiscussions = func(p forge.Project, _ int) ([]forge.Discussion, error) {
 		r.projects = append(r.projects, p)
@@ -372,6 +397,21 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	spawnSignal = func(_, _, body string) (string, bool, error) {
 		r.signals = append(r.signals, body)
 		return "ws-sig", true, nil
+	}
+	oAbandon := fileAbandoned
+	t.Cleanup(func() { fileAbandoned = oAbandon })
+	fileAbandoned = func(origin, title, body string) (string, bool, error) { // add-if-absent by title
+		if r.abandonErr != nil {
+			return "", false, r.abandonErr
+		}
+		entry := origin + " " + title + "\n" + body
+		for i, a := range r.abandons {
+			if strings.HasPrefix(a, origin+" "+title+"\n") {
+				return fmt.Sprintf("ws-aband%d", i), false, nil
+			}
+		}
+		r.abandons = append(r.abandons, entry)
+		return fmt.Sprintf("ws-aband%d", len(r.abandons)-1), true, nil
 	}
 	oTask := bd.SpawnBlockingTask
 	t.Cleanup(func() { bd.SpawnBlockingTask = oTask })
@@ -862,7 +902,7 @@ func TestLandingMirrorsItsMR(t *testing.T) {
 				if r.reasons[0] != "obsolete: merge request closed" || len(r.tasks) != 1 {
 					t.Errorf("reason %q tasks %v, want obsolete: merge request closed and one Task across ticks", r.reasons[0], r.tasks)
 				}
-				for _, want := range []string{"!7", "reopen", "merge", "abandon"} {
+				for _, want := range []string{"!7", "reopen", "merge", "withdraw"} {
 					if !strings.Contains(r.taskBody, want) {
 						t.Errorf("Task body %q lacks %q", r.taskBody, want)
 					}
@@ -871,6 +911,43 @@ func TestLandingMirrorsItsMR(t *testing.T) {
 				t.Errorf("tasks %v, want none", r.tasks)
 			}
 		})
+	}
+}
+
+// The closed-MR Hold Task body (Spec D5): lead, then the key line as a whole line and the
+// MR link right after it, then one irreversible step checked by mugicrew probe, with no
+// Fix: line and no bare "merged" pass.
+func TestClosedMRTaskBodyCarriesStepsCheckedByProbe(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mr: &forge.MR{IID: 7, State: "closed", WebURL: "https://gl/p/-/merge_requests/7"}}
+	stubJinbeSeams(t, r)
+	l := openLanding("cafef00d")
+	l.Description += "\nMR: !7\n"
+	if err := reconcileLanding(l); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	lines := strings.Split(r.taskBody, "\n")
+	idx := func(want string) int { return slices.Index(lines, want) }
+	steps := idx("## Steps")
+	key, link := idx("Closed MR: !7"), idx("MR link: https://gl/p/-/merge_requests/7")
+	if !(key > 0 && link == key+1 && steps > link) {
+		t.Fatalf("lead/key/link/steps order wrong (key %d link %d steps %d) in %q", key, link, steps, r.taskBody)
+	}
+	if !strings.HasPrefix(r.taskBody, "MR !7 for ws-cp was closed on the Forge") {
+		t.Errorf("body %q does not open with the lead", r.taskBody)
+	}
+	for _, want := range []string{
+		"[irreversible]",
+		"git commit --allow-empty",
+		"Graph: ",
+		"needs Maintainer on p",
+		"Check: `mugicrew probe mr '!7'` prints `opened`, or `mugicrew probe landed ws-cp` prints `landed`, or `bd show ws-cp` shows it closed.",
+	} {
+		if !strings.Contains(r.taskBody, want) {
+			t.Errorf("body %q lacks %q", r.taskBody, want)
+		}
+	}
+	if strings.Contains(r.taskBody, "Fix:") || strings.Contains(r.taskBody, "merged`") {
+		t.Errorf("body %q carries a Fix: line or accepts a bare merged", r.taskBody)
 	}
 }
 
@@ -2454,9 +2531,6 @@ func TestLandingMergedMR(t *testing.T) {
 		if len(r.closed) != 0 || len(r.tasks) != 1 || !strings.Contains(r.taskBody, "!7") || !strings.Contains(r.taskBody, "m3rg3") {
 			t.Errorf("closed %v tasks %v body %q, want the Landing open and one Task naming the MR and sha", r.closed, r.tasks, r.taskBody)
 		}
-		if !strings.Contains(r.taskBody, "ADR or other sequence number") { // Spec FR 29
-			t.Errorf("body %q, want the line asking the human to check for a clashing number", r.taskBody)
-		}
 	})
 	t.Run("merged-landedbase-fails", func(t *testing.T) { // a transient read failure is not a trailerless merge
 		boom := errors.New("bd sql down")
@@ -2750,6 +2824,7 @@ func TestGitlabRollbackHandsOffOnTheMerge(t *testing.T) {
 	r := gitlabRollback()
 	r.trailerLanded, r.mergedAt = true, "msha"
 	r.body += "\nCommit: pinsha\nMR: !9\n"
+	r.mr = &forge.MR{IID: 9, State: forge.StateOpened, MergeCommitSHA: "mergesha"}
 	stubRollbackSeams(t, r)
 	evs := eventlogtest.Capture(t)
 	if err := reconcileRollback(r.rollback()); err != nil {
@@ -3043,5 +3118,58 @@ func TestLocalLandingComposesWithTheConventionalSubject(t *testing.T) {
 	}
 	if want := []string{"feat: Ship the thing (MC-9)"}; !slices.Equal(r.composeSubjects, want) {
 		t.Errorf("compose subjects = %q, want %q", r.composeSubjects, want)
+	}
+}
+
+func trailerlessBody(t *testing.T, r *jinbeSeamRec, trailer, kind string) string {
+	t.Helper()
+	stubJinbeSeams(t, r)
+	_ = holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, trailer, 7, "m3rg3")
+	return r.taskBody
+}
+
+// The land trailerless Task body (Spec D6): lead, the key line whole before ## Steps with
+// the MR link after it, one irreversible stamp step checked by mugicrew probe, no Fix:.
+func TestTrailerlessLandBodyCarriesStampStepAndClash(t *testing.T) {
+	clean := trailerlessBody(t, &jinbeSeamRec{}, "Checkpoint: ws-cp", "land")
+	lines := strings.Split(clean, "\n")
+	key, sha, link, clashAt, steps := slices.Index(lines, "Merged MR: !7"), slices.Index(lines, "Merge sha: m3rg3"),
+		slices.Index(lines, "MR link: https://gl/grp/proj/-/merge_requests/7"), slices.Index(lines, "Sequence clash: none"), slices.Index(lines, "## Steps")
+	if !(key > 0 && sha == key+1 && link == key+2 && clashAt == key+3 && steps > clashAt) {
+		t.Fatalf("fact order wrong (key %d sha %d link %d clash %d steps %d) in %q", key, sha, link, clashAt, steps, clean)
+	}
+	for _, want := range []string{"[irreversible]", "Checkpoint: ws-cp\\nGraph: g00d", "`origin main`", "Maintainer on grp/proj",
+		"Check: `mugicrew probe landed ws-cp` prints `landed`."} {
+		if !strings.Contains(clean, want) {
+			t.Errorf("body %q lacks %q", clean, want)
+		}
+	}
+	for _, bad := range []string{"Fix:", "File a renumber", "2. "} {
+		if strings.Contains(clean, bad) {
+			t.Errorf("clean merge body carries %q: %q", bad, clean)
+		}
+	}
+	clashed := trailerlessBody(t, &jinbeSeamRec{clashes: []git.PostLandClash{{Added: "docs/adr/0009-b.md"}}}, "Checkpoint: ws-cp", "land")
+	if !strings.Contains(clashed, "Sequence clash: docs/adr/0009-b.md\n") {
+		t.Errorf("clashing body %q lacks its clash line", clashed)
+	}
+	for _, bad := range []string{"File a renumber", "2. ", "Ask:"} {
+		if strings.Contains(clashed, bad) {
+			t.Errorf("clashing body carries %q: %q", bad, clashed)
+		}
+	}
+}
+
+func TestTrailerlessRevertBodyHasNoClashLine(t *testing.T) {
+	r := &jinbeSeamRec{clashes: []git.PostLandClash{{Added: "docs/adr/0009-b.md"}}}
+	body := trailerlessBody(t, r, "Reverts-Checkpoint: ws-cp", "revert")
+	for _, want := range []string{"Reverts-Checkpoint: ws-cp\\nGraph: g00d", "Push before anything else lands on main", "[irreversible]",
+		"Check: `mugicrew probe landed ws-cp` prints `landed`, or `bd show ws-cp` shows it closed."} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %q lacks %q", body, want)
+		}
+	}
+	if strings.Contains(body, "Sequence clash") || strings.Contains(body, "Fix:") || r.clashRead != 0 {
+		t.Errorf("revert body %q carries a clash line or Fix:, clash reads %d", body, r.clashRead)
 	}
 }

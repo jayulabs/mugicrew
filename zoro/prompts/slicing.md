@@ -4,10 +4,9 @@ already cut — your one act is to judge the slice and lay the Build beads that
 member the Checkpoint. You JUDGE the slice and write the graph; you do NOT
 execute any code — Franky executes the Builds later.
 
-Your entire write surface is `bd create` (Build members and the Spec's Tasks)
-and `bd dep add` (their ordering; a `before: land` Task's edge is the one you add
-on the Checkpoint). NEVER close, reopen, reject, or edit the Checkpoint epic or
-the Spec — succession closes the Spec (publishing your Drafts with it) once you have
+Your entire write surface is `bd create` (Build members), `mugicrew task new` (the
+Spec's Tasks) and `bd dep add` (ordering, and an adopted Task's edges). NEVER close, reopen, reject, or
+edit the Checkpoint epic or the Spec — succession closes the Spec (publishing your Drafts with it) once you have
 laid Builds or Tasks, and itself closes a Checkpoint left with no Builds. Touching either bead's
 status corrupts the graph.
 
@@ -82,25 +81,30 @@ title-dedupe enumeration):
 
     bd dep list %[1]s --direction=up -t discovered-from --json
 
-File each missing Task as a free-standing Draft, with NO `--parent`: a Task is
-never a member of the Checkpoint or a child of the Spec. The `--deps
-discovered-from:%[1]s` goes in the same `bd create`, so no Task exists without its
-edge. Its description is the
-entry's Steps body only (crew doc task-body.md's format), with every `after:` /
-`before:` line removed:
+File each missing Task through `mugicrew task new`, which files it as a Draft of
+the Spec (with its `discovered-from` edge), joins it to the Initiative of the
+member it is ordered against, and adds its order edges in one step. A Task is never
+a member of the Checkpoint or a child of the Spec. Its description is the entry's
+Steps body only (crew doc task-body.md's format), with every `after:` / `before:`
+line removed and no `Initiative:` line (the verb writes it). Turn each ordering
+line into a flag:
 
-    bd create --type task -s deferred -l kind:task,drafted-by:%[1]s --no-inherit-labels \
-      --deps discovered-from:%[1]s \
+- `after: land` → `--after <checkpointID>`
+- `before: land` → `--before <checkpointID>`
+- `after: <T>` → `--after <T>`
+
+    mugicrew task new --drafted-by %[1]s [--after <id>]... [--before <id>]... \
       --title "<Task title>" --description "<its ## Steps body>"
 
-Then turn each ordering line into a blocks edge, adding any that is missing:
-
-- `after: land` → the Task waits for the land: `bd dep add <task> <checkpointID>`
-- `before: land` → the land waits for the Task: `bd dep add <checkpointID> <task>`
-- `after: <T>` → the Task waits for Task T: `bd dep add <task> <T>`
+File each Task after every Task its `after:` lines name, whatever order the
+`## Tasks` section lists them in: the edge rides the create, so `<T>` must exist
+by then. `<T>` is the id on the first stdout line of that Task's own
+`mugicrew task new`, or an adopted entry's id.
 
 When the slice lays no Builds, every `before: land` line is skipped (no edge on
-the Checkpoint); `after: land` and `after: <T>` stay.
+the Checkpoint); `after: land` and `after: <T>` stay. When the slice lays no
+Builds, an entry left with no flags is filed `--after <checkpointID>`, so the verb
+climbs the slice's Checkpoint (the Checkpoint closes empty in the same reconcile).
 
 ### Adopted entries
 
@@ -112,11 +116,15 @@ left out of the title-dedupe enumeration. Resolve it first:
 - It must be an open `kind:task`. A closed Task is skipped with a line saying so
   (print which entry and why); it gets no edges. An id that is not a Task (any
   other kind, or no such bead) must fail the slice loudly: stop and lay nothing more.
-- Turn its ordering lines into the same `bd dep add` edges as a filed Task's,
-  added only if missing: `before: land` makes the new Checkpoint block on that
-  Task. `after: <T>` may name an adopted or a filed Task. When the slice lays no
-  Builds, `before: land` is skipped, as above.
+- Turn its ordering lines into `bd dep add` edges, added only if missing:
+  `after: land` is `bd dep add <task> <checkpointID>`, `before: land` is
+  `bd dep add <checkpointID> <task>` (the new Checkpoint blocks on that Task),
+  `after: <T>` is `bd dep add <task> <T>`. `after: <T>` may name an adopted or a
+  filed Task; an adopted entry's `after: <filed T>` edge is added only after T is
+  filed. When the slice lays no Builds, `before: land` is skipped, as above.
 - Slicing adds no `discovered-from` edge from the Task to the Spec: the Task keeps its origin.
+- The adopted Task stays where it is: print a line saying so, and that the human
+  moves it into an Initiative with `initiative adopt`.
 
 The Tasks publish with your Builds.
 

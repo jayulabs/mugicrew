@@ -8,6 +8,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/git"
 )
 
@@ -100,6 +101,56 @@ func TestLandedLaterSideMintsRenumberCheckpoint(t *testing.T) {
 	}
 	if !slices.Equal(r.closed, []string{"ws-cp"}) {
 		t.Errorf("closed = %v, want the container closed after the filing", r.closed)
+	}
+}
+
+// A Checkpoint landed behind an empty trailer commit reads its clashes from the MR's
+// merge, the sha its trailerless hold recorded.
+func TestEmptyLandedCommitPassesTheResolvedMergeSha(t *testing.T) {
+	r := &renumberRec{parent: "ws-init"}
+	r.clashes = clash()
+	r.landedEmpty, r.mergeSha = true, "mergesha"
+	stubRenumber(t, r)
+	evs := eventlogtest.Capture(t)
+	if err := landedCheckpoint(t, r); err != nil {
+		t.Fatal(err)
+	}
+	if r.clashMerge != "mergesha" || len(r.succ) != 1 || !slices.Equal(r.closed, []string{"ws-cp"}) {
+		t.Errorf("merge %q succ %d closed %v, want the resolved sha, a renumber and a close", r.clashMerge, len(r.succ), r.closed)
+	}
+	if n := countEvents(*evs, "land.merge_sha_missing"); n != 0 {
+		t.Errorf("%d warnings, want none when the sha resolves", n)
+	}
+}
+
+// With no recorded merge sha, detection runs as today, one warning is logged, and the
+// Checkpoint still closes.
+func TestEmptyLandedCommitWithoutMergeShaWarnsOnceAndCloses(t *testing.T) {
+	r := &renumberRec{}
+	r.landedEmpty, r.mergeWhy = true, "no hold Task"
+	stubRenumber(t, r)
+	evs := eventlogtest.Capture(t)
+	if err := landedCheckpoint(t, r); err != nil {
+		t.Fatal(err)
+	}
+	if r.clashRead != 1 || r.clashMerge != "" || !slices.Equal(r.closed, []string{"ws-cp"}) {
+		t.Errorf("clash reads %d merge %q closed %v, want one plain read and a close", r.clashRead, r.clashMerge, r.closed)
+	}
+	if n := countEvents(*evs, "land.merge_sha_missing"); n != 1 {
+		t.Errorf("%d warnings, want exactly one", n)
+	}
+}
+
+// A non-empty landed commit is read as itself and never reaches the resolver.
+func TestNonEmptyLandedCommitSkipsTheResolver(t *testing.T) {
+	r := &renumberRec{}
+	r.mergeSha = "mergesha"
+	stubRenumber(t, r)
+	if err := landedCheckpoint(t, r); err != nil {
+		t.Fatal(err)
+	}
+	if r.mergeLookups != 0 || r.clashMerge != "" {
+		t.Errorf("lookups %d merge %q, want the resolver never called", r.mergeLookups, r.clashMerge)
 	}
 }
 

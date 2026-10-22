@@ -14,8 +14,10 @@ import (
 var newOffshoot = bd.NewOffshoot
 
 // runSignalOffshoot files an offshoot Signal ordered against its cause's
-// container, or unordered with the reason (ADR 0267). It prints the new id,
-// then the body's Order: line.
+// container, or unordered with the reason (ADR 0267). An ordered follow-up or
+// prerequisite joins its cause's open Initiative (ADR 0348 §6, §7); every other
+// offshoot is born outside it. It prints the new id,
+// then the body's Order: line, then the Initiative: placement line.
 func runSignalOffshoot(argv []string, w io.Writer) error {
 	const usage = "usage: mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none --title T --description D"
 	fs := flag.NewFlagSet("signal offshoot", flag.ContinueOnError)
@@ -35,13 +37,16 @@ func runSignalOffshoot(argv []string, w io.Writer) error {
 	}
 
 	line, edge := "Order: none", ""
+	parent, place := "", "Initiative: outside (unordered)"
 	if *order != "none" {
-		var container bd.Bead
+		var container, init bd.Bead
 		if cause.Parent != "" {
 			if p, err := showBead(cause.Parent); err != nil {
 				return fmt.Errorf("signal offshoot: container of %s: %w", *from, err)
 			} else if p.Kind == contract.KindCheckpoint || p.Kind == contract.KindChart {
 				container = p
+			} else if p.Kind == contract.KindInitiative && cause.Kind == contract.KindTask && cause.Unclosed() {
+				container, init = cause, p
 			}
 		}
 		switch {
@@ -54,21 +59,30 @@ func runSignalOffshoot(argv []string, w io.Writer) error {
 		default:
 			line, edge = "Order: prerequisite of "+container.Title, "blocks:"+container.ID
 		}
+		if edge != "" {
+			if init.ID == "" && container.Parent != "" {
+				// any status: a closed Initiative is not "no Initiative"
+				if init, err = bd.ParentInitiative(container, showBead); err != nil {
+					return fmt.Errorf("signal offshoot: initiative %s: %w", container.Parent, err)
+				}
+			}
+			parent, place = bd.InitiativePlacement(init, container.Title)
+		}
 	}
 
 	body := *desc + "\n\n"
-	id, err := newOffshoot(*title, body+line, *by, *from, edge)
+	id, err := newOffshoot(*title, body+line, *by, *from, edge, parent)
 	if err != nil && edge != "" {
 		reason := bd.CarrySkipReason(err)
 		if reason == "" {
 			return fmt.Errorf("signal offshoot: %w", err)
 		}
-		line = fmt.Sprintf("Order: unordered (%s)", reason)
-		id, err = newOffshoot(*title, body+line, *by, *from, "")
+		line, place = fmt.Sprintf("Order: unordered (%s)", reason), "Initiative: outside (unordered)"
+		id, err = newOffshoot(*title, body+line, *by, *from, "", "")
 	}
 	if err != nil {
 		return fmt.Errorf("signal offshoot: %w", err)
 	}
-	fmt.Fprintf(w, "%s\n%s\n", id, line)
+	fmt.Fprintf(w, "%s\n%s\n%s\n", id, line, place)
 	return nil
 }

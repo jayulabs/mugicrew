@@ -131,6 +131,7 @@ type loadedMsg struct {
 	pool        loop.Setting
 	autoExit    loop.AutoExit
 	initiatives cfglayer.Initiatives
+	approvals   cfglayer.Approvals
 	landName    string // land_strategy, read with the slow tier
 	landErr     error
 	kinds       kindProfiles
@@ -256,6 +257,7 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 	}
 	return func() tea.Msg {
 		started := time.Now()
+		loop.StampAutoApprove() // every refresh: isHITL reads only this snapshot (Spec D4)
 		open, err := listOpen()
 		if err != nil {
 			return errMsg{err}
@@ -369,7 +371,7 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 			msg.kinds.reasons = profileReasons(m.ctx, msg.kinds)
 			msg.commits, msg.histErr = readMainline()
 			msg.landName, msg.landErr = readLandStrategy()
-			msg.pool, msg.autoExit, msg.initiatives, msg.jiraSet = readPool(), readAutoExit(), readInitiatives(), jiraSiteSet()
+			msg.pool, msg.autoExit, msg.initiatives, msg.approvals, msg.jiraSet = readPool(), readAutoExit(), readInitiatives(), loop.ReadAutoApprove(), jiraSiteSet()
 		}
 		return msg
 	}
@@ -389,13 +391,14 @@ func claimedIDs(recents []string, sessions map[string]session.Info) map[string]b
 }
 
 // claimsAllClosed reports whether the Graph query claims every closed bead: s any or
-// s closed with no words, while Graph is the tab (ADR 0232).
+// s closed with no words and no scope, while Graph is the tab (ADR 0232; a bare scope is
+// no-words, status-any and must not, Spec FR26).
 func (m Model) claimsAllClosed() bool {
 	if m.tab != tabGraph {
 		return false
 	}
 	q := m.tabAt(tabGraph).(graphTab).q
-	return q.words == "" && (q.status == statusAny || q.status == statusClosed)
+	return q.scope == "" && q.words == "" && (q.status == statusAny || q.status == statusClosed)
 }
 
 // claimLoad is the load a Graph query change owes: the query starting to claim every
@@ -624,7 +627,7 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		}
 		m.live, m.sessions, m.loop = msg.live, msg.sessions, msg.loop
 		if msg.slowTier { // a fast load keeps the slow tier's last values
-			m.efforts, m.cpTips, m.pool, m.exit, m.kinds, m.initiatives, m.jiraSet = msg.efforts, msg.cpTips, msg.pool, msg.autoExit, msg.kinds, msg.initiatives, msg.jiraSet
+			m.efforts, m.cpTips, m.pool, m.exit, m.kinds, m.initiatives, m.approvals, m.jiraSet = msg.efforts, msg.cpTips, msg.pool, msg.autoExit, msg.kinds, msg.initiatives, msg.approvals, msg.jiraSet
 			m.landName, m.landErr = msg.landName, msg.landErr
 			m.histCommits, m.histErr = msg.commits, msg.histErr
 		}

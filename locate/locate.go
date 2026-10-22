@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	pathpkg "path"
 	"slices"
 	"strings"
 
@@ -50,11 +51,18 @@ type Query struct {
 	Tokens, Paths []string
 }
 
+// Declared is a searched repo with the dir it is declared at in the Workspace ("" for
+// the Workspace's own repo).
+type Declared struct {
+	Repo git.Repo
+	Dir  string
+}
+
 // Deps are the verb's reads, seams so a test scripts the bead list and the repos.
 type Deps struct {
 	Checkpoints func() ([]bd.Bead, error)  // the non-closed kind:checkpoint beads
 	RepoOf      func(bd.Bead) git.Repo     // the repo a bead's context: label names ("" = the Workspace's)
-	Repos       func() ([]git.Repo, error) // every declared repo, the Workspace's included; on error the repos it could name
+	Repos       func() ([]Declared, error) // every declared repo, the Workspace's included; on error the repos it could name
 	Only        *git.Repo                  // --signal's repo; nil reads every declared repo
 	Strategy    func() (string, error)     // land_strategy
 }
@@ -84,7 +92,13 @@ func (d Deps) Locate(q Query) (Result, error) {
 	repos, err := d.Repos()
 	res.warn(err, "could not resolve the declared repos; searched only the repos it named")
 	if d.Only != nil {
-		repos = []git.Repo{*d.Only}
+		only := Declared{Repo: *d.Only}
+		for _, dr := range repos {
+			if dr.Repo == *d.Only {
+				only = dr
+			}
+		}
+		repos = []Declared{only}
 	}
 
 	for _, t := range q.Tokens {
@@ -93,7 +107,8 @@ func (d Deps) Locate(q Query) (Result, error) {
 	for _, p := range q.Paths {
 		res.Hits = append(res.Hits, Hit{Ask: p, Kind: "path"})
 	}
-	for _, r := range repos {
+	for _, dr := range repos {
+		r, dir := dr.Repo, dr.Dir
 		main := r.Mainline()
 		if strategy == git.LandStrategyGitlab {
 			if ref, err := r.FetchTracking(r.ForgeRemote()); err != nil {
@@ -119,16 +134,17 @@ func (d Deps) Locate(q Query) (Result, error) {
 					}
 				}
 			case "path":
+				ask := inRepo(dir, h.Ask)
 				changed := false
 				for _, id := range live {
-					ch, err := r.ChangedOn(main, branchRef(id), h.Ask)
+					ch, err := r.ChangedOn(main, branchRef(id), ask)
 					res.warn(err, "could not diff "+id+" for path "+h.Ask)
 					if ch {
 						h.Checkpoints = append(h.Checkpoints, id)
 						changed = true
 					}
 				}
-				h.OnMain = h.OnMain || (!changed && r.PathAt(main, h.Ask))
+				h.OnMain = h.OnMain || (!changed && r.PathAt(main, ask))
 			}
 		}
 	}
@@ -147,6 +163,24 @@ func (res *Result) warn(err error, what string) {
 	if err != nil {
 		res.Warnings = append(res.Warnings, what+": "+err.Error())
 	}
+}
+
+// inRepo is path as the repo declared at dir is asked for it: a path equal to or
+// under dir/ loses that prefix, any other path (and every path for dir "") is as given.
+// A path equal to dir is the repo root, "": git reads accept it as <ref>: and, via
+// ChangedOn, as ".".
+func inRepo(dir, path string) string {
+	if dir == "" {
+		return path
+	}
+	dir, clean := pathpkg.Clean(dir), pathpkg.Clean(path)
+	if clean == dir {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(clean, dir+"/"); ok {
+		return rest
+	}
+	return path
 }
 
 func branchRef(id string) string { return "refs/heads/" + git.BranchName("checkpoint", id) }

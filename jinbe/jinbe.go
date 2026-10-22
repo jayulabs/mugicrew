@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -153,7 +154,9 @@ var (
 	membersDrained  = func(id string) (bool, error) { return bd.MembersDrained(id, nil) }
 	openBlockers    = bd.OpenBlockers
 	initiativeOf    = bd.InitiativeOf
-	postLandClashes = git.PostLandClashes
+	postLandClashes = git.PostLandClashesAt
+	commitEmpty     = git.IsEmptyCommit
+	mergeShaOf      = bd.MergeShaOf
 	subtreeIDs      = bd.SubtreeIDs
 	causedBy        = bd.CausedBy
 )
@@ -172,6 +175,7 @@ var (
 		return forge.CurrentUser(p)
 	}
 	newestByTrailer = git.Repo.NewestByTrailer
+	hasBranch       = git.Repo.HasBranch
 	childrenOfKind  = bd.ChildrenOfKind
 	supersede       = bd.Supersede
 	clock           = time.Now
@@ -292,7 +296,11 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 // earlier side files nothing. Run before the container closes, so a closed landed
 // container implies its check ran.
 func mintRenumber(container bd.Bead, sha string) error {
-	clashes, err := postLandClashes(sha)
+	merge, err := mergeBehindEmptyLand(container, sha)
+	if err != nil {
+		return err
+	}
+	clashes, err := postLandClashes(sha, merge)
 	if err != nil {
 		return err
 	}
@@ -301,6 +309,25 @@ func mintRenumber(container bd.Bead, sha string) error {
 		SpawnBuild: spawnChild, InitiativeOf: initiativeOf, SubtreeIDs: subtreeIDs, CausedBy: causedBy,
 	})
 	return err
+}
+
+// mergeBehindEmptyLand is the MR merge sha post-land clash detection diffs when sha, the
+// landed commit, is an empty trailer commit (a human stamped the trailer the merge
+// dropped), else "". When the empty land has no recorded merge sha it logs one warning
+// and returns "": detection runs as for any land and never holds the container open.
+func mergeBehindEmptyLand(container bd.Bead, sha string) (string, error) {
+	empty, err := commitEmpty(sha)
+	if err != nil || !empty {
+		return "", err
+	}
+	merge, why, err := mergeShaOf(container.ID)
+	if err != nil {
+		return "", err
+	}
+	if merge == "" {
+		slog.Warn("land.merge_sha_missing", append(eventlog.BeadAttrs(container), "sha", sha, "why", why)...)
+	}
+	return merge, nil
 }
 
 // reconcileLanding is a Landing's one land attempt at one pinned commit (ADR 0145),
@@ -477,7 +504,7 @@ func landedClose(l, cp bd.Bead, branch, sha, strategy string, lg legs) error {
 		}
 		landOutcome(lg, l, eventlog.LandLanded, git.RecordedMR(l.Description), "sha", sha)
 	}
-	return closeIfOpen(l, "landed: "+sha)
+	return closeIfOpen(l, landedReason+" "+sha)
 }
 
 // closeLandedMR closes whatever MR is still open on a landed container's branch: GitLab
@@ -532,7 +559,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 		} else if !errors.Is(err, git.ErrNotLanded) {
 			return true, err // a failed read says nothing about the trailer
 		}
-		return true, holdTrailerless(cp, lg.mrPath, "merge request", "MR", git.TrailerFor(string(cp.Kind), cp.ID), iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
+		return true, holdTrailerless(cp, lg.repo, mrNaming{lg.mrPath, mr.WebURL, "merge request", "MR"}, git.TrailerFor(string(cp.Kind), cp.ID), iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
 	}
 	if mr.State == forge.StateOpened {
 		if err := forgeReviewArm(cp, &l, lg, mr); err != nil { // first: an open Forge Review holds the land, and a 429 is held by reconcileLanding
@@ -567,9 +594,21 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 		return true, nil // locked (merge in progress) or unknown: pending, never the write leg (FR 26)
 	}
 	ref := git.MRRef(lg.mrPath, iid)
-	body := fmt.Sprintf("MR %s for %s was closed on the Forge, so its Landing was closed obsolete.\nClosed MR: !%d\n"+
-		"Fix: reopen or merge MR %s, or abandon the container, then close this Task. "+
-		"The next Landing reuses a reopened MR or opens a fresh one.\n", ref, cp.ID, iid, ref)
+	stamp, err := stampDo(cp, lg.repo, lg.mrPath, mr.WebURL, git.TrailerFor(string(cp.Kind), cp.ID))
+	if err != nil {
+		return true, err
+	}
+	body := bd.TaskBody(
+		fmt.Sprintf("MR %s for %s was closed on the Forge, so its Landing was closed obsolete.", ref, cp.ID),
+		[]string{fmt.Sprintf("Closed MR: !%d", iid), git.MRLinkLine(mr.WebURL)},
+		[]bd.TaskStep{{
+			Title:   fmt.Sprintf("Reopen or merge MR %s, or withdraw %s.", ref, cp.ID),
+			Markers: []string{"irreversible"},
+			Do: fmt.Sprintf("reopen or merge MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. "+
+				"If it was already merged and the Check fails, stamp the trailer: %s "+
+				"The next Landing reuses a reopened MR or opens a fresh one.", ref, cp.ID, stamp),
+			Check: fmt.Sprintf("`mugicrew probe mr '%s'` prints `opened`, or `mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", ref, cp.ID, cp.ID),
+		}}, "")
 	if _, err := holdTask(cp, fmt.Sprintf("Closed MR: !%d\n", iid), "merge request "+ref+" was closed", body); err != nil {
 		return true, err
 	}
@@ -781,45 +820,99 @@ func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
 		return true, err
 	}
 	infra := slices.ContainsFunc(jobs, func(j forge.Job) bool { return infraReason(j.FailureReason) })
-	details, err := pipelineDetails(lg.proj, pl, jobs)
+	facts, tails, err := pipelineParts(lg.proj, pl, jobs)
 	if err != nil {
 		return true, err
 	}
 	iid := git.RecordedMR(l.Description)
 	title := failedTitle(pl.ID, lg.mrPath, iid) // holdTask prefixes the container
-	details = mrLead(lg.mrPath, iid) + details
+	ref := git.MRRef(lg.mrPath, iid)
+	taskFacts := pipelineTaskFacts(ref, git.RecordedMRLink(l.Description), facts)
 	if infra {
-		if _, err := holdTask(cp, pipelineKey, title,
-			infraTaskLead+" fix the runner, retry the pipeline on the Forge, then close this Task.\n"+details); err != nil {
+		if _, err := holdTask(cp, pipelineKey, title, bd.TaskBody(
+			infraTaskLead+" the runner, not the code, failed.", taskFacts,
+			[]bd.TaskStep{infraRetryStep(ref, pl.ID, cp.ID, false)}, tails)); err != nil {
 			return true, err
 		}
 		landOutcome(lg, l, eventlog.LandPipelineFailed, git.RecordedMR(l.Description), "pipeline", pl.ID, "infra", true)
 		return true, holdPipeline(l, pl)
 	}
 	if cp.Kind == contract.KindChart {
-		if _, err := holdTask(cp, pipelineKey, title,
-			"The retried pipeline failed on this Chart's branch; main or the CI config is likely broken. Fix it, then close this Task.\n"+details); err != nil {
+		if _, err := holdTask(cp, pipelineKey, title, bd.TaskBody(
+			"The retried pipeline failed on this Chart's branch; main or the CI config is likely broken.", taskFacts,
+			chartPipelineSteps(ref, pl), tails)); err != nil {
 			return true, err
 		}
-	} else if err := fileCritique(l, cp, lg.proj, pl, cp.Title+": "+title, details); err != nil {
+	} else if err := fileCritique(l, cp, lg.proj, pl, cp.Title+": "+title, mrLead(lg.mrPath, iid)+joinPipelineParts(facts, tails)); err != nil {
 		return true, err
 	}
 	landOutcome(lg, l, eventlog.LandPipelineFailed, git.RecordedMR(l.Description), "pipeline", pl.ID)
 	return true, closeIfOpen(l, "obsolete: pipeline failed")
 }
 
-// pipelineDetails is the pipeline URL and the failing jobs' trace tails a pipeline-failure
-// Task or Critique carries.
-func pipelineDetails(p forge.Project, pl forge.Pipeline, jobs []forge.Job) (string, error) {
-	details := fmt.Sprintf("%s\nPipeline URL: %s\n", pipelineLine(pl.ID), pl.WebURL)
+// pipelineParts is a pipeline-failure body's two halves: the Pipeline: / Pipeline URL:
+// fact lines, and the failing jobs' Job, Job URL, failure_reason and fenced trace tail
+// blocks, one per job, for ## Diagnostics.
+func pipelineParts(p forge.Project, pl forge.Pipeline, jobs []forge.Job) (facts []string, diagnostics string, err error) {
+	facts = []string{pipelineLine(pl.ID), "Pipeline URL: " + pl.WebURL}
+	var tails []string
 	for _, j := range jobs {
 		tail, err := forgeTrace(p, j.ID)
 		if err != nil && !errors.Is(err, forge.ErrNotFound) {
-			return "", err
+			return nil, "", err
 		}
-		details += fmt.Sprintf("\nJob: %s\nJob URL: %s\nfailure_reason: %s\n```\n%s\n```\n", j.Name, j.WebURL, j.FailureReason, tail)
+		tails = append(tails, fmt.Sprintf("Job: %s\nJob URL: %s\nfailure_reason: %s\n```\n%s\n```\n", j.Name, j.WebURL, j.FailureReason, tail))
 	}
-	return details, nil
+	return facts, strings.Join(tails, "\n"), nil
+}
+
+// joinPipelineParts is the pipeline URL and the failing jobs' trace tails the Critique
+// carries, the two parts recombined the way they always read.
+func joinPipelineParts(facts []string, diagnostics string) string {
+	details := strings.Join(facts, "\n") + "\n"
+	if diagnostics != "" {
+		details += "\n" + diagnostics
+	}
+	return details
+}
+
+// pipelineTaskFacts is a pipeline-failure Task's fact lines: the always-present Merge
+// request: <ref>, the MR link, then the pipeline's own.
+func pipelineTaskFacts(ref, link string, pipeline []string) []string {
+	return append([]string{"Merge request: " + ref, git.MRLinkLine(link)}, pipeline...)
+}
+
+// infraRetryStep is the one step an infra pipeline failure asks of Brook: fix the runner
+// named under Diagnostics, then retry. A revert MR's Check also accepts the MR merged or
+// closed.
+func infraRetryStep(ref string, id int, container string, revert bool) bd.TaskStep {
+	check := fmt.Sprintf("`mugicrew probe pipeline '%s' %d` prints `success`, or `mugicrew probe landed %s` prints `landed`.", ref, id, container)
+	if revert {
+		check = fmt.Sprintf("`mugicrew probe pipeline '%s' %d` prints `success`, or `mugicrew probe landed %s` prints `landed`, or `mugicrew probe mr '%s'` prints `merged` or `closed`.", ref, id, container, ref)
+	}
+	return bd.TaskStep{
+		Title: "Fix the runner, then retry the pipeline.",
+		Do:    "fix the runner named under Diagnostics, then Retry the pipeline at the Pipeline URL.",
+		Check: check,
+	}
+}
+
+// chartPipelineSteps are a Chart's real pipeline failure: land a fix for the breakage,
+// and, for a branch pipeline (not merged-results), rebase the Chart onto the green main.
+func chartPipelineSteps(ref string, pl forge.Pipeline) []bd.TaskStep {
+	steps := []bd.TaskStep{{
+		Title: "Fix the breakage on main.",
+		Do:    "file a Signal for the breakage and land its fix.",
+		Check: fmt.Sprintf("`mugicrew probe pipeline '%s' --main` prints `success`.", ref),
+	}}
+	if !strings.HasSuffix(pl.Ref, "/merge") {
+		steps = append(steps, bd.TaskStep{
+			Title: "Rebase the Chart onto the green main.",
+			Do:    "press r on the Chart's row in the TUI.",
+			Ask:   "is the Chart rebased onto a green main?",
+		})
+	}
+	return steps
 }
 
 // mrLead names a nested MR at the head of a pipeline-failure Task or Critique body; a
@@ -878,23 +971,79 @@ func holdTask(cp bd.Bead, key, what, body string) (string, error) {
 	return id, err
 }
 
+// mrNaming is how holdTrailerless names and links the MR it holds on: its nested project
+// path ("" for a Workspace's), web link, and the running-text and sentence-start nouns.
+type mrNaming struct{ path, webURL, noun, label string }
+
 // holdTrailerless is the merged arm's miss: the MR is merged and fetched, yet no
 // trailer is on mainline (a hand-edited squash message dropped it). The Landing stays
 // open; one Brook-owned Task blocks the container, idempotent on (container, MR iid)
 // (Spec FR 19, ADR 0185 §5). noun and label name the MR in running text and at a sentence
 // start: "merge request"/"MR" for a land's, "revert merge request"/"Revert MR" for a
 // Rollback's. Returns the error that keeps the tick failing.
-func holdTrailerless(cp bd.Bead, path, noun, label, trailer string, iid int, sha string) error {
+func holdTrailerless(cp bd.Bead, repo git.Repo, mr mrNaming, trailer string, iid int, sha string) error {
+	path, webURL, noun, label := mr.path, mr.webURL, mr.noun, mr.label
 	ref := git.MRRef(path, iid)
+	revert := strings.HasPrefix(trailer, "Reverts-")
+	main := repo.Mainline()
 	// The key stays the bare "Merged MR: !<iid>" on purpose (Spec FR 29, ADR 0230): a nested MR must not re-key.
-	body := fmt.Sprintf("%s %s for %s was merged at %s, but no %q trailer reached mainline.\nMerged MR: !%d\nMerge sha: %s\n"+
-		"Fix: a hand-edited squash message dropped the trailer. Push a commit stamped with it to the Forge's main (not local main, which would diverge), then close this Task.\n"+
-		"Check: did this merge add an ADR or other sequence number mainline already held? Post-land clash detection cannot see it without the trailer.\n",
-		label, ref, cp.ID, sha, trailer, iid, sha)
+	facts := []string{fmt.Sprintf("Merged MR: !%d", iid), "Merge sha: " + sha, git.MRLinkLine(webURL)}
+	var clash []string
+	if !revert {
+		if repo == "" { // a nested container skips the post-land renumber, so its clash is none
+			clashes, err := postLandClashes(sha, "")
+			if err != nil {
+				return err
+			}
+			for _, c := range clashes {
+				clash = append(clash, c.Added)
+			}
+		}
+		// context only: Jinbe mints the renumber itself once the stamp lands (closeLanded → mintRenumber)
+		facts = append(facts, "Sequence clash: "+cmp.Or(strings.Join(clash, ", "), "none"))
+	}
+	do, err := stampDo(cp, repo, path, webURL, trailer)
+	if err != nil {
+		return err
+	}
+	check := fmt.Sprintf("`mugicrew probe landed %s` prints `landed`.", cp.ID)
+	if revert {
+		do += " Push before anything else lands on " + main + "."
+		check = fmt.Sprintf("`mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", cp.ID, cp.ID)
+	}
+	steps := []bd.TaskStep{{Title: "Stamp the trailer on the Forge's " + main + ".", Markers: []string{"irreversible"}, Do: do, Check: check}}
+	body := bd.TaskBody(fmt.Sprintf("%s %s for %s was merged at %s, but no %q trailer reached mainline.", label, ref, cp.ID, sha, trailer), facts, steps, "")
 	if _, err := holdTask(cp, fmt.Sprintf("Merged MR: !%d\n", iid), fmt.Sprintf("%s %s merged without its trailer", noun, ref), body); err != nil {
 		return err
 	}
 	return fmt.Errorf("jinbe: %s %s for %s is merged but its trailer is not on mainline (merge sha %s)", noun, ref, cp.ID, sha)
+}
+
+// stampDo is the Do that stamps trailer on the Forge's mainline: an empty commit carrying
+// git.TrailerBlock's exact block (our Graph: included), pushed to the Forge remote, which
+// needs Maintainer on the MR link's project. The trailerless step and the closed-MR
+// fallback share it.
+func stampDo(cp bd.Bead, repo git.Repo, path, webURL, trailer string) (string, error) {
+	graph, err := git.GraphID()
+	if err != nil {
+		return "", err
+	}
+	remote, main, project := repo.ForgeRemote(), repo.Mainline(), projectOfMRLink(webURL, path)
+	stamp := strings.ReplaceAll(git.TrailerBlock("", trailer, graph), "\n", "\\n")
+	return fmt.Sprintf("on the Forge at the MR link, on a checkout of the Forge's %s (not local main, which would diverge), commit an empty commit stamped with the trailer block "+
+		"(`git commit --allow-empty -m 'stamp %s' -m \"$(printf '%s')\"`) and push it to `%s %s`, which needs Maintainer on %s.",
+		main, cp.ID, stamp, remote, main, project), nil
+}
+
+// projectOfMRLink is the project path an MR web URL names (".../<project>/-/merge_requests/N"),
+// else fallback.
+func projectOfMRLink(webURL, fallback string) string {
+	if u, err := url.Parse(webURL); err == nil {
+		if p, _, ok := strings.Cut(strings.Trim(u.Path, "/"), "/-/"); ok && p != "" {
+			return p
+		}
+	}
+	return fallback
 }
 
 // flagStalePin is nami.FlagStalePin over Jinbe's seams.
@@ -911,11 +1060,20 @@ func finalCloseOut(l, cp bd.Bead, branch, sha string, lg legs) error {
 	if iid == 0 {
 		return nil
 	}
-	head := sha
-	if tip, ok := landedTip(lg.repo, sha); ok {
-		head = tip
-	}
+	head := landedHead(lg.repo, sha)
 	return closeOutArm(cp, lg, &forge.MR{IID: iid}, branch, closeOutTarget{head: head, merged: true, landing: l})
+}
+
+// landedReason prefixes the close reason of a Landing that landed: "landed: <sha>".
+const landedReason = "landed:"
+
+// landedHead is the commit a landed container's close-outs read trailers from: the squash's
+// Tip when it resolves, else the merge sha.
+func landedHead(repo git.Repo, sha string) string {
+	if tip, ok := landedTip(repo, sha); ok {
+		return tip
+	}
+	return sha
 }
 
 // recordMR appends "MR: !<iid>" (or "MR: <group/proj>!<iid>" for a nested repo's project, ADR 0230) to the Landing's body unless it already carries an
@@ -1021,7 +1179,7 @@ func landed(l, cp bd.Bead, sha string, err error, lg legs) error {
 		}
 		return closeIfOpen(l, "obsolete: conflict")
 	}
-	return closeIfOpen(l, "landed: "+sha)
+	return closeIfOpen(l, landedReason+" "+sha)
 }
 
 // maxGateAttempts bounds how often a gated Landing re-composes after mainline
@@ -1286,7 +1444,9 @@ func reconcileRollbackOnce(rb bd.Bead) ([]any, error) {
 //
 //  1. The Reverts-Checkpoint: trailer is on main ⇒ a human merged the revert MR. Hand
 //     off at its first-parent commit M (ADR 0211), keyed on that merge, not the Commit:
-//     pin a Forge squash may have rewritten; revert.done before handoff.done (a handoff
+//     pin a Forge squash may have rewritten. M comes from the recorded revert MR's merge
+//     sha when one is recorded (a hand-pushed stamp carrying the trailer is not the
+//     merge), else from the trailer commit; revert.done before handoff.done (a handoff
 //     that errors re-logs revert.done on each tick until it succeeds).
 //  2. An MR: !<iid> is recorded ⇒ read it; while open, assert its description and
 //     log revert.pending; its close, conflict and pipeline arms are revertMRArms.
@@ -1304,6 +1464,15 @@ func reconcileGitlabRollback(rb, cp bd.Bead, lg rbLeg, squash, base string) erro
 		}
 		if conflict != nil {
 			return fixForwardRevert(rb, cp, lg, squash, iid, conflict) // a merged revert whose rebuild conflicted: finish the fix-forward
+		}
+		if iid != 0 {
+			mr, err := forgeMR(lg.proj, iid)
+			if err != nil {
+				return err
+			}
+			if x = cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA, mr.SHA); x == "" {
+				return fmt.Errorf("rollback %s: revert MR !%d has no merge, squash or head sha", rb.ID, iid)
+			}
 		}
 		m, err := lg.firstParent(x)
 		if err != nil {
@@ -1369,7 +1538,7 @@ func revertMRArms(rb, cp bd.Bead, lg rbLeg, squash, base, reverts string, iid in
 		if _, err := lg.landedBase(reverts); !errors.Is(err, git.ErrNotLanded) {
 			return err // landed: the next tick hands off
 		}
-		return holdTrailerless(rb, lg.mrPath, "revert merge request", "Revert MR", reverts, iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
+		return holdTrailerless(rb, lg.repo, mrNaming{lg.mrPath, mr.WebURL, "revert merge request", "Revert MR"}, reverts, iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
 	case forge.StateClosed:
 		conflict, err := pinnedFixForward(rb.ID)
 		if err != nil {
@@ -1507,15 +1676,26 @@ func revertPipelineFailed(rb *bd.Bead, lg rbLeg, iid int, pl forge.Pipeline) err
 		return err
 	}
 	infra := slices.ContainsFunc(jobs, func(j forge.Job) bool { return infraReason(j.FailureReason) })
-	details, err := pipelineDetails(lg.proj, pl, jobs)
+	facts, tails, err := pipelineParts(lg.proj, pl, jobs)
 	if err != nil {
 		return err
 	}
-	lead := "The retried pipeline failed on the revert MR; main may be red for the very breakage being rolled back. Merge the MR anyway to hand off, or close it to abandon this Rollback (a closed MR makes this Task moot).\n"
+	ref := git.MRRef(lg.mrPath, iid)
+	link := git.RecordedMRLink(rb.Description)
+	var body string
 	if infra {
-		lead = infraTaskLead + " fix the runner, retry the pipeline on the Forge, then merge the MR to hand off or close it to abandon this Rollback (a closed MR makes this Task moot).\n"
+		body = bd.TaskBody(infraTaskLead+" the runner, not the code, failed on the revert MR.", pipelineTaskFacts(ref, link, facts),
+			[]bd.TaskStep{infraRetryStep(ref, pl.ID, rb.ID, true)}, tails)
+	} else {
+		body = bd.TaskBody("The retried pipeline failed on the revert MR; main may be red for the very breakage being rolled back.",
+			pipelineTaskFacts(ref, link, facts), []bd.TaskStep{{
+				Title:   "Merge the revert MR to hand off, or close it to abandon this Rollback.",
+				Markers: []string{"irreversible"},
+				Do:      fmt.Sprintf("merge or close the revert MR %s on the Forge at the MR link (a closed MR makes this Task moot).", ref),
+				Check:   fmt.Sprintf("`mugicrew probe mr '%s'` prints `merged` or `closed`.", ref),
+			}}, tails)
 	}
-	task, err := holdTask(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), mrLead(lg.mrPath, iid)+lead+details)
+	task, err := holdTask(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), body)
 	if err != nil {
 		return err
 	}

@@ -52,20 +52,26 @@ type frankySeamRec struct {
 	raises    []string  // raisePivot calls: "<bead> <spec> <pivot ids>"
 	spec      string    // the Checkpoint's Spec via SpecOf ("" = none)
 	surgeries []bd.Bead // the Checkpoint's Surgeries via SurgeriesOf
+	notes     string    // the newest Rationale: note (RationaleNote)
+	noteReads []string  // beads whose comments were read for a rationale
 }
 
 func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 	t.Helper()
-	oShow, oClose := showBead, closeBead
+	oShow, oClose, oNote := showBead, closeBead, rationale
 	oPivots, oRaised, oRaise, oSpec, oSurgery := openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf
 	t.Cleanup(func() {
-		showBead, closeBead = oShow, oClose
+		showBead, closeBead, rationale = oShow, oClose, oNote
 		openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf = oPivots, oRaised, oRaise, oSpec, oSurgery
 	})
 	closeBead = func(id, reason string) error {
 		r.closed = append(r.closed, id)
 		r.reasons = append(r.reasons, reason)
 		return nil
+	}
+	rationale = func(id string) string {
+		r.noteReads = append(r.noteReads, id)
+		return r.notes
 	}
 	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
 	pivotsDiscoveredFrom = func(string) ([]bd.Bead, error) { return r.raised, nil }
@@ -267,7 +273,14 @@ func TestFrankyPromptsSkillFree(t *testing.T) {
 // close reason.
 func TestBuildPromptCritiqueMayCloseNotNeeded(t *testing.T) {
 	b := implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp", SpecID: "ws-spec"})
-	for _, want := range []string{"not needed or is\nalready fixed", `bd close mc-x --reason "<why`, "relayed whole"} {
+	for _, want := range []string{
+		"not needed or is\nalready fixed",
+		`bd close mc-x --reason "rejected: <why`,
+		`bd close mc-x --reason "accepted: <what`,
+		`bd close mc-x --reason "deferred: <why`,
+		"relayed whole",
+		`bd comments add mc-x "Rationale: <what changed and why>"`,
+	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("build prompt lacks %q", want)
 		}
@@ -370,6 +383,56 @@ func TestFinishOnlyCloses(t *testing.T) {
 		if len(r.closed) != 1 || r.closed[0] != "ws-build" {
 			t.Errorf("%s: closed %v, want [ws-build]", k, r.closed)
 		}
+	}
+}
+
+// Spec D5, D6: a Critique with a Rationale: comment closes accepted: <it>; one
+// with none closes bare; no other kind reads comments or carries a reason.
+func TestFinishCritiqueAcceptedWithRationale(t *testing.T) {
+	r := &frankySeamRec{notes: "fixed the nil deref; declined the rename"}
+	stubFrankySeams(t, r)
+	b := openBuild()
+	b.Kind = contract.KindCritique
+	if err := finish(b); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.reasons) != 1 || r.reasons[0] != "accepted: fixed the nil deref; declined the rename" {
+		t.Errorf("reasons = %q", r.reasons)
+	}
+
+	r2 := &frankySeamRec{}
+	stubFrankySeams(t, r2)
+	if err := finish(b); err != nil {
+		t.Fatal(err)
+	}
+	if len(r2.reasons) != 1 || r2.reasons[0] != "" {
+		t.Errorf("no rationale: reasons = %q, want bare close", r2.reasons)
+	}
+}
+
+func TestFinishNonCritiqueIgnoresRationale(t *testing.T) {
+	for _, k := range []contract.Kind{contract.KindBuild, contract.KindConflict} {
+		r := &frankySeamRec{notes: "should be ignored"}
+		stubFrankySeams(t, r)
+		b := openBuild()
+		b.Kind = k
+		if err := finish(b); err != nil {
+			t.Fatal(err)
+		}
+		if r.reasons[0] != "" || len(r.noteReads) != 0 {
+			t.Errorf("%s: reason %q, reads %v; want bare close, no comment read", k, r.reasons[0], r.noteReads)
+		}
+	}
+}
+
+func TestFinishClosedCritiqueIsNoOp(t *testing.T) {
+	r := &frankySeamRec{notes: "x"}
+	stubFrankySeams(t, r)
+	b := openBuild()
+	b.Kind = contract.KindCritique
+	b.Status = "closed"
+	if err := finish(b); err != nil || len(r.closed) != 0 {
+		t.Errorf("err=%v closed=%v, want no-op", err, r.closed)
 	}
 }
 
@@ -1044,6 +1107,34 @@ func TestPromptsCarryIntegrateExits(t *testing.T) {
 			if !strings.Contains(got, line) {
 				t.Errorf("%s prompt lacks the integrate exit line %q", name, line)
 			}
+		}
+	}
+}
+
+// Spec FR 7–9: every committing Franky prompt (build, surgery, conflict; with and
+// without a Spec or Surgeries) names the <type>(<bead-id>) commit form, and the
+// conflict prompt still keeps replayed commits' messages and trailers.
+func TestFrankyPromptsConventionalCommit(t *testing.T) {
+	surgeries := []bd.Bead{{ID: "ws-s1", Title: "A surgery"}}
+	prompts := map[string]string{
+		"surgery/spec":    surgeryPrompt(surgeryArgs{ID: "ws-surg", Checkpoint: "ws-cp", SpecID: "ws-spec"}),
+		"surgery/nospec":  surgeryPrompt(surgeryArgs{ID: "ws-surg", Checkpoint: "ws-cp"}),
+		"build/spec":      implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp", SpecID: "ws-spec"}),
+		"build/surgeries": implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp", Surgeries: surgeries}),
+		"build/bare":      implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp"}),
+		"conflict/spec":   conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef", SpecID: "ws-spec"}),
+		"conflict/surg":   conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef", Surgeries: surgeries}),
+		"conflict/bare":   conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef"}),
+	}
+	for name, p := range prompts {
+		if v := promptguard.CommitRuleViolations(p); len(v) > 0 {
+			t.Errorf("%s prompt breaks the conventional-commit guard: %v", name, v)
+		}
+		if !strings.Contains(p, "<type>(<bead-id>): <subject>") {
+			t.Errorf("%s prompt must spell out <type>(<bead-id>): <subject>", name)
+		}
+		if strings.HasPrefix(name, "conflict/") && !strings.Contains(p, "Keep every commit message and its trailers") {
+			t.Errorf("%s prompt must keep replayed commits' messages and trailers", name)
 		}
 	}
 }

@@ -404,6 +404,36 @@ func InitiativesSetting(root string) Initiatives {
 	return out
 }
 
+// Approvals is the resolved [approvals] setting (ADR 0020 amendment).
+type Approvals struct {
+	AutoApprove bool   // [approvals] auto_approve: the crew approves Approvals itself
+	Unusable    bool   // the table was malformed or mistyped (warned config.unusable)
+	Path        string // the shared config file read
+}
+
+type approvalsLayer struct {
+	Approvals *struct {
+		AutoApprove bool `toml:"auto_approve"`
+	}
+}
+
+// AutoApproveSetting reads [approvals] auto_approve from the shared layer only, as
+// InitiativesSetting does, and re-reads on every call. A missing file, table or key
+// reads off; a decode error or mistyped table warns config.unusable and reads off.
+func AutoApproveSetting(root string) Approvals {
+	out := Approvals{Path: SharedPath(root)}
+	var l approvalsLayer
+	switch Decode(out.Path, &l) {
+	case Unusable:
+		out.Unusable = true
+	case Set:
+		if t := l.Approvals; t != nil {
+			out.AutoApprove = t.AutoApprove
+		}
+	}
+	return out
+}
+
 // WorkspaceSetUp reads whether the Workspace was set up by `mugicrew init
 // workspace`: land_strategy and [initiatives] required both present in the
 // shared layer (no marker key). The State is the shared layer's: Missing and Unusable

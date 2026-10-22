@@ -17,11 +17,10 @@ import (
 	"jayulabs.org/mugicrew/session"
 )
 
-// isHITL reports whether a kind is human-in-the-loop; the registry is the one
-// AFK/HITL source.
-func isHITL(k contract.Kind) bool {
-	e, err := registry.Lookup(k)
-	return err == nil && e.Mode == registry.HITL
+// isHITL reports whether a bead is human-in-the-loop; the registry is the one
+// AFK/HITL source. It reads the snapshot the refresh stamped, never the config.
+func isHITL(b *bd.Bead) bool {
+	return registry.IsMode(b.Kind, b.Labels, registry.HITL)
 }
 
 // unparentedSel is the selection key of the Unparented group header, which has no
@@ -453,11 +452,13 @@ type graphTab struct {
 	edit      line
 	qfold     map[string]bool // the folds while filtering; flip is untouched, so clearing restores it
 	qfoldFor  query           // the query qfold belongs to; a new query starts with every group open (FR40)
+	landFold  map[string]bool // the folds scopeTo set; a scope's bare query returns to them
 	matched   int             // beads the filter matches, and the unfiltered total
 	total     int
 	liveN     map[string]int // "N live" per foldable header by collapse key, off the unfiltered tree; set in rebuild
 	searching bool           // a fetch for the current generation is in flight (ADR 0232 §6)
 	entry     bool           // searching was set by Graph entry awaiting its load, not by a fetch
+	landMoved bool           // the cursor moved since a goto landing: the landing's fold stops pulling it back
 	want      string         // the cursor bead lost while searching: the cursor returns to it when it arrives
 	memo      *graphMemo     // visible() and what rows derive from it; replaced in rebuild, never mutated; nil until then
 }
@@ -563,6 +564,9 @@ func (g graphTab) rebuild() graphTab {
 		g.qfold, g.qfoldFor = map[string]bool{}, baseline
 	} else if q != g.qfoldFor {
 		g.qfold, g.qfoldFor = map[string]bool{}, q
+		if q.scope != "" && q == g.scopedTo { // a scope's bare query keeps the landing's folds
+			g.qfold = maps.Clone(g.landFold)
+		}
 	}
 	return g.fixSelection(old)
 }
@@ -613,14 +617,19 @@ func (g graphTab) setFolds(f map[string]bool) graphTab {
 // their subtrees are hidden unless the status facet is deferred. Display-only:
 // gates read g.beads and keep counting a Draft as open.
 func (g graphTab) visible() []bd.Bead {
-	if g.query().status == "deferred" {
-		return g.beads
+	beads := g.beads
+	if sc := g.q.scope; sc != "" {
+		in := scopeSubtree(beads, sc)
+		beads = slices.DeleteFunc(slices.Clone(beads), func(b bd.Bead) bool { return !in[b.ID] })
 	}
-	parent, draft := make(map[string]string, len(g.beads)), map[string]bool{}
-	for _, b := range g.beads {
+	if g.query().status == "deferred" {
+		return beads
+	}
+	parent, draft := make(map[string]string, len(beads)), map[string]bool{}
+	for _, b := range beads {
 		parent[b.ID], draft[b.ID] = b.Parent, b.Status == "deferred"
 	}
-	return slices.DeleteFunc(slices.Clone(g.beads), func(b bd.Bead) bool {
+	return slices.DeleteFunc(slices.Clone(beads), func(b bd.Bead) bool {
 		for id, n := b.ID, 0; id != "" && n <= len(parent); id, n = parent[id], n+1 {
 			if draft[id] {
 				return true
@@ -694,4 +703,59 @@ func (g graphTab) reveal(id string) (_ graphTab, ok bool, note string) {
 	}
 	scoped.sel, scoped.off, scoped.scopedTo = id, 0, scoped.q
 	return scoped.fixSelection(0), true, "scoped Graph to " + id
+}
+
+// scopeSubtree is the ids of head's loaded subtree: head, its members and nested heads'
+// members. A head that is not a loaded container (a self-scope) is the bead alone.
+func scopeSubtree(beads []bd.Bead, head string) map[string]bool {
+	in := map[string]bool{head: true}
+	if i := beadIndex(beads, head); i < 0 || !beads[i].Container {
+		return in
+	}
+	for grew := true; grew; {
+		grew = false
+		for _, b := range beads {
+			if !in[b.ID] && in[b.Parent] {
+				in[b.ID], grew = true, true
+			}
+		}
+	}
+	return in
+}
+
+// scopeTo scopes Graph to the group headed by head with sel selected: the query is
+// {scope: head, status: any}, and only sel's ancestor chain is open, sel too when it
+// heads a group (Decision 1). The beads shown are the ones loaded.
+func (g graphTab) scopeTo(head, sel string) graphTab {
+	g.q, g.typing, g.visit = query{scope: head, status: statusAny}, false, false
+	g.scopedTo = g.q
+	g = g.rebuild()
+	open := map[string]bool{sel: true}
+	for id, n := g.beadParent(sel), 0; id != "" && n <= len(g.beads); id, n = g.beadParent(id), n+1 {
+		open[id] = true
+	}
+	fold := map[string]bool{}
+	for id := range scopeSubtree(g.beads, head) {
+		fold[id] = !open[id]
+	}
+	g.landFold, g.qfold, g.qfoldFor = fold, maps.Clone(fold), g.q
+	g.sel, g.off = sel, 0
+	return g.fixSelection(0)
+}
+
+// scopeToPending is scopeTo for a landing whose subtree read is in flight: searching… is
+// on and the cursor parked on sel, which scopeTo's rebuild would otherwise have cleared.
+func (g graphTab) scopeToPending(head, sel string) graphTab {
+	g.entry, g.landMoved = false, false
+	g = g.scopeTo(head, sel)
+	g.searching, g.want = true, sel
+	return g
+}
+
+// beadParent is the loaded parent id of bead id, "" for none.
+func (g graphTab) beadParent(id string) string {
+	if i := g.beadIndex(id); i >= 0 {
+		return g.beads[i].Parent
+	}
+	return ""
 }

@@ -36,6 +36,7 @@ const (
 	dFin          // a Chart closed within 24h in 'Finished in last 24h': status only
 	dACW          // an own-paused open Chart in Actionable's paused band, the twin of its dCW and dChart rows
 	dACA          // an own-paused open AFK Chart child in Actionable's paused band, the twin of its dChild row
+	dMR           // an open MR Watch of a Chart in the Merge Requests section: b the Watch, chart its Chart
 )
 
 const (
@@ -47,6 +48,7 @@ const (
 	finPrefix    = "fin:"                  // a Finished row's key is finPrefix + the Chart's id
 	finWindow    = 24 * time.Hour
 	finRefuse    = "finished — nothing to launch"
+	mrsDetailD   = "Every open Chart Merge Request, under the gitlab land strategy. d shows its link."
 	chartsDetail = "Every open Chart with its status word: where it is on its way to a Spec. Status only."
 )
 
@@ -89,7 +91,7 @@ func (r dRow) shadeIn() shadeIn {
 		return shadeIn{id: r.b.ID, act: true}
 	case dLive:
 		return shadeIn{id: r.b.ID, act: true, live: true}
-	case dChart, dLeaf, dChild, dCW, dFin:
+	case dChart, dLeaf, dChild, dCW, dFin, dMR:
 		return shadeIn{id: r.b.ID}
 	}
 	return shadeIn{}
@@ -98,7 +100,7 @@ func (r dRow) shadeIn() shadeIn {
 // bk is the row's blocker key: its bead id (an Actionable, Live or Charts row's key is
 // "act:<id>", "live:<id>", "charts:<id>" or "fin:<id>"), else its key.
 func (r dRow) bk() string {
-	if r.kind == dAct || r.kind == dACW || r.kind == dACA || r.kind == dLive || r.kind == dCW || r.kind == dFin {
+	if r.kind == dAct || r.kind == dACW || r.kind == dACA || r.kind == dLive || r.kind == dCW || r.kind == dFin || r.kind == dMR {
 		return r.b.ID
 	}
 	return r.key
@@ -106,7 +108,7 @@ func (r dRow) bk() string {
 
 // leaf is whether enter routes the row as an open HITL leaf.
 func (r dRow) leaf() bool {
-	return r.kind == dLeaf || r.kind == dAct || r.kind == dLive && isHITL(r.b.Kind) && !r.b.Container
+	return r.kind == dLeaf || r.kind == dAct || r.kind == dLive && isHITL(r.b) && !r.b.Container
 }
 
 // collapsed: every container below Actionable starts folded; space flips.
@@ -160,12 +162,19 @@ func (g graphData) leafState(b *bd.Bead) lstate {
 }
 
 // defogCharts are the listed Charts: open or in_progress (tested explicitly, since
-// Bead.Open() counts a deferred Draft) and not chart:defogged.
+// Bead.Open() counts a deferred Draft) and either not chart:defogged, or stamped
+// with an open child: its land phase and review grillings are Defog's work.
 func defogCharts(beads []bd.Bead) (cs []*bd.Bead) {
 	for i, b := range beads {
-		if b.Kind == contract.KindChart && (b.Status == "open" || b.Status == "in_progress") && !b.HasLabel("chart:defogged") {
-			cs = append(cs, &beads[i])
+		if b.Kind != contract.KindChart || (b.Status != "open" && b.Status != "in_progress") {
+			continue
 		}
+		if b.HasLabel("chart:defogged") {
+			if hitl, afk, _ := chartKids(beads, &beads[i]); len(hitl) == 0 && len(afk) == 0 {
+				continue
+			}
+		}
+		cs = append(cs, &beads[i])
 	}
 	return
 }
@@ -180,7 +189,7 @@ func chartKids(beads []bd.Bead, c *bd.Bead) (hitl, afk, closed []*bd.Bead) {
 		switch {
 		case b.Status == "closed":
 			closed = append(closed, &beads[i])
-		case isHITL(b.Kind) && !b.Container:
+		case isHITL(&b) && !b.Container:
 			hitl = append(hitl, &beads[i])
 		default:
 			afk = append(afk, &beads[i])
@@ -201,6 +210,7 @@ func chartKids(beads []bd.Bead, c *bd.Bead) (hitl, afk, closed []*bd.Bead) {
 // defogList is the ordered row list for a snapshot and the session-only fold set.
 func (g graphData) defogList(flip map[string]bool) []dRow {
 	rows := append(g.defogActionable(flip), g.defogLive(flip)...)
+	rows = append(rows, g.defogMRSection(flip)...)
 	rows = append(rows, g.defogChartsSection(flip)...)
 	groups, nGroups, loose, nLoose := defogTree(g.beads, flip)
 	rows = append(rows, defogSection(dRow{kind: dSec, key: treeKey, title: fmt.Sprintf("Initiatives (%d)", nGroups)}, flip, groups, nGroups, "no Initiatives")...)
@@ -263,7 +273,7 @@ func (g graphData) defogBands() (wait, front, paused []dRow) {
 			paused = append(paused, dRow{kind: dACW, key: "act:" + b.ID, b: b, chart: b, depth: 1})
 		case c.Kind != contract.KindChart:
 			paused = append(paused, dRow{kind: dACA, key: "act:" + b.ID, b: b, depth: 1})
-		case isHITL(b.Kind) && !b.Container:
+		case isHITL(b) && !b.Container:
 			paused = append(paused, dRow{kind: dAct, key: "act:" + b.ID, b: b, chart: c, depth: 1})
 		default:
 			paused = append(paused, dRow{kind: dACA, key: "act:" + b.ID, b: b, chart: c, afk: true, depth: 1})
@@ -323,6 +333,31 @@ func (g graphData) defogLive(flip map[string]bool) []dRow {
 			rows = append(rows, dRow{kind: dPlace, key: liveNone, depth: 1})
 		}
 		rows = append(rows, live...)
+	}
+	return rows
+}
+
+// defogMRSection is the Merge Requests header, then a row per open Chart MR Watch (placeholder
+// when none, or the resolve error under an unusable land_strategy) while unfolded. Local shows
+// nothing (Spec D2).
+func (g graphData) defogMRSection(flip map[string]bool) []dRow {
+	mrs, shown := g.mrRows(contract.KindChart)
+	if !shown {
+		return nil
+	}
+	h := dRow{kind: dSec, key: mrsKey, title: fmt.Sprintf("Merge Requests (%d)", len(mrs))}
+	rows := []dRow{h}
+	if collapsed(flip, h) {
+		return rows
+	}
+	switch {
+	case g.landErr != nil:
+		rows = append(rows, dRow{kind: dPlace, key: mrsNone, title: g.landErr.Error(), depth: 1})
+	case len(mrs) == 0:
+		rows = append(rows, dRow{kind: dPlace, key: mrsNone, depth: 1})
+	}
+	for _, r := range mrs {
+		rows = append(rows, dRow{kind: dMR, key: r.key, b: r.b, chart: r.cp, depth: 1})
 	}
 	return rows
 }
@@ -511,7 +546,7 @@ func newDefog() component {
 // save writes the folds minus a closed or missing bead's; the fold still applies this
 // session.
 func (t defogTab) save() error {
-	return saveFolds(t.path, "defog", pruneFolds(unpeeked(t.flip, t.peek), t.g.beads, actKey, liveKey, chartsKey, finKey, treeKey))
+	return saveFolds(t.path, "defog", pruneFolds(unpeeked(t.flip, t.peek), t.g.beads, actKey, liveKey, mrsKey, chartsKey, finKey, treeKey))
 }
 
 func (t defogTab) afterLaunch(id string) component {
@@ -540,8 +575,14 @@ func (t defogTab) selIndex(rows []dRow) int {
 		if i := at(id); i >= 0 && b.Kind != contract.KindChart {
 			return i
 		}
-		if i := at(chartsPrefix + b.Parent); i >= 0 && b.Kind != contract.KindChart && t.g.beadByID(b.Parent).HasLabel("chart:defogged") { // a child of a defogged Chart has no tree row: its Chart's
-			return i
+		if b.Kind != contract.KindChart {
+			listed := slices.Contains(defogCharts(t.g.beads), t.g.beadByID(b.Parent))
+			if i := at(b.Parent); i >= 0 && listed { // its tree Chart's row, the Chart folded
+				return i
+			}
+			if i := at(chartsPrefix + b.Parent); i >= 0 && !listed { // a child of an unlisted Chart has no tree row: its Chart's
+				return i
+			}
 		}
 	}
 	if id, ok := strings.CutPrefix(t.sel, livePrefix); ok {
@@ -636,6 +677,9 @@ func (t defogTab) bindings() []key.Binding {
 	if r.foldable() {
 		bs = append(bs, keyFold)
 	}
+	if r.kind == dMR {
+		bs = append(bs, keyOpenMR)
+	}
 	if t.open {
 		bs = append(bs, keyShut, keyScroll)
 	} else {
@@ -701,6 +745,10 @@ func (m Model) defogKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			nm.setStatus("folds won't survive a restart: " + err.Error())
 		}
 		return nm, cmd, true
+	}
+	if r.kind == dMR && key.Matches(k, keyOpenMR) {
+		next, cmd := m.openMRRow(r.b, r.chart)
+		return next, cmd, true
 	}
 	if r.kind == dFin && (key.Matches(k, keyLaunch) || key.Matches(k, keyBg)) {
 		m.setStatus(finRefuse)
@@ -824,6 +872,9 @@ func (t defogTab) line(r dRow, tagW int, gut, trail string, blockers map[string]
 		if r.key == liveNone {
 			return gut + ind + blank + dimSt.Render(liveEmpty), ""
 		}
+		if r.key == mrsNone {
+			return gut + ind + blank + dimSt.Render(mrsEmpty), ""
+		}
 		return gut + ind + blank + dimSt.Render("nothing waits on you"), ""
 	case dHead:
 		if r.noInit() { // a top-level section: the count, and the folded trailer
@@ -833,6 +884,8 @@ func (t defogTab) line(r dRow, tagW int, gut, trail string, blockers map[string]
 			return gut + ind + dimSt.Render(fold) + dimSt.Render(r.title) + trail, ""
 		}
 		return gut + ind + dimSt.Render(fold) + t.g.sbrn(r.init, dimSt.Render(r.title), true, 0) + trail, ""
+	case dMR: // as Execute's: its MR, the Chart it waits on, the MR's state
+		return gut + ind + blank + t.g.sbrnLeaf(r.b, t.g.mrLine(r.b, r.chart), tagW, false), suffix()
 	case dLive:
 		if r.b.Kind != contract.KindChart {
 			break
@@ -862,7 +915,7 @@ func (t defogTab) view(w, h int) string {
 	rows := t.rows()
 	tagW := 0 // leaf and AFK rows share one kind-badge column
 	for _, r := range rows {
-		if r.leaf() || r.kind == dChild || r.kind == dACA || r.kind == dLive {
+		if r.leaf() || r.kind == dChild || r.kind == dACA || r.kind == dLive || r.kind == dMR {
 			tagW = max(tagW, kindTagW(r.b))
 		}
 	}
@@ -885,12 +938,14 @@ func (t defogTab) view(w, h int) string {
 	shade := shadeSet(t.g.parentOf, rows, sel, full, dRow.shadeIn)
 	lines, selRow := make([]string, len(rows)), sel
 	ids := make([]string, len(rows))
-	liveAt, chartsAt, treeAt, noInitAt := 0, 0, 0, 0 // the section headers that get a blank line above
+	liveAt, mrsAt, chartsAt, treeAt, noInitAt := 0, 0, 0, 0, 0 // the section headers that get a blank line above
 	for i, r := range rows {
 		ids[i], lines[i] = r.bk(), strconv.Itoa(i)
 		switch r.key {
 		case liveKey:
 			liveAt = i
+		case mrsKey:
+			mrsAt = i
 		case chartsKey:
 			chartsAt = i
 		case treeKey:
@@ -902,6 +957,7 @@ func (t defogTab) view(w, h int) string {
 	lines, ids, sel = gapAt(lines, ids, sel, noInitAt) // a blank line above each section header
 	lines, ids, sel = gapAt(lines, ids, sel, treeAt)
 	lines, ids, sel = gapAt(lines, ids, sel, chartsAt)
+	lines, ids, sel = gapAt(lines, ids, sel, mrsAt)
 	lines, ids, sel = gapAt(lines, ids, sel, liveAt)
 	var footer func(off, lh int) []string
 	if b != nil {

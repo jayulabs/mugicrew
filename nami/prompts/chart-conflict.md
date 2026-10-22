@@ -93,7 +93,9 @@ Chart branch or this bead — and the next run applies them.
 
 ## Rules
 
-- Commit your resolution on your effort branch; Go integrates it.
+- Commit your resolution on your effort branch; Go integrates it. Any commit you
+  author while resolving uses `git commit -m "docs(<bead-id>): <subject>"`; commits a rebase
+  replays keep their own messages.
 - Do NOT run `bd close` — Go closes this bead after its post-resolve check.
 - Never create beads (Go files any grilling) and never land the Chart.
 - Leave every file the Chart did not change exactly as mainline has it; Go's

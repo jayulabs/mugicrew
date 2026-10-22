@@ -54,6 +54,7 @@ type BeadLeftovers struct {
 	Replace      bool     // a replace-mode leaf: counted against its pinned Tip
 	Trees        []TreeLeftover
 	Drafts       []string
+	Session      string // a HITL bead's exited pane: no tree, no work in it, killed by cleanup (Spec mc-xw3ez D6)
 }
 
 // ContainerBranch is a closing Chart's or Checkpoint's branch.
@@ -111,6 +112,9 @@ func (inv Inventory) String() string {
 		}
 		if len(b.Drafts) > 0 {
 			fmt.Fprintf(&sb, " drafts %s", strings.Join(b.Drafts, ", "))
+		}
+		if b.Session != "" {
+			fmt.Fprintf(&sb, " exited session %s", b.Session)
 		}
 		sb.WriteString("\n")
 		for _, t := range b.Trees {
@@ -195,7 +199,7 @@ func TakeInventory(set []bd.Bead, o Opts) (Inventory, error) {
 		if err != nil {
 			return Inventory{}, fmt.Errorf("%s: %w", b.ID, err)
 		}
-		if left.Branch != "" || len(left.Trees) > 0 || len(left.Drafts) > 0 {
+		if left.Branch != "" || len(left.Trees) > 0 || len(left.Drafts) > 0 || left.Session != "" {
 			inv.Beads = append(inv.Beads, left)
 		}
 		if b.Kind == contract.KindChart || b.Kind == contract.KindCheckpoint {
@@ -223,6 +227,9 @@ func (c collector) bead(b bd.Bead) (BeadLeftovers, error) {
 	var err error
 	if left.Drafts, err = draftsOf(b.ID); err != nil {
 		return left, err
+	}
+	if s, ok := c.sessions[b.ID]; ok && s.State == session.Exited && isHITL(b) {
+		left.Session = s.Session
 	}
 	d, onEffort, err := route.OnEffort(b)
 	if err != nil {

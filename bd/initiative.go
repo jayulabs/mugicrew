@@ -97,8 +97,8 @@ func ReleaseChain(head string) error {
 		return refuse("release", head, "the head is closed", []Bead{h})
 	case in[h.Parent].Kind != contract.KindInitiative:
 		return refuse("release", head, "not a member of an Initiative", []Bead{h})
-	case RequireInitiativesOn():
-		return refuse("release", head, ReleaseRequiredWhy(head), []Bead{h})
+	case ReleaseRequiredWhy(h) != "" && RequireInitiativesOn():
+		return refuse("release", head, ReleaseRequiredWhy(h), []Bead{h})
 	}
 	if _, err := run("update", head, "--parent", ""); err != nil {
 		return err
@@ -115,9 +115,13 @@ func RequireInitiativesOn() bool {
 }
 
 // ReleaseRequiredWhy is release's refusal under Require Initiatives (ADR 0224): a
-// chain may move between Initiatives but never drop out of one. The TUI's A shows it too.
-func ReleaseRequiredWhy(head string) string {
-	return "Require Initiatives is on: move it with mugicrew initiative adopt " + head + " <other>"
+// chain may move between Initiatives but never drop out of one. A member Task is
+// exempt (ADR 0349), so its reason is empty. The TUI's A shows it too.
+func ReleaseRequiredWhy(member Bead) string {
+	if member.Kind == contract.KindTask {
+		return ""
+	}
+	return "Require Initiatives is on: move it with mugicrew initiative adopt " + member.ID + " <other>"
 }
 
 func refuse(verb, id, why string, blocking []Bead) error {

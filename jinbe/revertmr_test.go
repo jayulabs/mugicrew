@@ -1,6 +1,7 @@
 package jinbe
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -216,6 +217,7 @@ func TestRevertHeldRollbackResolves(t *testing.T) {
 	}
 	r := held()
 	r.trailerLanded, r.mergedAt = true, "msha"
+	r.mr.State, r.mr.MergeCommitSHA = "merged", "mergesha"
 	stubRollbackSeams(t, r)
 	tick(t, r)
 	if len(r.successors) != 1 || len(r.reasons) != 1 || r.reasons["ws-rb"] != "" {
@@ -305,5 +307,115 @@ func TestRevertForgeRebaseStaysPending(t *testing.T) {
 	}
 	if eventNamed(*evs, "revert.pending").Name == "" {
 		t.Errorf("events = %v, want revert.pending", eventlogtest.Names(*evs))
+	}
+}
+
+// handedOffAt runs one tick of a gitlab Rollback whose trailer is on main at stamp, with the
+// recorded revert MR as mr, and returns the sha handed to firstParent (the normalisation
+// input), the sha revert.done logged and the tick's error.
+func handedOffAt(t *testing.T, r *rollbackRec) (fpArg, done string, err error) {
+	t.Helper()
+	stubRollbackSeams(t, r)
+	firstParent = func(x string) (string, error) {
+		fpArg = x
+		if x == "unreachable" {
+			return "", errors.New("not on main")
+		}
+		return "m-of-" + x, nil
+	}
+	evs := eventlogtest.Capture(t)
+	err = reconcileRollback(r.rollback())
+	done, _ = eventNamed(*evs, "revert.done").Attrs["sha"].(string)
+	return fpArg, done, err
+}
+
+func stampedRevert(mr *forge.MR) *rollbackRec {
+	r := gitlabRollback()
+	r.trailerLanded = true
+	r.body += "\nCommit: pinsha\nMR: !9\n"
+	r.mr = mr
+	return r
+}
+
+// A hand-stamped trailer is not the merge: the successor is cut at the MR's merge, however
+// many commits sit between the two, and revert.done logs it; the sha fallback is
+// merge_commit_sha, squash_commit_sha, then sha.
+func TestRevertHandoffKeysOnTheRecordedMRMerge(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mr   forge.MR
+		want string
+	}{
+		"merge commit":  {forge.MR{MergeCommitSHA: "mc", SquashCommitSHA: "sq", SHA: "head"}, "mc"},
+		"squash commit": {forge.MR{SquashCommitSHA: "sq", SHA: "head"}, "sq"},
+		"fast-forward":  {forge.MR{SHA: "head"}, "head"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.mr.State = forge.StateMerged
+			r := stampedRevert(&tc.mr)
+			fp, done, err := handedOffAt(t, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fp != tc.want || done != "m-of-"+tc.want {
+				t.Errorf("firstParent(%q) revert.done sha %q, want the MR's %q", fp, done, tc.want)
+			}
+			if r.branches["checkpoint/ws-new"] != "seedsha" || r.seeds != 1 || !slices.Equal(r.closed, []string{"ws-rb"}) {
+				t.Errorf("branches %v seeds %d closed %v, want a handoff", r.branches, r.seeds, r.closed)
+			}
+		})
+	}
+}
+
+// A failed MR read, an MR with no sha, or a sha off main fails the tick: no successor, the
+// Rollback stays open.
+func TestRevertHandoffFailsLoudlyOnABadMRSha(t *testing.T) {
+	for name, r := range map[string]*rollbackRec{
+		"read error": func() *rollbackRec {
+			r := stampedRevert(nil)
+			r.mrErr = errors.New("503")
+			return r
+		}(),
+		"all shas empty":  stampedRevert(&forge.MR{State: forge.StateMerged}),
+		"sha not on main": stampedRevert(&forge.MR{State: forge.StateMerged, MergeCommitSHA: "unreachable"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := handedOffAt(t, r)
+			if err == nil {
+				t.Fatal("tick succeeded, want an error")
+			}
+			if name == "all shas empty" && (!strings.Contains(err.Error(), "ws-rb") || !strings.Contains(err.Error(), "!9")) {
+				t.Errorf("err = %v, want it to name the Rollback and the MR", err)
+			}
+			if len(r.successors) != 0 || len(r.closed) != 0 || r.mrReads != 1 {
+				t.Errorf("successors %d closed %v reads %d, want an open Rollback with one MR read", len(r.successors), r.closed, r.mrReads)
+			}
+		})
+	}
+}
+
+// No recorded MR: the trailer commit keys the handoff, with no Forge call.
+func TestRevertHandoffWithoutAnMRKeysOnTheTrailerCommit(t *testing.T) {
+	r := gitlabRollback()
+	r.trailerLanded = true
+	fp, _, err := handedOffAt(t, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp != "mergedsha" || r.mrReads != 0 { // landedBase's fake answers the trailer commit, mergedsha
+		t.Errorf("firstParent(%q) with %d MR reads, want the trailer commit and none", fp, r.mrReads)
+	}
+}
+
+// A pinned fix-forward finishes at the conflict's base and never keys on the MR: its
+// snapshot has no sha, which would fail the tick if the arm read one.
+func TestRevertPinnedFixForwardNeverKeysOnTheMR(t *testing.T) {
+	r := stampedRevert(&forge.MR{State: forge.StateMerged})
+	r.successors = []bd.Successor{{Description: git.ConflictPin(&git.RevertConflict{Base: "forgesha", Paths: []string{"a.go"}})}}
+	fp, _, err := handedOffAt(t, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp != "" || !slices.Equal(r.closed, []string{"ws-rb"}) {
+		t.Errorf("firstParent(%q) closed %v, want no normalisation and the fix-forward close", fp, r.closed)
 	}
 }

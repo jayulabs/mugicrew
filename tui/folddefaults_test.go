@@ -95,7 +95,7 @@ func TestFreshTabsFoldEveryContainerBelowActionable(t *testing.T) {
 	for _, r := range rows {
 		got = append(got, r.key)
 	}
-	if g := strings.Join(got, ","); g != "s:act,act:turn,act:ready,act:launch,act:paused,act:pc,s:live,live:live,s:charts,charts:pc,charts:c,charts:dc,s:tree,i:ini,i:" {
+	if g := strings.Join(got, ","); g != "s:act,act:turn,act:ready,act:launch,act:dcl,act:paused,act:pc,s:live,live:live,s:charts,charts:pc,charts:c,charts:dc,s:tree,i:ini,i:" {
 		t.Errorf("defog rows = %v", got)
 	}
 	em := fresh(t, "3", execFixture(), execSessions())
@@ -130,7 +130,7 @@ func slicesHas(ss []string, s string) bool {
 func TestFoldedTrailers(t *testing.T) {
 	db, ds := defogFixture()
 	v := screen(fresh(t, "2", db, ds))
-	if !strings.Contains(v, "ini · 10 open · 2 live") {
+	if !strings.Contains(v, "ini · 12 open · 2 live") {
 		t.Errorf("defog head:\n%s", v)
 	}
 	im := fresh(t, "1", mixed(), map[string]session.Info{"mc-long-22": {State: session.Alive}})

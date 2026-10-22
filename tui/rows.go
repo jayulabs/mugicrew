@@ -26,7 +26,7 @@ func leafTitleStyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain bool) {
 		return closedSty, false
 	case hot:
 		return pinkFg, false
-	case !isHITL(b.Kind):
+	case !isHITL(b):
 		return softSt, false
 	}
 	return lipgloss.NewStyle(), true

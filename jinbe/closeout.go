@@ -25,22 +25,29 @@ const (
 
 // Seams of the close-out pass.
 var (
-	hasCommit   = git.Repo.HasCommit
-	fetchCommit = git.Repo.FetchCommit
-	isReachable = git.Repo.IsAncestor
-	signalsFrom = bd.SignalsFrom
-	appendNotes = func(id, line string) error { return updateBody(id, []string{"--append-notes", line}) }
-	graphID     = git.GraphID
+	hasCommit    = git.Repo.HasCommit
+	commitSubj   = git.Repo.CommitSubject
+	fetchCommit  = git.Repo.FetchCommit
+	isReachable  = git.Repo.IsAncestor
+	signalsFrom  = bd.SignalsFrom
+	carriersFrom = bd.CarriersFrom
+	pivotByID    = bd.Show
+	appendNotes  = func(id, line string) error { return updateBody(id, []string{"--append-notes", line}) }
+	graphID      = git.GraphID
 )
 
 // closeOutTarget is what the Forge holds of a container: head is the commit a fix must be
 // reachable from (the MR's pushed head, or once merged the commit it landed: the squash's
 // Tip: when it has one). Under a merged target a bead whose commit head lacks is stranded,
-// carried by the stranded-commits Signal landing filed.
+// carried by the stranded-commits Signal landing filed. final marks a swept container's
+// late pass (ADR 0343 (an-mr-watch-closes-once-nothing-is-owed…)): no push can come, so every closed bead is due at
+// once, and it is never merged. watch is set on a late pass over a closed container.
 type closeOutTarget struct {
 	head    string
 	merged  bool
+	final   bool
 	landing bd.Bead
+	watch   bd.Bead // the MR Watch carrying the close-out lines once the container is closed; zero while it is open
 }
 
 // sourcesOf reads b's Source lines for MR iid, from its body and its notes (a fold
@@ -66,6 +73,7 @@ type closeOutResult struct {
 	awaiting, failing int
 	err               error
 	rateLimited       error
+	lastErr           map[string]string // bead id → its last failure this pass
 }
 
 // fail records one failed close-out as forge_review.close_out_failed (Warn).
@@ -74,6 +82,10 @@ func (r *closeOutResult) fail(cp, b bd.Bead, discussion string, err error) {
 	if r.err == nil {
 		r.err = err
 	}
+	if r.lastErr == nil {
+		r.lastErr = map[string]string{}
+	}
+	r.lastErr[b.ID] = oneLine(err.Error())
 	if errors.Is(err, forge.ErrRateLimited) && r.rateLimited == nil {
 		r.rateLimited = err
 	}
@@ -83,11 +95,12 @@ func (r *closeOutResult) fail(cp, b bd.Bead, discussion string, err error) {
 
 // dueBead is a closed filed bead whose close-out is due: sha8 is its integrate commit
 // ("" with no fix), signal the stranded-commits Signal's title when the merged commit
-// lacks that commit.
+// lacks that commit, swept the parsed reason of a Critique a pivot sweep closed.
 type dueBead struct {
 	b      bd.Bead
 	sha8   string
 	signal string
+	swept  *bd.SweptReason
 }
 
 // closeOutArm closes out the container cp's filed beads against its MR mr, as target says
@@ -98,13 +111,21 @@ type dueBead struct {
 // The reply marker is the idempotency key. A Forge 429 is returned to be held; any other
 // Forge failure is recorded (close_out_failed) and retried on the next pass, and under a
 // merged target (the final pass) is also returned, so the container does not close past it.
+// Once the container is closed (target.watch) nothing holds it, so the pass records its
+// lines on the Watch (ADR 0345 (an-outliving-mr-watch-carries-its-close-out-lines…)) and returns only a 429.
 func closeOutArm(cp bd.Bead, lg legs, mr *forge.MR, branch string, target closeOutTarget) error {
+	_, err := closeOutPass(cp, lg, mr, branch, target)
+	return err
+}
+
+// closeOutPass is closeOutArm that also hands back the pass's tally.
+func closeOutPass(cp bd.Bead, lg legs, mr *forge.MR, branch string, target closeOutTarget) (closeOutResult, error) {
+	var res closeOutResult
 	kids, err := childrenOfKind(cp.ID, contract.FiledKind(cp.Kind))
 	if err != nil {
-		return err
+		return res, err
 	}
 	filed := slices.DeleteFunc(slices.Clone(kids), func(k bd.Bead) bool { return len(sourcesOf(k, mr.IID)) == 0 })
-	var res closeOutResult
 	var due []dueBead
 	for _, b := range filed {
 		if b.Unclosed() || !slices.ContainsFunc(sourcesOf(b, mr.IID), func(d string) bool { return !closedOut(b, d) }) {
@@ -123,22 +144,49 @@ func closeOutArm(cp bd.Bead, lg legs, mr *forge.MR, branch string, target closeO
 	if len(due) > 0 {
 		closeOutDue(cp, lg, mr, filed, due, &res)
 	}
-	if !target.merged {
+	switch {
+	case target.watch.ID != "":
+		recordCloseOuts(target.watch, res)
+	case !target.merged && !target.final:
 		recordCloseOuts(cp, res)
-	} else if res.rateLimited == nil {
-		return res.err // the final pass: nothing reads the container again, so a failure holds it open to retry
+	case res.rateLimited == nil:
+		return res, res.err // the final pass: nothing reads the container again, so a failure holds it open to retry
 	}
-	return res.rateLimited
+	return res, res.rateLimited
 }
 
 // dueOf decides a closed bead b: wait is true while its integrate commit is not yet on
 // the Forge.
 func dueOf(cp, b bd.Bead, lg legs, branch string, target closeOutTarget) (x dueBead, wait bool, _ error) {
-	sha, err := newestByTrailer(lg.repo, branch, git.TrailerFor(string(b.Kind), b.ID))
-	if err != nil {
-		return x, false, err
+	if strings.HasPrefix(b.CloseReason, bd.ContainerLandedReason) { // its container landed: due at once, whatever the head
+		x = dueBead{b: b}
+		sigs, err := signalsFrom(b.ID)
+		if err != nil {
+			return x, false, err
+		}
+		carried := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(b.CloseReason, bd.ContainerLandedReason), "; carried by"))
+		for _, s := range sigs { // the stranded-commits Signal the close reason names, not an offshoot filed meanwhile
+			if s.ID == carried {
+				x.signal = s.Title
+				break
+			}
+		}
+		return x, false, nil
+	}
+	if sw, ok := bd.ParseSweptReason(b.CloseReason); ok { // swept: due at once, no sha, whatever the head reaches
+		return dueBead{b: b, swept: &sw}, false, nil
+	}
+	var sha string
+	if !target.final || hasBranch(lg.repo, branch) { // a swept branch may be gone: closed with no fix
+		var err error
+		if sha, err = newestByTrailer(lg.repo, branch, git.TrailerFor(string(b.Kind), b.ID)); err != nil {
+			return x, false, err
+		}
 	}
 	x = dueBead{b: b, sha8: sha[:min(8, len(sha))]}
+	if target.final { // nothing more will be pushed: due at once
+		return x, false, nil
+	}
 	if sha == "" { // closed with no fix: due at its close
 		return x, false, nil
 	}
@@ -243,9 +291,36 @@ func closeOutDiscussion(cp bd.Bead, lg legs, mr *forge.MR, d forge.Discussion, f
 		if has[x.b.ID] {
 			continue
 		}
-		body := renderReply(x.b, gid, name, x.sha8)
+		var body string
 		if x.signal != "" {
 			body = renderStranded(x.b, gid, name, x.signal)
+		} else if x.swept != nil {
+			carriers, err := successorTitles(x.b, x.swept.Successor)
+			if err != nil {
+				res.fail(cp, x.b, d.ID, err)
+				return // no reply with a wrong carrier
+			}
+			v, why := sweptReply(*x.swept, len(carriers) > 0)
+			if v != verdictDeferred {
+				carriers = nil
+			}
+			body = renderReply(x.b, gid, name, v, "", why, carriers)
+		} else {
+			v, why := closeVerdict(x.b, x.sha8)
+			if why == "" && x.sha8 != "" {
+				if subj, err := commitSubj(lg.repo, x.sha8); err == nil {
+					why = subj
+				}
+			}
+			var carriers []string
+			if v == verdictDeferred {
+				var err error
+				if carriers, err = carrierTitles(x.b); err != nil {
+					res.fail(cp, x.b, d.ID, err)
+					return // no reply with a wrong carrier
+				}
+			}
+			body = renderReply(x.b, gid, name, v, x.sha8, why, carriers)
 		}
 		if err := forgeReply(lg.proj, mr.IID, d.ID, body); err != nil {
 			res.fail(cp, x.b, d.ID, err)
@@ -286,6 +361,52 @@ func closeOutDiscussion(cp bd.Bead, lg legs, mr *forge.MR, d forge.Discussion, f
 	}
 }
 
+// carrierTitles are the titles of what tracks the Deferred ask of b (ADR 0339 (a-close-out-reply-reads-its-verdict…)):
+// the pivot named by a pivoted: reason's first id, read at any status, else the Signals,
+// Specs and Charts discovered-from b, at any status. A pivot that resolves to nothing names none.
+func carrierTitles(b bd.Bead) ([]string, error) {
+	_, _, ids, _ := parseVerdict(b.CloseReason)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(b.CloseReason)), "pivoted:") {
+		id := strings.FieldsFunc(ids, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+		if len(id) == 0 {
+			return nil, nil
+		}
+		p, err := pivotByID(id[0])
+		if bd.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return []string{p.Title}, nil
+	}
+	sigs, err := carriersFrom(b.ID)
+	if err != nil {
+		return nil, err
+	}
+	titles := make([]string, len(sigs))
+	for i, s := range sigs {
+		titles[i] = s.Title
+	}
+	return titles, nil
+}
+
+// successorTitles is the title of the swept reason's successor when it is discovered-from
+// b at any status (Drafts included), else none: an unrelated Signal, Spec or Chart
+// discovered-from b is not what carries the ask (ADR 0344 (a-swept-critique-is-deferred-only…)).
+func successorTitles(b bd.Bead, successor string) ([]string, error) {
+	cs, err := carriersFrom(b.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cs {
+		if c.ID == successor {
+			return []string{c.Title}, nil
+		}
+	}
+	return nil, nil
+}
+
 // humanSince is whether a non-system note that carries no reply marker follows the last
 // reply any bead of fed has in notes.
 func humanSince(notes []forge.Note, fed []bd.Bead, gid string) bool {
@@ -305,10 +426,11 @@ func humanSince(notes []forge.Note, fed []bd.Bead, gid string) bool {
 	return false
 }
 
-// recordCloseOuts writes the container's close-out lines the TUI's d shows: how many
+// recordCloseOuts writes the close-out lines the TUI's d shows on b, the container or its
+// closed container's MR Watch: how many
 // closed beads await a push, and how many close-outs fail, with the first error. A line
 // with a zero count is dropped. A failed write only warns; the next pass rewrites it.
-func recordCloseOuts(cp bd.Bead, r closeOutResult) {
+func recordCloseOuts(b bd.Bead, r closeOutResult) {
 	due, fail := "", ""
 	if r.awaiting > 0 {
 		due = fmt.Sprintf("%s%d", closeOutsDuePrefix, r.awaiting)
@@ -317,7 +439,7 @@ func recordCloseOuts(cp bd.Bead, r closeOutResult) {
 		fail = fmt.Sprintf("%s%d: %s", closeOutsFailingPrefix, r.failing, oneLine(r.err.Error()))
 	}
 	have := func(prefix string) string {
-		v, _ := git.ParseLine(cp.Description, strings.TrimSpace(prefix))
+		v, _ := git.ParseLine(b.Description, strings.TrimSpace(prefix))
 		if v == "" {
 			return ""
 		}
@@ -326,7 +448,7 @@ func recordCloseOuts(cp bd.Bead, r closeOutResult) {
 	if have(closeOutsDuePrefix) == due && have(closeOutsFailingPrefix) == fail {
 		return
 	}
-	writeMarker(cp, func(body string) string {
+	writeMarker(b, func(body string) string {
 		for _, l := range [][2]string{{closeOutsDuePrefix, due}, {closeOutsFailingPrefix, fail}} {
 			if l[1] == "" {
 				body = bd.RemoveBodyLine(body, l[0])

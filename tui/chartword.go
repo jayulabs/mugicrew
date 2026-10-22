@@ -46,12 +46,12 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 					surveyL = &g.beads[i]
 				}
 				continue
-			case isHITL(b.Kind) && !b.Container && (inSession || len(bl) == 0):
+			case isHITL(&b) && !b.Container && (inSession || len(bl) == 0):
 				// "your turn" outranks a working session as the driver
 				if hitlL == nil || g.sessions[hitlL.ID].State == session.Alive && humanWait(g.sessions[hitlL.ID], false) == "" {
 					hitlL = &g.beads[i]
 				}
-			case !isHITL(b.Kind) && (g.liveOf(&g.beads[i]) == alive || len(bl) == 0):
+			case !isHITL(&b) && (g.liveOf(&g.beads[i]) == alive || len(bl) == 0):
 				if afkL == nil || g.liveOf(&g.beads[i]) == alive {
 					afkL = &g.beads[i]
 				}

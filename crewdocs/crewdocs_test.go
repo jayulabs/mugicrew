@@ -202,7 +202,7 @@ func TestTaskBodyFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{"## Steps", "Do:", "Check:", "[secret]", "[elevated]", "[irreversible]", "a Do with no command", "`Ask:` replaces `Check:` only when nothing is probeable", "safe to re-run", "never carries `after:` or `before:`"} {
+	for _, want := range []string{"## Steps", "Do:", "Check:", "[secret]", "[elevated]", "[irreversible]", "a Do with no command", "`Ask:` replaces `Check:` only when nothing is probeable", "safe to re-run", "never carries `after:` or `before:`", "`Initiative:` line", "written by `mugicrew task new`, not the author"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("task-body.md missing %q", want)
 		}

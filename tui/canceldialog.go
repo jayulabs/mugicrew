@@ -46,6 +46,7 @@ type cancelChain struct {
 	head   bd.Bead
 	ids    map[string]bool
 	locked string
+	task   bool // a member Task: withdrawn when closed, never locked (ADR 0349)
 }
 
 // cancelState is the dialog's choices: one release flag per chain, every one starting
@@ -73,7 +74,7 @@ func (m Model) cancelDialog(id string, p withdraw.Plan, barred bool, warn string
 	}
 	chains := slices.Clone(p.Chains)
 	slices.SortStableFunc(chains, func(a, b withdraw.Chain) int { return beadCmp(a.Head, b.Head) })
-	cs := &cancelState{release: make([]bool, len(chains))}
+	cs := &cancelState{release: make([]bool, len(chains)+len(p.Tasks))}
 	for i, ch := range chains {
 		c := cancelChain{head: ch.Head, ids: map[string]bool{}}
 		for _, id := range ch.Beads {
@@ -86,6 +87,12 @@ func (m Model) cancelDialog(id string, p withdraw.Plan, barred bool, warn string
 		}
 		cs.release[i] = slices.Contains(p.Released, ch.Head.ID)
 		cs.chains = append(cs.chains, c)
+	}
+	tasks := slices.Clone(p.Tasks)
+	slices.SortStableFunc(tasks, beadCmp)
+	for _, t := range tasks {
+		cs.release[len(cs.chains)] = slices.Contains(p.Released, t.ID)
+		cs.chains = append(cs.chains, cancelChain{head: t, ids: map[string]bool{t.ID: true}, task: true})
 	}
 	return dialog{kind: xdialog, title: "Cancel " + title + "?", id: id, xs: xState{plan: p, barred: barred, warn: warn, cancel: cs}}
 }
@@ -155,12 +162,33 @@ func chainTags(inv withdraw.Inventory, c cancelChain) (t xTags) {
 
 func chainsNoun(n int) string { return pluralN(n, "chain") }
 
+func tasksNoun(n int) string { return pluralN(n, "Task") }
+
+// counts is how many chains and Tasks the cancel closes and releases.
+func (cs *cancelState) counts() (closeChains, relChains, closeTasks, relTasks int) {
+	for i, c := range cs.chains {
+		switch {
+		case c.task && cs.release[i]:
+			relTasks++
+		case c.task:
+			closeTasks++
+		case cs.release[i]:
+			relChains++
+		default:
+			closeChains++
+		}
+	}
+	return
+}
+
 // cancelTally is the lines above the rows, recomputed on every toggle.
 func (cs *cancelState) tally(p withdraw.Plan) []string {
 	closing := cs.closing(p)
-	rel := len(cs.released())
-	nClose := len(cs.chains) - rel
+	nClose, rel, tClose, tRel := cs.counts()
 	line := fmt.Sprintf("Closes %s (%s) · releases %s.", chainsNoun(nClose), pluralN(len(closing), "bead"), chainsNoun(rel))
+	if tClose+tRel > 0 {
+		line += fmt.Sprintf(" Withdraws %s · releases %s.", tasksNoun(tClose), tasksNoun(tRel))
+	}
 	return []string{line, xSummary(closingInventory(p.Inventory, closing), closing)}
 }
 
@@ -381,23 +409,38 @@ func (m Model) cancelRows(d dialog, inner, budget int) []string {
 // the total discarded.
 func (m Model) cancelReview(d dialog, inner int) []string {
 	p, cs := d.xs.plan, d.xs.cancel
-	var closes, releases []string
+	var closes, releases, withdraws, taskReleases []string
 	for i, c := range cs.chains {
 		line := "  " + kindTag(&c.head) + " " + c.head.Title
 		if cs.release[i] {
-			releases = append(releases, ansi.Truncate(line, inner, "…"))
+			l := ansi.Truncate(line, inner, "…")
+			if c.task {
+				taskReleases = append(taskReleases, l)
+			} else {
+				releases = append(releases, l)
+			}
 			continue
 		}
 		s := ""
 		if t := chainTags(p.Inventory, c); !t.none() {
 			s = t.String(inner >= xCompact)
 		}
-		closes = append(closes, withTags(line, s, inner))
+		if c.task {
+			withdraws = append(withdraws, withTags(line, s, inner))
+		} else {
+			closes = append(closes, withTags(line, s, inner))
+		}
 	}
 	out := []string{fmt.Sprintf("Closes %s:", chainsNoun(len(closes)))}
 	out = append(out, closes...)
 	out = append(out, "", fmt.Sprintf("Releases %s:", chainsNoun(len(releases))))
 	out = append(out, releases...)
+	if len(withdraws)+len(taskReleases) > 0 {
+		out = append(out, "", fmt.Sprintf("Withdraws %s:", tasksNoun(len(withdraws))))
+		out = append(out, withdraws...)
+		out = append(out, "", fmt.Sprintf("Releases %s:", tasksNoun(len(taskReleases))))
+		out = append(out, taskReleases...)
+	}
 	closing := cs.closing(p)
 	out = append(out, "")
 	out = append(out, wrapLines(xSummary(closingInventory(p.Inventory, closing), closing), inner)...)

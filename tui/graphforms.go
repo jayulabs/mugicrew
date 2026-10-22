@@ -206,8 +206,8 @@ func (m Model) graphKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	}
 	switch open.Keys()[0] {
 	case "A":
-		if m.initiatives.Required {
-			m.setStatus(bd.ReleaseRequiredWhy(b.ID))
+		if why := bd.ReleaseRequiredWhy(*b); m.initiatives.Required && why != "" {
+			m.setStatus(why)
 			return m, nil, true
 		}
 		id, from := b.ID, b.Parent

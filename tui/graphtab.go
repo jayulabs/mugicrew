@@ -64,7 +64,7 @@ func (g graphData) launchWhy(b *bd.Bead) string {
 		return b.ID + " is closed — nothing to launch or run"
 	case strandable(b): // a stranded claim's worktree may be live: never launch afresh
 		return claimLine(b)
-	case (b.Container && b.Kind != contract.KindInitiative) || !isHITL(b.Kind): // an open Initiative head launches Luffy's cut session
+	case (b.Container && b.Kind != contract.KindInitiative) || !isHITL(b): // an open Initiative head launches Luffy's cut session
 		return "b is HITL-only — enter runs it"
 	}
 	return ""
@@ -82,7 +82,7 @@ func claimLine(b *bd.Bead) string {
 // strandable is whether b is an in_progress HITL bead whose claim may be stranded: not
 // one of the restsClaimed kinds, which keep their at-rest handling (D6).
 func strandable(b *bd.Bead) bool {
-	return b.Status == "in_progress" && isHITL(b.Kind) && !restsClaimed(b.Kind)
+	return b.Status == "in_progress" && isHITL(b) && !restsClaimed(b.Kind)
 }
 
 // restsClaimed is whether an idle in_progress bead of kind k is at rest, not
@@ -94,7 +94,7 @@ func restsClaimed(k contract.Kind) bool {
 // launches is whether enter launches or attaches b, else it runs b: a session, or an
 // open HITL leaf or Initiative head.
 func (g graphData) launches(b *bd.Bead) bool {
-	return g.sessions[b.ID].Has() || (isHITL(b.Kind) && (!b.Container || b.Kind == contract.KindInitiative))
+	return g.sessions[b.ID].Has() || (isHITL(b) && (!b.Container || b.Kind == contract.KindInitiative))
 }
 
 // enterVerb is what enter does to b: resume, attach, launch or the run-now label; ""
@@ -129,7 +129,7 @@ func (g graphData) xLabel(b *bd.Bead) string {
 		return "drop" // a session always wins x
 	case g.liveOf(b) == alive:
 		return "abort"
-	case g.liveOf(b) == dead, isHITL(b.Kind) && !bd.ClaimedElsewhere(b.Assignee) && (!b.Container || b.Kind == contract.KindInitiative) && b.Status == "in_progress" && !g.sessions[b.ID].Has():
+	case g.liveOf(b) == dead, isHITL(b) && !bd.ClaimedElsewhere(b.Assignee) && (!b.Container || b.Kind == contract.KindInitiative) && b.Status == "in_progress" && !g.sessions[b.ID].Has():
 		return "recover"
 	}
 	return ""
@@ -245,7 +245,7 @@ func (g graphTab) update(k tea.KeyMsg) (component, tea.Cmd) {
 	i := indexRow(rows, g.sel)
 	switch {
 	case key.Matches(k, keyMove):
-		g.want = "" // any move cancels the cursor memory (ADR 0232 §6)
+		g.want, g.landMoved = "", true // any move cancels the cursor memory (ADR 0232 §6)
 		if len(rows) == 0 {
 			return g, nil
 		}

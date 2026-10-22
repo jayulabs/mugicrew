@@ -369,3 +369,19 @@ func readLandStrategy(path string) (string, cfglayer.State) {
 	}
 	return *cfg.LandStrategy, cfglayer.Set
 }
+
+// ReadAutoApprove is the shared [approvals] settings read, a var so tests fake it.
+// An unresolved repo reads off, as the Initiatives read does. The TUI refresh and
+// the one-shot verbs share it, so they agree with the loop.
+var ReadAutoApprove = func() cfglayer.Approvals {
+	root, err := git.RepoRoot()
+	if err != nil {
+		return cfglayer.Approvals{}
+	}
+	return cfglayer.AutoApproveSetting(root)
+}
+
+// StampAutoApprove stamps the registry's auto-approve snapshot from the shared
+// setting, at the start of a one-shot verb or TUI refresh that reaches a mode
+// predicate (Spec D4).
+func StampAutoApprove() { registry.SetAutoApprove(ReadAutoApprove().AutoApprove) }

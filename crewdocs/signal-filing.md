@@ -1,4 +1,4 @@
-<!-- hand-kept · Spec mc-0eot: one place for how a crewmate files a raised Signal -->
+<!-- hand-kept · Spec mc-0eot: one place for how a crewmate files a raised Signal; Carry per ADR 0085 (mugicrew-blocking-edges-carry-forward-on-succession) -->
 
 # Signal filing
 
@@ -35,6 +35,20 @@ Some filings are human-only. A crewmate never files a Rollback, never runs
 mugicrew rebase or rebases a container by hand, never files a Surgery, and
 never files a Task mid-work. Each one is suggested by an offshoot Signal
 instead, and the human decides.
+
+## Ordering on an earlier stage
+
+To make work wait for a Checkpoint that doesn't exist yet, block it on whichever
+bead of that spine is open now: its Signal, Chart or Spec, or the Checkpoint
+once it exists. When a stage closes in succession (the next bead on the spine
+takes its place), Carry adds the same blocking edge to each successor, so the
+dependent waits for the Checkpoint to **land**, not just for the stage to close.
+Only the edges a stage orders (the beads it blocks) are carried, not the
+stage's own blockers.
+
+This covers orders you propose or record other than with the offshoot verb,
+which still orders an offshoot. In a HITL chat, suggest blocking on the Signal
+or Chart; don't wait until the Checkpoint exists.
 
 ## Initiative member form
 

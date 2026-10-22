@@ -1313,9 +1313,8 @@ func fetchFF(remote string) (string, error) { return Repo("").fetchFF(remote) }
 
 func (r Repo) fetchFF(remote string) (string, error) {
 	main := r.mainline()
-	// an explicit tracking ref, not FETCH_HEAD, which a concurrent fetch in this repo overwrites
-	tracking := "refs/remotes/" + remote + "/" + main
-	if _, err := r.runForge(remote, "fetch", "--quiet", remote, "+refs/heads/"+main+":"+tracking); err != nil {
+	tracking, err := r.FetchTracking(remote)
+	if err != nil {
 		return "", err
 	}
 	forge, err := r.run("rev-parse", tracking+"^{commit}")
@@ -1679,6 +1678,14 @@ func preflightProject(r Repo, proj forge.Project) error {
 	if err := checkForgeProject(proj); err != nil {
 		return err
 	}
+	return r.foreignScan(r.mainline())
+}
+
+// ForeignScan reports, over ref (a mainline), the first commit whose trailer carries our
+// issue_prefix and another graph's Graph: as a *ForeignLanding, nil when there is none.
+func (r Repo) ForeignScan(ref string) error { return r.foreignScan(ref) }
+
+func (r Repo) foreignScan(ref string) error {
 	prefix, err := readIssuePrefix()
 	if err != nil {
 		return err
@@ -1688,7 +1695,7 @@ func preflightProject(r Repo, proj forge.Project) error {
 		return err
 	}
 	// no --first-parent: a squash under the merge method is a merge's second parent.
-	out, err := r.run("log", r.mainline(), "--extended-regexp", "--grep=^("+strings.Join(ownKinds, "|")+"): "+regexp.QuoteMeta(prefix)+"-", "--format=%H%x00%B%x1e")
+	out, err := r.run("log", ref, "--extended-regexp", "--grep=^("+strings.Join(ownKinds, "|")+"): "+regexp.QuoteMeta(prefix)+"-", "--format=%H%x00%B%x1e")
 	if err != nil {
 		return err
 	}
@@ -3007,12 +3014,18 @@ func (r Repo) CutBranch(name, base string) (created bool, err error) {
 // ErrNotLanded, never a fallback to the Workspace's main. Under gitlab a match must
 // also carry our Graph: (or none, a legacy land), else *ForeignLanding (ADR 0187).
 func (r Repo) LandedBase(trailer string) (string, error) {
+	return r.LandedBaseOn(r.mainline(), trailer)
+}
+
+// LandedBaseOn is LandedBase over ref instead of the child's local mainline, for a
+// read-only probe of a freshly fetched remote-tracking ref.
+func (r Repo) LandedBaseOn(ref, trailer string) (string, error) {
 	name, err := LandStrategyName()
 	if err != nil {
 		return "", err
 	}
 	if name != LandStrategyGitlab {
-		sha, err := r.run(trailerLogArgs(r.mainline(), trailer)...)
+		sha, err := r.run(trailerLogArgs(ref, trailer)...)
 		if err != nil {
 			return "", err
 		}
@@ -3022,7 +3035,7 @@ func (r Repo) LandedBase(trailer string) (string, error) {
 		return sha, nil
 	}
 	// no -n 1 and no --first-parent: a squash under the merge method is a merge's second parent.
-	out, err := r.run("log", r.mainline(), "--extended-regexp", "--grep="+trailerRegex(trailer), "--format=%H")
+	out, err := r.run("log", ref, "--extended-regexp", "--grep="+trailerRegex(trailer), "--format=%H")
 	if err != nil {
 		return "", err
 	}
@@ -3072,6 +3085,11 @@ func (r Repo) IsAncestor(a, b string) bool {
 func (r Repo) HasCommit(sha string) bool {
 	_, err := r.run("cat-file", "-e", sha+"^{commit}")
 	return err == nil
+}
+
+// CommitSubject is the subject line of commit sha.
+func (r Repo) CommitSubject(sha string) (string, error) {
+	return r.run("log", "-1", "--format=%s", sha)
 }
 
 // FetchCommit fetches sha from the child's Forge remote, so a pushed head some other
@@ -3362,6 +3380,27 @@ type PostLandClash struct {
 func PostLandClashes(landed string) ([]PostLandClash, error) { return Repo("").PostLandClashes(landed) }
 
 func (r Repo) PostLandClashes(landed string) ([]PostLandClash, error) {
+	return r.PostLandClashesAt(landed, "")
+}
+
+// PostLandClashesAt is PostLandClashes for a landed commit that may be an empty
+// trailer commit, a human's stamp of the trailer a merged MR dropped: when merge is
+// non-empty and landed's tree equals its first parent's, the MR's merge stands in for
+// landed, both as the diffed range (merge^1..merge) and as the point that orders this
+// container against the files in its slot. A non-empty landed, or no merge, reads
+// landed itself. Read-only; no bd.
+func PostLandClashesAt(landed, merge string) ([]PostLandClash, error) {
+	return Repo("").PostLandClashesAt(landed, merge)
+}
+
+func (r Repo) PostLandClashesAt(landed, merge string) ([]PostLandClash, error) {
+	if merge != "" {
+		if empty, err := r.IsEmptyCommit(landed); err != nil {
+			return nil, err
+		} else if empty {
+			landed = merge
+		}
+	}
 	tip, err := r.run("rev-parse", r.mainline())
 	if err != nil {
 		return nil, err
@@ -3411,6 +3450,23 @@ func (r Repo) PostLandClashes(landed string) ([]PostLandClash, error) {
 	}
 	return out, nil
 }
+
+// IsEmptyCommit is the package IsEmptyCommit in the child.
+func (r Repo) IsEmptyCommit(sha string) (bool, error) {
+	tree, err := r.run("rev-parse", sha+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	parent, err := r.run("rev-parse", sha+"^1^{tree}")
+	if err != nil {
+		return false, err
+	}
+	return tree == parent, nil
+}
+
+// IsEmptyCommit is whether sha's tree equals its first parent's: a commit that
+// changes no file, such as a land trailer stamped by hand.
+func IsEmptyCommit(sha string) (bool, error) { return Repo("").IsEmptyCommit(sha) }
 
 // landedBy is the container id of the "Chart:"/"Checkpoint:" land trailer on c, or on
 // c^1..c when c is a merge (the trailer rides the squash, not the merge); "" when none.

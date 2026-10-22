@@ -3,6 +3,7 @@ package git
 import (
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -200,4 +201,83 @@ func TestPostLandClashesSkipsAddedPathAbsentFromTip(t *testing.T) {
 	mustGit(t, "mv", adrY, "docs/adr/0003-y.md")
 	mustGit(t, "commit", "-m", "renumber y")
 	wantMoved(t, y)
+}
+
+// A land MR merged without its trailer is stamped by an empty commit on the Forge's
+// main; the clash its merge brought in is read from the merge, not the empty stamp.
+func TestPostLandClashesAtReadsTheMergeBehindAnEmptyStamp(t *testing.T) {
+	// earlier ADR 2, then an MR merge adding another ADR 2, then the empty stamp
+	stamped := func(t *testing.T) (x, merge, stamp string) {
+		newRepo(t)
+		addADR(t, "0001-base.md")
+		mustGit(t, "checkout", "-b", "by")
+		addADR(t, "0002-y.md")
+		mustGit(t, "checkout", "main")
+		addADR(t, "0002-x.md")
+		x = head(t)
+		mustGit(t, "merge", "--no-ff", "-m", "merge by", "by")
+		merge = head(t)
+		mustGit(t, "commit", "--allow-empty", "-m", "stamp\n\n"+TrailerFor("checkpoint", "mc-y"))
+		return x, merge, head(t)
+	}
+	movedAt := func(t *testing.T, landed, merge string) []string {
+		t.Helper()
+		cs, err := PostLandClashesAt(landed, merge)
+		if err != nil {
+			t.Fatalf("PostLandClashesAt: %v", err)
+		}
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.Added+" vs "+c.Others[0])
+		}
+		return out
+	}
+	t.Run("with the merge sha the clash is reported", func(t *testing.T) {
+		_, merge, stamp := stamped(t)
+		if got, want := movedAt(t, stamp, merge), []string{adrY + " vs " + adrX}; !reflect.DeepEqual(got, want) {
+			t.Errorf("clashes = %v, want %v", got, want)
+		}
+	})
+	t.Run("without it nothing is reported", func(t *testing.T) {
+		_, _, stamp := stamped(t)
+		wantMoved(t, stamp)
+		if got := movedAt(t, stamp, ""); len(got) != 0 {
+			t.Errorf("clashes = %v, want none", got)
+		}
+	})
+	t.Run("a non-empty stamp is diffed as itself even with a merge sha", func(t *testing.T) {
+		_, merge, _ := stamped(t)
+		addADR(t, "0003-z.md")
+		if got := movedAt(t, head(t), merge); len(got) != 0 {
+			t.Errorf("clashes = %v, want none (stamp adds no clash)", got)
+		}
+	})
+	t.Run("an ADR landed between the merge and the stamp is the later side, not an earlier one", func(t *testing.T) {
+		newRepo(t)
+		addADR(t, "0001-base.md")
+		mustGit(t, "checkout", "-b", "by")
+		addADR(t, "0002-y.md")
+		mustGit(t, "checkout", "main")
+		mustGit(t, "merge", "--no-ff", "-m", "merge by", "by")
+		merge := head(t)
+		addADR(t, "0002-w.md") // lands after the merge, before the stamp
+		mustGit(t, "commit", "--allow-empty", "-m", "stamp\n\n"+TrailerFor("checkpoint", "mc-y"))
+		for _, o := range movedAt(t, head(t), merge) {
+			if strings.Contains(o, "0002-w.md") {
+				t.Errorf("clash %q names the later-landed file as earlier", o)
+			}
+		}
+	})
+}
+
+func TestIsEmptyCommit(t *testing.T) {
+	newRepo(t)
+	addADR(t, "0001-base.md")
+	if empty, err := IsEmptyCommit(head(t)); err != nil || empty {
+		t.Errorf("file commit: empty = %v, %v", empty, err)
+	}
+	mustGit(t, "commit", "--allow-empty", "-m", "stamp")
+	if empty, err := IsEmptyCommit(head(t)); err != nil || !empty {
+		t.Errorf("stamp commit: empty = %v, %v", empty, err)
+	}
 }

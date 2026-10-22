@@ -13,6 +13,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
+	"jayulabs.org/mugicrew/registry"
 )
 
 // stubHarness records the Invocation the Launch path composes so we can assert
@@ -78,7 +79,7 @@ func TestLaunchApprovalComposesSession(t *testing.T) {
 // Spec FR10: the description Luffy writes keeps the Commit: pin line verbatim
 // and first, then a blank line, then the Decision Packet, in one bd update.
 func TestApprovalPromptWritesPinFirstThenPacket(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil)
+	p := approvalPrompt("ws-appr", false, nil, false)
 	for _, want := range []string{"bd update ws-appr --body-file <body-file>", "Commit: <sha>", "verbatim", "blank line", "Decision Packet"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("approval prompt missing %q", want)
@@ -92,7 +93,7 @@ func TestApprovalPromptWritesPinFirstThenPacket(t *testing.T) {
 // Spec mc-dbxb FR1, FR7, FR9, FR10: the approval prompt shows the packet in a
 // sibling doc pane and degrades to inline-only.
 func TestApprovalPromptShowsPacketInGlowPane(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil)
+	p := approvalPrompt("ws-appr", false, nil, false)
 	if strings.Contains(p, "%!") || strings.Contains(p, "--description") {
 		t.Errorf("approval prompt has a format artifact or the inline --description:\n%s", p)
 	}
@@ -144,11 +145,155 @@ func TestLaunchNonApprovalIsLoudError(t *testing.T) {
 	}
 }
 
-// approval is HITL, so the loop must never dispatch it: Run is a loud error, not
-// loop work (FR33), mirroring Sanji's loud Run default.
-func TestRunIsLoudHITLError(t *testing.T) {
-	if err := (Luffy{}).Run(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-appr", Kind: contract.KindApproval}); err == nil {
-		t.Fatal("Run of a HITL kind must return a loud error, got nil")
+// Any kind but a Signal or an Approval is no Run kind: a loud error.
+func TestRunOtherKindIsLoudError(t *testing.T) {
+	if err := (Luffy{}).Run(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err == nil {
+		t.Fatal("Run of an unowned kind must return a loud error, got nil")
+	}
+}
+
+const (
+	afkPin  = "0123abc"
+	afkLine = "auto-approved (AFK, Workspace auto-approve on)"
+)
+
+// afkPacket is a written Decision Packet: the pin first, then the sections.
+func afkPacket(pin, history string) string {
+	return git.CommitPin(pin) + "\n\n## Summary\nbody\n\n### Approval History\nFirst Approval.\n" + history + "\n"
+}
+
+// afkRun is the fake bd and harness an Approval Run drives: the Approval starts
+// open with only its pin; the session "writes" body, returns out and fails with err.
+type afkRun struct {
+	body   string // the Approval description after the session
+	out    string
+	err    error
+	closed bool // the Approval is closed before Run
+	runs   []contract.Invocation
+	closes []string // CloseOnPublish id+" "+reason
+}
+
+func stubAFK(t *testing.T, r *afkRun) {
+	t.Helper()
+	stubGraph(t, "ws-spec", nil)
+	swap(t, &show, func(id string) (bd.Bead, error) {
+		b := bd.Bead{ID: id, Kind: contract.KindApproval, Parent: "ws-cp", Status: "open", Description: git.CommitPin(afkPin)}
+		if r.closed {
+			b.Status = "closed"
+		}
+		if len(r.runs) > 0 {
+			b.Description = r.body
+		}
+		return b, nil
+	})
+	swap(t, &closeOnPublish, func(_ contract.Ctx, id, reason string, _ []bd.Edge) error {
+		r.closes = append(r.closes, id+" "+reason)
+		return nil
+	})
+}
+
+type afkHarness struct{ r *afkRun }
+
+func (h afkHarness) Run(_ contract.Ctx, inv contract.Invocation) (contract.Result, error) {
+	h.r.runs = append(h.r.runs, inv)
+	return contract.Result{Output: h.r.out}, h.r.err
+}
+func (afkHarness) LaunchCommand(contract.Invocation) (contract.LaunchCommand, error) { return nil, nil }
+func (afkHarness) ResumeCommand(string, bool) (contract.AgentCommand, error) {
+	return contract.AgentCommand{}, nil
+}
+
+func runAFK(r *afkRun) error {
+	stubCtxH := stubCtx{afkHarness{r}}
+	return (Luffy{}).Run(stubCtxH, contract.Bead{ID: "ws-appr", Kind: contract.KindApproval})
+}
+
+func TestRunApprovalAlreadyClosedDoesNothing(t *testing.T) {
+	r := &afkRun{closed: true}
+	stubAFK(t, r)
+	if err := runAFK(r); err != nil || len(r.runs) != 0 || len(r.closes) != 0 {
+		t.Errorf("closed Approval: err %v, runs %d, closes %v; want nothing", err, len(r.runs), r.closes)
+	}
+}
+
+func TestRunApprovalGoodSessionClosesApproved(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, afkLine), out: "writing\nApproved: ships the footer tint\n\n"}
+	stubAFK(t, r)
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.runs) != 1 || r.runs[0].BeadID != "ws-appr" || !strings.Contains(r.runs[0].Prompt, "--body-file") {
+		t.Errorf("want one AFK session anchored to the Approval, got %+v", r.runs)
+	}
+	if len(r.closes) != 1 || r.closes[0] != "ws-appr approved" {
+		t.Errorf("closes = %v, want [ws-appr approved]", r.closes)
+	}
+}
+
+func TestRunApprovalBadSessionErrorsWithoutClose(t *testing.T) {
+	good := afkPacket(afkPin, afkLine)
+	cases := map[string]afkRun{
+		"no outcome line":       {body: good, out: "all done"},
+		"empty output":          {body: good},
+		"outcome not last":      {body: good, out: "Approved: x\nthanks"},
+		"moved pin":             {body: afkPacket("deadbee", afkLine), out: "Approved: x"},
+		"pin not first":         {body: "intro\n" + good, out: "Approved: x"},
+		"packet unwritten":      {body: git.CommitPin(afkPin), out: "Approved: x"},
+		"no history line":       {body: afkPacket(afkPin, "nothing"), out: "Approved: x"},
+		"history line not last": {body: good + "### Next\nmore\n", out: "Approved: x"},
+		"harness error":         {body: good, out: "Approved: x", err: errors.New("boom")},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := c
+			stubAFK(t, &r)
+			if err := runAFK(&r); err == nil {
+				t.Error("want an error")
+			}
+			if len(r.closes) != 0 {
+				t.Errorf("closes = %v, want none", r.closes)
+			}
+		})
+	}
+}
+
+// The AFK prompt takes no claim, opens no pane, has no human gate, never reworks
+// or closes; it ends the History and the session on fixed lines.
+func TestApprovalPromptAFK(t *testing.T) {
+	p := approvalPromptAFK("ws-appr", true, nil)
+	for _, want := range []string{
+		"Commit:", "git diff main", "HEAD advanced since this was reviewed",
+		afkLine, "bd update ws-appr --body-file", "Approved: <one-line gist>",
+		contract.DraftInstruction("ws-appr"), "--order",
+	} {
+		if want == "git diff main" {
+			want = "git diff {{MAINLINE}}"
+		}
+		if !strings.Contains(p, want) {
+			t.Errorf("AFK prompt missing %q", want)
+		}
+	}
+	for _, bad := range []string{"--claim", "pane", "bd close", "rework", "explicit", "%!", "%["} {
+		if strings.Contains(p, bad) {
+			t.Errorf("AFK prompt has %q:\n%s", bad, p)
+		}
+	}
+	promptguard.Check(t, "approval-afk", p)
+}
+
+// The HITL prompt renders as it did before the core/tail split.
+func TestApprovalPromptHITLUnchanged(t *testing.T) {
+	for file, got := range map[string]string{
+		"testdata/approval_plain.txt":   approvalPrompt("ws-appr", false, nil, false),
+		"testdata/approval_surgery.txt": approvalPrompt("ws-appr", true, []bd.Bead{{ID: "s1", Title: "T"}}, false),
+	} {
+		want, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != string(want) {
+			t.Errorf("%s: HITL approval prompt changed", file)
+		}
 	}
 }
 
@@ -181,7 +326,7 @@ func TestRunCarriesContextToChart(t *testing.T) {
 // The prompt renders with the bead id and carries no stray % that fmt.Sprintf
 // would turn into %!(...) — guards a broken embed or a literal %.
 func TestPromptRenders(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil)
+	p := approvalPrompt("ws-appr", false, nil, false)
 	if !strings.Contains(p, "ws-appr") {
 		t.Errorf("approval prompt missing the bead id")
 	}
@@ -194,7 +339,7 @@ func TestPromptRenders(t *testing.T) {
 // citation, every crew-doc reference resolves, and none of the shared stance the
 // Crewmate preamble now carries is repeated.
 func TestApprovalPromptSkillFree(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil)
+	p := approvalPrompt("ws-appr", false, nil, false)
 	promptguard.Check(t, "approval", p)
 	for _, dup := range []string{"by their title", "bare id", "authorization, not authorship"} {
 		if strings.Contains(p, dup) {
@@ -403,7 +548,7 @@ func TestLaunchApprovalFocus(t *testing.T) {
 // Spec FR11, FR12: the Approval may raise an offshoot Signal through
 // the crew doc, and rework goes only through the verb.
 func TestApprovalPromptRaisesSignalThroughCrewDoc(t *testing.T) {
-	p := strings.Join(strings.Fields(approvalPrompt("ws-appr", false, nil)), " ")
+	p := strings.Join(strings.Fields(approvalPrompt("ws-appr", false, nil, false)), " ")
 	for _, want := range []string{"signal-filing.md", "discovered-from the Approval", "except raising an offshoot Signal on the human's yes", "mugicrew approval rework"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("approval prompt missing %q", want)
@@ -445,5 +590,43 @@ func TestRepoContextsNoReposNoGitCall(t *testing.T) {
 	swap(t, &git.RepoRoot, func() (string, error) { t.Error("git.RepoRoot called"); return "", nil })
 	if got := repoContexts(); got != nil {
 		t.Fatalf("repoContexts() = %v, want nil", got)
+	}
+}
+
+// Spec D9 / ADR 0341: a HITL Approval that fell back from AFK auto-approve tells
+// Luffy to record it in Approval History; an unmarked one is unchanged.
+func TestLaunchApprovalCarriesFallbackLineOnlyWhenMarked(t *testing.T) {
+	const line = "auto-approve failed (AFK, 3 attempts); resolved HITL"
+	launch := func(labels ...string) string {
+		stubGraph(t, "", nil)
+		inner := show
+		show = func(id string) (bd.Bead, error) {
+			b, err := inner(id)
+			b.Labels = labels
+			return b, err
+		}
+		h := &stubHarness{}
+		if _, err := (Luffy{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-appr", Kind: contract.KindApproval}); err != nil {
+			t.Fatalf("Launch: %v", err)
+		}
+		return h.inv.Prompt
+	}
+	if p := launch(registry.AutoApproveFailedLabel); !strings.Contains(p, line) {
+		t.Errorf("marked Approval prompt lacks %q", line)
+	}
+	if p := launch(); strings.Contains(p, line) || strings.Contains(p, "fell back") {
+		t.Errorf("unmarked Approval prompt carries the fallback line")
+	}
+}
+
+// The unattended prompt has no human to answer, and its core joins the tail with
+// a blank line.
+func TestApprovalPromptAFKHasNoHumanReferenceAndJoinsWithBlankLine(t *testing.T) {
+	p := approvalPromptAFK("ws-appr", true, nil)
+	if strings.Contains(p, "the human asks") {
+		t.Error("AFK prompt still tells the session to answer the human")
+	}
+	if !strings.Contains(p, "then the Decision Packet.\n\nKeep one body file") {
+		t.Errorf("AFK prompt core/tail join lacks a blank line:\n%s", p)
 	}
 }

@@ -168,7 +168,7 @@ func (m Model) settingsKey(k string) (_ tea.Model, _ tea.Cmd, ok bool) {
 	if m.setRow >= firstKindRow {
 		return m.kindEdit(k)
 	}
-	if m.setRow == initiativesRow { // read-only: the setting is shared, there is nothing to write locally
+	if m.setRow == initiativesRow || m.setRow == autoApproveRow { // read-only: the setting is shared, there is nothing to write locally
 		return m, nil, stepOf(k) != stepNone || k == "esc" || k == "enter"
 	}
 	if m.setRow == 1 {
@@ -275,8 +275,11 @@ type kindStage struct{ to, from string }
 // initiativesRow is the read-only Initiatives row; rows 0 and 1 are the pool and Auto-exit.
 const initiativesRow = 2
 
+// autoApproveRow is the read-only Auto-approve row, right after Initiatives.
+const autoApproveRow = 3
+
 // firstKindRow is the first Kind profiles row.
-const firstKindRow = 3
+const firstKindRow = 4
 
 // kindKeys are the [kind_profiles] keys, one per row from firstKindRow: default, then the kinds.
 func kindKeys() []string {
@@ -376,7 +379,7 @@ func (m Model) rowStaged() bool {
 		return m.staged != 0
 	case 1:
 		return m.exitStaged
-	case initiativesRow:
+	case initiativesRow, autoApproveRow:
 		return false
 	}
 	_, ok := m.kindStaged[kindRowKey(m.setRow)]
@@ -431,6 +434,10 @@ func (m Model) settingRows() []settingRow {
 		name:  "Initiatives",
 		value: initiativesText(m.initiatives),
 		gloss: "shared [initiatives] in .mugicrew/config.toml: edit the file to change it",
+	}, {
+		name:  "Auto-approve",
+		value: autoApproveText(m.approvals),
+		gloss: "shared [approvals] in .mugicrew/config.toml: edit the file to change it",
 	}}
 }
 
@@ -446,6 +453,17 @@ func initiativesText(i cfglayer.Initiatives) string {
 		return "off"
 	}
 	return fmt.Sprintf("required %s · external ref %s  (%s)", onOff(i.Required), onOff(i.ExternalRef), i.Path)
+}
+
+// autoApproveText is the Auto-approve row: on/off and the shared file it came from.
+func autoApproveText(a cfglayer.Approvals) string {
+	switch {
+	case a.Unusable:
+		return "unusable  (" + a.Path + ")"
+	case a.AutoApprove:
+		return "on  (" + a.Path + ")"
+	}
+	return "off  (" + a.Path + ")"
 }
 
 // sourceText is a row's source: local, config.toml or default, unusable → that
@@ -529,7 +547,7 @@ func (m Model) settingsTopIn(lines []string, sel span, top int) int {
 	if top > 0 && sel.lo <= top {
 		top = sel.lo - 1 // the ↑ marker's line
 	}
-	if m.setRow <= initiativesRow {
+	if m.setRow < firstKindRow {
 		top = 0
 	}
 	return max(min(top, len(lines)-h), 0)
@@ -608,6 +626,7 @@ type settingsState struct {
 	exit        loop.AutoExit
 	kinds       kindProfiles
 	initiatives cfglayer.Initiatives
+	approvals   cfglayer.Approvals
 	inflight    int
 	staged      int // the pool row's staged value; 0 = nothing staged
 	stagedFrom  int // the pool in force when staging began
@@ -615,6 +634,6 @@ type settingsState struct {
 	stagedExit  time.Duration
 	exitFrom    time.Duration
 	kindStaged  map[string]kindStage
-	setRow      int // 0 pool, 1 Auto-exit, 2 Initiatives, then the kinds from firstKindRow
+	setRow      int // 0 pool, 1 Auto-exit, 2 Initiatives, 3 Auto-approve, then the kinds from firstKindRow
 	setTop      int // the pane's first line, moved by the cursor and resize (ADR 0136)
 }

@@ -216,7 +216,7 @@ func (f focus) execSection(g graphData) (s fSection) {
 		}
 		open, closed := g.cpKids(cp)
 		for _, m := range open {
-			s.rows = append(s.rows, fRow{kind: fBead, key: m.ID, sec: secExec, b: m, cp: cp, rel: "member", leaf: isHITL(m.Kind) && !m.Container, depth: 2})
+			s.rows = append(s.rows, fRow{kind: fBead, key: m.ID, sec: secExec, b: m, cp: cp, rel: "member", leaf: isHITL(m) && !m.Container, depth: 2})
 		}
 		rs := f.foldRows(secExec, 2, cp.ID, closed)
 		for i := range rs {
@@ -241,7 +241,7 @@ func (f focus) execSection(g graphData) (s fSection) {
 			}
 			seen[w.ID] = true
 			if g.initiativeOf(w, cp) == f.id {
-				sides = append(sides, fRow{kind: fBead, key: "side:" + w.ID, sec: secExec, b: w, cp: cp, rel: rels[i], leaf: isHITL(w.Kind) && !w.Container, side: true, depth: 1})
+				sides = append(sides, fRow{kind: fBead, key: "side:" + w.ID, sec: secExec, b: w, cp: cp, rel: rels[i], leaf: isHITL(w) && !w.Container, side: true, depth: 1})
 			}
 		}
 	}

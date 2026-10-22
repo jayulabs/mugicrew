@@ -1,6 +1,7 @@
 # ADR 0310: mugicrew withdraw drops any unclosed chain, from the TUI's `X`, and cleans up its trees and branches
 
 Status: Proposed
+Amended by: ADR 0342 (mugicrew-withdraw-takes-a-task…) §1–§2.
 Date: 2026-10-19
 
 Chart mc-1k3gq (Withdraw or cancel any unclosed chain from the TUI, with

@@ -523,3 +523,19 @@ func TestInitsLine2AlignsAndClosedGap(t *testing.T) {
 	only := slices.DeleteFunc(initsFixture(), func(b bd.Bead) bool { return b.Status != "closed" || b.Kind != contract.KindInitiative })
 	gap(initsModel(t, only, nil))
 }
+
+// FR40: a member Task counts in the Initiative's line-2 rollup, and a member Task Draft
+// counts as a member but not as an open descendant.
+func TestInitStatsCountMemberTasks(t *testing.T) {
+	m := sized(t, 160, 40)
+	m.beads = []bd.Bead{
+		dbead("i", contract.KindInitiative, "open", "", 1),
+		dbead("t1", contract.KindTask, "open", "i", 1),
+		dbead("t2", contract.KindTask, "deferred", "i", 2),
+		dbead("t3", contract.KindTask, "closed", "i", 3),
+	}
+	st := m.initStatsOf()["i"]
+	if st.members != 3 || st.open != 1 {
+		t.Errorf("stats = %+v, want members 3, open 1", st)
+	}
+}

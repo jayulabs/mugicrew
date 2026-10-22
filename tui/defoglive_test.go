@@ -256,4 +256,7 @@ func TestDefogLiveStampedChart(t *testing.T) {
 			t.Errorf("header = %q", r.title)
 		}
 	}
+	if !slices.ContainsFunc(g.defogList(defogOpen(g)), func(r dRow) bool { return r.key == "land" }) { // the stamped Chart is listed: its Landing has a tree twin
+		t.Errorf("no tree row for the Landing")
+	}
 }

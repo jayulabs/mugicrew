@@ -750,33 +750,46 @@ func TestSlicingPromptDraftsBuildsBySpec(t *testing.T) {
 	}
 }
 
-// Spec D5 (FR 6–9, 13): the slicing prompt files each of the Spec's
-// Tasks as a free-standing Draft by the Spec (kind:task, no --parent), carries
-// the three edge recipes, and rolls forward over the Spec's existing Tasks.
+// Spec decision C (FR14–FR17): the slicing prompt files each of the Spec's Tasks
+// through mugicrew task new, maps the ordering lines to its flags, and rolls
+// forward over the Spec's existing Tasks.
 func TestSlicingPromptFilesSpecTasks(t *testing.T) {
-	p := slicingPrompt("mc-x")
+	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
 	for _, want := range []string{
 		"## Tasks",
 		"crew doc task-body.md",
 		"bd dep list mc-x --direction=up -t discovered-from --json", // roll forward by edge
 		"kind:task",
-		"--deps discovered-from:mc-x",
+		"mugicrew task new --drafted-by mc-x",
+		"`after: land` → `--after <checkpointID>`",
+		"`before: land` → `--before <checkpointID>`",
+		"`after: <T>` → `--after <T>`",
 		"every `before: land` line is skipped",
-		"-l kind:task," + contract.DraftedBy("mc-x") + " --no-inherit-labels",
-		"bd dep add <task> <checkpointID>", // after: land
-		"bd dep add <checkpointID> <task>", // before: land
-		"bd dep add <task> <T>",            // after: <T>
+		"an entry left with no flags is filed `--after <checkpointID>`",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("slicing prompt missing %q", want)
 		}
 	}
-	if strings.Contains(p, "bd list --all -l kind:task") {
-		t.Error("the drafted-by list query is replaced by the discovered-from edge")
+	filing := p[:strings.Index(p, "### Adopted entries")] // adopted entries keep the edge-only path
+	for _, bad := range []string{"bd list --all -l kind:task", "NO `--parent`", "free-standing", "bd dep add <task>", "bd dep add <checkpointID> <task>", "-l kind:task,"} {
+		if strings.Contains(filing, bad) {
+			t.Errorf("slicing prompt still carries %q", bad)
+		}
 	}
-	for _, line := range strings.Split(p, "\n") {
-		if strings.Contains(line, "kind:task,") && strings.Contains(line, "--parent") {
-			t.Errorf("a Task is filed with no --parent: %q", line)
+}
+
+// Each --after <T> needs T's id when the later Task is filed, so the slicing
+// prompt files Tasks in dependency order and says where <T> comes from.
+func TestSlicingPromptFilesTasksInDependencyOrder(t *testing.T) {
+	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
+	for _, want := range []string{
+		"File each Task after every Task its `after:` lines name, whatever order the `## Tasks` section lists them in",
+		"`<T>` is the id on the first stdout line of that Task's own `mugicrew task new`, or an adopted entry's id",
+		"an adopted entry's `after: <filed T>` edge is added only after T is filed",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("slicing prompt missing %q", want)
 		}
 	}
 }
@@ -794,6 +807,8 @@ func TestSlicingPromptAdoptsTaskByID(t *testing.T) {
 		"fail the slice loudly",
 		"added only if missing",
 		"adds no `discovered-from` edge",
+		"stays where it is",
+		"initiative adopt",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("slicing prompt missing adopted-entry rule %q", want)
@@ -896,6 +911,11 @@ func TestZoroPromptsSkillFree(t *testing.T) {
 	slicing := slicingPrompt("mc-x")
 	promptguard.Check(t, "pivot", pivot)
 	promptguard.Check(t, "slicing", slicing)
+	for name, text := range map[string]string{"pivot": pivot, "slicing": slicing} {
+		if v := promptguard.CommitRuleViolations(text); len(v) > 0 {
+			t.Errorf("%s prompt breaks the conventional-commit rule: %q", name, v)
+		}
+	}
 	refs := strings.Join(promptguard.CrewDocRefs(pivot), " ")
 	for _, want := range []string{"checkpoint-rules.md", "ADR-FORMAT.md"} {
 		if !strings.Contains(refs, want) {

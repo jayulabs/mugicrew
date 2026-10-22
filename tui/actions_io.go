@@ -124,6 +124,7 @@ const runTailLines = 12
 // and the claim, in that order. It returns the crewmate and the minted Inflight
 // once b is claimed, else a nil crewmate and the refusal or error status.
 func claimRunNow(ctx contract.Ctx, b bd.Bead, crews map[string]contract.Crewmate, force bool) (string, contract.Crewmate, dispatch.Inflight) {
+	loop.StampAutoApprove() // before each press: IsAFKLeaf and CountInflight read this moment's mode (Spec D4)
 	fail := func(err error) (string, contract.Crewmate, dispatch.Inflight) {
 		return "run-now: " + err.Error(), nil, dispatch.Inflight{}
 	}
@@ -326,7 +327,7 @@ func runNowHint(b bd.Bead, ready []bd.Bead, anc string, held []bd.Bead) string {
 		return pauseHint(b)
 	case anc != "":
 		return inheritedPauseHint(b.ID, anc)
-	case isHITL(b.Kind):
+	case isHITL(&b):
 		return b.ID + " is an open HITL bead — press enter to launch it (b in the background)"
 	case !inFrontier(b.ID, ready):
 		// Frontier first: a drained, defogged Chart that is merely blocked (not in

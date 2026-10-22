@@ -353,10 +353,15 @@ func TestNestedGitlabRollbackRevertsThroughTheChildsMR(t *testing.T) {
 	if _, err := child.Revert(squash, git.RevertsTrailer("checkpoint", "ws-cp")); err != nil {
 		t.Fatal(err)
 	}
+	r.mr = &forge.MR{IID: 9, State: forge.StateMerged, MergeCommitSHA: g(string(child), "rev-parse", "main")}
+	r.projects, r.mrReads = nil, 0
 	rb := r.rollback()
 	rb.Description = r.body
 	if err := reconcileRollback(rb); err != nil {
 		t.Fatal(err)
+	}
+	if r.mrReads == 0 || len(r.projects) == 0 || slices.ContainsFunc(r.projects, func(p forge.Project) bool { return p != childProject }) {
+		t.Errorf("MR read %d times in projects %v, want it read on the child's project", r.mrReads, r.projects)
 	}
 	if _, err := child.Head("checkpoint/ws-new"); err != nil {
 		t.Errorf("successor branch not cut in the child: %v", err)
@@ -399,8 +404,8 @@ func TestNestedGitlabRollbackRefusesAChildOnAnotherHost(t *testing.T) {
 
 // With an open !5 in both projects, closing a nested Rollback's MR closes only the child's.
 func TestNestedGitlabRollbackClosesOnlyTheChildsMR(t *testing.T) {
-	r, child, squash, _ := nestedGitlabRollback(t, "broke\nMR: ns/child!5\n")
-	r.mr = &forge.MR{IID: 5, State: forge.StateOpened}
+	r, child, squash, g := nestedGitlabRollback(t, "broke\nMR: ns/child!5\n")
+	r.mr = &forge.MR{IID: 5, State: forge.StateOpened, MergeCommitSHA: g(string(child), "rev-parse", "main")}
 	if _, err := child.Revert(squash, git.RevertsTrailer("checkpoint", "ws-cp")); err != nil {
 		t.Fatal(err)
 	}

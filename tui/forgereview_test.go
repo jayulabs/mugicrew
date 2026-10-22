@@ -125,6 +125,15 @@ func TestForgeReviewFieldsCloseOutsOnAContainer(t *testing.T) {
 	}
 }
 
+func TestForgeReviewFieldsCloseOutsOnAWatch(t *testing.T) {
+	b := bd.Bead{Kind: contract.KindMRWatch, Description: "MR: !7\nClose-outs due: 2\nClose-outs failing: 1: reply: boom\n"}
+	got := forgeReviewFields(&b)
+	want := [][2]string{{"close-outs", "2 due (await push) (1 failing: reply: boom)"}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("fields = %v, want %v", got, want)
+	}
+}
+
 func TestForgeReviewFieldsSourceLinesOnAFiledBead(t *testing.T) {
 	b := bd.Bead{Kind: contract.KindCritique, Description: "Source: !7 d1 11\n> quoted\n", Notes: "Source: !7 d2 12\nClosed out: d1"}
 	got := forgeReviewFields(&b)

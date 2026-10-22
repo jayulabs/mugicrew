@@ -328,3 +328,49 @@ func TestOrderedAfter(t *testing.T) {
 		t.Errorf("OrderedAfter = %v, want [s4 y] (b2 is inside, s5 is closed, z waits on x)", got)
 	}
 }
+
+// FR40: a Task filed as a direct Initiative child is a member like any other: an open
+// one and a Draft one each hold the Initiative under way, and it drains only when both
+// are closed.
+func TestStateOfInitiativeCountsMemberTasks(t *testing.T) {
+	ini := Bead{ID: "ini", Kind: "initiative", Status: "open"}
+	task := func(id, status string) Bead { return Bead{ID: id, Kind: "task", Parent: "ini", Status: status} }
+	for _, c := range []struct {
+		name string
+		all  []Bead
+		want InitiativeState
+	}{
+		{"open member Task", []Bead{ini, task("t", "open")}, InitiativeUnderWay},
+		{"member Task Draft", []Bead{ini, task("t", "deferred")}, InitiativeUnderWay},
+		{"every member Task closed", []Bead{ini, task("t", "closed"), task("d", "closed")}, InitiativeDrained},
+	} {
+		if got := StateOf(ini, c.all); got != c.want {
+			t.Errorf("%s: StateOf = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// ADR 0349: under Require Initiatives a member Task releases while a Checkpoint refuses.
+func TestReleaseChainTaskExemptFromRequired(t *testing.T) {
+	old := git.RepoRoot
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".mugicrew"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".mugicrew", "config.toml"), []byte("[initiatives]\nrequired = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git.RepoRoot = func() (string, error) { return ws, nil }
+	t.Cleanup(func() { git.RepoRoot = old })
+	g := append(adoptGraph(), node{id: "tk", kind: "task", status: "open", parent: "in"})
+	writes := fakeSnapshot(t, g...)
+	if err := ReleaseChain("tk"); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{"update", "tk", "--parent", ""}}; fmt.Sprint(*writes) != fmt.Sprint(want) {
+		t.Errorf("writes = %v", *writes)
+	}
+	if err := ReleaseChain("cp2"); !errors.As(err, new(*RefusedError)) {
+		t.Errorf("checkpoint release: %v", err)
+	}
+}

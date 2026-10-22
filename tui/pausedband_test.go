@@ -366,11 +366,15 @@ func TestExecPausedBuildCursorFollowsTwin(t *testing.T) {
 }
 
 // Spec mc-f22wp FR 1-3, 5-10, 12-13: Defog's paused band lists every own-paused, otherwise
-// ready bead whose home tab is Defog, a defogged Chart and its children included.
+// ready bead whose home tab is Defog, a defogged Chart and its children included. The
+// stamped Chart's land-phase beads arrive through the AFK-paused path (it is listed while it
+// has an open child), the no-Initiative Chart's through the listed-Chart path.
 func TestDefogActionablePausedHomeTab(t *testing.T) {
 	own := labeled("paused:failing")
 	defogged := labeled("chart:defogged")
 	beads := []bd.Bead{
+		dbead("nd", contract.KindChart, "open", "", 3),
+		dbead("ndk", contract.KindBuild, "open", "nd", 1, own),
 		dbead("dc", contract.KindChart, "open", "", 1, defogged),
 		dbead("land", contract.KindLanding, "open", "dc", 1, own),
 		dbead("mrw", contract.KindMRWatch, "open", "dc", 2, own),
@@ -381,8 +385,6 @@ func TestDefogActionablePausedHomeTab(t *testing.T) {
 		dbead("ex", contract.KindForgeReview, "open", "dc", 7, own),
 		dbead("pc", contract.KindChart, "open", "", 2, defogged, own),
 		dbead("inh", contract.KindLanding, "open", "pc", 1),
-		dbead("nd", contract.KindChart, "open", "", 3),
-		dbead("ndk", contract.KindBuild, "open", "nd", 1, own),
 	}
 	m := sized(t, 160, 40)
 	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"lv": true}, sessions: map[string]session.Info{"lv": {State: session.Alive}, "ex": {State: session.Exited}}})
@@ -410,24 +412,45 @@ func TestDefogActionablePausedHomeTab(t *testing.T) {
 	}
 }
 
-// Spec mc-f22wp FR 14: unpausing a defogged Chart's Landing from Actionable leaves the cursor
-// on its Chart's row, and pausing it again lists it in Actionable.
+// Spec mc-f22wp FR 14, mc-j3mw8 FR 23: unpausing a stamped Chart's Landing from Actionable leaves
+// the cursor on its tree row (its Chart's tree row while folded; the Chart's Charts row once the
+// Chart is unlisted), and pausing it again lists it in Actionable.
 func TestDefogPausedLandingCursorFollowsTwin(t *testing.T) {
-	beads := []bd.Bead{
-		dbead("dc", contract.KindChart, "open", "", 1, labeled("chart:defogged")),
-		dbead("land", contract.KindLanding, "open", "dc", 1, labeled("paused:failing")),
+	beads := func() []bd.Bead {
+		return []bd.Bead{
+			dbead("dc", contract.KindChart, "open", "", 1, labeled("chart:defogged")),
+			dbead("land", contract.KindLanding, "open", "dc", 1, labeled("paused:failing")),
+		}
 	}
-	m := sized(t, 160, 40)
-	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
-	m = press(t, m, runeKey("2"))
-	m = defogAt(t, m, "act:land")
-	beads[1].Labels = nil
-	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
-	if r, _ := m.tabAt(tabDefog).(defogTab).selRow(); r.key != chartsPrefix+"dc" {
-		t.Errorf("cursor = %q, want the Chart's row", r.key)
+	cursor := func(m Model, bs []bd.Bead) string {
+		m, _ = send(t, m, loadedMsg{beads: bs, live: map[string]bool{}})
+		r, _ := m.tabAt(tabDefog).(defogTab).selRow()
+		return r.key
 	}
-	beads[1].Labels = []string{"paused:failing"}
-	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}})
+	start := func(unfold bool) Model {
+		m := sized(t, 160, 40)
+		m, _ = send(t, m, loadedMsg{beads: beads(), live: map[string]bool{}})
+		m = press(t, treesOpen(m), runeKey("2"))
+		if !unfold {
+			m = press(t, defogAt(t, m, "dc"), runeKey(" "))
+		}
+		return defogAt(t, m, "act:land")
+	}
+	unpaused := beads()
+	unpaused[1].Labels = nil
+	if got := cursor(start(false), unpaused); got != "dc" {
+		t.Errorf("folded: cursor = %q, want the tree Chart row dc", got)
+	}
+	if got := cursor(start(true), unpaused); got != "land" {
+		t.Errorf("unfolded: cursor = %q, want the Landing's tree row", got)
+	}
+	closed := beads() // the Landing closes: the Chart has no open child and is unlisted
+	closed[1].Labels, closed[1].Status = nil, "closed"
+	if got := cursor(start(true), closed); got != chartsPrefix+"dc" {
+		t.Errorf("unlisted: cursor = %q, want %s", got, chartsPrefix+"dc")
+	}
+	m, _ := send(t, start(false), loadedMsg{beads: unpaused, live: map[string]bool{}})
+	m, _ = send(t, m, loadedMsg{beads: beads(), live: map[string]bool{}})
 	m = defogAt(t, m, "act:land")
 	if r, _ := m.tabAt(tabDefog).(defogTab).selRow(); r.key != "act:land" {
 		t.Errorf("cursor = %q, want act:land", r.key)

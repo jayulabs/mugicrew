@@ -387,6 +387,9 @@ func TestCarry(t *testing.T) {
 	t.Cleanup(func() { run = orun })
 	run = func(args ...string) (string, error) {
 		calls = append(calls, args)
+		if args[0] == "show" { // the container the hold is placed from: no Initiative
+			return `[{"id":"ws-cp","title":"cp","status":"open","labels":["kind:checkpoint"]}]`, nil
+		}
 		if args[1] == "list" {
 			if args[3] == "--direction=down" {
 				return "[]", nil
@@ -731,6 +734,9 @@ func TestSpawnBlockingTaskIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 	var calls [][]string
 	run = func(args ...string) (string, error) {
 		calls = append(calls, args)
+		if args[0] == "show" { // the container the hold is placed from: no Initiative
+			return `[{"id":"ws-cp","title":"cp","status":"open","labels":["kind:checkpoint"]}]`, nil
+		}
 		if args[0] == "create" {
 			return "ws-task", nil
 		}
@@ -746,6 +752,52 @@ func TestSpawnBlockingTaskIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 		}
 		if c[0] == "create" && !strings.Contains(strings.Join(c, " "), "--deps blocks:ws-cp") {
 			t.Errorf("create lacks the blocks edge: %v", c)
+		}
+	}
+}
+
+// A hold that outlives its closed Task re-files related to it (ADR 0338): the
+// edge goes to the most recently closed same-key Task blocking the container.
+func TestSpawnBlockingTaskIfAbsentLinksTheMostRecentlyClosedSameKeyTask(t *testing.T) {
+	const key = "Closed MR: !3\n"
+	for name, c := range map[string]struct {
+		blockers string
+		want     string // related target; "" = no edge
+		created  bool
+	}{
+		"one closed":    {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"}]`, "old", true},
+		"two closed":    {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"},{"id":"newer","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-02T10:00:00Z"}]`, "newer", true},
+		"other key":     {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Other\n","closed_at":"2026-10-01T10:00:00Z"}]`, "", true},
+		"open same key": {`[{"id":"live","status":"open","labels":["kind:task"],"description":"Closed MR: !3\n"}]`, "", false},
+	} {
+		orig := run
+		var related []string
+		run = func(args ...string) (string, error) {
+			switch {
+			case args[0] == "show":
+				return `[{"id":"ws-cp","title":"cp","status":"open","labels":["kind:checkpoint"]}]`, nil
+			case args[0] == "dep" && args[1] == "list" && args[2] == "ws-cp":
+				return c.blockers, nil
+			case args[0] == "dep" && args[1] == "list":
+				return "[]", nil
+			case args[0] == "dep" && args[1] == "add" && args[4] == "-t" && args[5] == "related":
+				related = append(related, args[2]+">"+args[3])
+			case args[0] == "create":
+				return "ws-new", nil
+			}
+			return "", nil
+		}
+		_, created, err := SpawnBlockingTaskIfAbsent("ws-cp", key, "t", key)
+		run = orig
+		if err != nil || created != c.created {
+			t.Fatalf("%s: created=%v err=%v", name, created, err)
+		}
+		want := []string(nil)
+		if c.want != "" {
+			want = []string{"ws-new>" + c.want}
+		}
+		if !slices.Equal(related, want) {
+			t.Errorf("%s: related edges = %v, want %v", name, related, want)
 		}
 	}
 }
@@ -924,5 +976,48 @@ func TestCreateRaiseDraftArgsHaveNoCausedBy(t *testing.T) {
 	}
 	if !slices.Contains(args, "drafted-by:ws-task") && !slices.Contains(args, "kind:critique,drafted-by:ws-task") {
 		t.Errorf("args = %v, want the drafted-by label", args)
+	}
+}
+
+func TestParseSweptReasonRoundTripsTheSweepWriters(t *testing.T) {
+	got, ok := ParseSweptReason(ObsoleteSuperseded("ws-old", "ws-new", "ws-pv"))
+	if want := (SweptReason{OldSpec: "ws-old", Successor: "ws-new", Pivot: "ws-pv"}); !ok || got != want {
+		t.Errorf("confirm = %+v %v, want %+v", got, ok, want)
+	}
+	got, ok = ParseSweptReason(ObsoleteEscalated("ws-old", "mc-chart", "ws-pv"))
+	if want := (SweptReason{OldSpec: "ws-old", Successor: "mc-chart", Pivot: "ws-pv", Escalated: true}); !ok || got != want {
+		t.Errorf("escalate = %+v %v, want %+v", got, ok, want)
+	}
+}
+
+func TestParseSweptReasonRejectsEveryOtherReason(t *testing.T) {
+	for _, r := range []string{
+		ContainerLandedReason + "; carried by ws-sig",
+		"obsolete: retired Draft",
+		"obsolete: free text",
+		"obsolete: Spec ws-old superseded by ws-new (pivot ws-pv confirmed) extra",
+		"superseded: ws-pv",
+		"",
+	} {
+		if got, ok := ParseSweptReason(r); ok {
+			t.Errorf("%q parsed as %+v", r, got)
+		}
+	}
+}
+
+// An open Task still carrying the old free-form body satisfies the key match, so the
+// reformatted filer files no duplicate (Spec D10).
+func TestSpawnBlockingTaskIfAbsentMatchesAnOldFormatOpenBody(t *testing.T) {
+	orig := run
+	t.Cleanup(func() { run = orig })
+	run = func(args ...string) (string, error) {
+		if args[0] == "create" {
+			t.Errorf("filed a duplicate: %v", args)
+		}
+		return `[{"id":"old","status":"open","labels":["kind:task"],"description":"MR !3 was closed.\nClosed MR: !3\nFix: reopen it.\n"}]`, nil
+	}
+	id, created, err := SpawnBlockingTaskIfAbsent("ws-cp", "Closed MR: !3\n", "t", "new body")
+	if err != nil || created || id != "old" {
+		t.Errorf("got %q %v %v, want the old open Task", id, created, err)
 	}
 }

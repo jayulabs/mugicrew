@@ -137,6 +137,10 @@ func Blocks(blocked, blocker string) error { return addEdgeIfAbsent(blocked, blo
 // Related adds a related edge from → to unless present — Related(pivot, spec).
 func Related(from, to string) error { return addEdgeIfAbsent(from, to, "related") }
 
+// DiscoveredFrom adds a discovered-from edge from → to unless present — the sweep's
+// --carries mark, DiscoveredFrom(successor, critique).
+func DiscoveredFrom(from, to string) error { return addEdgeIfAbsent(from, to, "discovered-from") }
+
 // OpenPivots is the Checkpoint's direct blocks targets filtered to open
 // kind:pivot — the one read behind both gate predicates, Usopp's dedupe, and
 // the sweep (FR15). The TUI's Inbox lead grouping reads the same blocks edge off
@@ -296,6 +300,23 @@ func SignalsFrom(originID string) ([]Bead, error) {
 	return slices.DeleteFunc(found, func(b Bead) bool { return b.Kind != contract.KindSignal }), nil
 }
 
+// CarriersFrom lists the Signals, Specs and Charts discovered-from originID, any status
+// (Drafts included): what tracks an ask that originID's close deferred or a sweep moved.
+func CarriersFrom(originID string) ([]Bead, error) {
+	found, err := depTargets(originID, "up", "discovered-from")
+	if err != nil {
+		return nil, err
+	}
+	return carriersOnly(found), nil
+}
+
+// carriersOnly keeps the Signals, Specs and Charts of a discovered-from read.
+func carriersOnly(found []Bead) []Bead {
+	return slices.DeleteFunc(found, func(b Bead) bool {
+		return b.Kind != contract.KindSignal && b.Kind != contract.KindSpec && b.Kind != contract.KindChart
+	})
+}
+
 // signalTitled is the Signal among beads titled exactly title.
 func signalTitled(beads []Bead, title string) (string, bool) {
 	for _, b := range beads {
@@ -350,6 +371,18 @@ func ForceClose(id, reason string) error {
 func ForceCloseAll(ids []string, reason string) error {
 	_, err := run(append(append([]string{"close"}, ids...), "--force", "--reason", reason)...)
 	return err
+}
+
+// OrderEdges is id's blocks edges both ways: blockedBy is what id waits on (a
+// follow-up's container), blocks is what waits on id (a prerequisite's container).
+func OrderEdges(id string) (blockedBy, blocks []Bead, err error) {
+	if blockedBy, err = depTargets(id, "down", "blocks"); err != nil {
+		return nil, nil, err
+	}
+	if blocks, err = depTargets(id, "up", "blocks"); err != nil {
+		return nil, nil, err
+	}
+	return blockedBy, blocks, nil
 }
 
 // DiscoveredFromSources is the beads id was discovered from: where an offshoot was found.

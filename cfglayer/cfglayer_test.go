@@ -242,6 +242,28 @@ func TestInitiativesSetting(t *testing.T) {
 	}
 }
 
+func TestAutoApproveSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name, shared, local string
+		want                Approvals
+	}{
+		{"absent", "gate = \"x\"\n", "", Approvals{}},
+		{"empty table", "[approvals]\n", "", Approvals{}},
+		{"on", "[approvals]\nauto_approve = true\n", "", Approvals{AutoApprove: true}},
+		{"off", "[approvals]\nauto_approve = false\n", "", Approvals{}},
+		{"decode error", "[approvals\nauto_approve = true\n", "", Approvals{Unusable: true}},
+		{"mistyped value", "[approvals]\nauto_approve = \"yes\"\n", "", Approvals{Unusable: true}},
+		{"mistyped table", "approvals = true\n", "", Approvals{Unusable: true}},
+		{"local layer ignored", "", "[approvals]\nauto_approve = true\n", Approvals{}},
+	} {
+		root := workspace(t, tc.shared, tc.local)
+		tc.want.Path = SharedPath(root)
+		if got := AutoApproveSetting(root); got != tc.want {
+			t.Errorf("%s: AutoApproveSetting = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestJiraPollInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name, shared, local string

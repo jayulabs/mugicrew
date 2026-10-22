@@ -70,6 +70,14 @@ func TestDefogList(t *testing.T) {
 				dbead("a", contract.KindChart, "deferred", "", 1), dbead("b", contract.KindChart, "open", "", 1, labeled("chart:defogged")),
 				dbead("c", contract.KindChart, "closed", "", 1), dbead("d", contract.KindChart, "open", "", 1),
 			}, nil, "# No Initiative,C d"},
+		{"a stamped Chart with no children, or only a Draft or an event, is out; one with an open child is listed",
+			[]bd.Bead{
+				dbead("none", contract.KindChart, "open", "", 1, labeled("chart:defogged")),
+				dbead("dr", contract.KindChart, "open", "", 2, labeled("chart:defogged")), dbead("drk", contract.KindGrilling, "deferred", "dr", 1),
+				dbead("ev", contract.KindChart, "in_progress", "", 3, labeled("chart:defogged")), dbead("evk", contract.KindGrilling, "open", "ev", 1, func(b *bd.Bead) { b.Event = true }),
+				dbead("cl", contract.KindChart, "open", "", 4, labeled("chart:defogged")), dbead("clk", contract.KindGrilling, "closed", "cl", 1),
+				dbead("kept", contract.KindChart, "open", "", 5, labeled("chart:defogged")), dbead("keptk", contract.KindGrilling, "open", "kept", 1),
+			}, nil, "# No Initiative,C kept,L keptk"},
 		{"Survey first, HITL before AFK, closed fold last",
 			[]bd.Bead{
 				dbead("c", contract.KindChart, "open", "", 1),
@@ -185,7 +193,7 @@ func TestDefogBadge(t *testing.T) {
 func defogSel(m Model) string { return m.tabAt(tabDefog).(defogTab).sel }
 
 func TestDefogViewSelectionAndFolds(t *testing.T) {
-	m := defogModel(t, 100, 40)
+	m := defogModel(t, 100, 50)
 	m = press(t, m, runeKey("2"))
 	v := ansi.Strip(m.View())
 	for _, want := range []string{"INITIATIVE", "t ini", "t turn", "your turn", "launching…", "⊘", "t afk", "▸ 1 closed", "t inh"} {
@@ -193,8 +201,8 @@ func TestDefogViewSelectionAndFolds(t *testing.T) {
 			t.Errorf("frame lacks %q:\n%s", want, v)
 		}
 	}
-	if strings.Count(v, "t dc") != 1 || strings.Contains(v, "t dcl") { // the stamped Chart is in Charts only, with no tree row or leaves
-		t.Errorf("a defogged Chart is in the tree:\n%s", v)
+	if strings.Count(v, "t dc ") != 3 || !strings.Contains(v, "t dcl") { // the stamped Chart with an open child is in Charts, the tree and (via its leaf) Actionable
+		t.Errorf("a defogged Chart with an open child is not in the tree:\n%s", v)
 	}
 	if got := defogSel(m); got != "" {
 		t.Errorf("initial sel = %q, want the unset first row", got)
@@ -266,7 +274,7 @@ func defogAt(t *testing.T, m Model, id string) Model {
 	if defogSel(m) == "" { // the unset selection is the first row
 		m = press(t, press(t, m, runeKey("j")), runeKey("k"))
 	}
-	for range 30 {
+	for range 60 {
 		if defogSel(m) == id {
 			return m
 		}
@@ -594,7 +602,7 @@ func TestGraphNoBadge(t *testing.T) {
 }
 
 // blockerDefog: sel is blocked by vis (a drawn leaf), hid (under a closed-by-default
-// Chart fold once folded), and gone (on no Defog row: its Chart is defogged).
+// Chart fold once folded), and gone (on no Defog row: a Draft under a defogged Chart).
 func blockerDefog(t *testing.T, h int) Model {
 	beads := []bd.Bead{
 		dbead("ini", contract.KindInitiative, "open", "", 1),
@@ -605,7 +613,7 @@ func blockerDefog(t *testing.T, h int) Model {
 		dbead("c2", contract.KindChart, "open", "ini", 2),
 		dbead("hid", contract.KindGrilling, "open", "c2", 1),
 		dbead("dc", contract.KindChart, "open", "ini", 3, labeled("chart:defogged")),
-		dbead("gone", contract.KindGrilling, "open", "dc", 1),
+		dbead("gone", contract.KindGrilling, "deferred", "dc", 1),
 	}
 	m := sized(t, 100, h)
 	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: map[string]session.Info{}})
@@ -683,14 +691,14 @@ func TestDefogActionable(t *testing.T) {
 			ids = append(ids, r.b.ID)
 		}
 	}
-	if got := strings.Join(ids, ","); got != "turn,ready,paused,pc" {
-		t.Errorf("Actionable = %s, want turn,ready,paused,pc", got)
+	if got := strings.Join(ids, ","); got != "turn,ready,dcl,paused,pc" {
+		t.Errorf("Actionable = %s, want turn,ready,dcl,paused,pc", got)
 	}
-	if h := m.tabAt(tabDefog).(defogTab).rows()[0]; h.kind != dSec || h.title != "Actionable (4)" {
+	if h := m.tabAt(tabDefog).(defogTab).rows()[0]; h.kind != dSec || h.title != "Actionable (5)" {
 		t.Errorf("header = %+v", h)
 	}
-	if n := m.tabAt(tabDefog).actN(); n != 4 {
-		t.Errorf("actN = %d, want 4", n)
+	if n := m.tabAt(tabDefog).actN(); n != 5 {
+		t.Errorf("actN = %d, want 5", n)
 	}
 	m = press(t, m, runeKey("2"))
 	v := ansi.Strip(m.View())
@@ -709,7 +717,7 @@ func TestDefogActionable(t *testing.T) {
 	// folding s:act hides its rows, not the count
 	f := defogAt(t, m, actKey)
 	f = press(t, f, runeKey(" "))
-	if n := f.tabAt(tabDefog).actN(); n != 4 || f.tabAt(tabDefog).count() != 1 {
+	if n := f.tabAt(tabDefog).actN(); n != 5 || f.tabAt(tabDefog).count() != 1 {
 		t.Errorf("fold changed counts: actN %d, count %d", n, f.tabAt(tabDefog).count())
 	}
 }

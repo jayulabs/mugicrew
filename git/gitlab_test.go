@@ -865,3 +865,35 @@ func TestRecordedMRLinkRoundTrips(t *testing.T) {
 		t.Errorf("RecordedMRLink without a line = %q, want empty", got)
 	}
 }
+
+func TestLandedBaseOnAndForeignScanReadTheGivenRef(t *testing.T) {
+	gitlabForge(t)
+	defer SetGraphID("g00")()
+	defer func(f func() (string, error)) { readIssuePrefix = f }(readIssuePrefix)
+	readIssuePrefix = func() (string, error) { return "mc", nil }
+	defer func(f func() (string, error)) { LandStrategyName = f }(LandStrategyName)
+	LandStrategyName = func() (string, error) { return LandStrategyGitlab, nil }
+
+	mustGit(t, "branch", "ahead")
+	mustGit(t, "switch", "-q", "ahead")
+	mustGit(t, "commit", "--allow-empty", "-m", "land\n\nCheckpoint: mc-ok\nGraph: g00")
+	mustGit(t, "commit", "--allow-empty", "-m", "land\n\nCheckpoint: mc-fx\nGraph: g99")
+	mustGit(t, "switch", "-q", "-")
+
+	if _, err := Repo("").LandedBaseOn("ahead", "Checkpoint: mc-ok"); err != nil {
+		t.Errorf("ours on ref = %v", err)
+	}
+	if _, err := Repo("").LandedBase("Checkpoint: mc-ok"); !errors.Is(err, ErrNotLanded) {
+		t.Errorf("local main reads the ref's land: %v", err)
+	}
+	var foreign *ForeignLanding
+	if _, err := Repo("").LandedBaseOn("ahead", "Checkpoint: mc-fx"); !errors.As(err, &foreign) {
+		t.Errorf("foreign on ref = %v", err)
+	}
+	if err := Repo("").ForeignScan("main"); err != nil {
+		t.Errorf("clean main = %v", err)
+	}
+	if err := Repo("").ForeignScan("ahead"); !errors.As(err, &foreign) || foreign.Theirs != "g99" {
+		t.Errorf("scan of ahead = %v", err)
+	}
+}

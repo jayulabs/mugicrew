@@ -555,3 +555,17 @@ func TestExecActionableListsEveryTask(t *testing.T) {
 		t.Errorf("live = %v, want [live]", live)
 	}
 }
+
+// FR40: a Task filed as a direct Initiative child shows in its Initiative's group, not
+// in No Initiative, and holds the group's Actionable row while open.
+func TestExecGroupsMemberTaskUnderItsInitiative(t *testing.T) {
+	beads := []bd.Bead{
+		dbead("i", contract.KindInitiative, "open", "", 1),
+		dbead("tm", contract.KindTask, "open", "i", 1),
+		dbead("to", contract.KindTask, "open", "", 2),
+	}
+	want := "# Actionable (2),A tm,A to,# Live (0),.,# Specs (0),.,# Checkpoints (0),.,# Initiatives (1),# t i,T tm,# No Initiative (1),T to"
+	if got := strings.Join(eshape(execList(beads, nil)), ","); got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}

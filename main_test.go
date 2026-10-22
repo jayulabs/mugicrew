@@ -145,7 +145,7 @@ func TestRequireGraphRefusesUserVerbsAndExportsBeadsDir(t *testing.T) {
 		return "", &bd.NoGraphError{Dir: dir}
 	}
 
-	for _, argv := range [][]string{{}, {"signal", "new"}, {"signal", "triage", "mc-1"}, {"signal", "offshoot"}, {"intake", "jira", "ABC-1"}, {"latch", "jira", "ABC-1"}, {"surgery", "new"}, {"surgery", "end", "mc-1"}, {"loop"}, {"loop", "--watch"}, {"loop", "start"}, {"loop", "start", "--watch"}, {"loop", "status"}, {"loop", "stop"}, {"loop", "--rev=abc", "--lock-fd=3"}, {"chart", "append", "mc-1", "Notes", "- x"}} {
+	for _, argv := range [][]string{{}, {"signal", "new"}, {"signal", "triage", "mc-1"}, {"signal", "offshoot"}, {"task", "new"}, {"intake", "jira", "ABC-1"}, {"latch", "jira", "ABC-1"}, {"surgery", "new"}, {"surgery", "end", "mc-1"}, {"loop"}, {"loop", "--watch"}, {"loop", "start"}, {"loop", "start", "--watch"}, {"loop", "status"}, {"loop", "stop"}, {"loop", "--rev=abc", "--lock-fd=3"}, {"chart", "append", "mc-1", "Notes", "- x"}} {
 		err := requireGraph(argv)
 		if err == nil || !strings.Contains(err.Error(), "mugicrew init") {
 			t.Errorf("requireGraph(%v) = %v, want the no-graph refusal", argv, err)
@@ -2102,7 +2102,7 @@ func TestGraphVerbIsUnknown(t *testing.T) {
 // Drift guard: the usage names every user-facing verb main dispatches and none
 // of the hidden surface (FR7, FR8; ADR 0060 §3, ADR 0037, ADR 0099).
 func TestUsageListsVerbsNotHidden(t *testing.T) {
-	for _, verb := range []string{"signal new", "signal triage", "signal offshoot", "surgery new", "surgery end", "pivot confirm",
+	for _, verb := range []string{"signal new", "signal triage", "signal offshoot", "task new", "surgery new", "surgery end", "pivot confirm",
 		"pivot escalate", "pivot raise", "reconcile", "loop", "abort", "ps", "stats", "doctor", "transcript", "integrate", "chart append|drop", "land-lineage", "--watch", "-C <dir>"} {
 		if !strings.Contains(usage, "\n  mugicrew "+verb) {
 			t.Errorf("usage lacks %q", verb)
@@ -2824,11 +2824,12 @@ const jiraNew = `{"key":"ABC-1","fields":{"summary":"Fix it","status":{"name":"O
 // targets, latchOf finds existing, newLatch records filings, blocksEdge records
 // edges not already in have.
 type latchFake struct {
-	filed       [][4]string // title, body, ref, draftedBy
-	edges       [][2]string // blocked, blocker
-	existing    *bd.Bead
-	have        map[string]bool // blocked ids already blocked by the existing latch
-	missingBead string
+	filed          [][4]string // title, body, ref, draftedBy
+	edges          [][2]string // blocked, blocker
+	existing       *bd.Bead
+	have           map[string]bool // blocked ids already blocked by the existing latch
+	missingBead    string
+	initiativeBead string
 }
 
 func latchWorkspace(t *testing.T, cfg, out string) (*latchFake, string) {
@@ -2840,6 +2841,9 @@ func latchWorkspace(t *testing.T, cfg, out string) (*latchFake, string) {
 	showBead = func(id string) (bd.Bead, error) {
 		if id == f.missingBead {
 			return bd.Bead{}, errors.New("not found")
+		}
+		if id == f.initiativeBead {
+			return bd.Bead{ID: id, Kind: contract.KindInitiative}, nil
 		}
 		return bd.Bead{ID: id}, nil
 	}
@@ -2897,6 +2901,22 @@ func TestLatchJiraMissingTargetFilesNothing(t *testing.T) {
 	err := runLatchJira([]string{"ABC-1", "--blocks", "mc-a", "--blocks", "mc-b"}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "mc-b") || len(f.filed) != 0 || len(f.edges) != 0 {
 		t.Errorf("err %v, filed %v, edges %v", err, f.filed, f.edges)
+	}
+}
+
+func TestLatchRefusesAnInitiativeTarget(t *testing.T) {
+	f, _ := latchWorkspace(t, siteCfg, jiraNew)
+	f.initiativeBead = "mc-ini"
+	for name, err := range map[string]error{
+		"jira": runLatchJira([]string{"ABC-1", "--blocks", "mc-a", "--blocks", "mc-ini"}, io.Discard),
+		"mr":   runLatchMR([]string{"!1", "--blocks", "mc-ini"}, io.Discard),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "mc-ini") || !strings.Contains(err.Error(), "Initiative") {
+			t.Errorf("%s: err = %v, want a refusal naming the Initiative", name, err)
+		}
+	}
+	if len(f.filed) != 0 || len(f.edges) != 0 {
+		t.Errorf("filed %v, edges %v", f.filed, f.edges)
 	}
 }
 
@@ -3449,5 +3469,30 @@ func TestReconcileRejectsMergeAtFlag(t *testing.T) {
 	err := runReconcile([]string{"mc-s", "--checkpoint", "mc-cp", "--merge-at=1"})
 	if err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Errorf("err = %v, want the usage error", err)
+	}
+}
+
+// The withdraw output carries a swept Task per line, a left-open Task and each
+// land hold released (Spec mc-xw3ez D9).
+func TestPrintSweptLines(t *testing.T) {
+	var sb strings.Builder
+	printSwept(&sb, "tk", withdraw.Result{
+		Swept:    []bd.Swept{{Bead: bd.Bead{ID: "t2"}, After: "tk"}},
+		Before:   []bd.BeforeClosed{{Bead: bd.Bead{ID: "t1"}, Before: "t2"}},
+		LeftOpen: []bd.Held{{Bead: bd.Bead{ID: "t9"}, Before: "cp", Also: []string{"z1", "z2"}}},
+		Holds:    []string{"cp2"},
+	})
+	want := "swept t2 (withdrawn: tk)\nswept t1 (withdrawn: tk; before t2)\nleft open t9: also before z1, z2\nland hold released: cp2\n"
+	if sb.String() != want {
+		t.Errorf("output = %q, want %q", sb.String(), want)
+	}
+}
+
+func TestSplitCarries(t *testing.T) {
+	if got := splitCarries(" a, b,,a ,"); !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("splitCarries = %q, want [a b]", got)
+	}
+	if got := splitCarries(""); len(got) != 0 {
+		t.Errorf("splitCarries(\"\") = %q, want none", got)
 	}
 }

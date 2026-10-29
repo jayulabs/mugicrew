@@ -5,7 +5,6 @@ package tui
 // (ADR 0101).
 
 import (
-	"cmp"
 	"fmt"
 	"regexp"
 	"slices"
@@ -27,55 +26,36 @@ import (
 )
 
 var (
-	softSt     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	closedSty  = lipgloss.NewStyle().Foreground(dim).Strikethrough(true)
-	selMarker  = lipgloss.NewStyle().Foreground(lipgloss.Color("111")).Bold(true)
-	sectionSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Bold(true) // the Initiatives, No Initiative and Backlog headers
-	labelSt    = softSt
-	deadSty    = warnSt.Bold(true)
-	blockedSty = deadSty
-	pinkFg     = lipgloss.NewStyle().Foreground(lipgloss.Color("210"))
-	blockerMk  = pinkFg.Bold(true)
-	selRow     = lipgloss.NewStyle().Background(lipgloss.Color("25")).Foreground(lipgloss.Color("15")).Bold(true) // the selection, across the list's full width (FR14); blue so it reads apart from ancRow (FR15)
-	pickRow    = lipgloss.NewStyle().Background(lipgloss.Color("237"))                                            // a picker's selected item, across the box's inner width; no foreground, so the item keeps its own
-	ancRow     = lipgloss.NewStyle().Background(lipgloss.Color("236"))                                            // an ancestor of the selection (FR8; gray, unlike the blue selRow)
+	softSt     lipgloss.Style
+	closedSty  lipgloss.Style
+	selMarker  lipgloss.Style
+	sectionSt  lipgloss.Style // the Initiatives, No Initiative and Backlog headers
+	labelSt    lipgloss.Style
+	deadSty    lipgloss.Style
+	blockedSty lipgloss.Style
+	pinkFg     lipgloss.Style
+	blockerMk  lipgloss.Style
+	selRow     lipgloss.Style // the selection, across the list's full width (FR14); blue so it reads apart from ancRow (FR15)
+	pickRow    lipgloss.Style // a picker's selected item, across the box's inner width; no foreground (dark), so the item keeps its own
+	ancRow     lipgloss.Style // an ancestor of the selection (FR8; gray, unlike the blue selRow)
 	// The pause colours (ADR 0057 §1, ADR 0078): yellow the loop's self-clearing
 	// foreign-hold, red a failing pause, orange an abandoned effort, darker orange
 	// recover's fence, tan a Checkup's fence, cyan a stranded integrate, blue an unrunnable profile,
 	// magenta the human's manual pause; dim magenta a pause inherited (ADR 0084).
-	pauseSty = map[string]lipgloss.Style{
-		bd.PausedForeignHold:       lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
-		bd.PausedFailing:           warnSt,
-		bd.PausedAbandoned:         lipgloss.NewStyle().Foreground(lipgloss.Color("208")),
-		bd.PausedRecovering:        lipgloss.NewStyle().Foreground(lipgloss.Color("172")),
-		bd.PausedCheckup:           lipgloss.NewStyle().Foreground(lipgloss.Color("179")),
-		bd.PausedManual:            lipgloss.NewStyle().Foreground(lipgloss.Color("213")),
-		bd.PausedIntegrateConflict: lipgloss.NewStyle().Foreground(lipgloss.Color("44")),
-		bd.PausedNotBuilt:          lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
-		bd.PausedProfile:           lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
-		bd.PausedContext:           lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
-	}
-	inheritSty = lipgloss.NewStyle().Foreground(lipgloss.Color("127"))
+	pauseSty   map[string]lipgloss.Style
+	inheritSty lipgloss.Style
 
 	// kindColors is from the kind colour picker prototype (picked by eye, dark background).
-	kindColors = map[contract.Kind]lipgloss.Color{
-		// defog
-		contract.KindSignal: "186", contract.KindSurvey: "117", contract.KindGrilling: "202",
-		contract.KindResearch: "60", contract.KindPrototype: "170",
-		// spine
-		contract.KindChart: "68", contract.KindChartConflict: "89", contract.KindSpec: "49",
-		contract.KindCheckpoint: "180",
-		// execution
-		contract.KindBuild: "224", contract.KindReview: "108", contract.KindCritique: "167",
-		contract.KindConflict: "88",
-		// gates
-		contract.KindApproval: "107", contract.KindPivot: "160", contract.KindRollback: "94",
-		// hitl misc
-		contract.KindTask: "248", contract.KindDiscussion: "246", contract.KindCheckup: "246",
-		// formerly fallback, now their own
-		contract.KindSurgery: "93", contract.KindInitiative: "255", contract.KindLanding: "209", contract.KindMRWatch: "209",
-		contract.KindForgeReview: "109",
-	}
+	kindColors map[contract.Kind]lipgloss.Color
+
+	// The lifted function-local literals: a Container chip's ink, the unknown kind,
+	// the in-progress glyph and the priority tints.
+	kindFallback lipgloss.Color
+	chipInk      lipgloss.Color
+	inProgSty    lipgloss.Style
+	prio0Tint    lipgloss.Color
+	prio1Tint    lipgloss.Color
+	tintInk      lipgloss.Color
 )
 
 // kindTag renders a bead's kind: a Container as a chip (black bold UPPERCASE on
@@ -83,11 +63,20 @@ var (
 func kindTag(b *bd.Bead) string {
 	c, ok := kindColors[b.Kind]
 	if !ok {
-		c = "244"
+		c = kindFallback
 	}
 	name := strings.ToUpper(string(b.Kind))
+	if b.Draft() {
+		if name == "" {
+			name = "—"
+		}
+		if b.Container {
+			return dimSt.Padding(0, 1).Render(name)
+		}
+		return dimSt.Render(name) // unkept: a selected Draft row restyles it like any dim text
+	}
 	if b.Container {
-		return kept(lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(c).Bold(true).Padding(0, 1).Render(name))
+		return kept(lipgloss.NewStyle().Foreground(chipInk).Background(c).Bold(true).Padding(0, 1).Render(name))
 	}
 	if name == "" {
 		name = "—"
@@ -111,6 +100,9 @@ func kindTagW(b *bd.Bead) int {
 // red ⊘ and an open paused bead as ‖ in its cause's colour (ADR 0057 §1); with no
 // own cause, an inherited pause is a dim magenta ‖ (ADR 0084).
 func (g graphData) stateGlyph(b *bd.Bead) string {
+	if b.Draft() {
+		return dimSt.Render("draft") // the Draft's own word, checked before blocked and paused
+	}
 	if g.blocked(b) {
 		return kept(blockedSty.Render("⊘"))
 	}
@@ -118,7 +110,7 @@ func (g graphData) stateGlyph(b *bd.Bead) string {
 	case "closed":
 		return dimSt.Render("✓")
 	case "in_progress":
-		return kept(lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Render("◐"))
+		return kept(inProgSty.Render("◐"))
 	default:
 		if cs := bd.PausedCauses(*b); len(cs) > 0 && b.Status == "open" {
 			return kept(pauseSty[cs[0]].Render("‖")) // manual's colour wins; ponytail: an unknown cause renders unstyled
@@ -176,9 +168,10 @@ func (g graphData) openBlockers(b *bd.Bead) []*bd.Bead {
 type verdict int
 
 const (
-	na    verdict = iota // not in_progress, or HITL: no verdict
-	alive                // the probe found reconcile/claude carrying the bead id
-	dead                 // an in_progress AFK effort, the probe found nothing
+	na     verdict = iota // not in_progress, or HITL: no verdict
+	alive                 // the probe found reconcile/claude carrying the bead id
+	dead                  // an in_progress AFK effort outside the loaded ids, so with no reading: neither live nor orphan
+	orphan                // an in_progress AFK effort no live host holds (the Orphaned-claim reading, ADR 0391)
 )
 
 func (g graphData) liveOf(b *bd.Bead) verdict {
@@ -187,6 +180,8 @@ func (g graphData) liveOf(b *bd.Bead) verdict {
 		return na
 	case g.live[b.ID]:
 		return alive
+	case g.orphans[b.ID]:
+		return orphan
 	default:
 		return dead
 	}
@@ -200,6 +195,8 @@ func livenessDot(l verdict) string {
 		return kept(aliveSt.Render("●"))
 	case dead:
 		return kept(deadSty.Render("○"))
+	case orphan:
+		return kept(warnSt.Render("⊘"))
 	}
 	return dimSt.Render("·")
 }
@@ -211,15 +208,9 @@ type sessionLook struct {
 }
 
 var (
-	sessionLooks = map[session.State]sessionLook{
-		session.Alive:  {aliveSt, "●", "alive"},
-		session.Exited: {deadSty, "✕", "exited"},
-	}
-	doneLook  = sessionLook{aliveSt.Bold(true), "●", "done — /exit"}
-	waitLooks = map[session.Waiting]sessionLook{
-		session.WaitTurn: {waitSt, "●", "your turn"},
-		session.WaitAsk:  {waitSt, "●", "needs approval"},
-	}
+	sessionLooks map[session.State]sessionLook
+	doneLook     sessionLook
+	waitLooks    map[session.Waiting]sessionLook
 )
 
 // humanWait is the one TUI notion of waiting on the human: s's waiting bit when it is alive,
@@ -321,6 +312,9 @@ func (g graphData) rowSuffix(b *bd.Bead) string {
 	if _, ok := g.lookOf(b); !ok && restsClaimed(b.Kind) && b.Status == "in_progress" {
 		return "  " + dimSt.Render("idle — enter to resume")
 	}
+	if b.Kind == contract.KindApproval && bd.IsCarriedApproval(b.Description) {
+		return "  " + dimSt.Render("carried") // Go wrote this stamp, not the human
+	}
 	return ageSuffix(b)
 }
 
@@ -351,6 +345,8 @@ func livenessLine(l verdict, b *bd.Bead) string {
 		return aliveSt.Render("alive") + claimed
 	case dead:
 		return deadSty.Render("dead") + softSt.Render(" — no reconcile/claude process") + claimed
+	case orphan:
+		return warnSt.Render("orphaned") + softSt.Render(" — no live host holds it; x recovers it") + claimed
 	}
 	return softSt.Render("— (HITL: no verdict)")
 }
@@ -500,7 +496,7 @@ func idSet[R any](rows []R, bead func(R) *bd.Bead) map[string]bool {
 }
 
 // initiativesHeaderText is the detail of a queue tab's Initiatives section header.
-const initiativesHeaderText = "The Initiative groups, and No Initiative: the Checkpoints and Specs with no Initiative parent, and the outside Tasks and Pivots.\n\nenter does nothing here (space folds)."
+const initiativesHeaderText = "The Initiative groups, and No Initiative: the Checkpoints and Specs with no Initiative parent, and the outside Errands and Pivots.\n\nenter does nothing here (space folds)."
 
 // running is whether b's effort is Live, launching or launched but not yet seen alive.
 func (g graphData) running(b *bd.Bead) bool {
@@ -537,15 +533,12 @@ func (g graphTab) initiativeProgress(id string) (landed, chains int, live string
 	return landed, len(cs), live
 }
 
-// childCounts returns (closed, total) member beads of a container, leaving out
-// hidden Drafts: it is what the Graph shows. Gates use gateChildCounts.
+// childCounts returns (closed, total) member beads of a container, Drafts in total:
+// it is what the Graph shows. Gates read the verdict.
 func (g graphTab) childCounts(id string) (closed, total int) {
 	c := g.memoOf().counts[id]
 	return c[0], c[1]
 }
-
-// gateChildCounts counts Drafts too: a Draft is still open for draining.
-func (g graphData) gateChildCounts(id string) (closed, total int) { return childCountsOf(g.beads, id) }
 
 func childCountsOf(beads []bd.Bead, id string) (closed, total int) {
 	for _, b := range beads {
@@ -725,11 +718,18 @@ func (g graphTab) detailBody() string {
 	if v, ok := g.sessionLine(b); ok {
 		field("session", v)
 	}
+	if b.Draft() {
+		field("drafted by", g.draftedByLine(b))
+	}
 	if l := g.pauseLine(b); l != "" {
 		field("paused", l)
 	}
-	if g.efforts[b.ID] { // where its unintegrated work lives (ADR 0104 §7)
-		field("effort", git.EffortBranch(b.ID))
+	if g.efforts != nil && g.efforts.Branches[b.ID] { // where its work lives (ADR 0104 §7, ADR 0394)
+		v := git.EffortBranch(b.ID)
+		if g.efforts.Integrated[b.ID] { // tip is its cut ref: a leftover, not unintegrated work
+			v += " (integrated)"
+		}
+		field("effort", v)
 	}
 	field("age", HumanAge(b.Created))
 	if b.Kind == contract.KindPivot && b.Open() {
@@ -878,6 +878,8 @@ func (g graphTab) launchPreview(b *bd.Bead) string {
 		return softSt.Render(string(b.Kind) + " is running. x aborts it.")
 	case dead:
 		return softSt.Render(string(b.Kind) + "'s effort is dead. x recovers it.")
+	case orphan:
+		return softSt.Render(string(b.Kind) + "'s claim is orphaned: no live host holds it. x recovers it.")
 	}
 	if strandable(b) { // enter refuses (launchWhy): the preview agrees
 		return softSt.Render(claimLine(b))
@@ -891,8 +893,8 @@ func (g graphTab) launchPreview(b *bd.Bead) string {
 				return softSt.Render("CHECKPOINT — approved & at HEAD. Press ") + selMarker.Render("enter") +
 					softSt.Render(" to land it now (Jinbe), or wait for the loop. Use edit to intervene.")
 			}
-			if held := g.landHeldBy(b); len(held) > 0 {
-				return softSt.Render("CHECKPOINT — approved; land held by open blocker: " + strings.Join(held, ", ") + ". Use edit to intervene.")
+			if v := g.eligibility(b); v.Cause == loop.CauseLandHeld {
+				return softSt.Render("CHECKPOINT — approved; land held by open blocker: " + strings.Join(bd.Titles(holderBeads(v.Holders)), ", ") + ". Use edit to intervene.")
 			}
 			return softSt.Render("CHECKPOINT — land-watched. Jinbe lands it once an Approval\ncloses at the branch HEAD. Use edit to intervene.")
 		}
@@ -918,20 +920,11 @@ func launchOwner(crew map[string]contract.Crewmate, k contract.Kind) (string, er
 	return e.Owner, nil
 }
 
-// pauseRefusesRunNow is run-now's pause gate: an own manual, abandoned or
-// recovering pause, or an inherited one (anc, "" for none), refuses.
-func pauseRefusesRunNow(b bd.Bead, anc string) bool {
-	return anc != "" || slices.ContainsFunc(pauseCauses, func(c pauseCause) bool { return c.refuses && bd.PausedBy(b, c.cause) })
-}
-
 // pauseCause is one paused: cause in precedence order (ADR 0078, 0104 §4, 0123 §3),
-// the one table pauseRefusesRunNow, runNowHint and runNowLabel read. refuses: run-now
-// won't touch the bead; else retry (when set) is its run-now label.
+// the one table pauseHint reads; the retryable causes carry no hint (the verdict runs them).
 type pauseCause struct {
-	cause   string
-	refuses bool
-	retry   string
-	hint    func(b bd.Bead) string // refuses: why run-now won't touch b
+	cause string
+	hint  func(b bd.Bead) string // refuses: why run-now won't touch b
 }
 
 // pauseHint is the first refusing cause's hint on b, "" if none.
@@ -945,75 +938,54 @@ func pauseHint(b bd.Bead) string {
 }
 
 var pauseCauses = []pauseCause{
-	{cause: bd.PausedManual, refuses: true, hint: func(b bd.Bead) string {
+	{cause: bd.PausedManual, hint: func(b bd.Bead) string {
 		id := b.ID
 		return id + " is paused by hand — press p or run 'bd label remove " + id + " paused:manual' first"
 	}},
-	{cause: bd.PausedAbandoned, refuses: true, hint: func(b bd.Bead) string {
+	{cause: bd.PausedAbandoned, hint: func(b bd.Bead) string {
 		id := b.ID
 		return id + ": abandoned effort may still be running; check, then 'bd label remove " + id + " paused:abandoned'"
 	}},
-	{cause: bd.PausedRecovering, refuses: true, hint: func(b bd.Bead) string {
+	{cause: bd.PausedRecovering, hint: func(b bd.Bead) string {
 		id := b.ID
 		return id + " is being recovered, or a recover failed partway — re-run 'mugicrew recover " + id + "'"
 	}},
-	{cause: bd.PausedContext, refuses: true, hint: func(b bd.Bead) string {
+	{cause: bd.PausedContext, hint: func(b bd.Bead) string {
 		return b.ID + " is held: " + contexts.PauseNote(b, bd.PausedContext)
 	}},
-	{cause: bd.PausedIntegrateConflict, retry: "retry"},
-	{cause: bd.PausedNotBuilt, retry: "retry"},
-	{cause: bd.PausedFailing, retry: "retry"},
-	{cause: bd.PausedProfile, retry: "retry"},
-	{cause: bd.PausedForeignHold, retry: "retry hold"},
 }
 
-// landHeldBy is the titles of the open blockers holding a landable-looking
-// Checkpoint's land per the last refresh (nil when it isn't held).
-func (g graphData) landHeldBy(b *bd.Bead) []string {
-	if !g.checkpointLooksLandable(b.ID) {
-		return nil
-	}
-	var titles []string
-	for _, h := range g.openBlockers(b) {
-		titles = append(titles, cmp.Or(h.Title, h.ID))
-	}
-	return titles
-}
-
-// runNowLabel is the I/O-free run-now affordance (run/spec/land/retry…), "" when b
-// does not look run-now-eligible from the loaded graph. A hint that may be one
-// refresh stale; the press-time read is the authoritative gate.
+// runNowLabel is the I/O-free run-now affordance (run/spec/land/retry…): the verdict's
+// Action over the loaded graph, "" when b is not run-now eligible. A blocked bead reads as
+// its confirmed press would (the y/n waives only that leg). A hint that may be one refresh
+// stale; the press-time read is the authoritative gate.
 func (g graphData) runNowLabel(b *bd.Bead) string {
-	if b == nil || b.Status != "open" || pauseRefusesRunNow(*b, g.inheritedPause(b)) || g.memberHold(b) != "" {
+	if b == nil || b.Status != "open" {
 		return ""
 	}
-	l := ""
-	switch {
-	case loop.IsAFKLeaf(*b):
-		l = "run"
-	case loop.IsDrainedChartCandidate(*b):
-		if closed, total := g.gateChildCounts(b.ID); closed == total && len(g.heldChildren(b.ID)) == 0 {
-			l = "spec"
-		}
-	case loop.IsCheckpointCandidate(*b):
-		if g.checkpointLooksLandable(b.ID) && len(g.landHeldBy(b)) == 0 {
-			l = "land"
-		}
+	if v := g.confirmed(b); v.Runnable {
+		return string(v.Action)
 	}
-	if l == "" {
-		return ""
+	return ""
+}
+
+// confirmed is b's verdict, re-judged with force when the first one is blocked: what a
+// confirmed y/n press would act on.
+func (g graphData) confirmed(b *bd.Bead) loop.Verdict {
+	v := g.eligibility(b)
+	if v.Cause != loop.CauseBlocked {
+		return v
 	}
-	if i := slices.IndexFunc(pauseCauses, func(c pauseCause) bool { return c.retry != "" && bd.PausedBy(*b, c.cause) }); i >= 0 {
-		return pauseCauses[i].retry
-	}
-	return l
+	forced, _ := loop.Judge(*b, loop.ModeRunNow, g.widened(), loop.Inputs{Force: true}, snapView{g})
+	return forced
 }
 
 // runNowWhy is "" when run-now would act on b, else why not: every refusal that needs
-// no I/O, in the order runNow answers it before any blocked y/n. The press-time
-// gate (runNowEligible, the pool, the land hold) still refuses after it passes.
+// no I/O, in the order runNow answers it before any blocked y/n. The TUI-only states are
+// read before the verdict; the press-time gate (the pool, the profile gate) still refuses
+// after it passes.
 func (g graphData) runNowWhy(b *bd.Bead) string {
-	id, anc := b.ID, g.inheritedPause(b)
+	id := b.ID
 	switch {
 	case g.busyWhy(b) != "":
 		return g.busyWhy(b)
@@ -1023,74 +995,16 @@ func (g graphData) runNowWhy(b *bd.Bead) string {
 		return id + " is running — t shows it · x aborts it"
 	case b.Status == "in_progress":
 		return id + "'s effort is not running — x recovers it"
-	case pauseHint(*b) != "":
-		return pauseHint(*b)
-	case anc != "":
-		return inheritedPauseHint(id, anc)
-	case g.memberHold(b) != "":
-		return g.memberHold(b)
-	case g.runNowLabel(b) != "":
-		return ""
-	case loop.IsDrainedChartCandidate(*b):
-		if held := g.heldChildren(id); len(held) > 0 {
-			return chartHeldHint(id, held)
-		}
-		closed, total := g.gateChildCounts(id)
-		return fmt.Sprintf("%s: Chart not drained — %d/%d children closed", id, closed, total)
-	case loop.IsCheckpointCandidate(*b):
-		if t := g.landHeldBy(b); len(t) > 0 {
-			return id + ": " + landHeldNote(t)
-		}
-		if g.reviewDue(id) {
-			return id + ": review due — the loop spawns it"
-		}
-		return checkpointNotReadyHint(id)
 	}
-	if b.Status == "blocked" {
-		return id + " is blocked — enter runs a bead only once its blockers clear"
-	}
-	return id + " has nothing for enter to run"
-}
-
-// memberHold is why a Checkpoint's member can't run, "" when nothing holds it: an
-// open Surgery on a Critique's Checkpoint (loop.SurgeryHold's snapshot twin; the
-// press-time surgeryHold stays authoritative), or an open blocker of the
-// Checkpoint whose kind doesn't admit a land-only hold (loop.Readmit, ADR 0269).
-func (g graphData) memberHold(b *bd.Bead) string {
-	i := g.beadIndex(b.Parent)
-	if b.Parent == "" || i < 0 || g.beads[i].Kind != contract.KindCheckpoint {
-		return ""
-	}
-	cp := &g.beads[i]
-	if b.Kind == contract.KindCritique {
-		for _, s := range g.beads {
-			if s.Parent == cp.ID && s.Kind == contract.KindSurgery && s.Open() {
-				return b.ID + ": held by open Surgery " + s.ID + " — ending the Surgery releases it"
-			}
-		}
-	}
-	for _, h := range g.openBlockers(cp) {
-		if !h.Kind.AdmitsLandOnlyHold() {
-			return cp.ID + " is gated by " + cmp.Or(h.Title, h.ID) + " (" + h.ID + ") — not running"
-		}
+	if v := g.confirmed(b); !v.Runnable {
+		return causeHint(*b, v)
 	}
 	return ""
 }
 
-// reviewDue is the I/O-free half of bd.ReviewDueOver: the Checkpoint's members are
-// drained, one exists, no pivot is open and no Approval pins the tip. An unknown
-// tip (no read, or a failed one) pins nothing, so only a known at-tip Approval vetoes.
-func (g graphData) reviewDue(id string) bool {
-	var kids []bd.Bead
-	for _, k := range g.beads {
-		if k.Parent == id {
-			kids = append(kids, k)
-		}
-	}
-	return g.reviewDueOver(g.beadByID(id), kids)
-}
-
-// reviewDueOver is reviewDue over cp's already-collected children.
+// reviewDueOver is the I/O-free half of bd.ReviewDueOver over cp's collected children, for the
+// rollup: members drained, one exists, no Pivot open and no Approval pins the tip. An unknown tip
+// (no read, or a failed one) pins nothing, so only a known at-tip Approval vetoes.
 func (g graphData) reviewDueOver(cp *bd.Bead, kids []bd.Bead) bool {
 	members := 0
 	tip := g.cpTips[cp.ID]
@@ -1123,28 +1037,6 @@ func (g graphData) heldChildren(id string) []bd.Bead {
 	return held
 }
 
-// checkpointLooksLandable is the I/O-free half of loop.CheckpointReady: an approved-closed
-// kind:approval child and no open kind:conflict / kind:critique child.
-func (g graphData) checkpointLooksLandable(id string) bool {
-	hasApprovedApproval := false
-	for _, b := range g.beads {
-		if b.Parent != id {
-			continue
-		}
-		switch b.Kind {
-		case contract.KindConflict, contract.KindCritique:
-			if b.Status == "open" {
-				return false
-			}
-		case contract.KindApproval:
-			if b.ApprovedClosed() {
-				hasApprovedApproval = true
-			}
-		}
-	}
-	return hasApprovedApproval
-}
-
 // view is the Graph body: the list, and while detail is open the list's top half
 // over a rule and the detail drawer (ADR 0171 §2).
 func (g graphTab) view(w, h int) string {
@@ -1165,7 +1057,13 @@ func (g graphTab) viewBody(w, h int) string {
 		return dimSt.Render(" Graph — no beads yet")
 	}
 	blockers, folds, anc := g.selBlockers(), g.folds(), g.ancestors()
-	sel := 0
+	sel, footer, _ := g.listParts(rows, w)
+	return drawerWin(len(rows), func(i int) string { return g.line(rows[i], blockers, folds, anc) }, sel, g.open, w, h, g.detailVP(), footer, g.lv.offsets(rowKeys(rows, func(r row) string { return r.sel })))
+}
+
+// listParts is what viewBody and hit share about the rows: the selected row's index, the
+// blocker footer and the linked blockers of its rows.
+func (g graphTab) listParts(rows []row, w int) (sel int, footer, links func(off, lh int) []string) {
 	ids := make([]string, len(rows))
 	for i, r := range rows {
 		ids[i] = r.beadID
@@ -1173,16 +1071,74 @@ func (g graphTab) viewBody(w, h int) string {
 			sel = i
 		}
 	}
-	var footer func(off, lh int) []string
 	if b := g.selected(); b != nil {
-		footer = blockerFooter(g.graphData, g.openBlockers(b), ids, w)
+		bl := g.openBlockers(b)
+		footer, links = blockerFooter(g.graphData, bl, ids, w), blockerLinks(bl, ids)
 	}
-	return drawerWin(len(rows), func(i int) string { return g.line(rows[i], blockers, folds, anc) }, sel, g.open, w, h, g.detailVP(), footer)
+	return sel, footer, links
 }
 
+// hit is the pointer's view of body line y of a w by h body (pointable): the filter header
+// line is inert, and the rows sit under it as viewBody draws them.
+func (g graphTab) hit(w, h, y int) hitTarget {
+	lg, top, ok := g.geom(w, h)
+	if !ok {
+		return hitTarget{caret: -1}
+	}
+	t := lg.hit(g.lv, y-top)
+	t.line += top
+	return t
+}
+
+// geom is what the pointer shares with viewBody about a w by h body: the list's geometry and
+// the body lines above it (the filter header). It is false when there are no rows.
+func (g graphTab) geom(w, h int) (lg listGeom, top int, ok bool) {
+	if g.header(w) != "" {
+		h, top = max(h-1, 1), 1
+	}
+	g.w, g.h = w, h
+	rows := g.rows()
+	if len(rows) == 0 {
+		return listGeom{}, top, false
+	}
+	sel, footer, links := g.listParts(rows, w)
+	return listGeom{n: len(rows), sel: sel, h: h, open: g.open, footer: footer, links: links,
+		keys: anchorKeys(rowKeys(rows, func(r row) string { return r.sel })),
+		at:   func(k int) hitTarget { return stopTarget(rows[k].sel, rows[k].beadID != "") }}, top, true
+}
+
+// selectKey selects a row as j/k would.
+func (g graphTab) selectKey(key string) component {
+	g.sel, g.off, g.want, g.landMoved = key, 0, "", true
+	return g
+}
+
+func (g graphTab) wheel(w, h, y, delta int) component {
+	lg, top, ok := g.geom(w, h)
+	if !ok {
+		return g
+	}
+	if lg.hit(g.lv, y-top).kind == hitDrawer {
+		g.w, g.h = w, h-top
+		g.off = wheelDrawer(g.detailVP(), delta)
+		return g
+	}
+	g.lv = lg.wheeled(g.lv, delta)
+	return g
+}
+
+func (g graphTab) snap(w, h int) component {
+	if lg, _, ok := g.geom(w, h); ok {
+		g.lv = lg.snapped(g.lv)
+	}
+	return g
+}
+
+func (g graphTab) unscroll() component { g.lv = listView{}; return g }
+
 var (
-	prio0Sty = warnSt.Bold(true)
-	prio1Sty = lipgloss.NewStyle().Foreground(lipgloss.Color("217")) // not 210, the hot-title pink
+	prio0Sty lipgloss.Style
+	prio1Sty lipgloss.Style // not the blocker pink
 )
 
 // prioText is the plain P<n>; prio is it coloured: P0 bold warn red, P1 light red, the rest unstyled.
@@ -1203,9 +1159,9 @@ func prio(p int) string {
 func prioTint(cp int) (lipgloss.Color, bool) {
 	switch cp {
 	case 0:
-		return "203", true
+		return prio0Tint, true
 	case 1:
-		return "217", true
+		return prio1Tint, true
 	}
 	return "", false
 }
@@ -1214,7 +1170,7 @@ func prioTint(cp int) (lipgloss.Color, bool) {
 // would otherwise hide; st unchanged when there is no tint.
 func tinted(st lipgloss.Style, cp int) lipgloss.Style {
 	if c, ok := prioTint(cp); ok {
-		return st.Foreground(lipgloss.Color("16")).Background(c)
+		return st.Foreground(tintInk).Background(c)
 	}
 	return st
 }

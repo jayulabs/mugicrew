@@ -25,6 +25,7 @@ import (
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
+	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/route"
 	"jayulabs.org/mugicrew/session"
 )
@@ -41,7 +42,7 @@ func (m Model) pinned(id string) (bd.Bead, bool) {
 	return m.beads[i], true
 }
 
-// actionKey runs Graph's action keys over the selection; ok is false for any other key.
+// actionKey is enter's and b's launch path over the selection; ok is false for any other key.
 func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 	g := m.gateData()
 	var act func(b bd.Bead) (tea.Model, tea.Cmd)
@@ -55,25 +56,10 @@ func (m Model) actionKey(k tea.KeyMsg) (next tea.Model, cmd tea.Cmd, ok bool) {
 		}
 	case key.Matches(k, keyBg):
 		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.launchAs(g, b, true) }
-	case key.Matches(k, keyPauseKey):
-		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.togglePause(g, b) }
-	case key.Matches(k, keyDropKey):
-		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.dropKey(g, b) }
-	case key.Matches(k, keyWithdrawKey):
-		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.withdrawKey(g, b) }
-	case key.Matches(k, keyPrio):
-		d := prioDir(k)
-		act = func(b bd.Bead) (tea.Model, tea.Cmd) { return m.bumpPriority(b, d) }
 	default:
 		return m, nil, false
 	}
 	b := m.selection()
-	if b == nil && key.Matches(k, keyWithdrawKey) {
-		if i := m.initRow(); isOpenInitiative(i) {
-			next, cmd = m.withdrawKey(g, *i)
-			return next, cmd, true
-		}
-	}
 	if b == nil {
 		m.setStatus("nothing selected")
 		if gt, isGraph := m.tabAt(m.tab).(graphTab); isGraph && gt.sel == unparentedSel {
@@ -126,6 +112,9 @@ func (m Model) launchAs(g graphData, b bd.Bead, bg bool) (tea.Model, tea.Cmd) {
 		if s.State == session.Exited {
 			ctx := m.ctx
 			return m.startLaunch(b, bg, func() launchDoneMsg {
+				if err := refuseLegacy(); err != nil {
+					return launchDoneMsg{b: b, resume: true, refused: true, err: err}
+				}
 				pctx, err := resumeCtx(ctx, b, s.Profile)
 				if err != nil {
 					return launchDoneMsg{b: b, resume: true, refused: true, err: err}
@@ -182,6 +171,9 @@ func (m Model) launchAs(g graphData, b bd.Bead, bg bool) (tea.Model, tea.Cmd) {
 func (m Model) launchNow(b bd.Bead, bg bool) (tea.Model, tea.Cmd) {
 	ctx, crew := m.ctx, m.crew
 	return m.startLaunch(b, bg, func() launchDoneMsg {
+		if err := refuseLegacy(); err != nil { // before the claim: a refusal acts on nothing
+			return launchDoneMsg{b: b, refused: true, err: err}
+		}
 		pctx, profile, err := launchCtx(ctx, b) // before the claim: a refusal neither claims nor pauses
 		if err != nil {
 			return launchDoneMsg{b: b, refused: true, err: err}
@@ -200,8 +192,8 @@ func (m Model) launchNow(b bd.Bead, bg bool) (tea.Model, tea.Cmd) {
 		c.Profile = profile
 		// The bead is claimed first, as AFK dispatch does: a failed claim starts
 		// nothing, and a failed start releases the claim (ADR 0034). A Surgery's
-		// filing already claimed it, and an idle in_progress Task is resumed.
-		resume := (b.Kind == contract.KindTask || b.Kind == contract.KindDiscussion || b.Kind == contract.KindCheckup) && b.Status == "in_progress"
+		// filing already claimed it, and an idle in_progress Errand is resumed.
+		resume := (b.Kind == contract.KindErrand || b.Kind == contract.KindDiscussion || b.Kind == contract.KindCheckup) && b.Status == "in_progress"
 		claim := b.Kind != contract.KindSurgery && !resume
 		if claim {
 			if err := hitlClaim(b.ID); err != nil {
@@ -452,34 +444,20 @@ func (m Model) abortDone(id string, signalled []int, held bool, err error) (tea.
 	return m, m.load()
 }
 
-// recoverOpts are x's recover options, never forced (ADR 0127): the TUI's own
-// session is always left out of the TUI-alive read. A live effort, run-now
-// included, is already caught by recover's argv scan and flock read first.
-func (m Model) recoverOpts(id string) func(discard bool) (chopper.Opts, error) {
-	return func(discard bool) (o chopper.Opts, err error) {
-		o.Discard = discard
-		o.ExcludeTUISession, err = ownSession()
-		return o, err
-	}
-}
-
 // openRecover reads the inventory and verdict now, under the bead's pending key (a
 // pure read, but the key marks the row busy), so the dialog states what y repairs.
-// An ambiguous verdict opens no dialog: the TUI never forces.
+// An ambiguous verdict opens no dialog: the TUI never forces (ADR 0127), so Force
+// stays unset; a live effort, run-now included, is already caught by recover's argv
+// scan and flock read first.
 func (m Model) openRecover(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
-	id, opts := b.ID, m.recoverOpts(b.ID)
+	id := b.ID
 	return m.startWrite(id, "checking", func() writeDoneMsg {
-		o, err := opts(false)
-		var inv chopper.Inventory
-		var v string
-		if err == nil {
-			inv, v, err = assessRecover(id, o)
-		}
+		inv, v, err := assessRecover(id, chopper.Opts{})
 		return writeDoneMsg{id, func(m Model) (tea.Model, tea.Cmd) {
 			var rf *chopper.Refused
 			switch {
 			case errors.As(err, &rf) && rf.Verdict == chopper.Ambiguous:
-				m.setStatus(err.Error() + "; the TUI never forces: with the loop off, run mugicrew recover --force " + id)
+				m.setStatus(err.Error() + "; the TUI never forces: check pgrep -a claude and your own shells, then run mugicrew recover --force " + id)
 			case err != nil:
 				m.setStatus("recover: " + err.Error())
 			case v == "":
@@ -487,7 +465,8 @@ func (m Model) openRecover(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 			case len(m.modals) > 0: // a dialog opened meanwhile keeps the keys
 				m.setStatus(id + ": recover read done; press x again")
 			default:
-				return m.push(promptDialog("Recover?", func(w int) []string { return []string{confirmRecoverPrompt(b.Title, v, inv, w)} }, id,
+				orphan := m.orphans[id]
+				return m.push(promptDialog("Recover?", func(w int) []string { return []string{confirmRecoverPrompt(b.Title, v, inv, orphan, w)} }, id,
 					func(m Model, d dialog) (Model, tea.Cmd) {
 						if inv.Files == 0 {
 							return into(m.recoverRun(d.id, false))
@@ -506,13 +485,9 @@ func (m Model) openRecover(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 // bound to the confirmed file count; the verdict re-checked inside means no writer
 // is left to grow it.
 func (m Model) recoverRun(id string, discard bool) (tea.Model, tea.Cmd) {
-	opts := m.recoverOpts(id)
 	return m.startAct(id, "recovering", func() writeDoneMsg {
-		o, err := opts(discard)
-		var r chopper.Report
-		if err == nil {
-			r, err = recoverBead(id, o) // liveness re-checked inside
-		}
+		// Never forced (ADR 0127).
+		r, err := recoverBead(id, chopper.Opts{Discard: discard}) // liveness re-checked inside
 		return writeDoneMsg{id, func(m Model) (tea.Model, tea.Cmd) { return m.recoverDone(id, r, err) }}
 	})
 }
@@ -548,8 +523,11 @@ func (m Model) runNow(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 		m.setStatus(why)
 		return m, nil
 	}
-	if g.blocked(&b) && b.Status == "open" {
-		blockers := g.heldBy(&b)
+	if v := g.eligibility(&b); v.Cause == loop.CauseBlocked {
+		blockers := make([]*bd.Bead, len(v.Holders))
+		for i := range v.Holders {
+			blockers[i] = &v.Holders[i].Bead
+		}
 		return m.push(promptDialog("Run blocked bead now?", func(w int) []string { return []string{confirmBlockedPrompt("run", b.Title, blockers, w)} }, b.ID,
 			func(m Model, d dialog) (Model, tea.Cmd) {
 				cur, ok := m.pinned(d.id)
@@ -585,6 +563,12 @@ func (m Model) transcript(id string) (tea.Model, tea.Cmd) {
 func (m Model) runNowGo(bead bd.Bead, force bool) (tea.Model, tea.Cmd) {
 	crews, ctx := m.crew, m.ctx
 	return m.startAct(bead.ID, "dispatching", func() writeDoneMsg {
+		if err := refuseLegacy(); err != nil {
+			return writeDoneMsg{bead.ID, func(m Model) (tea.Model, tea.Cmd) {
+				m.setStatus(err.Error())
+				return m, nil
+			}}
+		}
 		status, crew, r := claimRunNow(ctx, bead, crews, force)
 		if crew != nil { // claimed: hand the effort to a detached host (ADR 0330)
 			cmd, outPath, err := spawnRunHost(r)
@@ -705,8 +689,8 @@ func confirmDropPrompt(title string, w int) string   { return fitTitle(dropPromp
 func confirmFinishPrompt(title string, w int) string { return fitTitle(finishPromptFmt, title, w) }
 func confirmAbortPrompt(title string, w int) string  { return fitTitle(abortPromptFmt, title, w) }
 
-func confirmRecoverPrompt(title, verdict string, inv chopper.Inventory, w int) string {
-	return fitTitle(recoverPromptFmt, title, w, verdict, chopper.Leftovers(inv))
+func confirmRecoverPrompt(title, verdict string, inv chopper.Inventory, orphan bool, w int) string {
+	return fitTitle(recoverPromptFmt, title, w, verdict, chopper.Leftovers(inv, orphan))
 }
 
 // confirmDiscardPrompt is recover's second dialog on a dirty tree: the file count y loses.

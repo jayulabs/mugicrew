@@ -64,7 +64,7 @@ var table = map[contract.Kind]Entry{
 	contract.KindMRWatch:    {Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}, // Spec D4: Jinbe's every-tick MR read; copies Landing's row
 	contract.KindLatch:      {Owner: "brook", Mode: AFK, Container: false, Mechanical: true}, // Spec mc-8ymw.9 D1: Brook's in-process Jira check; copies Landing's row
 	contract.KindSurgery:    {Owner: "franky", Mode: HITL, Container: false},                 // ADR 0092: HITL, so an open Surgery is never an AFK loop or run-now candidate
-	contract.KindTask:       {Owner: "brook", Mode: HITL, Container: false},                  // ADR 0115: only a human launches a Task, so the loop never does
+	contract.KindErrand:     {Owner: "brook", Mode: HITL, Container: false},                  // ADR 0115: only a human launches an Errand, so the loop never does
 	contract.KindDiscussion: {Owner: "robin", Mode: HITL, Container: false, ReadOnly: true},  // ADR 0194: a human-started Robin session, so the loop never dispatches it
 	contract.KindCheckup:    {Owner: "chopper", Mode: HITL, Container: false},                // ADR 0272: a human-started Chopper session (bd edits, so not ReadOnly), so the loop never dispatches it
 	contract.KindInitiative: {Owner: "luffy", Mode: HITL, Container: true},                   // ADR 0128/0135: branchless container with no effort, so never a loop candidate nor a pool slot
@@ -93,18 +93,26 @@ var autoApprove atomic.Bool
 // SetAutoApprove stamps the auto-approve snapshot ModeOf reads.
 func SetAutoApprove(on bool) { autoApprove.Store(on) }
 
-// ResetAutoApprove turns the snapshot off; tests call it in Cleanup.
-func ResetAutoApprove() { autoApprove.Store(false) }
+// ResetModeSnapshots turns the auto-approve and gitlab snapshots off; tests call it in Cleanup.
+func ResetModeSnapshots() { autoApprove.Store(false); gitlab.Store(false) }
+
+// gitlab is the land-strategy snapshot, stamped beside autoApprove at the same call
+// sites: under gitlab an Approval runs AFK whether or not auto-approve is on, since the
+// human approves by un-drafting the MR, not in a session. Off (local) until set.
+var gitlab atomic.Bool
+
+// SetGitlab stamps the land-strategy snapshot ModeOf reads.
+func SetGitlab(on bool) { gitlab.Store(on) }
 
 // ModeOf is a bead's dispatch mode: Lookup's static Mode, except an Approval is
-// AFK while the auto-approve snapshot is on and labels lack auto-approve:failed
+// AFK while the auto-approve or gitlab snapshot is on and labels lack auto-approve:failed
 // (ADR 0346). An unknown kind reads HITL, so nothing unowned is dispatched.
 func ModeOf(kind contract.Kind, labels []string) Mode {
 	e, err := Lookup(kind)
 	if err != nil {
 		return HITL
 	}
-	if kind == contract.KindApproval && autoApprove.Load() && !slices.Contains(labels, AutoApproveFailedLabel) {
+	if kind == contract.KindApproval && (autoApprove.Load() || gitlab.Load()) && !slices.Contains(labels, AutoApproveFailedLabel) {
 		return AFK
 	}
 	return e.Mode

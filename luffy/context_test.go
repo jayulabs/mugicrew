@@ -44,11 +44,11 @@ func TestReconcileContextStampsChartAndFastLaneSpec(t *testing.T) {
 }
 
 func TestTriagePromptContextQuestion(t *testing.T) {
-	base := triagePrompt("ws-sig", "", "", nil, nil)
-	if got := triagePrompt("ws-sig", "", "", map[string]string{}, nil); got != base {
+	base := triagePrompt("ws-sig", "", "", "", nil, nil)
+	if got := triagePrompt("ws-sig", "", "", "", map[string]string{}, nil); got != base {
 		t.Error("empty contexts must leave the prompt byte-identical")
 	}
-	got := triagePrompt("ws-sig", "", "", map[string]string{"web": "apps/web/", "api": "apps/api"}, nil)
+	got := triagePrompt("ws-sig", "", "", "", map[string]string{"web": "apps/web/", "api": "apps/api"}, nil)
 	rest, ok := strings.CutPrefix(got, base)
 	if !ok {
 		t.Fatal("the context question must be appended, not woven in")
@@ -108,7 +108,7 @@ func TestSignalContextLabelPreBindsSuccessor(t *testing.T) {
 func TestTriagePromptRepoContextRules(t *testing.T) {
 	ctxs := map[string]string{"api": "proj-a/", "docs": "docs/"}
 	swap(t, &repoContexts, func() map[string]string { return map[string]string{"api": "proj-a"} })
-	got := triagePrompt("ws-sig", "", "", ctxs, nil)
+	got := triagePrompt("ws-sig", "", "", "", ctxs, nil)
 	for _, want := range []string{"Never none", "Cross-repo split", "api (proj-a/)", "[<context>]", "ADR 0085"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("repo rules missing %q", want)
@@ -118,7 +118,7 @@ func TestTriagePromptRepoContextRules(t *testing.T) {
 		t.Error("path = context listed as a repo context")
 	}
 	swap(t, &repoContexts, func() map[string]string { return nil })
-	got = triagePrompt("ws-sig", "", "", ctxs, nil)
+	got = triagePrompt("ws-sig", "", "", "", ctxs, nil)
 	if strings.Contains(got, "Never none") || strings.Contains(got, "Cross-repo split") {
 		t.Error("path-only Workspace must get neither rule")
 	}
@@ -126,10 +126,10 @@ func TestTriagePromptRepoContextRules(t *testing.T) {
 
 func TestTriagePromptPreBoundOnlyWhenLabelled(t *testing.T) {
 	ctxs := map[string]string{"api": "proj-a/"}
-	if strings.Contains(triagePrompt("ws-sig", "", "", ctxs, nil), "Pre-bound member") {
+	if strings.Contains(triagePrompt("ws-sig", "", "", "", ctxs, nil), "Pre-bound member") {
 		t.Error("loose Signal got the pre-bound paragraph")
 	}
-	got := triagePrompt("ws-sig", "", "api", ctxs, nil)
+	got := triagePrompt("ws-sig", "", "api", "", ctxs, nil)
 	if !strings.Contains(got, "Pre-bound member") || !strings.Contains(got, "context:api") {
 		t.Error("labelled Signal missing the pre-bound paragraph")
 	}

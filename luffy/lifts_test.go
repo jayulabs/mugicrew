@@ -7,7 +7,7 @@ import (
 
 // The dirty-main rule sits in the reconcile fast lane.
 func TestTriagePromptDirtyMainIsHumans(t *testing.T) {
-	got := strings.Join(strings.Fields(triagePrompt("ws-sig", "", "", nil, nil)), " ")
+	got := strings.Join(strings.Fields(triagePrompt("ws-sig", "", "", "", nil, nil)), " ")
 	i := strings.Index(got, "### FAST LANE")
 	if i < 0 {
 		t.Fatal("triage prompt lacks the FAST LANE section")

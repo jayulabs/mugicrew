@@ -10,6 +10,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -18,7 +19,7 @@ func isEvent(b *bd.Bead)     { b.Event = true }
 
 // execFixture covers the research row table: a folded Checkpoint under an Initiative
 // with every member state, a surgery Checkpoint, Specs, Drafts and events, and the
-// Tasks and Pivots that wait on, hold and gate Checkpoint cpA.
+// Errands and Pivots that wait on, hold and gate Checkpoint cpA.
 func execFixture() []bd.Bead {
 	cp := contract.KindCheckpoint
 	return []bd.Bead{
@@ -40,8 +41,8 @@ func execFixture() []bd.Bead {
 		dbead("pg", contract.KindPivot, "open", "", 1),
 		dbead("pg2", contract.KindPivot, "open", "i2", 2),
 		dbead("pu", contract.KindPivot, "open", "", 1),
-		dbead("tb", contract.KindTask, "open", "", 3),
-		dbead("ta", contract.KindTask, "open", "", 3, blockedBy("cpA")),
+		dbead("tb", contract.KindErrand, "open", "", 3),
+		dbead("ta", contract.KindErrand, "open", "", 3, blockedBy("cpA")),
 	}
 }
 
@@ -77,7 +78,7 @@ func TestExecList(t *testing.T) {
 		want  string
 	}{
 		{"empty snapshot: every section with its placeholder", nil, nil, "# Actionable (0),.,# Live (0),.,# Specs (0),.,# Checkpoints (0),.,# Initiatives (0),.,# No Initiative (0),."},
-		{"Actionable, Initiative groups, Checkpoints before Specs before Tasks and Pivots, No Initiative last, Checkpoints folded",
+		{"Actionable, Initiative groups, Checkpoints before Specs before Errands and Pivots, No Initiative last, Checkpoints folded",
 			beads, nil,
 			"# Actionable (6),A ap,A pg,A sg,A pg2,A tb,A pz,# Live (0),.,# Specs (2),P sp,P sp2,# Checkpoints (2),K cpA,K cs,# Initiatives (2)," +
 				"# t i1,C cpA,S sp,S sp2,T tb,T ta," +
@@ -105,27 +106,27 @@ func TestExecList(t *testing.T) {
 			[]bd.Bead{dbead("c", contract.KindCheckpoint, "open", "", 1, isContainer), dbead("m", contract.KindBuild, "open", "c", 1)},
 			map[string]bool{"c": true},
 			"# Actionable (0),.,# Live (0),.,# Specs (0),.,# Checkpoints (1),K c,# Initiatives (0),.,# No Initiative (1),C c,M m"},
-		{"a Task or Pivot with no Initiative falls back to its Checkpoint's",
+		{"an Errand or Pivot with no Initiative falls back to its Checkpoint's",
 			[]bd.Bead{
 				dbead("i", contract.KindInitiative, "open", "", 1),
 				dbead("c", contract.KindCheckpoint, "open", "i", 1, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"p"} }),
 				dbead("p", contract.KindPivot, "open", "", 1),
 			}, nil,
 			"# Actionable (1),A p,# Live (0),.,# Specs (0),.,# Checkpoints (1),K c,# Initiatives (1),# t i,C c,T p,# No Initiative (0),."},
-		{"every live Task is listed: Initiative child, freestanding, blocked, after-land; Drafts, closed and ungated Pivots are not",
+		{"every live Errand is listed: Initiative child, freestanding, blocked, after-land; Drafts, closed and ungated Pivots are not",
 			[]bd.Bead{
 				dbead("i", contract.KindInitiative, "open", "", 1),
-				dbead("ti", contract.KindTask, "open", "i", 1),
-				dbead("tf", contract.KindTask, "open", "", 2),
-				dbead("tk", contract.KindTask, "open", "", 3, blockedBy("tf")),
+				dbead("ti", contract.KindErrand, "open", "i", 1),
+				dbead("tf", contract.KindErrand, "open", "", 2),
+				dbead("tk", contract.KindErrand, "open", "", 3, blockedBy("tf")),
 				dbead("c", contract.KindCheckpoint, "closed", "", 1, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"tl"} }),
-				dbead("tl", contract.KindTask, "open", "", 4),
-				dbead("td", contract.KindTask, "deferred", "i", 5),
-				dbead("tc", contract.KindTask, "closed", "i", 6),
+				dbead("tl", contract.KindErrand, "open", "", 4),
+				dbead("td", contract.KindErrand, "deferred", "i", 5),
+				dbead("tc", contract.KindErrand, "closed", "i", 6),
 				dbead("p", contract.KindPivot, "open", "", 1),
 			}, nil,
 			"# Actionable (3),A ti,A tf,A tl,# Live (0),.,# Specs (0),.,# Checkpoints (0),.,# Initiatives (1),# t i,T ti,# No Initiative (3),T tf,T tk,T tl"},
-		{"a Task or Pivot waiting on no listed Checkpoint is not shown",
+		{"an Errand or Pivot waiting on no listed Checkpoint is not shown",
 			[]bd.Bead{
 				dbead("c", contract.KindCheckpoint, "closed", "", 1, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"p"} }),
 				dbead("p", contract.KindPivot, "open", "", 1),
@@ -139,7 +140,7 @@ func TestExecList(t *testing.T) {
 }
 
 // Actionable follows ADR 0170 §3: blocked, paused and done beads and after-land
-// Tasks fall out; idle and live beads stay; a Pivot that gates nothing is absent.
+// Errands fall out; idle and live beads stay; a Pivot that gates nothing is absent.
 func TestExecActionable(t *testing.T) {
 	beads := append(execFixture(),
 		dbead("lv", contract.KindApproval, "open", "cpA", 5))
@@ -341,15 +342,15 @@ func TestExecHints(t *testing.T) {
 	m, _ := execModel(t, beads)
 	m = unfolded(t, m)
 	for _, c := range []struct{ key, want string }{
-		{"act:ap", "enter launch · b bg · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"lv", "enter attach · d detail · p pause · x drop · t transcript · +/- prio · J/K section"},
-		{"blk", "d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"sp", "enter run · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
-		{"cpA", "space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
+		{"act:ap", "enter launch · b bg · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"lv", "enter attach · d detail · p pause · x drop · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"blk", "d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · U unblock · J/K section"},
+		{"sp", "enter run · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"},
+		{"cpA", "space fold · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · U unblock · J/K section"},
 		{actKey, "space fold · d detail · J/K section"},
-		{"i:i1", "space fold · d detail · X cancel · J/K section"},
+		{"i:i1", "space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section"},
 		{"cpA/closed", "space fold · d detail · J/K section"},
-		{"cl", "d detail · t transcript · J/K section"},
+		{"cl", "d detail · t transcript · c checkup · J/K section"},
 	} {
 		n := execAt(t, m, c.key)
 		if got := hintsOf(n); got != c.want {
@@ -422,7 +423,7 @@ func TestExecBlockerFooterAboveRule(t *testing.T) {
 	m = press(t, execAt(t, unfolded(t, m), "ap"), runeKey("d"))
 	got := lines(ansi.Strip(m.View()))
 	for i := len(got) - 1; i > 0; i-- {
-		if strings.HasPrefix(got[i], "────") {
+		if strings.HasPrefix(got[i], "╭───") {
 			if !strings.HasPrefix(got[i-1], "!") || !strings.Contains(got[i-1], "· ghost") {
 				t.Errorf("row above rule = %q, want footer", got[i-1])
 			}
@@ -453,15 +454,15 @@ func TestExecGapUnderActionable(t *testing.T) {
 	t.Fatalf("no %q line", next)
 }
 
-// initiativeOf is the bead's own Initiative, else its Checkpoint's: a Task adopted
+// initiativeOf is the bead's own Initiative, else its Checkpoint's: an Errand adopted
 // into X that holds a Checkpoint in Y resolves to X.
 func TestInitiativeOf(t *testing.T) {
 	g := graphData{beads: []bd.Bead{
 		dbead("x", contract.KindInitiative, "open", "", 1),
 		dbead("y", contract.KindInitiative, "open", "", 1),
 		dbead("cp", contract.KindCheckpoint, "open", "y", 1, isContainer),
-		dbead("own", contract.KindTask, "open", "x", 1),
-		dbead("none", contract.KindTask, "open", "", 1),
+		dbead("own", contract.KindErrand, "open", "x", 1),
+		dbead("none", contract.KindErrand, "open", "", 1),
 		dbead("nocp", contract.KindCheckpoint, "open", "", 1, isContainer),
 	}}
 	for _, c := range []struct{ b, cp, want string }{
@@ -509,10 +510,10 @@ func TestExecActionableBands(t *testing.T) {
 	}
 }
 
-// Every open unblocked Task is Actionable wherever it sits (Spec mc-b5ce); only a Task
+// Every open unblocked Errand is Actionable wherever it sits (Spec mc-b5ce); only an Errand
 // blocking a listed Checkpoint carries the "holds land of" hint.
-func TestExecActionableListsEveryTask(t *testing.T) {
-	tk := contract.KindTask
+func TestExecActionableListsEveryErrand(t *testing.T) {
+	tk := contract.KindErrand
 	beads := []bd.Bead{
 		dbead("cpOpen", contract.KindCheckpoint, "open", "", 1, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"tb", "tb2"} }),
 		dbead("cpOpen2", contract.KindCheckpoint, "open", "", 2, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"tb"} }),
@@ -556,16 +557,42 @@ func TestExecActionableListsEveryTask(t *testing.T) {
 	}
 }
 
-// FR40: a Task filed as a direct Initiative child shows in its Initiative's group, not
+// FR40: an Errand filed as a direct Initiative child shows in its Initiative's group, not
 // in No Initiative, and holds the group's Actionable row while open.
-func TestExecGroupsMemberTaskUnderItsInitiative(t *testing.T) {
+func TestExecGroupsMemberErrandUnderItsInitiative(t *testing.T) {
 	beads := []bd.Bead{
 		dbead("i", contract.KindInitiative, "open", "", 1),
-		dbead("tm", contract.KindTask, "open", "i", 1),
-		dbead("to", contract.KindTask, "open", "", 2),
+		dbead("tm", contract.KindErrand, "open", "i", 1),
+		dbead("to", contract.KindErrand, "open", "", 2),
 	}
 	want := "# Actionable (2),A tm,A to,# Live (0),.,# Specs (0),.,# Checkpoints (0),.,# Initiatives (1),# t i,T tm,# No Initiative (1),T to"
 	if got := strings.Join(eshape(execList(beads, nil)), ","); got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
+	}
+}
+
+// A Chart's Approval reads in Actionable as a Checkpoint's does: a HITL one is a candidate,
+// a waiting one (an MR: line) too, and an AFK one is the loop's.
+func TestActionableChartApprovals(t *testing.T) {
+	autoApproveOn(t)
+	mr := func(b *bd.Bead) { b.Description = undraftBody }
+	hitl := labeled(registry.AutoApproveFailedLabel)
+	g := graphData{beads: []bd.Bead{
+		dbead("ch", contract.KindChart, "open", "", 1, isContainer),
+		dbead("hi", contract.KindApproval, "open", "ch", 1, hitl),
+		dbead("wt", contract.KindApproval, "open", "ch", 2, mr),
+		dbead("af", contract.KindApproval, "open", "ch", 3),
+	}}
+	got := eshape(g.actionable())
+	if len(got) != 2 {
+		t.Fatalf("Chart Approvals in Actionable = %v, want hi and wt", got)
+	}
+	for _, r := range g.actionable() {
+		if r.b.ID == "af" {
+			t.Fatalf("AFK Chart Approval is Actionable")
+		}
+		if r.cp == nil || r.cp.ID != "ch" {
+			t.Fatalf("row %s parent = %v", r.b.ID, r.cp)
+		}
 	}
 }

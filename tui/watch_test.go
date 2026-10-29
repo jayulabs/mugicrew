@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -150,4 +151,20 @@ func TestTranscriptHintsAndRef(t *testing.T) {
 		t.Errorf("header row hints %q", ansi.Strip(i.hintsView()))
 	}
 	m, _ = actModel(t)
+}
+
+// The package's TestMain fences tmux off: t with no per-test Watch stub finishes on the
+// default stub, and the tmux address variables are gone from the process.
+func TestTranscriptKeyReachesNoRealTmux(t *testing.T) {
+	m, _ := actModel(t)
+	m, cmd := at(t, m, "live", runeKey("t"))
+	m = settle(t, m, cmd)
+	if got := statusOf(m); got != "transcript live" {
+		t.Errorf("status = %q, want transcript live", got)
+	}
+	for _, k := range []string{"TMUX", "TMUX_PANE", "MUGICREW_HITL_PANE"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s is set to %q in the test process", k, v)
+		}
+	}
 }

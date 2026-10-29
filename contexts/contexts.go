@@ -383,6 +383,18 @@ func AtHead(b bd.Bead, ws func(body, branch string) bool) func(body, branch stri
 	}
 }
 
+// ApprovedAtHead is the first of approvals closed approved whose Commit: pin is branch's
+// live tip in b's repo (AtHead), or nil: the scan a Chart's gate and its land share.
+func ApprovedAtHead(b bd.Bead, approvals []bd.Bead, ws func(body, branch string) bool, branch string) *bd.Bead {
+	atHead := AtHead(b, ws)
+	for i := range approvals {
+		if approvals[i].ApprovedClosed() && atHead(approvals[i].Description, branch) {
+			return &approvals[i]
+		}
+	}
+	return nil
+}
+
 // LandedTip is the Tip: a land squash pinned, read in b's repo: the child's for a
 // repo context, else ws.
 func LandedTip(b bd.Bead, sha string, ws func(string) (string, bool)) (string, bool) {

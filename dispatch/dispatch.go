@@ -189,14 +189,14 @@ func Beads(in []Inflight) []bd.Bead {
 // cleanup; abort never unclaims, removes a tree or deletes Drafts.
 // ponytail: SIGTERM only; add SIGKILL escalation if aborted efforts survive.
 func Abort(id, by string) ([]int, bool, error) {
-	b, err := show(id)
+	b, err := bd.Show(id)
 	if err != nil {
 		return nil, false, err
 	}
 	if b.Status != "in_progress" {
 		return nil, false, fmt.Errorf("%s: nothing in flight", id)
 	}
-	if err := abortPause(id, bd.PausedManual); err != nil {
+	if err := bd.Pause(id, bd.PausedManual); err != nil {
 		return nil, false, err
 	}
 	// The scan also matches this process when it is `mugicrew abort <id>`;
@@ -231,13 +231,12 @@ func AbortNote(held bool) string {
 // FormatPids renders Abort's pids space-separated for the CLI and TUI ("" for none).
 func FormatPids(pids []int) string { return strings.Trim(fmt.Sprint(pids), "[]") }
 
-// abortPause, abortPids and killGroup are Abort's seams, vars so tests stub
+// abortPids, abortHeld and killGroup are Abort's seams, vars so tests stub
 // them. killGroup SIGTERMs pid's own process group (every spawn is Setpgid).
 var (
-	abortPause = bd.Pause
-	abortPids  = liveness.Pids
-	abortHeld  = liveness.Held
-	killGroup  = func(pid int) error {
+	abortPids = liveness.Pids
+	abortHeld = liveness.Held
+	killGroup = func(pid int) error {
 		pgid, err := syscall.Getpgid(pid)
 		if err != nil {
 			return err
@@ -310,7 +309,7 @@ func Dispatch(ctx contract.Ctx, crew contract.Crewmate, b bd.Bead, out io.Writer
 		return e.out, err
 	}
 	if err == nil {
-		if swept(b.ID) { // every placement (ADR 0124)
+		if session.Swept(b.ID) { // every placement (ADR 0124)
 			err = e.retire(b)
 		}
 		if err == nil {
@@ -337,7 +336,9 @@ func Dispatch(ctx contract.Ctx, crew contract.Crewmate, b bd.Bead, out io.Writer
 // effort's err.
 func (e *effort) fail(b bd.Bead, err error) error {
 	e.finish(err)
-	ids, branches, derr := deleteDrafts(b.ID)
+	// The handler closed its own bead, so the delete is serialized by the effort's
+	// dispatcher hold (ADR 0154), not by the claim; the caller holds it until done.
+	ids, branches, derr := bd.DeleteDrafts(b.ID, bd.UnderHold(b.ID, func() bool { return liveness.Holding(b.ID) }))
 	// ponytail: a failed delete leaves the Drafts stalling the container (D9), as a crash does
 	eventlog.RecordDrafts("draft.deleted", b.ID, ids, derr, e.attrs...)
 	eventlog.RecordBranches(branches, e.attrs...)
@@ -349,7 +350,7 @@ func (e *effort) fail(b bd.Bead, err error) error {
 // and finishing close its Go flow handed over (ADR 0059 §4, Spec D5-D6), recording
 // draft.published with the ids, or draft.failed. Nothing to publish records nothing.
 func (e *effort) publish(b bd.Bead) error {
-	ids, err := publish(b.ID, e.intent.Edges, e.intent.Close)
+	ids, err := bd.Publish(b.ID, e.intent.Edges, e.intent.Close)
 	return eventlog.RecordDrafts("draft.published", b.ID, ids, err, e.attrs...)
 }
 
@@ -363,7 +364,7 @@ func (e *effort) publish(b bd.Bead) error {
 // batch status guard is the upgrade path.
 func (e *effort) retire(b bd.Bead) error {
 	e.intent = intent{}
-	ds, err := drafts(b.ID)
+	ds, err := bd.Drafts(b.ID)
 	if err != nil {
 		return err
 	}
@@ -374,18 +375,10 @@ func (e *effort) retire(b bd.Bead) error {
 		}
 	}
 	if len(ids) > 0 {
-		err = closeDrafts(ids, fmt.Sprintf("%s %s of %s was retired", bd.ObsoleteReason, b.ID, b.Parent))
+		err = bd.ForceCloseAll(ids, fmt.Sprintf("%s %s of %s was retired", bd.ObsoleteReason, b.ID, b.Parent))
 	}
 	return eventlog.RecordDrafts("draft.obsoleted", b.ID, ids, err, append(e.attrs, "container", b.Parent)...)
 }
-
-// publish and deleteDrafts are bd's, vars so tests observe them without a live
-// bd; so are swept and the swept tail's Drafts read and close.
-var (
-	publish, deleteDrafts = bd.Publish, bd.DeleteDrafts
-	swept                 = session.Swept
-	drafts, closeDrafts   = bd.Drafts, bd.ForceCloseAll
-)
 
 // deleteLanded deletes a container's own branch once it is landed and closed
 // (Spec FR30–32): the bead re-reads closed, and the branch tip is the tip
@@ -396,7 +389,7 @@ var (
 // refs/mugicrew/prototypes/* is a separate ref, never touched.
 // ponytail: no sweep for containers closed outside the loop; a leftover branch is harmless.
 func (e *effort) deleteLanded(b bd.Bead, branch string) {
-	if cur, err := show(b.ID); err != nil || cur.Status != "closed" {
+	if cur, err := bd.Show(b.ID); err != nil || cur.Status != "closed" {
 		return
 	}
 	landedBase, landedTip, head, del := git.LandedBase, git.LandedTip, git.Head, git.DeleteBranch
@@ -420,14 +413,14 @@ func (e *effort) deleteLanded(b bd.Bead, branch string) {
 // handler's close stands — and a failed re-read records claim.failed and leaves the
 // claim, never a blind release.
 func (e *effort) release(b bd.Bead) {
-	cur, serr := show(b.ID)
+	cur, serr := bd.Show(b.ID)
 	// ponytail: a failed re-read leaves Aborted false, so an aborted effort then
 	// counts toward paused:failing — accepted: it already carries paused:manual.
 	e.out.Aborted = bd.PausedBy(cur, bd.PausedManual)
 	if serr != nil { // a non-nil err records claim.failed: nothing was released
 		eventlog.RecordClaim(b, "claim.released", serr, "effort", e.id)
 	} else if cur.Status == "in_progress" {
-		eventlog.RecordClaim(b, "claim.released", unclaim(b.ID), "effort", e.id)
+		eventlog.RecordClaim(b, "claim.released", bd.Unclaim(b.ID), "effort", e.id)
 	}
 }
 
@@ -459,7 +452,7 @@ var worktreeRun = func(b bd.Bead, d route.Destination, e *effort, out io.Writer)
 		// caller's claim released, or bd ready never offers it again and the bead
 		// strands in_progress with no process (reads dead in the TUI).
 		if h, busy := contexts.Busy(contexts.Owner(b, d.Container), err, branch); busy {
-			err = eventlog.RecordClaim(b, "claim.released", unclaim(b.ID), "effort", e.id)
+			err = eventlog.RecordClaim(b, "claim.released", bd.Unclaim(b.ID), "effort", e.id)
 			e.out.Holder = h
 			if ownContention(b, branch, h, e.inflight) {
 				e.out.Cut = CutBusy
@@ -510,7 +503,7 @@ var errAborted = errors.New("aborted before spawn: paused:manual")
 // abort in the pre-cut window wrote paused:manual with no child yet to signal.
 // A failed read errs too: never spawn on a guess. No re-read follows the child.
 func preSpawn(id string) error {
-	cur, err := show(id)
+	cur, err := bd.Show(id)
 	if err != nil {
 		return err
 	}
@@ -600,9 +593,6 @@ func ForeignHeld(b bd.Bead, inflight InflightFunc) (branch string, foreign bool,
 // sessions is the detached-session table, a var so tests script it without tmux.
 var sessions = session.Sessions
 
-// claim, unclaim and show are bd's, vars so tests observe the claim ops without a live bd.
-var claim, unclaim, show = bd.Claim, bd.Unclaim, bd.Show
-
 // Claim takes b's in_progress claim for its owning crewmate and records
 // claim.taken, or claim.failed at Error (ADR 0029 §5). bd stays event-blind: the
 // loop and the TUI run-now claim through here. It takes the bead's per-effort
@@ -615,7 +605,7 @@ func Claim(b bd.Bead) (*liveness.Hold, error) {
 	if err != nil {
 		return nil, eventlog.RecordClaim(b, "claim.taken", err)
 	}
-	if err := eventlog.RecordClaim(b, "claim.taken", claim(b.ID)); err != nil {
+	if err := eventlog.RecordClaim(b, "claim.taken", bd.Claim(b.ID)); err != nil {
 		h.Release()
 		return nil, err
 	}

@@ -120,13 +120,14 @@ func TestIntegrateByHumanPrintsTheCloseHint(t *testing.T) {
 	stubIntegrate(t, "sq1", nil)
 	var out strings.Builder
 	Integrate(pausedBuild, "human", &out)
-	if !strings.Contains(out.String(), "integrated; bead still open: bd close mc-b") {
+	const clause = "no longer holds"
+	if !strings.Contains(out.String(), "integrated; bead still open: bd close mc-b") || !strings.Contains(out.String(), clause) {
 		t.Errorf("human output = %q, want the close hint", out.String())
 	}
 	stubIntegrate(t, "", nil)
 	out.Reset()
 	Integrate(pausedBuild, "human", &out)
-	if got := out.String(); !strings.Contains(got, "nothing to integrate") || !strings.Contains(got, "bd close mc-b") {
+	if got := out.String(); !strings.Contains(got, "nothing to integrate") || !strings.Contains(got, "bd close mc-b") || !strings.Contains(got, clause) {
 		t.Errorf("human output, nothing ahead, pause lifted = %q, want nothing-to-integrate and the close hint", got)
 	}
 	unpausedBuild := pausedBuild

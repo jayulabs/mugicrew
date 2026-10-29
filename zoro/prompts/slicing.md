@@ -4,10 +4,10 @@ already cut — your one act is to judge the slice and lay the Build beads that
 member the Checkpoint. You JUDGE the slice and write the graph; you do NOT
 execute any code — Franky executes the Builds later.
 
-Your entire write surface is `bd create` (Build members), `mugicrew task new` (the
-Spec's Tasks) and `bd dep add` (ordering, and an adopted Task's edges). NEVER close, reopen, reject, or
+Your entire write surface is `bd create` (Build members), `mugicrew errand new` (the
+Spec's Errands) and `bd dep add` (ordering, and an adopted Errand's edges). NEVER close, reopen, reject, or
 edit the Checkpoint epic or the Spec — succession closes the Spec (publishing your Drafts with it) once you have
-laid Builds or Tasks, and itself closes a Checkpoint left with no Builds. Touching either bead's
+laid Builds or Errands, and itself closes a Checkpoint left with no Builds. Touching either bead's
 status corrupts the graph.
 
 Spec to slice: %[1]s  (read it with: bd show %[1]s)
@@ -62,30 +62,35 @@ code (Franky does). So when a slice needs a prefactor, emit it as its own
 `kind:build` at the **head** of the chain, with the dependent Builds
 `blocks`-edged behind it, rather than doing the prefactor yourself.
 
-## File the Spec's Tasks first
+## File the Spec's Errands first
 
-A Spec may end with an optional `## Tasks` section: steps in the external world
+A Spec may end with an optional `## Errands` section: steps in the external world
 (outside the bead graph and the code) that a human walks through. File only the
-Tasks it lists, and file them BEFORE any Build: a re-run that finds Builds
-already laid skips this session, so Tasks filed after them could be lost.
+Errands it lists, and file them BEFORE any Build: a re-run that finds Builds
+already laid skips this session, so Errands filed after them could be lost.
 
-Read each entry for a `task: <id>` line first: such an entry adopts an existing
-Task, and slicing files nothing for an adopted entry (see "Adopted entries"
+Before filing anything, read the open Spec for the retired form: if it carries a
+`## Tasks` heading or a `task: <id>` line, fail the slice loudly and lay nothing.
+Name the new form: the Spec's section is `## Errands` and an adopt line is
+`errand: <id>`, so the Spec needs amending (a pivot, or a superseding Spec) first.
+
+Read each entry for an `errand: <id>` line first: such an entry adopts an existing
+Errand, and slicing files nothing for an adopted entry (see "Adopted entries"
 below). The filing steps that follow cover the other entries.
 
-Enumerate the Tasks a prior run already filed, however they were published or
+Enumerate the Errands a prior run already filed, however they were published or
 closed, by listing the Spec's dependents over the discovered-from edge. Keep only
-rows labelled `kind:task` (ignore any other kind, e.g. an offshoot Signal), compare
+rows labelled `kind:errand` (ignore any other kind, e.g. an offshoot Signal), compare
 by title, and file only the titles that are missing (an adopted entry is left out of the
 title-dedupe enumeration):
 
     bd dep list %[1]s --direction=up -t discovered-from --json
 
-File each missing Task through `mugicrew task new`, which files it as a Draft of
+File each missing Errand through `mugicrew errand new`, which files it as a Draft of
 the Spec (with its `discovered-from` edge), joins it to the Initiative of the
-member it is ordered against, and adds its order edges in one step. A Task is never
+member it is ordered against, and adds its order edges in one step. An Errand is never
 a member of the Checkpoint or a child of the Spec. Its description is the entry's
-Steps body only (crew doc task-body.md's format), with every `after:` / `before:`
+Steps body only (crew doc errand-body.md's format), with every `after:` / `before:`
 line removed and no `Initiative:` line (the verb writes it). Turn each ordering
 line into a flag:
 
@@ -93,13 +98,13 @@ line into a flag:
 - `before: land` → `--before <checkpointID>`
 - `after: <T>` → `--after <T>`
 
-    mugicrew task new --drafted-by %[1]s [--after <id>]... [--before <id>]... \
-      --title "<Task title>" --description "<its ## Steps body>"
+    mugicrew errand new --drafted-by %[1]s [--after <id>]... [--before <id>]... \
+      --title "<Errand title>" --description "<its ## Steps body>"
 
-File each Task after every Task its `after:` lines name, whatever order the
-`## Tasks` section lists them in: the edge rides the create, so `<T>` must exist
-by then. `<T>` is the id on the first stdout line of that Task's own
-`mugicrew task new`, or an adopted entry's id.
+File each Errand after every Errand its `after:` lines name, whatever order the
+`## Errands` section lists them in: the edge rides the create, so `<T>` must exist
+by then. `<T>` is the id on the first stdout line of that Errand's own
+`mugicrew errand new`, or an adopted entry's id.
 
 When the slice lays no Builds, every `before: land` line is skipped (no edge on
 the Checkpoint); `after: land` and `after: <T>` stay. When the slice lays no
@@ -108,25 +113,25 @@ climbs the slice's Checkpoint (the Checkpoint closes empty in the same reconcile
 
 ### Adopted entries
 
-An entry with a `task: <id>` line adopts that Task. It is not filed, and it is
+An entry with an `errand: <id>` line adopts that Errand. It is not filed, and it is
 left out of the title-dedupe enumeration. Resolve it first:
 
     bd show <id> --json
 
-- It must be an open `kind:task`. A closed Task is skipped with a line saying so
-  (print which entry and why); it gets no edges. An id that is not a Task (any
+- It must be an open `kind:errand`. A closed Errand is skipped with a line saying so
+  (print which entry and why); it gets no edges. An id that is not an Errand (any
   other kind, or no such bead) must fail the slice loudly: stop and lay nothing more.
 - Turn its ordering lines into `bd dep add` edges, added only if missing:
-  `after: land` is `bd dep add <task> <checkpointID>`, `before: land` is
-  `bd dep add <checkpointID> <task>` (the new Checkpoint blocks on that Task),
-  `after: <T>` is `bd dep add <task> <T>`. `after: <T>` may name an adopted or a
-  filed Task; an adopted entry's `after: <filed T>` edge is added only after T is
+  `after: land` is `bd dep add <errand> <checkpointID>`, `before: land` is
+  `bd dep add <checkpointID> <errand>` (the new Checkpoint blocks on that Errand),
+  `after: <T>` is `bd dep add <errand> <T>`. `after: <T>` may name an adopted or a
+  filed Errand; an adopted entry's `after: <filed T>` edge is added only after T is
   filed. When the slice lays no Builds, `before: land` is skipped, as above.
-- Slicing adds no `discovered-from` edge from the Task to the Spec: the Task keeps its origin.
-- The adopted Task stays where it is: print a line saying so, and that the human
+- Slicing adds no `discovered-from` edge from the Errand to the Spec: the Errand keeps its origin.
+- The adopted Errand stays where it is: print a line saying so, and that the human
   moves it into an Initiative with `initiative adopt`.
 
-The Tasks publish with your Builds.
+The Errands publish with your Builds.
 
 ## Lay each Build into the Checkpoint
 

@@ -168,3 +168,11 @@ func errNoParent(b bd.Bead) error {
 // prototypeRef is the side ref a prototype commits to, keyed on its parent Chart id
 // (ADR 0009: refs/mugicrew/prototypes/<chart-id>) — reachable for lineage, never merged.
 func prototypeRef(chartID string) string { return "refs/mugicrew/prototypes/" + chartID }
+
+// HasTree reports whether b's effort may run in a tree the orphan reading's cwd
+// scan can search: any placement but repo-root, and an unroutable bead too, so a
+// route error never reads as nothing to scan.
+func HasTree(b bd.Bead) bool {
+	d, err := Route(b)
+	return err != nil || d.Placement != RepoRoot
+}

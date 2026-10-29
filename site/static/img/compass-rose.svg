@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-50 -50 100 100">
+  <title>mugicrew compass rose</title>
+  <circle r="44" fill="none" stroke="#1f2a44" stroke-width="1.5"/>
+  <circle r="38" fill="none" stroke="#1f2a44" stroke-width=".7"/>
+  <path d="M0 -46 L7 -7 L0 0 Z" fill="#1f2a44"/><path d="M0 -46 L-7 -7 L0 0 Z" fill="#a23b2a"/>
+  <path transform="rotate(90)" d="M0 -46 L7 -7 L0 0 Z" fill="#1f2a44"/><path transform="rotate(90)" d="M0 -46 L-7 -7 L0 0 Z" fill="#a23b2a"/>
+  <path transform="rotate(180)" d="M0 -46 L7 -7 L0 0 Z" fill="#1f2a44"/><path transform="rotate(180)" d="M0 -46 L-7 -7 L0 0 Z" fill="#a23b2a"/>
+  <path transform="rotate(270)" d="M0 -46 L7 -7 L0 0 Z" fill="#1f2a44"/><path transform="rotate(270)" d="M0 -46 L-7 -7 L0 0 Z" fill="#a23b2a"/>
+  <path transform="rotate(45)" d="M0 -30 L5 -5 L0 0 L-5 -5 Z" fill="none" stroke="#1f2a44" stroke-width="1.2"/>
+  <path transform="rotate(135)" d="M0 -30 L5 -5 L0 0 L-5 -5 Z" fill="none" stroke="#1f2a44" stroke-width="1.2"/>
+  <path transform="rotate(225)" d="M0 -30 L5 -5 L0 0 L-5 -5 Z" fill="none" stroke="#1f2a44" stroke-width="1.2"/>
+  <path transform="rotate(315)" d="M0 -30 L5 -5 L0 0 L-5 -5 Z" fill="none" stroke="#1f2a44" stroke-width="1.2"/>
+  <circle r="4" fill="#f3ead4" stroke="#1f2a44" stroke-width="1.5"/>
+</svg>

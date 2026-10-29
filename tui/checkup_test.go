@@ -17,9 +17,9 @@ func checkupModel(t *testing.T) (Model, *[]string) {
 	m := sized(t, 160, 40)
 	m.crew = map[string]contract.Crewmate{"chopper": fakeCrew{}}
 	m, _ = send(t, m, loadedMsg{beads: []bd.Bead{
-		{ID: "tk", Kind: contract.KindTask, Status: "open", Title: "A task", Created: epoch},
-		{ID: "cl", Kind: contract.KindTask, Status: "closed", Title: "Done task", Created: epoch},
-		{ID: "ck", Kind: contract.KindCheckup, Status: "open", Title: "Repair A task", Created: epoch, Related: []string{"tk"}},
+		{ID: "tk", Kind: contract.KindErrand, Status: "open", Title: "An errand", Created: epoch},
+		{ID: "cl", Kind: contract.KindErrand, Status: "closed", Title: "Done errand", Created: epoch},
+		{ID: "ck", Kind: contract.KindCheckup, Status: "open", Title: "Repair An errand", Created: epoch, Related: []string{"tk"}},
 	}})
 	m, _ = send(t, m, runeKey("4"))
 	if sel(m) == unparentedSel {
@@ -35,7 +35,7 @@ func TestCheckupHintOnEveryRowButCheckup(t *testing.T) {
 			t.Errorf("%s: c checkup shown = %v, want %v", id, got, want)
 		}
 	}
-	closed := bd.Bead{Kind: contract.KindTask, Status: "closed"}
+	closed := bd.Bead{Kind: contract.KindErrand, Status: "closed"}
 	if len(formBindings(nil, &closed)) == 0 || !canCheckup(&closed) {
 		t.Error("c must be offered on a closed bead")
 	}

@@ -268,8 +268,14 @@ func runOut(args ...string) (string, error) {
 func runRaw(args ...string) (string, error) { return runRawEnv(nil, args...) }
 
 // runRawEnv is runRaw with extra env entries after the process env.
-func runRawEnv(env []string, args ...string) (string, error) {
+func runRawEnv(env []string, args ...string) (string, error) { return runRawStdin("", env, args...) }
+
+// runRawStdin is runRawEnv with stdin fed to git.
+func runRawStdin(stdin string, env []string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	cmd.Env = append(append(os.Environ(), env...), "LC_ALL=C") // callers that read git's text (merge-tree output) get English
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}      // a loop's Ctrl-C drains; it must not kill an effort's git step (ADR 0050)
 	out, err := cmd.Output()
@@ -417,19 +423,17 @@ func recordCut(r Repo, id, at string) error {
 	return err
 }
 
-// CommitsSinceCut counts branch's commits since id's recorded cut point
-// (cut..branch): the effort's own work, however far its container has moved on.
-// ok is false when no cut ref is recorded (an effort cut before ADR 0264), leaving
-// the caller to estimate from the container.
-func (r Repo) CommitsSinceCut(id, branch string) (n int, ok bool, err error) {
-	_, err = r.run("rev-parse", "--verify", "--quiet", cutRefPrefix+id+"^{commit}")
-	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) && ee.ExitCode() == 1 {
-		return 0, false, nil
-	}
-	if err != nil {
+// CommitsSinceCut counts branch's commits since the start of id's own work
+// (start..branch), however far its container has moved on: the recorded cut point,
+// or the merge-base with container when branch was rebased onto later container
+// history (OwnWorkStart). ok is false when no cut ref is recorded (an effort cut
+// before ADR 0264), leaving the caller to estimate from the container.
+func (r Repo) CommitsSinceCut(id, branch, container string) (n int, ok bool, err error) {
+	start, cut, err := r.OwnWorkStart(id, branch, container)
+	if err != nil || cut == "" {
 		return 0, false, err
 	}
-	n, err = r.CommitsAhead(cutRefPrefix+id, branch)
+	n, err = r.CommitsAhead(start, branch)
 	return n, err == nil, err
 }
 
@@ -533,7 +537,25 @@ var RepoRoot = func() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	first, _, _ := strings.Cut(out, "\n")
+	return firstWorktree(out)
+}
+
+// RepoRootAt is RepoRoot resolved from a git common dir instead of the process cwd:
+// the first stanza of `git --git-dir=<gitDir> worktree list --porcelain`. The
+// hitl-hook, which holds only its pane's socket, names the TUI's root with it (Spec
+// FR12) — both go through firstWorktree, so they can't drift apart.
+func RepoRootAt(gitDir string) (string, error) {
+	out, err := run(append([]string{"--git-dir", gitDir}, worktreeListArgs()...)...)
+	if err != nil {
+		return "", err
+	}
+	return firstWorktree(out)
+}
+
+// firstWorktree is the path of the first stanza of `git worktree list --porcelain`
+// output: the main worktree, or a bare common dir itself.
+func firstWorktree(porcelain string) (string, error) {
+	first, _, _ := strings.Cut(porcelain, "\n")
 	root, ok := strings.CutPrefix(first, "worktree ")
 	if !ok {
 		return "", fmt.Errorf("git worktree list: no worktree in %q", first)
@@ -587,8 +609,8 @@ func MainlineAt(gitDir string) (string, error) {
 	return run("--git-dir", gitDir, "rev-parse", "--verify", MainlineOf(gitDir)+"^{commit}")
 }
 
-// UserName is `git config user.name` — the middle rung of bd's actor resolution
-// (ADR 0052 §2). An unset name is an error, which the caller treats as "fall through".
+// UserName is `git config user.name`, the bare-name fallback when bd's actor can't
+// be read (bd.Actor). An unset name is an error, which the caller treats as "fall through".
 func UserName() (string, error) { return run("config", "user.name") }
 
 // Head is a branch's live tip SHA (`git rev-parse <branch>`) — the commit a
@@ -762,6 +784,14 @@ func SetGraphID(id string) (restore func()) {
 // commit-message trailer, ParseCommit greps it back. Pure, checkable without git.
 func CommitPin(sha string) string { return "Commit: " + sha }
 
+// PatchIDPin is the body line that sits beside the Commit: pin: "Patch-id: <id>",
+// the patch-id of the content the Chart would land (ChartPatchID); ParsePatchID
+// reads it back. Pure.
+func PatchIDPin(id string) string { return "Patch-id: " + id }
+
+// ParsePatchID reads the "Patch-id: <id>" pin out of a bead body; absent is (,false).
+func ParsePatchID(body string) (id string, ok bool) { return parsePin(body, "Patch-id:") }
+
 // BasePin is the body line a conflict bead stamps with the base SHA the tail must
 // rebase onto: "Base: <sha>" — the writer twin of ParseBase, kept next
 // to it so the two can't drift (mirrors CommitPin/ParseCommit). Jinbe stamps it on
@@ -801,7 +831,7 @@ func RecordedMR(body string) int {
 // RecordedMRPath is RecordedMR plus the qualifying project path: "" for the bare
 // "MR: !<iid>" form, which names the Workspace's project (ADR 0230).
 func RecordedMRPath(body string) (path string, iid int) {
-	rest, _ := ParseLine(body, "MR:")
+	rest, _ := ParseLine(body, MRKey)
 	path, n, _ := strings.Cut(rest, "!")
 	iid, _ = strconv.Atoi(n)
 	return path, iid
@@ -814,8 +844,23 @@ func MRLine(path string, iid int) string { return "MR: " + MRRef(path, iid) }
 // MRLinkKey is the body key of an MR's web URL, the one Forge Review bodies use.
 const MRLinkKey = "MR link:"
 
+// MRKey is the body key of the recorded "MR: ..." line.
+const MRKey = "MR:"
+
 // MRLinkLine is the "MR link: <web_url>" body line recorded beside an "MR:" line.
 func MRLinkLine(url string) string { return MRLinkKey + " " + url }
+
+// The display-only MR Watch lines Jinbe records from an open MR (ADR 0385): raw Forge
+// values, which the TUI reads back by these keys to derive all green.
+const (
+	MRHeadKey        = "MR head:"
+	MRPipelineKey    = "MR pipeline:"
+	MRThreadsKey     = "MR threads:"
+	MRMergeStatusKey = "MR merge status:"
+)
+
+// MRFactLine is "<key> <value>" for one of the MR Watch lines above.
+func MRFactLine(key, value string) string { return key + " " + value }
 
 // RecordedMRLink is the web URL of the body's "MR link:" line, "" when it has none.
 func RecordedMRLink(body string) string {
@@ -965,12 +1010,15 @@ func squashCommitArgs(branch, subject, pin, trailer, graph, packet string) []str
 }
 
 // DecisionPacket is an Approval description's Decision Packet: the body with its
-// leading Commit: pin line removed (the land commit's Tip: line already records what
+// leading Commit: pin line (and a Patch-id: line directly after it) removed (the land commit's Tip: line already records what
 // landed), "" for a pin-only or pre-packet Approval (first line not a pin). Pure.
 func DecisionPacket(approvalBody string) string {
 	body := strings.TrimSpace(approvalBody)
 	first, rest, _ := strings.Cut(body, "\n")
 	if strings.HasPrefix(first, "Commit:") {
+		if next, after, _ := strings.Cut(rest, "\n"); strings.HasPrefix(next, "Patch-id:") {
+			rest = after
+		}
 		return strings.TrimSpace(rest)
 	}
 	// ponytail: a pin-less first line marks a pre-packet Approval (spawn text, pin on
@@ -1207,10 +1255,10 @@ func LandStrategyByName(name string) (LandStrategy, error) {
 // LandStrategyFor is the land_strategy seam taking the repo: the empty Repo is
 // LandStrategyByName, and local and gitlab both act on r (Spec D3), so no caller
 // gets a cwd-bound strategy for a child.
-func LandStrategyFor(name string, r Repo, subject string) (LandStrategy, error) {
+func LandStrategyFor(name string, r Repo, subject, body string) (LandStrategy, error) {
 	switch name {
 	case LandStrategyLocal:
-		return r.landLocal(subject), nil
+		return r.landLocal(subject, body), nil
 	case LandStrategyGitlab:
 		return r.landGitlab(subject), nil
 	}
@@ -1219,10 +1267,10 @@ func LandStrategyFor(name string, r Repo, subject string) (LandStrategy, error) 
 
 // landLocal is LandLocal in the child, a Compose plus LandSameBase run through the
 // handle (the Repo must be a tree path for the compose to leave main's checkout alone).
-// The squash commit's subject is subject ("" keeps "land <branch>").
-func (r Repo) landLocal(subject string) LandStrategy {
+// The squash commit's subject is subject ("" keeps "land <branch>"), its body body ("" none).
+func (r Repo) landLocal(subject, body string) LandStrategy {
 	return func(branch, trailer string) (string, error) {
-		composed, base, pin, err := r.Compose(branch, trailer, "", subject)
+		composed, base, pin, err := r.Compose(branch, trailer, body, subject)
 		if err != nil {
 			return "", err
 		}
@@ -1363,7 +1411,7 @@ type DifferentHost struct {
 }
 
 func (e *DifferentHost) Error() string {
-	return fmt.Sprintf("git: nested repo project %s is on host %s, not the Workspace's %s; only same-host child projects are supported (README, \"GitLab land strategy\")",
+	return fmt.Sprintf("git: nested repo project %s is on host %s, not the Workspace's %s; only same-host child projects are supported (docs/gitlab.md)",
 		e.Child.ID, e.Child.Host, e.Workspace.Host)
 }
 
@@ -1426,8 +1474,14 @@ func (r Repo) landGitlab(subject string) LandStrategy {
 }
 
 // MRPresentation is what a Land MR shows a human: its title and the body above the
-// trailer block. An empty Body gives a trailer-only description.
-type MRPresentation struct{ Title, Body string }
+// trailer block. An empty Body gives a trailer-only description. Draft opens the MR as
+// a GitLab Draft, and a reused MR is rewritten Draft too (a re-approval's re-draft); a reused MR
+// that is still a Draft stays one unless Undraft is set.
+type MRPresentation struct {
+	Title, Body string
+	Draft       bool
+	Undraft     bool // a reused Draft MR is rewritten ready (an auto-approved Approval's open)
+}
 
 // description is the MR description: the human body, a blank line, then block (always last).
 func (p MRPresentation) description(block string) string {
@@ -1482,7 +1536,7 @@ func (r Repo) landGitlabAt(branch string, pres MRPresentation, trailer, pin stri
 	}
 	reuse := func(mr *forge.MR) error {
 		if withTip {
-			return forge.SetMR(proj, mr.IID, pres.Title, pres.description(block))
+			return forge.SetMR(proj, mr.IID, forge.DraftTitle(pres.Title, pres.Draft || mr.Draft && !pres.Undraft), pres.description(block))
 		}
 		return assertBlock(proj, mr, block)
 	}
@@ -1506,7 +1560,7 @@ func (r Repo) landGitlabAt(branch string, pres MRPresentation, trailer, pin stri
 	if err != nil {
 		return "", err
 	}
-	mr, err = forge.CreateMR(proj, branch, r.mainline(), pres.Title, pres.description(block), assignee)
+	mr, err = forge.CreateMR(proj, branch, r.mainline(), pres.Title, pres.description(block), assignee, pres.Draft)
 	switch {
 	case errors.Is(err, forge.ErrDuplicate): // lost the race: re-list
 		if mr, err = forge.FindOpenMR(proj, branch); err != nil {
@@ -1705,7 +1759,7 @@ func (r Repo) foreignScan(ref string) error {
 			continue
 		}
 		if g, ok := ParseGraph(msg); ok && g != ours {
-			return fmt.Errorf("loop start refused (README, \"GitLab land strategy\"): %w",
+			return fmt.Errorf("loop start refused (docs/gitlab.md): %w",
 				&ForeignLanding{Trailer: ownTrailer(msg, prefix), Ours: ours, Theirs: g, Sha: sha})
 		}
 	}
@@ -1814,6 +1868,22 @@ func (r Repo) Compose(branch, trailer, packet, subject string) (composed, base, 
 	return composed, base, pin, nil
 }
 
+// ResetTree returns the repo's tree to HEAD with nothing a gate command left behind:
+// an in-progress rebase aborted, tracked changes reset, then untracked, ignored and
+// nested-repo files cleaned. Run it on a detached land tree before re-composing.
+func (r Repo) ResetTree() error {
+	if r.rebaseInProgress() {
+		if _, err := r.run("rebase", "--abort"); err != nil {
+			return err
+		}
+	}
+	if _, err := r.run("reset", "--hard", "HEAD"); err != nil {
+		return err
+	}
+	_, err := r.run("clean", "-ffdx")
+	return err
+}
+
 // LandSameBase is the write leg that lands a Compose result: under the land lock it
 // re-checks main clean, the container at pin and mainline at base (*PinMoved,
 // *BaseMoved otherwise), then fast-forwards mainline to composed.
@@ -1844,7 +1914,7 @@ func (r Repo) LandSameBase(composed, base, pin string) LandStrategy {
 // LandLocal is the local strategy: Compose then LandSameBase in one locked call,
 // with no Decision Packet (a Checkpoint's goes through gatedLand's composeLanding).
 func LandLocal(branch, trailer string) (sha string, err error) {
-	return Repo("").landLocal("")(branch, trailer)
+	return Repo("").landLocal("", "")(branch, trailer)
 }
 
 // LandedTip is the container tip the land squash sha pinned (its TipPin line), ok
@@ -2001,7 +2071,7 @@ func landLineageGitlab(branch string) (string, error) {
 	if _, err := Repo("").runForge(remote, "push", "--force", remote, tip+":refs/heads/"+branch); err != nil {
 		return "", err
 	}
-	mr, err = forge.CreateMR(proj, branch, Mainline(), title, body, 0)
+	mr, err = forge.CreateMR(proj, branch, Mainline(), title, body, 0, false)
 	if errors.Is(err, forge.ErrDuplicate) { // lost the race: re-list
 		mr, err = forge.FindOpenMR(proj, branch)
 		if err == nil && mr == nil {
@@ -2122,6 +2192,38 @@ func MainlineLogAcross(n int, repos map[string]string) ([]MainlineCommit, error)
 	}
 	slices.SortStableFunc(cs, func(a, b MainlineCommit) int { return b.Time.Compare(a.Time) })
 	return cs[:min(n, len(cs))], nil
+}
+
+// LandedAcross is Repo.LandedTrailers over the Workspace's mainline and each declared repo's
+// (repos maps context name to dir), merged: the Workspace's landing wins a trailer both hold.
+func LandedAcross(trailers []string, repos map[string]string) (map[string]string, error) {
+	landed, err := Repo("").LandedTrailers(trailers)
+	if err != nil || len(repos) == 0 || len(trailers) == 0 {
+		return landed, err
+	}
+	root, err := RepoRoot()
+	if err != nil {
+		return nil, err
+	}
+	if landed == nil {
+		landed = map[string]string{}
+	}
+	for _, name := range slices.Sorted(maps.Keys(repos)) {
+		dir := filepath.Join(root, repos[name])
+		if !IsRepoRoot(dir) { // a declared child not checked out landed nothing
+			continue
+		}
+		kids, err := Repo(dir).LandedTrailers(trailers)
+		if err != nil {
+			return nil, err
+		}
+		for t, sha := range kids {
+			if _, ok := landed[t]; !ok {
+				landed[t] = sha
+			}
+		}
+	}
+	return landed, nil
 }
 
 // revertTreeArgs / revertCommitArgs are Revert's plumbing pair: merge-tree applies
@@ -2287,10 +2389,49 @@ func EffortBranch(id string) string { return effortPrefix + id }
 
 const effortPrefix = "effort/"
 
-// EffortRefs is the set of bead ids holding an effort/<id> branch, read in one
-// for-each-ref, never one git call per ref (Spec D7): a closed bead in it
-// still has unintegrated work, so it keeps its container from draining.
-func EffortRefs() (map[string]bool, error) { return Repo("").EffortRefs() }
+// EffortSet is the effort-branch read the drain gates share: Branches is the bead ids
+// holding an effort/<id> branch (the branch exists, never filtered), Integrated the ids
+// among them whose tip equals their refs/mugicrew/cut/<id>, so the branch holds nothing
+// past its container (ADR 0394 (a-closed-effort-whose-tip-is-its-cut-ref…)). An id with
+// no cut ref is never integrated.
+type EffortSet struct {
+	Branches   map[string]bool
+	Integrated map[string]bool
+	// Owner is the repo each branch was read from, for the reap to delete it where it
+	// lives; an id absent is the cwd's repo.
+	Owner map[string]Repo
+}
+
+// NewEffortSet is an EffortSet with both maps allocated.
+func NewEffortSet() *EffortSet {
+	return &EffortSet{Branches: map[string]bool{}, Integrated: map[string]bool{}, Owner: map[string]Repo{}}
+}
+
+// Held is whether id's effort branch holds unintegrated work: it exists and is not
+// integrated. A nil set holds nothing.
+func (s *EffortSet) Held(id string) bool {
+	return s != nil && s.Branches[id] && !s.Integrated[id]
+}
+
+// Merge adds o's branches and integrated ids to s.
+func (s *EffortSet) Merge(o *EffortSet) {
+	if o == nil {
+		return
+	}
+	maps.Copy(s.Branches, o.Branches)
+	maps.Copy(s.Integrated, o.Integrated)
+	if len(o.Owner) > 0 {
+		if s.Owner == nil {
+			s.Owner = map[string]Repo{}
+		}
+		maps.Copy(s.Owner, o.Owner)
+	}
+}
+
+// EffortRefs is the effort set (EffortSet) of the cwd's repo, read in one
+// for-each-ref, never one git call per ref (Spec D7): a closed bead in Branches
+// and not Integrated still has unintegrated work, so it keeps its container from draining.
+func EffortRefs() (*EffortSet, error) { return Repo("").EffortRefs() }
 
 // CurrentEffort is the bead id off the cwd's branch, effort/<id>: the one input
 // mugicrew integrate derives (Spec D3), read through a rebase stopped on
@@ -2410,10 +2551,11 @@ func Integrate(container, id, subject, trailer string) (sha string, retries int,
 // lock stays the Workspace's.
 func (r Repo) Integrate(container, id, subject, trailer string) (sha string, retries int, err error) {
 	return r.integrateLoop(container, func(tip string) (string, error) {
-		cut, err := r.run("rev-parse", "--verify", "--quiet", cutRefPrefix+id)
-		upstream := cut
-		if err != nil { // no cut ref: a branch cut before ADR 0264
-			cut = ""
+		upstream, cut, err := r.OwnWorkStart(id, "HEAD", tip)
+		if err != nil {
+			return "", err
+		}
+		if cut == "" { // no cut ref: a branch cut before ADR 0264
 			fp, ferr := r.run("merge-base", "--fork-point", container, "refs/heads/"+EffortBranch(id))
 			if ferr != nil || fp == "" { // base not in the container's reflog: it was rewritten
 				return "", ErrNoCutPoint
@@ -2423,6 +2565,8 @@ func (r Repo) Integrate(container, id, subject, trailer string) (sha string, ret
 			} else if upstream == tip { // no squash on tip yet: the fork point is the cut
 				upstream = fp
 			}
+		} else if upstream != cut { // rebased past the cut: the operator can tell it apart
+			slog.Info("integrate.own-work-start", "bead", id, "cut", cut, "start", upstream)
 		}
 		orig, err := r.run("rev-parse", "HEAD")
 		if err != nil {
@@ -2444,7 +2588,13 @@ func (r Repo) Integrate(container, id, subject, trailer string) (sha string, ret
 				_, _ = r.run("update-ref", cutRefPrefix+id, head)
 			}
 		}
-		if sha == "" && orig != head {
+		// the work is already on the container: the effort stays at the rebased head and
+		// the cut ref follows it, so the branch reads integrated (ADR 0394)
+		noop := err == nil && head == tip && cut != ""
+		if noop {
+			_, _ = r.run("update-ref", cutRefPrefix+id, head)
+		}
+		if sha == "" && orig != head && !noop {
 			// Nothing published: put the effort back, so the unmoved cut ref (or fork
 			// point) still marks where its own work starts and the next attempt does
 			// not replay the container commits this rebase carried.
@@ -2454,6 +2604,34 @@ func (r Repo) Integrate(container, id, subject, trailer string) (sha string, ret
 		}
 		return sha, err
 	})
+}
+
+// OwnWorkStart resolves, at read time, the commit where the effort's own work starts,
+// and the recorded cut (refs/mugicrew/cut/<id>). With no cut ref both are "" and the
+// caller keeps its legacy fallback; a rev-parse failure other than "no such ref" is
+// returned. Otherwise the start is the cut, unless the effort was rebased onto later
+// container history: when merge-base(tip, effort) is not the cut and either the cut is
+// off the effort's history (a rebase after an earlier integrate rewrote past it) or the
+// cut is a strict ancestor of the merge-base, the start is that merge-base, so commits
+// already on the container are not replayed.
+func (r Repo) OwnWorkStart(id, effort, tip string) (start, cut string, err error) {
+	cut, err = r.run("rev-parse", "--verify", "--quiet", cutRefPrefix+id+"^{commit}")
+	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) && ee.ExitCode() == 1 { // --quiet: 1 is "no such ref"
+		return "", "", nil
+	} else if err != nil {
+		return "", "", err
+	}
+	if cut == "" {
+		return "", "", nil
+	}
+	mb, err := r.run("merge-base", tip, effort)
+	if err != nil || mb == "" || mb == cut {
+		return cut, cut, nil
+	}
+	if r.IsAncestor(cut, effort) && !r.IsAncestor(cut, mb) {
+		return cut, cut, nil
+	}
+	return mb, cut, nil
 }
 
 // IntegrateReplace publishes the cwd's effort branch, a history rewrite of the
@@ -3064,6 +3242,62 @@ func (r Repo) LandedBaseOn(ref, trailer string) (string, error) {
 	return "", foreign
 }
 
+// LandedTrailers is LandedBase for many trailers at once: one `git log` over the child's
+// mainline for every trailer, parsed into trailer line → the newest landing commit's sha. A
+// trailer absent from mainline is absent from the map. Under gitlab a match carrying another
+// Bead Graph's Graph: is dropped, as LandedBase refuses it (ADR 0187 §2). No --first-parent: a
+// squash under the merge method is a merge's second parent.
+func (r Repo) LandedTrailers(trailers []string) (map[string]string, error) {
+	if len(trailers) == 0 {
+		return nil, nil
+	}
+	name, err := LandStrategyName()
+	if err != nil {
+		return nil, err
+	}
+	ours := ""
+	if name == LandStrategyGitlab {
+		if ours, err = GraphID(); err != nil {
+			return nil, err
+		}
+	}
+	args := []string{"log", r.mainline(), "--extended-regexp", "--format=%H%x1f%B%x1e"}
+	for _, t := range trailers {
+		args = append(args, "--grep="+trailerRegex(t))
+	}
+	out, err := r.run(args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseLandedLog(out, trailers, ours), nil
+}
+
+// parseLandedLog reads LandedTrailers' log output (newest first): each record's whole body
+// lines that are one of trailers map to its sha, the first (newest) record winning. A
+// non-empty ours drops a record whose Graph: names another graph.
+func parseLandedLog(out string, trailers []string, ours string) map[string]string {
+	want := make(map[string]bool, len(trailers))
+	for _, t := range trailers {
+		want[t] = true
+	}
+	landed := map[string]string{}
+	for _, rec := range strings.Split(out, "\x1e") {
+		sha, msg, ok := strings.Cut(strings.TrimSpace(rec), "\x1f")
+		if !ok {
+			continue
+		}
+		if g, has := ParseGraph(msg); ours != "" && has && g != ours {
+			continue
+		}
+		for _, l := range strings.Split(msg, "\n") {
+			if _, seen := landed[l]; want[l] && !seen {
+				landed[l] = sha
+			}
+		}
+	}
+	return landed
+}
+
 // LandedTip is the package LandedTip for a squash in the child.
 func (r Repo) LandedTip(sha string) (tip string, ok bool) {
 	body, err := r.run("log", "-1", "--format=%B", sha)
@@ -3135,35 +3369,55 @@ func (r Repo) WorktreeOn(branch string) (h Holder, ok bool, err error) {
 }
 
 // EffortRefs is the package EffortRefs in the child.
-func (r Repo) EffortRefs() (map[string]bool, error) {
-	out, err := r.run("for-each-ref", "--format=%(refname:lstrip=3)", "refs/heads/"+effortPrefix)
-	if err != nil {
-		return nil, err
-	}
-	ids := map[string]bool{}
-	for id := range strings.FieldsSeq(out) {
-		ids[id] = true
-	}
-	return ids, nil
+func (r Repo) EffortRefs() (*EffortSet, error) {
+	set, _, err := r.BranchRefs()
+	return set, err
 }
 
-// BranchRefs is EffortRefs plus the checkpoint/<id> tips (id → sha), both off one
-// for-each-ref so the TUI's refresh spawns no extra process (Spec D1).
-func (r Repo) BranchRefs() (efforts map[string]bool, tips map[string]string, err error) {
-	out, err := r.run("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"+effortPrefix, "refs/heads/checkpoint/")
+// BranchRefs is the effort set plus the checkpoint/<id> tips (id → sha), all off one
+// for-each-ref so the TUI's refresh spawns no extra process (Spec D1). The cut refs ride
+// the same pass: an effort whose tip equals its cut ref is Integrated.
+func (r Repo) BranchRefs() (efforts *EffortSet, tips map[string]string, err error) {
+	out, err := r.run("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"+effortPrefix, "refs/heads/checkpoint/", cutRefPrefix)
 	if err != nil {
 		return nil, nil, err
 	}
-	efforts, tips = map[string]bool{}, map[string]string{}
+	efforts, tips = NewEffortSet(), map[string]string{}
+	heads, cuts := map[string]string{}, map[string]string{}
 	for line := range strings.Lines(out) {
 		ref, sha, _ := strings.Cut(strings.TrimSpace(line), " ")
 		if id, ok := strings.CutPrefix(ref, "refs/heads/"+effortPrefix); ok {
-			efforts[id] = true
+			efforts.Branches[id] = true
+			efforts.Owner[id] = r
+			heads[id] = sha
 		} else if id, ok := strings.CutPrefix(ref, "refs/heads/checkpoint/"); ok {
 			tips[id] = sha
+		} else if id, ok := strings.CutPrefix(ref, cutRefPrefix); ok {
+			cuts[id] = sha
+		}
+	}
+	for id, sha := range heads {
+		if cut, ok := cuts[id]; ok && cut == sha {
+			efforts.Integrated[id] = true
 		}
 	}
 	return efforts, tips, nil
+}
+
+// CheckedOut is the set of branch names some worktree of the child has checked out,
+// from one `git worktree list --porcelain`.
+func (r Repo) CheckedOut() (map[string]bool, error) {
+	out, err := r.run(worktreeListArgs()...)
+	if err != nil {
+		return nil, err
+	}
+	set := map[string]bool{}
+	for line := range strings.Lines(out) {
+		if b, ok := strings.CutPrefix(strings.TrimSpace(line), "branch refs/heads/"); ok {
+			set[b] = true
+		}
+	}
+	return set, nil
 }
 
 // Materialize checks effort/<id> out in the child at path, a linked worktree of r
@@ -3537,3 +3791,38 @@ func OnMainline() bool {
 	b, err := run("symbolic-ref", "--quiet", "--short", "HEAD")
 	return err == nil && b == Mainline()
 }
+
+// ChartPatchID is the patch-id of the content the pin would land on mainline: the
+// first field of `git patch-id --verbatim` over the pin's diff against its
+// merge-base with mainline. -U0 hides a rebase over nearby mainline edits;
+// --verbatim and --no-renames make whitespace and a rename-only change count; the
+// rest pins the diff text against local config. An empty diff is ("", nil).
+func ChartPatchID(r Repo, mainline, pin string) (string, error) {
+	mb, err := r.run("merge-base", mainline, pin)
+	if err != nil {
+		return "", err
+	}
+	diff, err := r.runRaw("diff", "--no-ext-diff", "--no-textconv", "--no-color", "--binary",
+		"--full-index", "--no-renames", "-U0", "--diff-algorithm=myers", mb, pin)
+	if err != nil {
+		return "", err
+	}
+	if diff == "" {
+		return "", nil
+	}
+	out, err := runRawStdin(diff, nil, r.args("patch-id", "--verbatim")...)
+	if err != nil {
+		return "", err
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(out), " ")
+	return id, nil
+}
+
+func (r Repo) args(a ...string) []string {
+	if r == "" {
+		return a
+	}
+	return append([]string{"-C", string(r)}, a...)
+}
+
+func (r Repo) runRaw(args ...string) (string, error) { return runRaw(r.args(args...)...) }

@@ -39,6 +39,7 @@ type dialog struct {
 	field       int // input: the focused field
 	items       []string
 	cur         int // picker: the highlighted item
+	top         int // picker: the first drawn item once it scrolls; follows cur only to keep it in view, so hover never moves it
 	act         func(m Model, d dialog) (Model, tea.Cmd)
 	alt         func(m Model, d dialog) (Model, tea.Cmd) // confirm: d, a second action beside y
 	altKey      key.Binding                              // confirm: alt's binding, keyAlt when unset
@@ -181,8 +182,17 @@ func (d dialog) noBinding() key.Binding {
 
 // push opens d over the frame and whatever modals are already up.
 func (m Model) push(d dialog) Model {
-	m.modals = append(slices.Clone(m.modals), d)
+	m.modals = append(slices.Clone(m.modals), m.settled(d))
 	return m
+}
+
+// settled pins a picker's top to the first item it draws, so the window a picker opens or
+// is rebuilt with (cur set, top 0) stays put when hover moves cur.
+func (m Model) settled(d dialog) dialog {
+	if d.kind == picker {
+		d.top, _ = m.pickerWindow(d)
+	}
+	return d
 }
 
 // pop closes the top modal; once the stack is empty a result held behind it shows.
@@ -261,6 +271,7 @@ func (m Model) modalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if d.ids != nil {
 			d.id = d.ids[d.cur]
 		}
+		d = m.settled(d) // keys scroll the window; hover never does
 	}
 	m.modals = slices.Clone(m.modals)
 	m.modals[len(m.modals)-1] = d
@@ -275,19 +286,55 @@ func hasKey(k tea.KeyMsg) func([]string) bool {
 // modalView is the top modal centred in a rounded box, with only its own keys as hints.
 func (m Model) modalView() string {
 	d := m.modals[len(m.modals)-1]
+	if d.kind == form {
+		box, _ := m.formBox(d)
+		return m.placeBox(box)
+	}
+	return m.modalBox(d)
+}
+
+// dialogLayout is where the top modal d, a form, input dialog or surgery, draws its fields.
+func (m Model) dialogLayout(d dialog) formLayout {
+	if d.kind == surgery {
+		return m.layoutOf(m.surgeryBox(d))
+	}
+	return m.layoutOf(m.boxOf(d))
+}
+
+// layoutOf is where the centred box draws, with its fields.
+func (m Model) layoutOf(box string, fs []formField) formLayout {
+	bw, bh := lipgloss.Width(box), lipgloss.Height(box)
+	return formLayout{x: max((m.w-bw)/2, 0), y: max((m.h-bh)/2, 0), w: bw, h: bh, fields: fs}
+}
+
+// formBox is the form's rounded box, and where it is drawn (placeBox centres it).
+func (m Model) formBox(d dialog) (string, formLayout) {
+	box, fs := m.boxOf(d)
+	return box, m.layoutOf(box, fs)
+}
+
+func (m Model) modalBox(d dialog) string {
 	if d.kind == surgery {
 		return m.surgeryView(d)
 	}
 	if d.kind == xdialog {
 		return m.xView(d)
 	}
+	box, _ := m.boxOf(d)
+	return m.placeBox(box)
+}
+
+// boxOf draws d's box; for a form, also its fields' rows within the content, and for a
+// picker the rows of the items it draws (field is the item index).
+func (m Model) boxOf(d dialog) (string, []formField) {
+	var fs []formField
 	styleW := m.dialogWidth() - 2 // the outer width less the border; styleW-2 is the inner width
 	if d.kind == form {
 		styleW = m.formWidth() - 2
 	}
 	hint := lipgloss.NewStyle().Width(styleW - 2).Render(flatHints(d.bindings(), styleW-2))
 	if d.kind == loopMenu {
-		hint = m.loopOptsLine()
+		hint, _ = m.loopOptsLineSpans(m.loopOptsInner())
 		d.body = m.loopMenuBody(styleW - 2)
 	}
 	ls := []string{brand.Render(d.title)}
@@ -302,11 +349,21 @@ func (m Model) modalView() string {
 	switch d.kind {
 	case form:
 		ls = append(ls, "")
-		ls = append(ls, m.formLines(d.sf, styleW)...)
+		var rows []string
+		rows, fs = m.formRows(d.sf, styleW)
+		for i := range fs {
+			fs[i].row += len(ls)
+			if fs[i].text >= 0 {
+				fs[i].text += len(ls)
+			}
+		}
+		ls = append(ls, rows...)
 	case input:
 		ls = append(ls, "")
 		for i, in := range d.inputs {
-			ls = append(ls, fieldRow(styleW, i == d.field, d.labels[i]+":", in.render)...)
+			rows := fieldRow(styleW, i == d.field, d.labels[i]+":", in.render)
+			fs = append(fs, textField(i, styleW, d.labels[i]+":", len(ls), len(rows)))
+			ls = append(ls, rows...)
 		}
 	case picker:
 		// only the picker needs a fixed row count, so only its lines are cut to the
@@ -315,20 +372,12 @@ func (m Model) modalView() string {
 			ls[i] = ansi.Truncate(l, styleW-2, "…")
 		}
 		ls = append(ls, "")
-		// the box's chrome: two borders, the blank before the hints and the
-		// (wrapped, never cut) hint lines
-		budget := max(m.h-len(ls)-3-lipgloss.Height(hint), 1)
-		lo, hi := 0, len(d.items)
-		if hi+len(d.heads) > budget {
-			budget -= len(d.heads)   // ponytail: reserves every heading's line, even one scrolled out of view
-			rows := max(budget-1, 1) // items only: one row goes to the k/N counter
-			lo = followOffset(hi, rows, d.cur)
-			hi = lo + rows
-		}
+		lo, hi := m.pickerWindow(d)
 		for i := lo; i < hi; i++ {
 			if h, ok := d.heads[i]; ok {
 				ls = append(ls, dimSt.Render("  "+h))
 			}
+			fs = append(fs, formField{field: i, row: len(ls), rows: 1})
 			if i == d.cur {
 				ls = append(ls, shadeRow(ansi.Truncate("  "+d.items[i], styleW-2, "…"), styleW-2, pickRow))
 			} else {
@@ -340,7 +389,35 @@ func (m Model) modalView() string {
 		}
 	}
 	ls = append(ls, "", hint)
-	return m.placeBox(refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)))
+	return refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)), fs
+}
+
+// pickerWindow is the items lo..hi a picker draws: all of them when they fit, else a
+// window starting at top, moved just enough to keep cur in view, leaving a row for the
+// k/N counter. The lines above the items (title, body and the blank) and the height of the
+// hints are the picker's own, as boxOf lays them out.
+func (m Model) pickerWindow(d dialog) (lo, hi int) {
+	styleW := m.dialogWidth() - 2
+	before := 2 // the title and the blank before the items
+	n := len(d.body)
+	if d.prompt != nil {
+		n += len(d.prompt(styleW - 2))
+	}
+	if n > 0 {
+		before += 1 + n // the blank after the title, then the body
+	}
+	hintH := lipgloss.Height(lipgloss.NewStyle().Width(styleW - 2).Render(flatHints(d.bindings(), styleW-2)))
+	// the box's chrome: two borders, the blank before the hints and the
+	// (wrapped, never cut) hint lines
+	budget := max(m.h-before-3-hintH, 1)
+	lo, hi = 0, len(d.items)
+	if hi+len(d.heads) > budget {
+		budget -= len(d.heads)   // ponytail: reserves every heading's line, even one scrolled out of view
+		rows := max(budget-1, 1) // items only: one row goes to the k/N counter
+		lo = min(max(d.top, d.cur-rows+1, 0), d.cur, hi-rows)
+		hi = lo + rows
+	}
+	return lo, hi
 }
 
 // placeBox draws box centred over the frame, so the header and status line stay

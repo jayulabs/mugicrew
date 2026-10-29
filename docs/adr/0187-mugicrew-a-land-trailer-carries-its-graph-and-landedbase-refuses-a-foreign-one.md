@@ -63,3 +63,20 @@ foreign `Checkpoint: mc-abcd` on mainline would read as our bead's land to every
 - **Derive `issue_prefix` from the GitLab username.** Rejected. Bead ids and
   branch names already carry the prefix, and the refusal plus the preflight
   already catch a shared prefix.
+
+## Amendment: run-now refuses a foreign land and files the hold too
+
+The shared eligibility verdict (Chart "One eligibility module for loop dispatch
+and TUI run-now") reports a `ForeignLanding` from `LandedBase` as its own
+cause, `foreign-landing`, carrying the foreign sha and both graph ids. It
+refuses in both modes. That cause is not `paused:foreign-hold`: a foreign land
+never writes a pause label, and run-now's override of `paused:foreign-hold`
+(ADR 0055 (paused-beads) §6) does not reach it. The verdict stays pure. §3
+gains a fourth filer: whichever caller reads the `foreign-landing` cause calls
+`bd.HoldForeign`. That means the loop's candidate scan and, now, run-now's
+press-time gate. So a press files the Errand without waiting for a running
+loop, and the Errand stays idempotent on (container, foreign sha). If the
+filing fails, the press is refused with that error, just as it fails the
+loop's tick. The TUI row hint reads the snapshot without I/O and never sees
+the trailer. It never files the hold, and the row reads as held only once the
+Errand blocks it.

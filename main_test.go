@@ -65,13 +65,13 @@ func TestCrewForRoutesKindToOwner(t *testing.T) {
 	if _, ok := cp.(jinbe.Jinbe); !ok {
 		t.Errorf("checkpoint owner = %T, want jinbe.Jinbe", cp)
 	}
-	// A Task resolves to Brook's crew() entry (Spec D2), so l launches it.
-	tk, err := crewFor(contract.KindTask)
+	// An Errand resolves to Brook's crew() entry (Spec D2), so l launches it.
+	tk, err := crewFor(contract.KindErrand)
 	if err != nil {
-		t.Fatalf("crewFor(task): %v", err)
+		t.Fatalf("crewFor(errand): %v", err)
 	}
 	if _, ok := tk.(brook.Brook); !ok {
-		t.Errorf("task owner = %T, want brook.Brook", tk)
+		t.Errorf("errand owner = %T, want brook.Brook", tk)
 	}
 	// An unregistered kind is a loud error, not a nil crewmate.
 	if _, err := crewFor(contract.Kind("nonesuch")); err == nil {
@@ -145,7 +145,7 @@ func TestRequireGraphRefusesUserVerbsAndExportsBeadsDir(t *testing.T) {
 		return "", &bd.NoGraphError{Dir: dir}
 	}
 
-	for _, argv := range [][]string{{}, {"signal", "new"}, {"signal", "triage", "mc-1"}, {"signal", "offshoot"}, {"task", "new"}, {"intake", "jira", "ABC-1"}, {"latch", "jira", "ABC-1"}, {"surgery", "new"}, {"surgery", "end", "mc-1"}, {"loop"}, {"loop", "--watch"}, {"loop", "start"}, {"loop", "start", "--watch"}, {"loop", "status"}, {"loop", "stop"}, {"loop", "--rev=abc", "--lock-fd=3"}, {"chart", "append", "mc-1", "Notes", "- x"}} {
+	for _, argv := range [][]string{{}, {"signal", "new"}, {"signal", "triage", "mc-1"}, {"signal", "offshoot"}, {"errand", "new"}, {"intake", "jira", "ABC-1"}, {"latch", "jira", "ABC-1"}, {"surgery", "new"}, {"surgery", "end", "mc-1"}, {"loop"}, {"loop", "--watch"}, {"loop", "start"}, {"loop", "start", "--watch"}, {"loop", "status"}, {"loop", "stop"}, {"loop", "--rev=abc", "--lock-fd=3"}, {"chart", "append", "mc-1", "Notes", "- x"}} {
 		err := requireGraph(argv)
 		if err == nil || !strings.Contains(err.Error(), "mugicrew init") {
 			t.Errorf("requireGraph(%v) = %v, want the no-graph refusal", argv, err)
@@ -341,7 +341,7 @@ func TestRunInteractiveDraftLifecycle(t *testing.T) {
 }
 
 // fakeBd puts a stub `bd` first on PATH (bd.run shells out by name): `show`
-// prints showJSON, `dep list` prints depsJSON, anything else fails. Every argv is
+// prints showJSON, `dep list` prints depsJSON, the kind:task list is empty, anything else fails. Every argv is
 // appended to the returned log, so a test can assert what was (not) written.
 func fakeBd(t *testing.T, showJSON, depsJSON string) (logPath string) {
 	t.Helper()
@@ -353,6 +353,7 @@ echo "$*" >> "$FAKE_BD_LOG"
 case "$1" in
 show) printf '%s' "$FAKE_BD_SHOW" ;;
 dep) printf '%s' "$FAKE_BD_DEPS" ;;
+list) case "$*" in *kind:task*) printf '[]' ;; *) exit 1 ;; esac ;; # the loop's start check finds no legacy bead
 *) exit 1 ;;
 esac
 `
@@ -548,14 +549,14 @@ func TestRunPivotConfirmUsage(t *testing.T) {
 	}
 }
 
-// `mugicrew pivot raise` takes exactly one task id; anything else is a usage error
+// `mugicrew pivot raise` takes exactly one errand id; anything else is a usage error
 // before bd is touched.
 func TestRunPivotRaiseUsage(t *testing.T) {
 	for _, argv := range [][]string{
 		{},
 		{""},
 		{"ws-t", "more"},                         // stray positional
-		{"--pivot", "f"},                         // a flag where the task goes
+		{"--pivot", "f"},                         // a flag where the errand goes
 		{"ws-t", "--critique"},                   // a flag with no file
 		{"ws-t", "--merge-into", "p"},            // a merge with no evidence file
 		{"ws-t", "--merge-into", "--pivot", "f"}, // a flag where a value goes
@@ -591,7 +592,7 @@ func TestRunPivotRaiseFlags(t *testing.T) {
 		{"ws-t", "--pivot", body, "--pivot", body, "--critique", body}, // two pivots
 		{"ws-t", "--merge-into", "ws-p", body},                         // merge without Critique
 	} {
-		log := fakeBd(t, `[{"id":"ws-t","status":"open","issue_type":"task","labels":["kind:task"]}]`, "[]")
+		log := fakeBd(t, `[{"id":"ws-t","status":"open","issue_type":"task","labels":["kind:errand"]}]`, "[]")
 		err := runPivotRaise(argv, io.Discard)
 		if err == nil || strings.HasPrefix(err.Error(), "usage:") {
 			t.Errorf("runPivotRaise(%q) = %v, want the verb's shape refusal", argv, err)
@@ -604,9 +605,9 @@ func TestRunPivotRaiseFlags(t *testing.T) {
 	}
 }
 
-// A probe on a bead that is not an open Task refuses, names the offshoot-Signal
+// A probe on a bead that is not an open Errand refuses, names the offshoot-Signal
 // fallback and writes nothing (only show is run).
-func TestRunPivotRaiseRefusesNonTask(t *testing.T) {
+func TestRunPivotRaiseRefusesNonErrand(t *testing.T) {
 	log := fakeBd(t, `[{"id":"ws-t","status":"open","issue_type":"task","labels":["kind:signal"]}]`, "[]")
 	err := runPivotRaise([]string{"ws-t"}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "offshoot Signal") {
@@ -1023,7 +1024,13 @@ func TestMain(m *testing.M) {
 	}
 	// loop start's gitlab preflight would otherwise read the real repo (none in the nix sandbox).
 	git.LandStrategyName = func() (string, error) { return git.LandStrategyLocal, nil }
+	// Stamps in-process never read the machine's auto_approve.
+	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{Source: "default"} }
+	refuseLegacyTasks = func(string) error { return nil } // the real check shells out to bd
 	loop.StopWindow = 0 // tests send stop and force back to back; window tests set their own
+	// A command-less pane of a throwaway tmux server runs $SHELL; a login zsh hung up
+	// mid-startup dumps core, so every server these tests start takes a minimal sh.
+	os.Setenv("SHELL", "/bin/sh")
 	os.Exit(m.Run())
 }
 
@@ -1082,6 +1089,29 @@ func TestDetachedLoopSurvivesKillPane(t *testing.T) {
 	// Not Kill(pid, 0), which a zombie passes: the loop's state must not be Z.
 	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err != nil || strings.Contains(string(b), ") Z ") {
 		t.Fatalf("loop (pid %d) died with the TUI pane: %v", pid, err)
+	}
+}
+
+// A throwaway tmux server takes /bin/sh as its default-shell, never the human's
+// login shell, so killing it can't make that shell dump core. Real tmux; skipped
+// without tmux.
+func TestThrowawayTmuxServerDefaultsToBinSh(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	sock := filepath.Join(t.TempDir(), "s.sock")
+	t.Cleanup(func() { exec.Command("tmux", "-S", sock, "kill-server").Run() })
+	tm := func(args ...string) string {
+		t.Helper()
+		b, err := exec.Command("tmux", append([]string{"-S", sock, "-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	tm("new-session", "-d", "-s", "x")
+	if got := tm("show-options", "-gv", "default-shell"); got != "/bin/sh" {
+		t.Fatalf("default-shell = %q; want /bin/sh", got)
 	}
 }
 
@@ -2011,6 +2041,29 @@ func TestRunChart(t *testing.T) {
 	}
 }
 
+// `mugicrew chart finish <chart> --survey <survey>` maps onto one guarded stamp;
+// any other shape is a usage error that stamps nothing.
+func TestRunChartFinish(t *testing.T) {
+	orig := finishChart
+	t.Cleanup(func() { finishChart = orig })
+	var called []string
+	finishChart = func(chart, survey string) error {
+		called = append(called, chart+"|"+survey)
+		return nil
+	}
+	for _, argv := range [][]string{{"finish"}, {"finish", "mc-c"}, {"finish", "mc-c", "mc-s"}, {"finish", "mc-c", "--survey"}, {"finish", "mc-c", "--survey", "mc-s", "x"}} {
+		if err := runChart(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runChart(%q) = %v, want a usage error", argv, err)
+		}
+	}
+	if err := runChart([]string{"finish", "mc-c", "--survey", "mc-s"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(called, []string{"mc-c|mc-s"}) {
+		t.Errorf("finishes = %q", called)
+	}
+}
+
 // `mugicrew hitl-hook` never blocks or talks to Claude (Spec FR29): it
 // exits 0 with empty stdout on garbage stdin, with the pane var missing, and with
 // a pane var naming no server, even outside a repo.
@@ -2021,6 +2074,7 @@ func TestHitlHookAlwaysSilent(t *testing.T) {
 		{"not json", ""},
 		{`{"hook_event_name":"Stop"}`, ""},
 		{`{"hook_event_name":"Stop"}`, filepath.Join(t.TempDir(), "none.sock") + ",%1"},
+		{`{"hook_event_name":"Stop","last_assistant_message":"` + contract.ClosingPhrase + `"}`, filepath.Join(t.TempDir(), "mugicrew", "tmux.sock") + ",%1"},
 	} {
 		cmd := exec.Command(self, "hitl-hook")
 		cmd.Env = append(os.Environ(), "MUGICREW_TEST_MAIN=1", "MUGICREW_HITL_PANE="+tc.pane)
@@ -2102,7 +2156,7 @@ func TestGraphVerbIsUnknown(t *testing.T) {
 // Drift guard: the usage names every user-facing verb main dispatches and none
 // of the hidden surface (FR7, FR8; ADR 0060 §3, ADR 0037, ADR 0099).
 func TestUsageListsVerbsNotHidden(t *testing.T) {
-	for _, verb := range []string{"signal new", "signal triage", "signal offshoot", "task new", "surgery new", "surgery end", "pivot confirm",
+	for _, verb := range []string{"signal new", "signal triage", "signal offshoot", "errand new", "surgery new", "surgery end", "pivot confirm",
 		"pivot escalate", "pivot raise", "reconcile", "loop", "abort", "ps", "stats", "doctor", "transcript", "integrate", "chart append|drop", "land-lineage", "--watch", "-C <dir>"} {
 		if !strings.Contains(usage, "\n  mugicrew "+verb) {
 			t.Errorf("usage lacks %q", verb)
@@ -2273,35 +2327,15 @@ func TestRunRecoverLists(t *testing.T) {
 	}
 }
 
-// --force passes through to Recover, and the real Recover refuses it on a real
-// flock while the loop is on, before it reads the bead (ADR 0127 §2).
-func TestRunRecoverForceRefusedWhileLoopOn(t *testing.T) {
+// --force passes through to Recover; whether the loop being on refuses it is
+// Judge's call per bead (ADR 0391), tested in chopper.
+func TestRunRecoverForcePassesThrough(t *testing.T) {
 	orig := recoverBead
 	t.Cleanup(func() { recoverBead = orig })
 	var got chopper.Opts
 	recoverBead = func(_ string, o chopper.Opts) (chopper.Report, error) { got = o; return chopper.Report{}, nil }
 	if code := runRecover([]string{"--force", "mc-a"}, io.Discard, io.Discard); code != 0 || !got.Force || got.Discard {
 		t.Fatalf("recover --force mc-a = %d, opts %+v; want Force passed", code, got)
-	}
-
-	recoverBead = orig
-	dir := t.TempDir()
-	t.Setenv("BEADS_DIR", dir)
-	origCommon := git.CommonDir
-	t.Cleanup(func() { git.CommonDir = origCommon })
-	git.CommonDir = func() (string, error) { return t.TempDir(), nil }
-	lk, err := looplock.Acquire(filepath.Join(dir, "mugicrew-loop.lock"), "", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lk.Close()
-	evs := eventlogtest.Capture(t)
-	var errw bytes.Buffer
-	if code := runRecover([]string{"mc-a", "--force"}, io.Discard, &errw); code != 1 || !strings.Contains(errw.String(), "--force needs the loop off") {
-		t.Fatalf("recover --force with the loop on = %d, %q; want exit 1 naming the loop", code, errw.String())
-	}
-	if names := eventlogtest.Names(*evs); !slices.Equal(names, []string{"recover.refused"}) {
-		t.Errorf("events = %v, want one recover.refused", names)
 	}
 }
 
@@ -2318,8 +2352,9 @@ func TestRunInitiative(t *testing.T) {
 	var called []string
 	var flight func(bd.Bead) bool
 	var released []string
+	var why string
 	cancelInitiative = func(id string, o withdraw.Opts) (withdraw.Result, error) {
-		called, flight, released = append(called, "cancel "+id), o.InFlight, o.Release
+		called, flight, released, why = append(called, "cancel "+id), o.InFlight, o.Release, o.Why
 		return withdraw.Result{}, nil
 	}
 	withdrawChain = func(id string, o withdraw.Opts) (withdraw.Result, error) {
@@ -2336,17 +2371,27 @@ func TestRunInitiative(t *testing.T) {
 			t.Errorf("runWithdraw(%q) = %v, want a usage error", argv, err)
 		}
 	}
-	if err := runInitiative([]string{"cancel", "in"}); err != nil {
+	if err := runInitiative([]string{"cancel", "in", "--why", "obsolete"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runInitiative([]string{"cancel", "in", "--release", "a", "--release", "b"}); err != nil {
-		t.Fatal(err)
+	if why != "obsolete" {
+		t.Errorf("why = %q", why)
 	}
-	if !slices.Equal(released, []string{"a", "b"}) {
-		t.Errorf("released = %q", released)
+	for _, argv := range [][]string{
+		{"cancel", "in", "--release", "a", "--release", "b", "--why", "w1"},
+		{"cancel", "in", "--release", "a", "--why", "w1", "--release", "b", "--discard"},
+		{"cancel", "in", "--why", "w1", "--release", "a", "--release", "b"},
+	} {
+		if err := runInitiative(argv); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(released, []string{"a", "b"}) || why != "w1" {
+			t.Errorf("%q: released = %q, why = %q", argv, released, why)
+		}
 	}
 	called = called[:1]
-	for _, argv := range [][]string{{"cancel", "in", "stray"}, {"cancel", "--release", "a"}, {"cancel", "in", "--release"}} {
+	for _, argv := range [][]string{{"cancel", "in", "stray"}, {"cancel", "--release", "a"}, {"cancel", "in", "--release"},
+		{"cancel", "in"}, {"cancel", "in", "--release", "a"}, {"cancel", "in", "--why", ""}, {"cancel", "in", "--why", "  "}, {"cancel", "in", "--why"}} {
 		if err := runInitiative(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
 			t.Errorf("runInitiative(%q) = %v, want a usage error", argv, err)
 		}
@@ -2690,7 +2735,7 @@ func TestRunApproval(t *testing.T) {
 	t.Cleanup(func() { reworkApproval = orig })
 	var gotID string
 	var gotFiles []string
-	reworkApproval = func(id string, files []string) ([]string, error) {
+	reworkApproval = func(id string, files, _, _ []string) ([]string, error) {
 		gotID, gotFiles = id, files
 		return []string{"c1", "c2"}, nil
 	}
@@ -2825,6 +2870,8 @@ const jiraNew = `{"key":"ABC-1","fields":{"summary":"Fix it","status":{"name":"O
 // edges not already in have.
 type latchFake struct {
 	filed          [][4]string // title, body, ref, draftedBy
+	filedBlocks    [][]string  // the blocks targets each create carried
+	createErr      error
 	edges          [][2]string // blocked, blocker
 	existing       *bd.Bead
 	have           map[string]bool // blocked ids already blocked by the existing latch
@@ -2853,8 +2900,12 @@ func latchWorkspace(t *testing.T, cfg, out string) (*latchFake, string) {
 		}
 		return *f.existing, true, nil
 	}
-	newLatch = func(title, body, ref, by string) (string, error) {
+	newLatch = func(title, body, ref, by string, blocks []string) (string, error) {
+		if f.createErr != nil {
+			return "", f.createErr
+		}
 		f.filed = append(f.filed, [4]string{title, body, ref, by})
+		f.filedBlocks = append(f.filedBlocks, blocks)
 		return "mc-latch", nil
 	}
 	blocksEdge = func(blocked, blocker string) error {
@@ -2878,8 +2929,8 @@ func TestLatchJiraFirstFilingBlocksEachTarget(t *testing.T) {
 	if len(f.filed) != 1 || f.filed[0] != [4]string{"Jira ABC-1 is done", wantBody, "jira-latch-ABC-1", ""} {
 		t.Errorf("filed = %q", f.filed)
 	}
-	if !slices.Equal(f.edges[0][:], []string{"mc-a", "mc-latch"}) || len(f.edges) != 2 || out.String() != "mc-latch\n" {
-		t.Errorf("edges %v, out %q", f.edges, out.String())
+	if !slices.Equal(f.filedBlocks[0], []string{"mc-a", "mc-b"}) || len(f.edges) != 0 || out.String() != "mc-latch\n" {
+		t.Errorf("blocks %v, edges %v, out %q", f.filedBlocks, f.edges, out.String())
 	}
 }
 
@@ -2973,8 +3024,8 @@ func TestLatchJiraClosedLatchIsIgnored(t *testing.T) {
 	if err := runLatchJira([]string{"ABC-1", "--blocks", "mc-a"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.filed) != 1 || len(f.edges) != 1 || f.edges[0] != [2]string{"mc-a", "mc-latch"} {
-		t.Errorf("filed %v edges %v", f.filed, f.edges)
+	if len(f.filed) != 1 || len(f.edges) != 0 || !slices.Equal(f.filedBlocks[0], []string{"mc-a"}) {
+		t.Errorf("filed %v blocks %v edges %v", f.filed, f.filedBlocks, f.edges)
 	}
 }
 
@@ -2985,6 +3036,20 @@ func TestLatchJiraDraftedByFilesADraft(t *testing.T) {
 	}
 	if len(f.filed) != 1 || f.filed[0][3] != "mc-me" {
 		t.Errorf("filed = %q", f.filed)
+	}
+}
+
+// A failing create exits non-zero with no edge call after it, for both verbs.
+func TestLatchFailingCreateFilesNothing(t *testing.T) {
+	f, _ := latchWorkspace(t, siteCfg, jiraNew)
+	f.createErr = errors.New("bd down")
+	if err := runLatchJira([]string{"ABC-1", "--blocks", "mc-a"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bd down") || len(f.edges) != 0 {
+		t.Errorf("jira: err %v edges %v", err, f.edges)
+	}
+	g, _ := mrWorkspace(t, "gitlab", openMR, nil)
+	g.createErr = errors.New("bd down")
+	if err := runLatchMR([]string{"!7", "--blocks", "mc-a"}, io.Discard); err == nil || !strings.Contains(err.Error(), "bd down") || len(g.edges) != 0 {
+		t.Errorf("mr: err %v edges %v", err, g.edges)
 	}
 }
 
@@ -3017,7 +3082,7 @@ func TestLatchMRFilesTitleBodyAndRefExactly(t *testing.T) {
 	if len(f.filed) != 1 || f.filed[0] != [4]string{"MR a/b!7 is merged", wantBody, "gitlab-mr-latch-gl.example.com/a/b!7", ""} {
 		t.Errorf("filed = %q", f.filed)
 	}
-	if len(f.edges) != 2 || out.String() != "mc-latch\n" || len(*reads) != 1 || (*reads)[0] != "gl.example.com/a%2Fb!7" {
+	if len(f.edges) != 0 || !slices.Equal(f.filedBlocks[0], []string{"mc-a", "mc-b"}) || out.String() != "mc-latch\n" || len(*reads) != 1 || (*reads)[0] != "gl.example.com/a%2Fb!7" {
 		t.Errorf("edges %v out %q reads %v", f.edges, out.String(), *reads)
 	}
 }
@@ -3424,7 +3489,7 @@ func TestRunWithdrawDiscardFlag(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, argv := range [][]string{{"withdraw", "cp", "--discard"}, {"cancel", "in"}, {"cancel", "in", "--discard"}} {
+	for _, argv := range [][]string{{"withdraw", "cp", "--discard"}, {"cancel", "in", "--why", "w"}, {"cancel", "in", "--discard", "--why", "w"}} {
 		if err := runInitiative(argv); err != nil {
 			t.Fatal(err)
 		}
@@ -3472,7 +3537,7 @@ func TestReconcileRejectsMergeAtFlag(t *testing.T) {
 	}
 }
 
-// The withdraw output carries a swept Task per line, a left-open Task and each
+// The withdraw output carries a swept Errand per line, a left-open Errand and each
 // land hold released (Spec mc-xw3ez D9).
 func TestPrintSweptLines(t *testing.T) {
 	var sb strings.Builder
@@ -3488,11 +3553,126 @@ func TestPrintSweptLines(t *testing.T) {
 	}
 }
 
+// A Latch withdraw prints the beads it releases.
+func TestPrintSweptLatchReleases(t *testing.T) {
+	var sb strings.Builder
+	printSwept(&sb, "lt", withdraw.Result{LatchReleases: []string{"w1", "w2"}})
+	if want := "unblocks: w1 w2\n"; sb.String() != want {
+		t.Errorf("output = %q, want %q", sb.String(), want)
+	}
+}
+
 func TestSplitCarries(t *testing.T) {
 	if got := splitCarries(" a, b,,a ,"); !slices.Equal(got, []string{"a", "b"}) {
 		t.Errorf("splitCarries = %q, want [a b]", got)
 	}
 	if got := splitCarries(""); len(got) != 0 {
 		t.Errorf("splitCarries(\"\") = %q, want none", got)
+	}
+}
+
+// loop start refuses over kind:task beads in the parent, before building or
+// spawning, so the human sees the doctor-fix error instead of "loop started".
+func TestRunLoopStartRefusesLegacyTaskBeads(t *testing.T) {
+	common := t.TempDir()
+	path := filepath.Join(t.TempDir(), "mugicrew-loop.lock")
+	orig, origSpawn := refuseLegacyTasks, spawnLoop
+	t.Cleanup(func() { refuseLegacyTasks, spawnLoop = orig, origSpawn })
+	refuseLegacyTasks = func(string) error {
+		return errors.New("2 bead(s) still labelled kind:task: run `mugicrew doctor fix`")
+	}
+	var spawned *exec.Cmd
+	spawnLoop = func(cmd *exec.Cmd) error { spawned = cmd; return errors.New("no exec") }
+	_, builds := stubBuild(t, "0123456789abcdef0123456789abcdef01234567", "/nix/store/x-mugicrew/bin/mugicrew", nil)
+	err := runLoopStart(path, common, false, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "mugicrew doctor fix") {
+		t.Fatalf("start over kind:task beads = %v; want an error naming mugicrew doctor fix", err)
+	}
+	if spawned != nil || len(*builds) != 0 {
+		t.Fatalf("refused start spawned %v, built %v", spawned, *builds)
+	}
+}
+
+// autoExitTestWorkspace is a git repo whose socket-anchored auto_exit resolution
+// the tests below drive: its socket, and a linked worktree of it.
+func autoExitTestWorkspace(t *testing.T) (root, sock, linked string) {
+	t.Helper()
+	root = scratchRepo(t)
+	linked = filepath.Join(root, "wt")
+	gitIn(t, root, "worktree", "add", "-q", linked, "-b", "side")
+	return root, filepath.Join(root, ".git", "mugicrew", "tmux.sock"), linked
+}
+
+func writeAutoExit(t *testing.T, path, value string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("auto_exit = \""+value+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// autoExitAt reads the Workspace's layers from the pane's socket (ADR 0356), whatever
+// tree the session runs in: the local layer under the common dir, and the main
+// checkout's working-tree shared layer, not a linked worktree's own.
+func TestAutoExitAtResolvesFromTheSocket(t *testing.T) {
+	root, sock, linked := autoExitTestWorkspace(t)
+	t.Chdir(linked) // a deliberately wrong cwd: the linked worktree
+	if got := autoExitAt(sock); got != loop.DefaultAutoExit {
+		t.Errorf("nothing set = %v, want the default", got)
+	}
+	writeAutoExit(t, filepath.Join(root, ".mugicrew", "config.toml"), "45s") // uncommitted, main checkout only
+	writeAutoExit(t, filepath.Join(linked, ".mugicrew", "config.toml"), "5m") // the linked tree's own copy
+	if got := autoExitAt(sock); got != 45*time.Second {
+		t.Errorf("shared layer = %v, want the main checkout's 45s", got)
+	}
+	// Committed on main after the linked worktree was cut: the linked tree still lacks it.
+	gitIn(t, root, "add", ".mugicrew")
+	gitIn(t, root, "commit", "-q", "-m", "shared auto_exit")
+	if got := autoExitAt(sock); got != 45*time.Second {
+		t.Errorf("committed shared layer = %v, want the main checkout's 45s", got)
+	}
+	writeAutoExit(t, filepath.Join(root, ".git", "mugicrew", "config.toml"), "30s")
+	if got := autoExitAt(sock); got != 30*time.Second {
+		t.Errorf("local over shared = %v, want 30s", got)
+	}
+	writeAutoExit(t, filepath.Join(root, ".git", "mugicrew", "config.toml"), "0")
+	if got := autoExitAt(sock); got != 0 {
+		t.Errorf("off = %v, want 0 (disarm)", got)
+	}
+}
+
+// A socket whose common dir isn't a git dir, or is gone, is the default, even when
+// the process cwd is a Workspace with another value.
+func TestAutoExitAtUnresolvableIsDefault(t *testing.T) {
+	root, _, _ := autoExitTestWorkspace(t)
+	writeAutoExit(t, filepath.Join(root, ".mugicrew", "config.toml"), "45s")
+	t.Chdir(root)
+	notGit := t.TempDir()
+	for _, sock := range []string{
+		filepath.Join(notGit, "mugicrew", "tmux.sock"),
+		filepath.Join(notGit, "gone", "mugicrew", "tmux.sock"),
+	} {
+		if got := autoExitAt(sock); got != loop.DefaultAutoExit {
+			t.Errorf("autoExitAt(%s) = %v, want the default", sock, got)
+		}
+	}
+}
+
+// The nested-child layout is the one that reproduced the reported symptom: an agent
+// that cd'd into a `repo =` child of a host worktree arms from the Workspace's local
+// layer, not the child's (which the old cwd walk read, giving the default).
+func TestAutoExitAtNestedChildUsesTheWorkspace(t *testing.T) {
+	host := nestedHost(t, "child")
+	out, err := exec.Command("git", "-C", host, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	common := strings.TrimSpace(string(out))
+	writeAutoExit(t, filepath.Join(common, "mugicrew", "config.toml"), "30s")
+	t.Chdir(filepath.Join(host, "child")) // a deliberately wrong cwd: the nested child repo
+	if got := autoExitAt(filepath.Join(common, "mugicrew", "tmux.sock")); got != 30*time.Second {
+		t.Errorf("nested child = %v, want the Workspace's 30s", got)
 	}
 }

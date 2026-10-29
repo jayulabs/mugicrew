@@ -160,7 +160,9 @@ func (m Model) sessionsSync() Model {
 	m.modals = slices.Clone(m.modals)
 	for i, d := range m.modals {
 		if d.sessions {
-			m.modals[i] = m.sessionsDialog(hitl, afk, d.id, d.cur)
+			nd := m.sessionsDialog(hitl, afk, d.id, d.cur)
+			nd.top = d.top // the refresh keeps the window the human is looking at
+			m.modals[i] = m.settled(nd)
 		}
 	}
 	return m

@@ -23,10 +23,12 @@ import (
 // isTerminal and startPager are seams for the verb tests.
 var (
 	isTerminal = func(f *os.File) bool { return term.IsTerminal(f.Fd()) }
-	// startPager runs cmd (via sh -c) with out as its stdout; the caller writes the
-	// view to the returned pipe and calls done, which closes it and waits.
-	startPager = func(cmd string, out *os.File) (io.Writer, func() error, error) {
+	// startPager runs cmd (via sh -c) with out as its stdout and extraEnv added to
+	// the verb's environment; the caller writes the view to the returned pipe and
+	// calls done, which closes it and waits.
+	startPager = func(cmd string, extraEnv []string, out *os.File) (io.Writer, func() error, error) {
 		c := exec.Command("sh", "-c", cmd)
+		c.Env = append(os.Environ(), extraEnv...)
 		c.Stdout, c.Stderr = out, os.Stderr
 		in, err := c.StdinPipe()
 		if err != nil {
@@ -44,6 +46,15 @@ var (
 const watchPaneEnv = "MUGICREW_WATCH_PANE"
 
 func inWatchPane() bool { return os.Getenv(watchPaneEnv) != "" }
+
+// pagerEnv is the extra environment for the pager: in the Watch pane less keeps no
+// history file, so the pane closing while less quits cannot abort it saving history.
+func pagerEnv() []string {
+	if inWatchPane() {
+		return []string{"LESSHISTFILE=-"}
+	}
+	return nil
+}
 
 // pagerCmd is $PAGER, else less -FRX (less -RX in the Watch pane: -F would quit on one screen).
 func pagerCmd() string {
@@ -148,7 +159,7 @@ func transcriptVerb(argv []string, w io.Writer) error {
 	last := ss[len(ss)-1]
 	follow := !noFollow && last.Outcome == "unended"
 	if f, ok := w.(*os.File); ok && o.Wrap && !noPager && !follow {
-		pw, done, err := startPager(pagerCmd(), f)
+		pw, done, err := startPager(pagerCmd(), pagerEnv(), f)
 		if err != nil {
 			return err
 		}

@@ -99,9 +99,19 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 			blocked += fmt.Sprintf(" +%d", len(blockers)-1)
 		}
 	}
+	desc := func(b *bd.Bead, extra string) string { // "<id> <kind> <state>" plus what drove it
+		if b == nil {
+			return ""
+		}
+		return fmt.Sprintf("%s %s %s%s", b.ID, b.Kind, b.Status, extra)
+	}
 	charting := boolWord(surveyL != nil, "survey due")
 	if surveyL != nil && g.sessions[surveyL.ID].State == session.Alive {
 		charting = "charting"
+	}
+	chartingWhy := desc(surveyL, "")
+	if charting == "survey due" && c.HasLabel(contract.LabelDefogged) {
+		chartingWhy += ", Chart stamped: confirm to finish"
 	}
 	fog := ""
 	if fogBlocked && len(fogBlockers) > 0 {
@@ -151,12 +161,6 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 	case bd.Paused(*c):
 		own = "paused"
 	}
-	desc := func(b *bd.Bead, extra string) string { // "<id> <kind> <state>" plus what drove it
-		if b == nil {
-			return ""
-		}
-		return fmt.Sprintf("%s %s %s%s", b.ID, b.Kind, b.Status, extra)
-	}
 	rules := []struct{ word, why string }{ // rank 1–16; "" is no match
 		{boolWord(landedL != nil && g.liveOf(c) == alive, "speccing"), "Landing " + desc(landedL, "") + ": " + closeOf(landedL) + ", Spec session holds the Chart"},
 		{boolWord(landedL != nil, "landed"), "Landing " + desc(landedL, "") + ": " + closeOf(landedL)},
@@ -165,7 +169,7 @@ func (g graphData) chartWord(c *bd.Bead) rollupResult {
 		{boolWord(conflictL != nil, "conflict"), desc(conflictL, "")},
 		{blocked, desc(blockerL, " blocking the Chart")},
 		{own, "the Chart itself carries " + strings.Join(bd.PausedCauses(*c), ", ")},
-		{charting, desc(surveyL, "")},
+		{charting, chartingWhy},
 		{turn, desc(hitlL, ", "+turnWhy)},
 		{afk, desc(afkL, "")},
 		{fog, "every defog child waits on " + desc(fogL, "")},

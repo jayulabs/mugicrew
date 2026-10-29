@@ -65,9 +65,9 @@ bead, freezes the Checkpoint (the pivot blocks it until it closes) and closes
 your bead `pivoted: <pivot>` in the same publish as your Drafts. Never
 improvise a redesign for that FR; your prompt says what you do next.
 
-A **Task raiser** differs: a Task stuck on a wrong FR stays stuck, claimed and
+A **Errand raiser** differs: an Errand stuck on a wrong FR stays stuck, claimed and
 open, and is never closed `pivoted:`. It holds the Checkpoint's land, and its
-step still has to happen. Its pivot is `discovered-from` the Task, and the pivot
+step still has to happen. Its pivot is `discovered-from` the Errand, and the pivot
 is paired with a Critique carrying the Ask, which is the refile that an effort
 raiser's unfinished FR would otherwise get.
 

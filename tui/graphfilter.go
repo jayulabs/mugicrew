@@ -23,13 +23,14 @@ import (
 const queryFile = "graph-filter.json"
 
 // The status picker's entries (ADR 0075 §1).
-var statusItems = []string{"any", "unclosed", "open", "in_progress", "blocked", "deferred", "closed"}
+var statusItems = []string{"any", "unclosed", "open", "in_progress", "blocked", "draft", "closed"}
 
 // statusAny is the stored status that shows closed beads too; "unclosed" is the default.
 const (
 	statusAny      = "any"
 	statusUnclosed = "unclosed"
 	statusClosed   = "closed"
+	statusDraft    = "draft" // the Draft facet; the stored bd status is deferred
 )
 
 // query is the filter: whitespace words over title and id, a status and a kind
@@ -58,6 +59,9 @@ func (q query) statusOK(b bd.Bead, sessions map[string]session.Info) bool {
 	case "unclosed":
 		// Words at the baseline search every bead (Spec "Graph search at the default status matches closed beads" §1).
 		return strings.TrimSpace(q.words) != "" || b.Unclosed() || sessions[b.ID].Has()
+	}
+	if q.status == statusDraft {
+		return b.Status == "deferred" || sessions[b.ID].Has()
 	}
 	return b.Status == q.status || sessions[b.ID].Has()
 }
@@ -266,6 +270,9 @@ func loadQuery(path string) query {
 		return baseline
 	}
 	q := query{words: f.Words, status: f.Status, kind: f.Kind}
+	if q.status == "deferred" { // saved before the facet was renamed
+		q.status = statusDraft
+	}
 	if !slices.Contains(statusItems, q.status) {
 		q.status = baseline.status
 	}

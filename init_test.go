@@ -193,6 +193,88 @@ func TestInitTTYPromptsWithGlabDefault(t *testing.T) {
 	}
 }
 
+func localMouse(t *testing.T, e *initEnv) string {
+	b, _ := os.ReadFile(filepath.Join(e.dir, ".git", "mugicrew", "config.toml"))
+	return string(b)
+}
+
+func TestInitMousePrompt(t *testing.T) {
+	for in, want := range map[string]string{"y\n": "mouse = true", "N\n": "mouse = false", "\n": "mouse = false"} {
+		e := initWS(t)
+		e.graph, e.tty = true, true
+		out, code := e.run(t, in)
+		if code != 0 || !strings.Contains(out, "Enable mouse mode? [y/N]") || !strings.Contains(out, "Shift-drag") {
+			t.Fatalf("%q: code=%d out=%s", in, code, out)
+		}
+		if got := localMouse(t, e); !strings.Contains(got, want) {
+			t.Fatalf("%q: config %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInitMouseFlagSkipsPromptAndWrites(t *testing.T) {
+	for v, want := range map[string]string{"on": "mouse = true", "off": "mouse = false"} {
+		e := initWS(t)
+		e.graph, e.tty = true, true
+		out, code := e.run(t, "", "--mouse", v)
+		if code != 0 || strings.Contains(out, "Enable mouse mode?") || !strings.Contains(localMouse(t, e), want) {
+			t.Fatalf("%s: code=%d out=%s cfg=%q", v, code, out, localMouse(t, e))
+		}
+	}
+}
+
+func TestInitMouseNoTTYLeavesKeyUnset(t *testing.T) {
+	e := initWS(t)
+	e.graph = true
+	out, code := e.run(t, "y\n")
+	if code != 0 || strings.Contains(out, "Enable mouse mode?") || localMouse(t, e) != "" {
+		t.Fatalf("code=%d out=%s cfg=%q", code, out, localMouse(t, e))
+	}
+}
+
+func TestInitMouseSetKeySkipsPrompt(t *testing.T) {
+	e := initWS(t)
+	e.graph, e.tty = true, true
+	e.run(t, "", "--mouse", "on")
+	out, code := e.run(t, "N\n")
+	if code != 0 || strings.Contains(out, "Enable mouse mode?") || !strings.Contains(localMouse(t, e), "mouse = true") {
+		t.Fatalf("code=%d out=%s cfg=%q", code, out, localMouse(t, e))
+	}
+}
+
+func TestInitMouseFlagOverridesSetKey(t *testing.T) {
+	e := initWS(t)
+	e.graph, e.tty = true, true
+	e.run(t, "", "--mouse", "on")
+	out, code := e.run(t, "", "--mouse", "off")
+	if code != 0 || !strings.Contains(localMouse(t, e), "mouse = false") {
+		t.Fatalf("code=%d out=%s cfg=%q", code, out, localMouse(t, e))
+	}
+}
+
+func TestInitMouseUnusableLocalSkipsPromptWithWarning(t *testing.T) {
+	e := initWS(t)
+	e.graph, e.tty = true, true
+	e.run(t, "", "--mouse", "on")
+	p := filepath.Join(e.dir, ".git", "mugicrew", "config.toml")
+	if err := os.WriteFile(p, []byte("[tui]\nmouse = \"yes\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, code := e.run(t, "y\n")
+	if code != 0 || strings.Contains(out, "Enable mouse mode?") || !strings.Contains(out, "unusable") {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
+
+func TestInitMouseBadValueIsUsageError(t *testing.T) {
+	e := initWS(t)
+	e.graph = true
+	out, code := e.run(t, "", "--mouse", "maybe")
+	if code == 0 || !strings.Contains(out, "usage") || localMouse(t, e) != "" {
+		t.Fatalf("code=%d out=%s", code, out)
+	}
+}
+
 // TestInitRealBd drives a real bd in a scratch BEADS_DIR-free clone: server mode,
 // dolt_database follows the prefix, and nothing is committed.
 func TestInitRealBd(t *testing.T) {

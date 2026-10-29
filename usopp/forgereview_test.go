@@ -230,3 +230,28 @@ func TestForgeReviewRoutesThroughUsoppAndRejectsLaunch(t *testing.T) {
 		t.Error("forge-review is AFK: Launch must error")
 	}
 }
+
+// FR49 wiring: a confirm sweep closes the forge-review while the session fails; the
+// runner reports it done, so the tail writes nothing.
+func TestForgeReviewSweptDuringFailedRunIsDone(t *testing.T) {
+	r := newFRRec()
+	stubForgeReview(t, r)
+	reads := 0
+	inner := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		b, err := inner(id)
+		if id == "ws-fr" {
+			if reads++; reads > 1 { // closed by the sweep after the dispatch read
+				b.Status = "closed"
+			}
+		}
+		return b, err
+	}
+	err := Usopp{}.Run(stubCtx{&recordingHarness{err: errors.New("session killed")}}, contract.Bead{ID: "ws-fr", Kind: contract.KindForgeReview})
+	if err != nil {
+		t.Errorf("Run = %v, want nil (swept is done)", err)
+	}
+	if len(r.closed)+len(r.updates) != 0 || r.ownClosed != "" {
+		t.Errorf("swept forge-review touched the graph: %+v", r)
+	}
+}

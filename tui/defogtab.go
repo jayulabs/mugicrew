@@ -130,9 +130,10 @@ const (
 	sAsk
 	sDone
 	sExited
+	sUndraft // an Approval waiting on the human's un-draft of its GitLab Draft MR
 )
 
-// leafState: launching > done > ask > turn > live > held launch > exited > blocked > paused (own
+// leafState: launching > done > ask > turn > live > held launch > awaiting un-draft > exited > blocked > paused (own
 // or inherited) > ready.
 func (g graphData) leafState(b *bd.Bead) lstate {
 	s := g.sessions[b.ID]
@@ -151,6 +152,8 @@ func (g graphData) leafState(b *bd.Bead) lstate {
 		return sLive
 	case !g.launched[b.ID].IsZero(): // held after a successful launch, not yet seen alive: never ready
 		return sLaunching
+	case bd.AwaitingUndraft(*b): // before exited: a gitlab fallback Approval's exited session doesn't hide the wait
+		return sUndraft
 	case s.State == session.Exited:
 		return sExited
 	case g.blocked(b):
@@ -531,6 +534,7 @@ type defogTab struct {
 	w, h int  // the body's size, handed over by tabAt
 	open bool // d: the detail pane is open
 	off  int  // the detail viewport's scroll offset
+	lv   listView
 }
 
 // newDefog is a Defog tab with the folds the human saved on this machine.
@@ -677,33 +681,26 @@ func (t defogTab) bindings() []key.Binding {
 	if r.foldable() {
 		bs = append(bs, keyFold)
 	}
-	if r.kind == dMR {
-		bs = append(bs, keyOpenMR)
-	}
 	if t.open {
 		bs = append(bs, keyShut, keyScroll)
 	} else {
 		bs = append(bs, keyDetail)
 	}
-	if r.b == nil {
-		if r.kind == dHead && isOpenInitiative(r.init) {
-			bs = append(bs, keyCancelKey)
-		}
+	b := r.verbBead()
+	if b == nil {
 		return append(bs, keySection)
 	}
-	if r.b.Unclosed() {
-		bs = append(bs, verbKey("p", pauseLabel(r.b)))
+	hinted, _ := beadVerbBindings(t.g, b, r.role())
+	// hintOf (ADR 0229) picks each verb's section; this order is the in-section order on the bar and in ?.
+	at := slices.IndexFunc(hinted, func(kb key.Binding) bool { return !slices.Contains([]string{"w", "p", "x", "X"}, kb.Keys()[0]) })
+	if at < 0 {
+		at = len(hinted)
 	}
-	if l := t.g.xHint(r.b); l != "" {
-		bs = append(bs, verbKey("x", l))
+	bs = append(bs, hinted[:at]...)
+	if r.b != nil {
+		bs = append(bs, keyTranscript)
 	}
-	if t.g.xOffers(r.b) {
-		bs = append(bs, xBinding(r.b))
-	}
-	bs = append(bs, keyTranscript)
-	if r.b.Unclosed() {
-		bs = append(bs, keyPrio)
-	}
+	bs = append(bs, hinted[at:]...)
 	return append(bs, keySection)
 }
 
@@ -719,16 +716,36 @@ func (t defogTab) extra() []key.Binding {
 	for _, b := range t.bindings() {
 		shown[b.Keys()[0]] = true
 	}
-	cand := []key.Binding{keyLaunch, keyBg}
-	if r.b != nil {
-		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
-	}
-	for _, b := range cand {
+	for _, b := range []key.Binding{keyLaunch, keyBg} {
 		if !shown[b.Keys()[0]] {
 			out = append(out, b)
 		}
 	}
-	return out
+	_, verbs := beadVerbBindings(t.g, r.verbBead(), r.role())
+	return append(out, verbs...)
+}
+
+// verbBead is the bead the row's bead verbs act on: its own, else the Initiative a header names.
+func (r dRow) verbBead() *bd.Bead {
+	if r.b != nil {
+		return r.b
+	}
+	if r.kind == dHead {
+		return r.init
+	}
+	return nil
+}
+
+// role is how much of the verb set the row hints (ADR 0360): an MR row keeps w, a
+// closed row c.
+func (r dRow) role() rowRole {
+	switch r.kind {
+	case dMR:
+		return roleMR
+	case dFin:
+		return roleClosed
+	}
+	return roleFull
 }
 
 // defogKey routes the Defog tab's action keys through the shared paths; ok is false
@@ -746,10 +763,6 @@ func (m Model) defogKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return nm, cmd, true
 	}
-	if r.kind == dMR && key.Matches(k, keyOpenMR) {
-		next, cmd := m.openMRRow(r.b, r.chart)
-		return next, cmd, true
-	}
 	if r.kind == dFin && (key.Matches(k, keyLaunch) || key.Matches(k, keyBg)) {
 		m.setStatus(finRefuse)
 		return m, nil, true
@@ -757,9 +770,8 @@ func (m Model) defogKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	return m.queueRowKey(k, r.b, r.leaf())
 }
 
-// queueRowKey is the queue tabs' shared routing for a selected row's action keys:
-// enter and b take rowEnterWhy/rowBgWhy's refusals, then enter launches or runs now
-// and the rest go to the shared paths. leaf is whether the row is an open HITL leaf;
+// queueRowKey is the queue tabs' shared routing for a selected row's launch keys:
+// enter and b take rowEnterWhy/rowBgWhy's refusals, then enter launches or runs now. leaf is whether the row is an open HITL leaf;
 // ok is false for a key the row doesn't own.
 func (m Model) queueRowKey(k tea.KeyMsg, b *bd.Bead, leaf bool) (tea.Model, tea.Cmd, bool) {
 	g := m.gateData()
@@ -779,12 +791,6 @@ func (m Model) queueRowKey(k tea.KeyMsg, b *bd.Bead, leaf bool) (tea.Model, tea.
 			m.setStatus(why)
 			return m, nil, true
 		}
-		return m.actionKey(k)
-	case b == nil && key.Matches(k, keyWithdrawKey) && isOpenInitiative(m.initRow()): // a header carries no bead; actionKey finds it
-		return m.actionKey(k)
-	case b == nil:
-		return m, nil, false
-	case key.Matches(k, keyPauseKey), key.Matches(k, keyDropKey), key.Matches(k, keyPrio), key.Matches(k, keyWithdrawKey):
 		return m.actionKey(k)
 	}
 	return m, nil, false
@@ -911,6 +917,35 @@ func (t defogTab) line(r dRow, tagW int, gut, trail string, blockers map[string]
 	return s, suffix()
 }
 
+// gapped is the Defog rows as drawRows takes them: each line's row number as text ("" for a
+// gap), its bead id for the blocker footer, and the selected row's line. View and hit share it.
+func (t defogTab) gapped(rows []dRow, sel int) (lines, ids []string, at int) {
+	lines, at = make([]string, len(rows)), sel
+	ids = make([]string, len(rows))
+	liveAt, mrsAt, chartsAt, treeAt, noInitAt := 0, 0, 0, 0, 0 // the section headers that get a blank line above
+	for i, r := range rows {
+		ids[i], lines[i] = r.bk(), strconv.Itoa(i)
+		switch r.key {
+		case liveKey:
+			liveAt = i
+		case mrsKey:
+			mrsAt = i
+		case chartsKey:
+			chartsAt = i
+		case treeKey:
+			treeAt = i
+		case "i:":
+			noInitAt = i
+		}
+	}
+	lines, ids, at = gapAt(lines, ids, at, noInitAt) // a blank line above each section header
+	lines, ids, at = gapAt(lines, ids, at, treeAt)
+	lines, ids, at = gapAt(lines, ids, at, chartsAt)
+	lines, ids, at = gapAt(lines, ids, at, mrsAt)
+	lines, ids, at = gapAt(lines, ids, at, liveAt)
+	return lines, ids, at
+}
+
 func (t defogTab) view(w, h int) string {
 	rows := t.rows()
 	tagW := 0 // leaf and AFK rows share one kind-badge column
@@ -935,35 +970,50 @@ func (t defogTab) view(w, h int) string {
 		}
 		return t.line(r, tagW, blockerGutter(blockers, r.bk(), hid), trail, blockers)
 	}
-	shade := shadeSet(t.g.parentOf, rows, sel, full, dRow.shadeIn)
-	lines, selRow := make([]string, len(rows)), sel
-	ids := make([]string, len(rows))
-	liveAt, mrsAt, chartsAt, treeAt, noInitAt := 0, 0, 0, 0, 0 // the section headers that get a blank line above
-	for i, r := range rows {
-		ids[i], lines[i] = r.bk(), strconv.Itoa(i)
-		switch r.key {
-		case liveKey:
-			liveAt = i
-		case mrsKey:
-			mrsAt = i
-		case chartsKey:
-			chartsAt = i
-		case treeKey:
-			treeAt = i
-		case "i:":
-			noInitAt = i
-		}
-	}
-	lines, ids, sel = gapAt(lines, ids, sel, noInitAt) // a blank line above each section header
-	lines, ids, sel = gapAt(lines, ids, sel, treeAt)
-	lines, ids, sel = gapAt(lines, ids, sel, chartsAt)
-	lines, ids, sel = gapAt(lines, ids, sel, mrsAt)
-	lines, ids, sel = gapAt(lines, ids, sel, liveAt)
+	shade := shadeSet(t.g.beadByID, rows, sel, full, dRow.shadeIn)
+	lines, ids, at := t.gapped(rows, sel)
 	var footer func(off, lh int) []string
 	if b != nil {
 		footer = blockerFooter(t.g, t.g.openBlockers(b), ids, w)
 	}
-	return drawRows(lines, row, shade, sel, selRow, t.open, w, h, t.detailVP(), footer)
+	return drawRows(lines, row, shade, at, sel, t.open, w, h, t.detailVP(), footer, t.lv.offsets(t.geom(rows, w, h).keys))
 }
 
 func (t defogTab) drawerOpen() bool { return t.open }
+
+// geom is what View and the pointer share about a w by h body over rows.
+func (t defogTab) geom(rows []dRow, w, h int) listGeom {
+	sel := t.selIndex(rows)
+	lines, ids, at := t.gapped(rows, sel)
+	var footer, links func(off, lh int) []string
+	if b := t.selected(); b != nil {
+		bl := t.g.openBlockers(b)
+		footer, links = blockerFooter(t.g, bl, ids, w), blockerLinks(bl, ids)
+	}
+	return queueGeom(lines, at, t.open, h, footer, links, func(i int) string { return rows[i].key }, func(i int) (string, bool, bool) {
+		return rows[i].key, rows[i].b != nil, rows[i].selectable()
+	})
+}
+
+// hit is the pointer's view of body line y of a w by h body (pointable).
+func (t defogTab) hit(w, h, y int) hitTarget { return t.geom(t.rows(), w, h).hit(t.lv, y) }
+
+// selectKey selects the row key as j/k would.
+func (t defogTab) selectKey(key string) component { t.sel, t.off = key, 0; return t }
+
+func (t defogTab) wheel(w, h, y, delta int) component {
+	g := t.geom(t.rows(), w, h)
+	if g.hit(t.lv, y).kind == hitDrawer {
+		t.off = wheelDrawer(t.detailVP(), delta)
+		return t
+	}
+	t.lv = g.wheeled(t.lv, delta)
+	return t
+}
+
+func (t defogTab) snap(w, h int) component {
+	t.lv = t.geom(t.rows(), w, h).snapped(t.lv)
+	return t
+}
+
+func (t defogTab) unscroll() component { t.lv = listView{}; return t }

@@ -18,14 +18,16 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// The fixed palette (the 256-color dark one), as paired SGR codes so spans nest
-// without a full reset.
-const (
-	accent = "212"
-	muted  = "244"
-	code   = "180"
-	link   = "111"
-)
+// Palette names the four colours the renderer draws, as xterm-256 index strings.
+type Palette struct{ Accent, Muted, Code, Link string }
+
+// pal is the palette in force (the 256-color dark one until SetPalette), drawn as
+// paired SGR codes so spans nest without a full reset.
+var pal = Palette{Accent: "212", Muted: "244", Code: "180", Link: "111"}
+
+// SetPalette installs p for every later Render. Only the TUI's theme calls it; the
+// doc pane and transcript run in their own processes and keep the dark default.
+func SetPalette(p Palette) { pal = p }
 
 func fg(c, s string) string  { return "\x1b[38;5;" + c + "m" + s + "\x1b[39m" }
 func bold(s string) string   { return "\x1b[1m" + s + "\x1b[22m" }
@@ -78,13 +80,13 @@ func (r rd) block(n ast.Node, w int) []string {
 		s := r.inline(n)
 		switch n.Level {
 		case 1:
-			s = bold(uline(fg(accent, s)))
+			s = bold(uline(fg(pal.Accent, s)))
 		case 2:
-			s = bold(fg(accent, s))
+			s = bold(fg(pal.Accent, s))
 		case 3:
 			s = bold(s)
 		default:
-			s = bold(fg(muted, s))
+			s = bold(fg(pal.Muted, s))
 		}
 		return wrap(s, w)
 	case *ast.List:
@@ -100,7 +102,7 @@ func (r rd) block(n ast.Node, w int) []string {
 				out = append(out, "")
 			}
 			mw := ansi.StringWidth(m)
-			out = append(out, indent(r.blocks(c, w-mw), fg(muted, m), strings.Repeat(" ", mw))...)
+			out = append(out, indent(r.blocks(c, w-mw), fg(pal.Muted, m), strings.Repeat(" ", mw))...)
 		}
 		return out
 	case *ast.FencedCodeBlock, *ast.CodeBlock:
@@ -110,20 +112,20 @@ func (r rd) block(n ast.Node, w int) []string {
 			seg := ls.At(i)
 			l := strings.TrimRight(strings.ReplaceAll(string(seg.Value(r.src)), "\t", "    "), "\r\n")
 			for _, x := range strings.Split(ansi.Hardwrap(l, max(w-2, 1), true), "\n") {
-				out = append(out, "  "+fg(code, x))
+				out = append(out, "  "+fg(pal.Code, x))
 			}
 		}
 		return out
 	case *ast.Blockquote:
-		return indent(r.blocks(n, w-2), fg(muted, "│ "), fg(muted, "│ "))
+		return indent(r.blocks(n, w-2), fg(pal.Muted, "│ "), fg(pal.Muted, "│ "))
 	case *ast.ThematicBreak:
-		return []string{fg(muted, strings.Repeat("─", max(w, 1)))}
+		return []string{fg(pal.Muted, strings.Repeat("─", max(w, 1)))}
 	case *east.Table:
 		return r.table(n, w)
 	case *ast.HTMLBlock:
 		var out []string
 		line := func(s text.Segment) {
-			out = append(out, wrap(fg(muted, strings.TrimRight(string(s.Value(r.src)), "\r\n")), w)...)
+			out = append(out, wrap(fg(pal.Muted, strings.TrimRight(string(s.Value(r.src)), "\r\n")), w)...)
 		}
 		for i := 0; i < n.Lines().Len(); i++ {
 			line(n.Lines().At(i))
@@ -153,7 +155,7 @@ func (r rd) inline(n ast.Node) string {
 			sb.WriteString(strike(r.inline(c)))
 		case *east.TaskCheckBox:
 			if c.IsChecked {
-				sb.WriteString(fg(muted, "☑") + " ")
+				sb.WriteString(fg(pal.Muted, "☑") + " ")
 			} else {
 				sb.WriteString("☐ ")
 			}
@@ -167,7 +169,7 @@ func (r rd) inline(n ast.Node) string {
 					}
 				}
 			}
-			sb.WriteString(fg(code, lit.String()))
+			sb.WriteString(fg(pal.Code, lit.String()))
 		case *ast.Emphasis:
 			if c.Level == 2 {
 				sb.WriteString(bold(r.inline(c)))
@@ -176,16 +178,16 @@ func (r rd) inline(n ast.Node) string {
 			}
 		case *ast.Link:
 			t := r.inline(c)
-			sb.WriteString(fg(link, t))
+			sb.WriteString(fg(pal.Link, t))
 			if d := string(c.Destination); d != ansi.Strip(t) {
-				sb.WriteString(fg(muted, " ("+d+")"))
+				sb.WriteString(fg(pal.Muted, " ("+d+")"))
 			}
 		case *ast.AutoLink:
-			sb.WriteString(fg(link, string(c.URL(r.src))))
+			sb.WriteString(fg(pal.Link, string(c.URL(r.src))))
 		case *ast.RawHTML:
 			for i := 0; i < c.Segments.Len(); i++ {
 				s := c.Segments.At(i)
-				sb.WriteString(fg(muted, string(s.Value(r.src))))
+				sb.WriteString(fg(pal.Muted, string(s.Value(r.src))))
 			}
 		default:
 			sb.WriteString(r.inline(c))
@@ -455,9 +457,9 @@ func box(t *east.Table, rows [][]string, hdr []bool, cw []int, narrowed bool) []
 		for i, x := range cw {
 			parts[i] = strings.Repeat("─", x+2)
 		}
-		return fg(muted, l+strings.Join(parts, m)+rt)
+		return fg(pal.Muted, l+strings.Join(parts, m)+rt)
 	}
-	bar := fg(muted, "│")
+	bar := fg(pal.Muted, "│")
 	out := []string{rule("┌", "┬", "┐")}
 	for ri, cells := range rows {
 		if narrowed && ri > 0 && !hdr[ri] && !hdr[ri-1] {
@@ -531,11 +533,11 @@ func stacked(rows [][]string, hdr []bool, w int) []string {
 			continue
 		}
 		if len(out) > 0 {
-			out = append(out, fg(muted, strings.Repeat("─", w)))
+			out = append(out, fg(pal.Muted, strings.Repeat("─", w)))
 		}
 		for i, c := range cells {
 			if i < len(heads) && heads[i] != "" {
-				c = bold(heads[i]) + fg(muted, ":") + " " + c
+				c = bold(heads[i]) + fg(pal.Muted, ":") + " " + c
 			}
 			add(c)
 		}

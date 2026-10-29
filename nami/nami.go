@@ -1,7 +1,9 @@
 // Package nami holds Nami, the charting crewmate. She owns grilling/research
 // (and chart-conflict) and stewards the chart (GLOSSARY.md): she maps the fog
 // toward a Destination Luffy's triage settled (ADR 0129), and reconcile is the
-// idempotent graph-driver behind a drained Chart (spec §8).
+// idempotent graph-driver behind a drained Chart (spec §8). A charting session
+// ends one of five ways: keep the Chart with its fog seeded, finish it in place
+// (no fog, ADR 0357), hand it back, reject it, or mark it a duplicate.
 package nami
 
 import (
@@ -66,30 +68,20 @@ func runResearch(ctx contract.Ctx, bead contract.Bead) error {
 	if err != nil {
 		return err
 	}
-	res, err := ctx.Harness().Run(ctx, inv)
-	if err != nil {
-		return err // errored Run: leave the bead open, the next tick re-dispatches
+	_, reason, _, open, err := runSession(ctx, inv, showBead)
+	if err != nil || !open {
+		return err // errored Run leaves the bead open for the next tick; closed (swept, or by a prior run): done
 	}
 	// The agent ends its run with the pointer line "Wrote docs/research/<slug>.md:
-	// <summary>"; that IS the close reason. Headless claude carries the
-	// full assistant message, so match the LAST non-empty line, not the whole Output —
-	// prose before the pointer would otherwise fail the prefix and the bead would NEVER
-	// close. Only the pointer means a doc landed to close against —
-	// an exit-0 soft failure that printed some other final line (e.g. "Unable to find
-	// primary sources") must NOT false-close the bead, so require the prefix (subsumes
-	// the empty case) and leave the bead for the next tick otherwise.
-	reason := lastNonEmptyLine(res.Output)
+	// <summary>"; that IS the close reason. Only the pointer means a doc landed to
+	// close against: an exit-0 soft failure that printed some other final line
+	// (e.g. "Unable to find primary sources") must NOT false-close the bead, so
+	// require the prefix (subsumes the empty case) and leave the bead for the next
+	// tick otherwise.
 	if !strings.HasPrefix(reason, researchDocPointer) {
 		return nil
 	}
-	b, err := bd.Show(bead.ID)
-	if err != nil {
-		return err
-	}
-	if b.Open() {
-		return bd.Close(bead.ID, reason)
-	}
-	return nil // already closed by a prior run: no double close
+	return closeBead(bead.ID, reason)
 }
 
 // resolvedOutcome prefixes the chart-conflict agent's success line, "Resolved:
@@ -135,11 +127,10 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 	if err != nil {
 		return err
 	}
-	res, err := ctx.Harness().Run(ctx, inv)
-	if err != nil {
-		return err // errored Run: the bead stays open
+	_, line, res, open, err := runSession(ctx, inv, showBead)
+	if err != nil || !open {
+		return err // errored Run: the bead stays open; closed (swept, or by a prior run): done, no check, no integrate
 	}
-	line := lastNonEmptyLine(res.Output)
 	if title, ok := strings.CutPrefix(line, escalateOutcome); ok {
 		return escalateChartConflict(ctx, b, strings.TrimSpace(title), res.Output)
 	}
@@ -315,20 +306,6 @@ func hasSourceLine(body string) bool {
 // moves the guard + emit line, not the landing path.
 const researchDocPointer = "Wrote docs/research/"
 
-// lastNonEmptyLine returns the last non-blank line of s, trimmed. Headless claude
-// output carries the whole assistant message, so the pointer line the agent emits
-// last sits behind any prose it printed first; the close guard matches on this line,
-// not the whole Output.
-func lastNonEmptyLine(s string) string {
-	lines := strings.Split(s, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			return line
-		}
-	}
-	return ""
-}
-
 // researchPrompt is the research workflow an AFK kind:research bead's agent runs
 // (spec §5.3: the prompt carries the workflow, embedded in-repo, not
 // the packaged skill). It reproduces the research skill's primary-sources discipline
@@ -372,7 +349,8 @@ const wayfinderMapFields = contract.WayfinderMapFields
 // Chart: read the Destination and Notes Luffy wrote, map Notes /
 // Not-yet-specified / Out-of-scope and seed the defog beads as Chart children,
 // or push back (ADR 0130: narrow in place, split an offshoot Signal, hand back,
-// or reject/duplicate on the human's assent), closing only the Chart. The
+// finish in place on the human's assent to no fog, or reject/duplicate on the
+// human's assent), closing only the Chart or, finishing in place, neither bead. The
 // clean-exit publish, Survey close and claim release are hitl-run's, in Go.
 // Section meanings and defog-create rules are the chart-body Crew doc.
 //
@@ -384,10 +362,11 @@ func chartingPrompt(surveyID, chartID string) string {
 }
 
 // speccingPrompt is the fork-of-to-spec workflow the AFK speccing session runs
-// over a defogged Chart: read the Chart body + every closed defog bead
-// + prototype side-refs, then author the one already-spawned Spec's body via bd
-// update (no new bead, no triage label). Mirrors chartingTmpl/grillingTmpl. Names the five
-// Chart-body sections via the shared wayfinderMapFields so they can't drift.
+// over a defogged Chart: read the Chart body + every closed defog bead + the
+// closed Survey's notes + prototype side-refs, then author the one
+// already-spawned Spec's body via bd update (no new bead, no triage label).
+// Mirrors chartingTmpl/grillingTmpl. Names the five Chart-body sections via the
+// shared wayfinderMapFields so they can't drift.
 // Its Spec-body write is serialized by the loop's one container step per container.
 // The seven sections are the spec-template Crew doc, shared with charting, and
 // the section meanings the chart-body Crew doc (ADR 0088).
@@ -406,7 +385,9 @@ func speccingPrompt(chartID string) string {
 // then PROMOTE remaining fog into fresh defog children, STAMP chart:defogged when
 // nothing promotable stands, or ESCALATE one grilling child when a load-bearing
 // bullet can't be classified — never blind-stamp. The agent mutates the graph
-// itself; the handler is thin (no re-read, no close). Mirrors speccingTmpl; names
+// itself; the handler is thin (no re-read, no close). The judge is not the only
+// stamper: a Survey also stamps on a no-fog finish (ADR 0357) and skips the
+// promote path. Mirrors speccingTmpl; names
 // the five Chart-body sections via the shared wayfinderMapFields and the stamp via
 // contract.LabelDefogged (the loop's dispatch gate), so neither can drift. The
 // section meanings and defog-create rules are the chart-body Crew doc (ADR 0088).
@@ -488,6 +469,7 @@ var (
 	closeBead          = bd.Close
 	spawnSuccessor     = bd.SpawnSuccessorIfAbsent
 	showBead           = bd.Show
+	runSession         = bd.RunSession
 	updateBody         = bd.Update
 	closeOnPublish     = bd.CloseOnPublish
 	spawnChildIfAbsent = bd.SpawnChildIfAbsent
@@ -512,6 +494,14 @@ var (
 	repoDirOf          = contexts.RepoDirOf
 	forgeFindOpenMR    = forge.FindOpenMR
 	forgeCloseMR       = forge.CloseMR
+	fetchMainline      = git.Repo.FetchMainline
+	probeBase          = git.Repo.ResolveProbeBase
+	chartPatchID       = git.ChartPatchID
+	sequenceRules      = func(r git.Repo) ([]git.Rule, error) { return git.SequenceRules(r) }
+	verifyRenumber     = git.Repo.VerifyRenumber
+	approvedAtHead     = git.ApprovedAtHead
+	closedChildrenOf   = bd.ClosedChildrenOfKindBeads
+	openChildrenOf     = bd.OpenChildrenOfKindBeads
 	forgeProject       = func(r git.Repo) (forge.Project, error) { return git.SameHostProject(r, git.Repo.ForgeProject) }
 )
 
@@ -628,17 +618,25 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	if sha, landed, err := contexts.Landed(chart, chartTrailer(chart.ID), landedBase); err != nil {
-		if foreign := (*git.ForeignLanding)(nil); errors.As(err, &foreign) {
-			return bd.HoldForeign(chart, foreign) // the hold exists even with no Landing (ADR 0187 §3)
+	// An Anchor: pin on the Chart is the landed fact for a Chart that landed with
+	// nothing ahead (ADR 0358); else the trailer on mainline.
+	pinSha, pinned := git.ParseAnchor(chart.Description)
+	sha, landed := pinSha, pinned
+	if !pinned {
+		var err error
+		if sha, landed, err = contexts.Landed(chart, chartTrailer(chart.ID), landedBase); err != nil {
+			if foreign := (*git.ForeignLanding)(nil); errors.As(err, &foreign) {
+				return bd.HoldForeign(chart, foreign) // the hold exists even with no Landing (ADR 0187 §3)
+			}
+			return err
 		}
-		return err
-	} else if landed {
+	}
+	if landed {
 		name, err := git.LandStrategyName()
 		if err != nil {
 			return err
 		}
-		if name == git.LandStrategyGitlab { // before the Landing closes (Spec FR 20)
+		if name == git.LandStrategyGitlab && !pinned { // before the Landing closes (Spec FR 20); a pin-landed Chart added no commit to flag or renumber
 			l, hasLanding := bd.NewestLanding(landings)
 			evBead := chart // the event bead, as Jinbe's: the Landing, else the Chart
 			r, dir := repoDirOf(chart)
@@ -679,18 +677,9 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 			}
 		}
 		if held, err := openAnyBlockers(chart.ID); err != nil || len(held) > 0 {
-			return err // any open blocker (a human's Task, an offshoot Signal) freezes the Chart (ADR 0268)
+			return err // any open blocker (a human's Errand, an offshoot Signal) freezes the Chart (ADR 0268)
 		}
-		head, err := contexts.Head(chart, "refs/heads/"+chartBranch(chart.ID), branchHead)
-		if err != nil {
-			return err
-		}
-		_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
-			Kind:        contract.KindLanding,
-			Title:       chart.Title,
-			Description: git.CommitPin(head),
-		})
-		return err
+		return gateChart(chart)
 	}
 	succ := specSuccessor(chart)
 	if succ.Parent, err = initiativeOf(chart); err != nil {
@@ -730,6 +719,142 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 		return closeOnPublish(ctx, chart.ID, "", nil) // body authored: the Chart's terminal artifact exists, close it with the Spec's publish
 	}
 	return nil
+}
+
+// chartApprovalBody is the body of a Chart's Approval: the sentence, then the Commit:
+// pin and the Patch-id: pin each on its own line.
+func chartApprovalBody(head, patchID string) string {
+	return "Approval of the defogged Chart at the pinned commit.\n" + git.CommitPin(head) + "\n" + git.PatchIDPin(patchID)
+}
+
+// gateChart is reconcileChart's land gate for a drained, stamped, unlanded Chart with
+// no open Landing and no open blocker: the Landing directly when nothing is ahead of
+// mainline (ADR 0358), the Landing caused by an approved Approval pinned at the head,
+// else an Approval at the head (any off-head open one obsoleted first). No Usopp
+// Review sits before it: defog and the Approval are the Chart's review.
+func gateChart(chart bd.Bead) error {
+	name, err := git.LandStrategyName()
+	if err != nil {
+		return err
+	}
+	repo, _ := repoDirOf(chart)
+	var mainline string
+	if name == git.LandStrategyGitlab {
+		mainline, err = fetchMainline(repo)
+	} else {
+		mainline, err = probeBase(repo)
+	}
+	if err != nil {
+		return err
+	}
+	branch := chartBranch(chart.ID)
+	head, err := contexts.Head(chart, "refs/heads/"+branch, branchHead)
+	if err != nil {
+		return err
+	}
+	if contexts.AncestorIn(repo, isAncestor)(head, mainline) {
+		_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
+			Kind:        contract.KindLanding,
+			Title:       chart.Title,
+			Description: git.CommitPin(head),
+		})
+		return err
+	}
+	closed, err := closedChildrenOf(chart.ID, contract.KindApproval)
+	if err != nil {
+		return err
+	}
+	if a := contexts.ApprovedAtHead(chart, closed, approvedAtHead, branch); a != nil {
+		pin, _ := git.ParseCommit(a.Description)
+		_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
+			Kind:        contract.KindLanding,
+			Title:       chart.Title,
+			Description: git.CommitPin(pin),
+			CausedBy:    a.ID,
+		})
+		return err
+	}
+	open, err := openChildrenOf(chart.ID, contract.KindApproval)
+	if err != nil {
+		return err
+	}
+	var atHead *bd.Bead
+	for i, a := range open {
+		if got, ok := git.ParseCommit(a.Description); !ok || got != head {
+			if err := closeBead(a.ID, "Approval obsoleted: pinned commit superseded by advanced HEAD"); err != nil {
+				return err
+			}
+		} else {
+			atHead = &open[i]
+		}
+	}
+	id, err := chartPatchID(repo, mainline, head)
+	if err != nil {
+		return err
+	}
+	if id == "" { // commits that cancel out: the net diff is empty, so nothing lands to approve
+		_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
+			Kind:        contract.KindLanding,
+			Title:       chart.Title,
+			Description: git.CommitPin(head),
+		})
+		return err
+	}
+	body := chartApprovalBody(head, id)
+	if atHead != nil && bd.IsCarriedApproval(atHead.Description) { // a carry whose close a crash cut short: finish it
+		return closeBead(atHead.ID, bd.ApprovedReason)
+	}
+	// An Approval session already open at the head means the check ran for this head.
+	if old, ok := bd.NewestApproved(closed); ok && atHead == nil {
+		carried, note, err := carryRenumber(repo, mainline, head, id, old)
+		if err != nil {
+			return err
+		}
+		if carried != "" {
+			newID, _, err := spawnChildIfAbsent(chart.ID, bd.Successor{
+				Kind: contract.KindApproval, Title: chart.Title, Description: carried, CausedBy: old.ID,
+			})
+			if err != nil {
+				return err
+			}
+			return closeBead(newID, bd.ApprovedReason)
+		}
+		body += "\n\n" + note
+	}
+	_, _, err = spawnChildIfAbsent(chart.ID, bd.Successor{
+		Kind:        contract.KindApproval,
+		Title:       chart.Title,
+		Description: body,
+	})
+	return err
+}
+
+// carryRenumber asks the renumber-only verifier (ADR 0397) whether head is old's pinned
+// squash replayed modulo a renumber. An accept returns the carried Approval's body; a
+// reject returns "" and the one-line not-carried note for the fallback Approval (ADR
+// 0398 §5). A git error, or an old Approval with no readable pin, is an error: nothing is
+// spawned and the next tick retries.
+func carryRenumber(repo git.Repo, mainline, head, patchID string, old bd.Bead) (body, note string, err error) {
+	pin, ok := git.ParseCommit(old.Description)
+	if !ok {
+		return "", "", fmt.Errorf("approved Approval %s has no readable Commit: pin", old.ID)
+	}
+	rules, err := sequenceRules(repo)
+	if err != nil {
+		return "", "", err
+	}
+	v, err := verifyRenumber(repo, rules, pin, head, mainline)
+	if err != nil {
+		return "", "", err
+	}
+	if !v.Accept {
+		return "", bd.NotCarriedNote(v.Point, v.File), nil
+	}
+	renames := make([]bd.Rename, len(v.Renames))
+	for i, r := range v.Renames {
+		renames[i] = bd.Rename{Path: r.Path, Old: r.Old, New: r.New}
+	}
+	return bd.CarriedApprovalBody(old.Title, head, patchID, pin, renames), "", nil
 }
 
 // mintRenumber files the renumber Checkpoint when the landed Chart is the later side

@@ -138,6 +138,11 @@ func (g graphData) rollup(cp *bd.Bead) rollupResult {
 	default:
 		r.Word, r.Rank, r.Why = "idle ⚠", 13, "members exist but no rule matched"
 	}
+	if r.Word == "approved" && approvedL != nil && bd.IsCarriedApproval(approvedL.Description) {
+		c := carriedRow(approvedL.Description)
+		r.Qualifiers = append(r.Qualifiers, c)
+		r.Why += " · " + c
+	}
 	// qualifiers, in order: round N, re-review, stale pin, !<iid>, MR sub-state, forge review, retrying
 	rounds := 0
 	for _, k := range kids {
@@ -274,4 +279,13 @@ func kindWord(k contract.Kind) string {
 		return "Bead"
 	}
 	return strings.ToUpper(string(k[:1])) + string(k[1:])
+}
+
+// carriedRow is the "approved" row's reading of a carried Approval: carried (0394 → 0395) from
+// <old sha short>, from the History line the carry wrote; all renames, as that line has them.
+func carriedRow(body string) string {
+	last, _ := bd.ApprovalHistoryLast(body)
+	inner := strings.TrimSuffix(strings.TrimPrefix(last, "carried (renumber-only from "), ")")
+	sha, renames, _ := strings.Cut(inner, ": ")
+	return fmt.Sprintf("carried (%s) from %s", renames, sha8(sha))
 }

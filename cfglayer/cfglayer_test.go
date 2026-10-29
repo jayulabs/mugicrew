@@ -242,28 +242,6 @@ func TestInitiativesSetting(t *testing.T) {
 	}
 }
 
-func TestAutoApproveSetting(t *testing.T) {
-	for _, tc := range []struct {
-		name, shared, local string
-		want                Approvals
-	}{
-		{"absent", "gate = \"x\"\n", "", Approvals{}},
-		{"empty table", "[approvals]\n", "", Approvals{}},
-		{"on", "[approvals]\nauto_approve = true\n", "", Approvals{AutoApprove: true}},
-		{"off", "[approvals]\nauto_approve = false\n", "", Approvals{}},
-		{"decode error", "[approvals\nauto_approve = true\n", "", Approvals{Unusable: true}},
-		{"mistyped value", "[approvals]\nauto_approve = \"yes\"\n", "", Approvals{Unusable: true}},
-		{"mistyped table", "approvals = true\n", "", Approvals{Unusable: true}},
-		{"local layer ignored", "", "[approvals]\nauto_approve = true\n", Approvals{}},
-	} {
-		root := workspace(t, tc.shared, tc.local)
-		tc.want.Path = SharedPath(root)
-		if got := AutoApproveSetting(root); got != tc.want {
-			t.Errorf("%s: AutoApproveSetting = %+v, want %+v", tc.name, got, tc.want)
-		}
-	}
-}
-
 func TestJiraPollInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name, shared, local string
@@ -425,5 +403,51 @@ func TestLandingPollIntervalWarnsUnusable(t *testing.T) {
 		if len(*evs) != 1 || (*evs)[0].Name != "config.unusable" || (*evs)[0].Attrs["key"] != "gitlab.landing_poll_interval" {
 			t.Errorf("%s: events = %v, want one config.unusable key=gitlab.landing_poll_interval", body, *evs)
 		}
+	}
+}
+
+func TestResolveGate(t *testing.T) {
+	ctxTbl := func(keys string) string { return "[context.c]\nrepo = \"v/c\"\n" + keys }
+	cases := []struct {
+		name          string
+		shared, local string
+		top, ctx      GateSpec
+		topErr, cErr  string
+	}{
+		{name: "neither"},
+		{name: "nix", shared: "gate = \"a\"\n" + ctxTbl("gate = \"b\"\n"),
+			top: GateSpec{Kind: GateNix, Value: "a"}, ctx: GateSpec{Kind: GateNix, Value: "b"}},
+		{name: "command", shared: "gate_command = \"make\"\n" + ctxTbl("gate_command = \"go test\"\n"),
+			top: GateSpec{Kind: GateCommand, Value: "make"}, ctx: GateSpec{Kind: GateCommand, Value: "go test"}},
+		{name: "both", shared: "gate = \"a\"\ngate_command = \"make\"\n" + ctxTbl("gate = \"b\"\ngate_command = \"x\"\n"),
+			topErr: "the top level", cErr: "context c"},
+		{name: "no leak into context", shared: "gate_command = \"make\"\n" + ctxTbl(""),
+			top: GateSpec{Kind: GateCommand, Value: "make"}},
+		{name: "local command over shared nix", shared: "gate = \"a\"\n", local: "gate_command = \"make\"\n",
+			top: GateSpec{Kind: GateCommand, Value: "make"}},
+		{name: "local nix over shared command", shared: "gate_command = \"make\"\n", local: "gate = \"a\"\n",
+			top: GateSpec{Kind: GateNix, Value: "a"}},
+		{name: "local context table wins whole", shared: ctxTbl("gate = \"b\"\n"), local: ctxTbl("gate_command = \"x\"\n"),
+			ctx: GateSpec{Kind: GateCommand, Value: "x"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := workspace(t, c.shared, c.local)
+			for scope, got := range map[string]GateSpec{"top": ResolveGate(root), "ctx": ResolveContextGate(root, "c")} {
+				want, wantErr := c.top, c.topErr
+				if scope == "ctx" {
+					want, wantErr = c.ctx, c.cErr
+				}
+				if wantErr != "" {
+					if got.Err == nil || !strings.Contains(got.Err.Error(), wantErr) {
+						t.Errorf("%s: Err = %v, want naming %q", scope, got.Err, wantErr)
+					}
+					continue
+				}
+				if got != want {
+					t.Errorf("%s: got %+v, want %+v", scope, got, want)
+				}
+			}
+		})
 	}
 }

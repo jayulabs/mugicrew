@@ -87,12 +87,12 @@ func TestFindOpenMR(t *testing.T) {
 }
 
 func TestGetMRReadsTheMirroredFields(t *testing.T) {
-	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"iid":7,"state":"closed","detailed_merge_status":"need_rebase","has_conflicts":true,"merge_error":"boom","squash_commit_sha":"b2","merge_commit_sha":"c3","user_notes_count":3,"head_pipeline":{"id":42,"status":"failed","web_url":"https://gl/p/42"}}`)
+	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"iid":7,"state":"closed","detailed_merge_status":"need_rebase","merge_status":"cannot_be_merged_recheck","has_conflicts":true,"merge_error":"boom","squash_commit_sha":"b2","merge_commit_sha":"c3","user_notes_count":3,"head_pipeline":{"id":42,"status":"failed","web_url":"https://gl/p/42"}}`)
 	mr, err := GetMR(proj, 7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := MR{IID: 7, State: "closed", DetailedMergeStatus: "need_rebase", HasConflicts: true, MergeError: "boom",
+	want := MR{IID: 7, State: "closed", DetailedMergeStatus: "need_rebase", MergeStatus: "cannot_be_merged_recheck", HasConflicts: true, MergeError: "boom",
 		SquashCommitSHA: "b2", MergeCommitSHA: "c3", UserNotesCount: 3, HeadPipeline: &Pipeline{ID: 42, Status: "failed", WebURL: "https://gl/p/42"}}
 	if got := *mr; got.HeadPipeline == nil || *got.HeadPipeline != *want.HeadPipeline {
 		t.Fatalf("GetMR = %+v, want %+v", got, want)
@@ -110,7 +110,7 @@ func TestGetMRReadsTheMirroredFields(t *testing.T) {
 
 func TestCreateMRSendsSquashTargetTitleAndLFBody(t *testing.T) {
 	log := fakeGlab(t, "HTTP/2.0 201 Created\n\n{\"iid\":9}")
-	mr, err := CreateMR(proj, "chart/x", "main", "land chart/x", "Tip: a\nChart: x\n", 42)
+	mr, err := CreateMR(proj, "chart/x", "main", "land chart/x", "Tip: a\nChart: x\n", 42, false)
 	if err != nil || mr.IID != 9 {
 		t.Fatalf("CreateMR = %+v, %v", mr, err)
 	}
@@ -127,7 +127,7 @@ func TestCreateMRSendsSquashTargetTitleAndLFBody(t *testing.T) {
 
 func TestCreateMRWithoutAssigneeSendsNone(t *testing.T) {
 	log := fakeGlab(t, "HTTP/2.0 201 Created\n\n{\"iid\":9}")
-	CreateMR(proj, "b", "main", "t", "d", 0)
+	CreateMR(proj, "b", "main", "t", "d", 0, false)
 	if b, _ := os.ReadFile(log); strings.Contains(string(b), "assignee") {
 		t.Errorf("argv %q has an assignee", b)
 	}
@@ -165,7 +165,7 @@ func TestClassifiesHTTPStatus(t *testing.T) {
 		{"no status line", "glab: no such host", nil, true},
 	} {
 		fakeGlab(t, c.resp)
-		_, err := CreateMR(proj, "b", "main", "t", "d", 0)
+		_, err := CreateMR(proj, "b", "main", "t", "d", 0, false)
 		var fe *Error
 		switch {
 		case c.want != nil && !errors.Is(err, c.want):
@@ -186,7 +186,7 @@ func TestMissingGlabFailsLoudly(t *testing.T) {
 func TestNoCallEverMergesOrCancels(t *testing.T) {
 	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n[]", "HTTP/2.0 201 Created\n\n{\"iid\":1}", "HTTP/2.0 200 OK\n\n{}")
 	FindOpenMR(proj, "b")
-	CreateMR(proj, "b", "main", "t", "d", 0)
+	CreateMR(proj, "b", "main", "t", "d", 0, false)
 	SetDescription(proj, 1, "d")
 	b, _ := os.ReadFile(log)
 	for _, bad := range []string{"/merge\n", "/merge ", "cancel_merge_when_pipeline_succeeds", "auto_merge"} {
@@ -216,8 +216,8 @@ func TestValidateSettings(t *testing.T) {
 		switch {
 		case c.field == "" && err != nil:
 			t.Errorf("%s: %v, want ok", c.name, err)
-		case c.field != "" && (!errors.As(err, &ref) || ref.Field != c.field || !strings.Contains(err.Error(), "GitLab land strategy")):
-			t.Errorf("%s: %v, want a %s refusal naming the README", c.name, err, c.field)
+		case c.field != "" && (!errors.As(err, &ref) || ref.Field != c.field || !strings.Contains(err.Error(), "docs/gitlab.md")):
+			t.Errorf("%s: %v, want a %s refusal naming docs/gitlab.md", c.name, err, c.field)
 		}
 	}
 }
@@ -484,5 +484,51 @@ func TestMainPipelineReadsTheLatestOnTheDefaultBranch(t *testing.T) {
 	}
 	if pl, err := MainPipeline(proj); err != nil || pl != nil {
 		t.Errorf("no pipelines = %+v, %v; want nil, nil", pl, err)
+	}
+}
+
+func TestGetMRDecodesDraft(t *testing.T) {
+	fakeGlab(t, "HTTP/2.0 200 OK\n\n"+`{"iid":7,"draft":true}`, "HTTP/2.0 200 OK\n\n"+`{"iid":7,"draft":false,"title":"Draft: x"}`, "HTTP/2.0 200 OK\n\n"+`[{"iid":7,"draft":true}]`)
+	if mr, err := GetMR(proj, 7); err != nil || !mr.Draft {
+		t.Errorf("draft true = %+v, %v", mr, err)
+	}
+	if mr, err := GetMR(proj, 7); err != nil || mr.Draft {
+		t.Errorf("draft false (title notwithstanding) = %+v, %v", mr, err)
+	}
+	if mr, err := FindOpenMR(proj, "b"); err != nil || !mr.Draft {
+		t.Errorf("find-open draft = %+v, %v", mr, err)
+	}
+}
+
+func TestCreateMRAsDraftPrefixesTheTitle(t *testing.T) {
+	log := fakeGlab(t, "HTTP/2.0 201 Created\n\n{\"iid\":9}")
+	if _, err := CreateMR(proj, "b", "main", "land b", "d", 0, true); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(log); !strings.Contains(string(b), "title=Draft: land b") {
+		t.Errorf("argv %q lacks the Draft: title", b)
+	}
+}
+
+func TestSetDraftPutsOnlyTheTitleBothWays(t *testing.T) {
+	log := fakeGlab(t, "HTTP/2.0 200 OK\n\n{}", "HTTP/2.0 200 OK\n\n{}")
+	if err := SetDraft(proj, 7, "Ship it", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDraft(proj, 7, "Ship it", false); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(log)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("argv = %q", b)
+	}
+	for i, want := range []string{"title=Draft: Ship it", "title=Ship it"} {
+		if !strings.Contains(lines[i], "-X PUT") || !strings.Contains(lines[i], "-f "+want+" projects/ns%2Fp/merge_requests/7") {
+			t.Errorf("call %d argv %q lacks -f %s", i, lines[i], want)
+		}
+		if strings.Contains(lines[i], "description") {
+			t.Errorf("call %d argv %q sends a description", i, lines[i])
+		}
 	}
 }

@@ -3,7 +3,6 @@ package tui
 import (
 	"cmp"
 	"maps"
-	"slices"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -86,9 +85,9 @@ func strandable(b *bd.Bead) bool {
 }
 
 // restsClaimed is whether an idle in_progress bead of kind k is at rest, not
-// stranded: a Surgery keeps its filing claim and a Task waits claimed (ADR 0170 §9).
+// stranded: a Surgery keeps its filing claim and an Errand waits claimed (ADR 0170 §9).
 func restsClaimed(k contract.Kind) bool {
-	return k == contract.KindSurgery || k == contract.KindTask || k == contract.KindDiscussion || k == contract.KindCheckup
+	return k == contract.KindSurgery || k == contract.KindErrand || k == contract.KindDiscussion || k == contract.KindCheckup
 }
 
 // launches is whether enter launches or attaches b, else it runs b: a session, or an
@@ -100,6 +99,9 @@ func (g graphData) launches(b *bd.Bead) bool {
 // enterVerb is what enter does to b: resume, attach, launch or the run-now label; ""
 // when launchWhy or the run-now gate refuses, so the hints bar omits it.
 func (g graphData) enterVerb(b *bd.Bead) string {
+	if g.draftWhy(b) != "" {
+		return ""
+	}
 	if g.launches(b) {
 		switch s := g.sessions[b.ID]; {
 		case g.launchWhy(b) != "":
@@ -129,7 +131,7 @@ func (g graphData) xLabel(b *bd.Bead) string {
 		return "drop" // a session always wins x
 	case g.liveOf(b) == alive:
 		return "abort"
-	case g.liveOf(b) == dead, isHITL(b) && !bd.ClaimedElsewhere(b.Assignee) && (!b.Container || b.Kind == contract.KindInitiative) && b.Status == "in_progress" && !g.sessions[b.ID].Has():
+	case g.liveOf(b) == dead, g.liveOf(b) == orphan, isHITL(b) && !bd.ClaimedElsewhere(b.Assignee) && (!b.Container || b.Kind == contract.KindInitiative) && b.Status == "in_progress" && !g.sessions[b.ID].Has():
 		return "recover"
 	}
 	return ""
@@ -170,7 +172,7 @@ func (g graphTab) bindings() []key.Binding {
 		if v := g.enterVerb(b); v != "" {
 			bs = append(bs, verbKey("enter", v))
 		}
-		if s := g.sessions[b.ID]; g.launchWhy(b) == "" && (!s.Has() || s.State == session.Exited) {
+		if s := g.sessions[b.ID]; g.draftWhy(b) == "" && g.launchWhy(b) == "" && (!s.Has() || s.State == session.Exited) {
 			bs = append(bs, keyBg) // b on an alive session only refuses (FR27)
 		}
 	}
@@ -185,28 +187,9 @@ func (g graphTab) bindings() []key.Binding {
 	}
 	bs = append(bs, keySearch, keyStatus, keyKind)
 	if b != nil {
-		if b.Unclosed() {
-			bs = append(bs, verbKey("p", pauseLabel(b)))
-		}
-		if l := g.xHint(b); l != "" {
-			bs = append(bs, verbKey("x", l))
-		}
-		if g.xOffers(b) {
-			bs = append(bs, xBinding(b))
-		}
-		bs = append(bs, keyTranscript)
+		hinted, _ := beadVerbBindings(g.graphData, b, roleFull)
+		bs = spliceVerbs(bs, hinted)
 	}
-	forms := formBindings(g.beads, b)
-	// hintOf (ADR 0229) picks each verb's section; this order is the in-section order on the bar and in ?.
-	at := slices.IndexFunc(forms, func(f key.Binding) bool { return slices.Contains([]string{"c", "a", "A", "B", "U", "r"}, f.Keys()[0]) })
-	if at < 0 {
-		at = len(forms)
-	}
-	bs = append(bs, forms[:at]...)
-	if b != nil && b.Unclosed() {
-		bs = append(bs, keyPrio)
-	}
-	bs = append(bs, forms[at:]...)
 	return bs
 }
 
@@ -226,11 +209,13 @@ func (g graphTab) extra() []key.Binding {
 	if len(g.rows()) >= 2 { // one row has nowhere to move
 		out = append(out, keyMove, keySection)
 	}
-	for _, b := range []key.Binding{keyLaunch, keyBg, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio, keyReject, keyAdopt, keyRelease, keyBlock, keyUnblock, keyCheckup} {
+	for _, b := range []key.Binding{keyLaunch, keyBg} {
 		if !shown[b.Keys()[0]] {
 			out = append(out, b)
 		}
 	}
+	_, verbs := beadVerbBindings(g.graphData, g.selected(), roleFull)
+	out = append(out, verbs...)
 	if g.q.active() && !g.open { // esc clears the filter; §7 hints it on Logs alone
 		out = append(out, keyClear)
 	}

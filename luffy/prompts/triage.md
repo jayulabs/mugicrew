@@ -111,7 +111,7 @@ each later triaged and charted on its own. Only phase 1 is cut now; later phases
    This spawns the Signal's one Initiative (kind:initiative, in succession to
    the Signal) as a Draft and carries the Signal's ordering to it; it does NOT
    close the Signal — mugicrew closes it at clean exit. Idempotent. The --title names the effort, no kind prefix.
-4. Find it with bd dep list %[1]s --direction=up -t caused-by --json and set
+4. The Initiative's id is the first line reconcile printed. Set
    its priority:  bd update <initiativeID> --priority <P0-P4>
 5. File phase 1's member Signal, and only phase 1's, as a Draft child of
    <initiativeID>: Read crew doc signal-filing.md (Initiative member form). Its
@@ -122,6 +122,13 @@ each later triaged and charted on its own. Only phase 1 is cut now; later phases
    each chain's unclosed head (unclosed Signal, Chart, Spec or Checkpoint), run:
      mugicrew initiative adopt <head> <initiativeID>
    It re-parents the head alone; closed predecessors stay put. Name each adopted head's title in Phases.
+   Then, for each `latch <id> <verb> <key>` line reconcile printed (a Jira or MR
+   wait on the Signal that was not carried onto the Initiative), ask the human
+   which member, if any, actually waits on it: the phase-1 member Signal or an
+   adopted chain head. On a named member, run:
+     mugicrew latch <verb> <key> --blocks <member> --drafted-by %[1]s
+   (verb is jira or mr). On "none waits", do nothing: the Latch orphans and
+   closes. Never use a raw bd dep add for a Latch.
 6. Stop. Do not chart or triage phase 1 here, and file no later phase.
 
 ### REROUTE — the defect or wrong FR is on one in-flight Checkpoint

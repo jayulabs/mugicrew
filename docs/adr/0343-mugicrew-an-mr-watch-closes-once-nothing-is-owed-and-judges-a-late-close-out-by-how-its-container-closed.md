@@ -1,6 +1,6 @@
 # ADR 0343: An MR Watch closes once nothing is owed, and judges a late close-out by how its container closed
 
-Status: Accepted
+Status: Accepted (amended by ADR 0382 (under-gitlab-the-un-draft…): the Watch stays open on a waiting Approval's closed MR)
 Date: 2026-10-21
 
 Chart mc-uigy1 (Every close of a Merge-Request-filed bead gets a close-out

@@ -118,14 +118,16 @@ func IntegrateIn(c Child, b bd.Bead, by eventlog.IntegrateBy, w io.Writer) int {
 			slog.Info("effort.resumed", append(eventlog.BeadAttrs(b), "cause", bd.PausedIntegrateConflict)...)
 		}
 	}
+	// the verb never closes the bead; say what the leftover branch is
+	noLonger := fmt.Sprintf(" (%s no longer holds %s; the loop deletes it once the bead closes and no tree is on it)", git.EffortBranch(b.ID), d.Container)
 	switch {
 	case sha == "" && lifted && by == eventlog.ByHuman:
 		// the trailer was already on the container: lifting the pause was the last step
-		fmt.Fprintf(w, "nothing to integrate onto %s; bead still open: bd close %s\n", d.Container, b.ID)
+		fmt.Fprintf(w, "nothing to integrate onto %s; bead still open: bd close %s%s\n", d.Container, b.ID, noLonger)
 	case sha == "":
 		fmt.Fprintf(w, "nothing to integrate onto %s\n", d.Container)
 	case by == eventlog.ByHuman:
-		fmt.Fprintf(w, "integrated; bead still open: bd close %s\n", b.ID)
+		fmt.Fprintf(w, "integrated; bead still open: bd close %s%s\n", b.ID, noLonger)
 	default:
 		fmt.Fprintf(w, "integrated %s onto %s\n", sha, d.Container)
 	}

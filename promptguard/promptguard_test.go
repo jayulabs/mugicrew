@@ -56,7 +56,7 @@ func TestKindPrefixedTitles(t *testing.T) {
 		{`--title "pivot: FR3: y"`, true},
 		{`--title "Chart-conflict: z"`, true},
 		{`--title "Surgery: w"`, true},
-		{`--title "Task: v"`, true},
+		{`--title "Errand: v"`, true},
 		{`--title "<what's wrong>"`, false},
 		{`--title "<FR>: <what's wrong>"`, false},
 		{"git commit -m \"x\n\nSpec: mc-1\"", false},

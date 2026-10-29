@@ -57,7 +57,7 @@ auth*) exit 0;;
 *"projects/$pid") if [ -f $s/project ]; then cat $s/project; else printf 'HTTP/2.0 200 OK\n\n{"squash_commit_template":"%%{title}\\n\\n%%{description}","squash_option":"always"}'; fi;;
 *"-X POST"*) if [ -f $s/dup ]; then cp $s/dup $s/desc; printf 'HTTP/2.0 409 Conflict\n\n{"message":"already exists"}'; else mv $s/desc.tmp $s/desc; printf 'HTTP/2.0 201 Created\n\n{"iid":5,"web_url":"https://gl.example.com/%s/-/merge_requests/5"}' "$path"; fi;;
 *"-X PUT"*) mv $s/desc.tmp $s/desc; printf 'HTTP/2.0 200 OK\n\n{"iid":5,"web_url":"https://gl.example.com/%s/-/merge_requests/5"}' "$path";;
-*) if [ -f $s/desc ]; then b=; while IFS= read -r l; do b="$b$l\\n"; done < $s/desc; printf 'HTTP/2.0 200 OK\n\n[{"iid":5,"web_url":"https://gl.example.com/%s/-/merge_requests/5","description":"%s"}]' "$path" "$b"; else printf 'HTTP/2.0 200 OK\n\n[]'; fi;;
+*) if [ -f $s/desc ]; then b=; while IFS= read -r l; do b="$b$l\\n"; done < $s/desc; printf 'HTTP/2.0 200 OK\n\n[{"iid":5,"web_url":"https://gl.example.com/%s/-/merge_requests/5","draft":%s,"description":"%s"}]' "$path" "$(cat $s/draft 2>/dev/null || echo false)" "$b"; else printf 'HTTP/2.0 200 OK\n\n[]'; fi;;
 esac
 `
 	if err := os.WriteFile(filepath.Join(dir, "glab"), []byte(script), 0o755); err != nil {
@@ -113,7 +113,7 @@ func TestLandGitlabTitlesTheMRWithTheCallerSubject(t *testing.T) {
 	_, argv := gitlabForge(t)
 	defer SetGraphID("g00")()
 	mustGit(t, "branch", "chart/x")
-	st, err := LandStrategyFor(LandStrategyGitlab, "", "docs(mugicrew): Chart it (MC-2)")
+	st, err := LandStrategyFor(LandStrategyGitlab, "", "docs(mugicrew): Chart it (MC-2)", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -850,6 +850,85 @@ func TestPinnedGitlabDuplicateRaceRewritesTitleAndBody(t *testing.T) {
 	a, _ := os.ReadFile(argv)
 	if n := strings.Count(string(a), "-X PUT"); n != 1 || !strings.Contains(string(a), "title=Ship it") || strings.Contains(string(a[strings.Index(string(a), "-X PUT"):]), "assignee") {
 		t.Errorf("argv = %s, want one PUT with the title and no assignee", a)
+	}
+}
+
+// A Land asked to present as a GitLab Draft opens its MR with the "Draft: " title prefix.
+func TestPinnedGitlabDraftCreatesAPrefixedMR(t *testing.T) {
+	_, argv := gitlabForge(t)
+	mustGit(t, "branch", "chart/x")
+	pin := mustGit(t, "rev-parse", "chart/x")
+	strategy := Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it", Draft: true})
+	if _, err := Land("chart/x", "Chart: x", strategy); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=Draft: Ship it") {
+		t.Errorf("create argv = %s, want the Draft: prefix", a)
+	}
+}
+
+// A Land reusing an MR that is still a GitLab Draft keeps the prefix, so its title
+// rewrite never un-drafts it (Spec FR 18); reusing an un-drafted MR stays bare.
+func TestPinnedGitlabReuseKeepsADraftMRDrafted(t *testing.T) {
+	_, argv := gitlabForge(t)
+	dir := filepath.Dir(argv)
+	mustGit(t, "branch", "chart/x")
+	pin := mustGit(t, "rev-parse", "chart/x")
+	strategy := Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it"})
+	if _, err := Land("chart/x", "Chart: x", strategy); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "draft"), []byte("true"), 0o644)
+	os.WriteFile(argv, nil, 0o644)
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it v2"})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=Draft: Ship it v2") {
+		t.Errorf("reuse of a Draft MR argv = %s, want the Draft: prefix kept", a)
+	}
+	os.WriteFile(filepath.Join(dir, "draft"), []byte("false"), 0o644)
+	os.WriteFile(argv, nil, 0o644)
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it v3"})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	if a, _ := os.ReadFile(argv); strings.Contains(string(a), "Draft:") {
+		t.Errorf("reuse of a ready MR argv = %s, want no Draft: prefix", a)
+	}
+}
+
+// An Approval's open asking to Undraft rewrites a reused GitLab Draft MR ready.
+func TestPinnedGitlabUndraftReadiesAReusedDraftMR(t *testing.T) {
+	_, argv := gitlabForge(t)
+	dir := filepath.Dir(argv)
+	mustGit(t, "branch", "chart/x")
+	pin := mustGit(t, "rev-parse", "chart/x")
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it"})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "draft"), []byte("true"), 0o644)
+	os.WriteFile(argv, nil, 0o644)
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it", Undraft: true})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=Ship it") || strings.Contains(string(a), "Draft:") {
+		t.Errorf("undraft argv = %s, want the bare title", a)
+	}
+}
+
+// A re-approval's open asking for Draft rewrites a reused ready MR back to a GitLab Draft.
+func TestPinnedGitlabDraftRedraftsAReusedReadyMR(t *testing.T) {
+	_, argv := gitlabForge(t)
+	mustGit(t, "branch", "chart/x")
+	pin := mustGit(t, "rev-parse", "chart/x")
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it"})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	os.WriteFile(argv, nil, 0o644)
+	if _, err := Land("chart/x", "Chart: x", Repo("").PinnedGitlab(pin, MRPresentation{Title: "Ship it", Draft: true})); !errors.Is(err, ErrLandPending) {
+		t.Fatal(err)
+	}
+	if a, _ := os.ReadFile(argv); !strings.Contains(string(a), "title=Draft: Ship it") {
+		t.Errorf("re-draft argv = %s, want the Draft: prefix", a)
 	}
 }
 

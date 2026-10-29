@@ -70,10 +70,7 @@ func CheckupRefusal(target bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	hs, err := look(Opts{})
-	if err != nil {
-		return err
-	}
+	hs := look()
 	v, jerr := judgeIn(hs, inv, Opts{}, lineage(os.Getpid()), false)
 	var rf *Refused
 	alive := errors.As(jerr, &rf) && rf.Verdict == Alive

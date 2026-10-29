@@ -328,18 +328,48 @@ func TestCurrentEffortReadsTheBranch(t *testing.T) {
 	}
 }
 
+// The effort set also says which branches are integrated: tip == refs/mugicrew/cut/<id>
+// (a never-committed branch included); a branch ahead of its cut, one with no cut ref and
+// a cut ref with no branch are not (ADR 0394 (a-closed-effort-whose-tip-is-its-cut-ref…)).
+func TestEffortRefsReadsIntegratedSet(t *testing.T) {
+	newRepo(t)
+	base := mustGit(t, "rev-parse", "HEAD")
+	for _, id := range []string{"same", "ahead", "nocut"} {
+		mustGit(t, "branch", EffortBranch(id), base)
+	}
+	for _, id := range []string{"same", "ahead", "orphan"} {
+		mustGit(t, "update-ref", cutRefPrefix+id, base)
+	}
+	mustGit(t, "checkout", "-q", EffortBranch("ahead"))
+	mustGit(t, "commit", "-q", "--allow-empty", "-m", "work")
+	mustGit(t, "checkout", "-q", "-")
+	got, tips, err := Repo("").BranchRefs()
+	if err != nil || len(tips) != 0 {
+		t.Fatalf("BranchRefs = %v, %v, %v", got, tips, err)
+	}
+	if len(got.Branches) != 3 || !got.Branches["same"] || !got.Branches["ahead"] || !got.Branches["nocut"] {
+		t.Errorf("Branches = %v, want same, ahead, nocut", got.Branches)
+	}
+	if len(got.Integrated) != 1 || !got.Integrated["same"] {
+		t.Errorf("Integrated = %v, want only same", got.Integrated)
+	}
+	if got.Held("same") || !got.Held("ahead") || !got.Held("nocut") || got.Held("orphan") {
+		t.Errorf("Held: same %v ahead %v nocut %v orphan %v", got.Held("same"), got.Held("ahead"), got.Held("nocut"), got.Held("orphan"))
+	}
+}
+
 // EffortRefs is the set of bead ids holding an effort/<id> branch, read in one
 // for-each-ref (Spec D7); other branches never appear.
 func TestEffortRefsListsEffortBranches(t *testing.T) {
 	newRepo(t)
-	if got, err := EffortRefs(); err != nil || len(got) != 0 {
+	if got, err := EffortRefs(); err != nil || len(got.Branches) != 0 {
 		t.Fatalf("EffortRefs with none = %v, %v; want empty", got, err)
 	}
 	mustGit(t, "branch", EffortBranch("mc-a.1"))
 	mustGit(t, "branch", EffortBranch("mc-a.2"))
 	mustGit(t, "branch", "chart/mc-a")
 	got, err := EffortRefs()
-	if err != nil || len(got) != 2 || !got["mc-a.1"] || !got["mc-a.2"] {
+	if err != nil || len(got.Branches) != 2 || !got.Branches["mc-a.1"] || !got.Branches["mc-a.2"] {
 		t.Errorf("EffortRefs = %v, %v; want {mc-a.1, mc-a.2}", got, err)
 	}
 }
@@ -413,7 +443,7 @@ func TestBuildEffortEndsAsOneIntegrateCommit(t *testing.T) {
 	if got := mustGit(t, "log", "--format=%s", tip+".."+integCP); got != "feat: b1 work [b1]" {
 		t.Errorf("container gained %q, want one \"feat: b1 work [b1]\" commit", got)
 	}
-	if refs, err := EffortRefs(); err != nil || len(refs) != 0 {
+	if refs, err := EffortRefs(); err != nil || len(refs.Branches) != 0 {
 		t.Errorf("effort refs left = %v (%v), want none", refs, err)
 	}
 }
@@ -1008,8 +1038,9 @@ func TestIntegrateWithoutCutRefAfterRewriteRefusesNoCutPoint(t *testing.T) {
 // reports ok false when there is no cut ref.
 func TestCommitsSinceCut(t *testing.T) {
 	newRepo(t)
+	mustGit(t, "branch", integCP)
 	mustGit(t, "branch", "effort/b1")
-	if _, ok, err := Repo("").CommitsSinceCut("b1", "effort/b1"); ok || err != nil {
+	if _, ok, err := Repo("").CommitsSinceCut("b1", "effort/b1", integCP); ok || err != nil {
 		t.Fatalf("no cut ref: ok = %v, err = %v", ok, err)
 	}
 	if err := recordCut(Repo(""), "b1", "effort/b1"); err != nil {
@@ -1018,8 +1049,32 @@ func TestCommitsSinceCut(t *testing.T) {
 	mustGit(t, "checkout", "-q", "effort/b1")
 	mustGit(t, "commit", "-q", "--allow-empty", "-m", "one")
 	mustGit(t, "commit", "-q", "--allow-empty", "-m", "two")
-	if n, ok, err := (Repo("")).CommitsSinceCut("b1", "effort/b1"); n != 2 || !ok || err != nil {
+	if n, ok, err := (Repo("")).CommitsSinceCut("b1", "effort/b1", integCP); n != 2 || !ok || err != nil {
 		t.Errorf("CommitsSinceCut = %d, %v, %v; want 2, true, nil", n, ok, err)
+	}
+}
+
+// A branch rebased onto a newer container tip counts only its own commits: none is
+// zero, N own commits is N, however many sibling squashes the container gained.
+func TestCommitsSinceCutRebased(t *testing.T) {
+	for _, own := range []int{0, 2} {
+		newRepo(t)
+		mustGit(t, "branch", integCP)
+		mustGit(t, "branch", "effort/b1")
+		if err := recordCut(Repo(""), "b1", "effort/b1"); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, "checkout", "-q", integCP)
+		mustGit(t, "commit", "-q", "--allow-empty", "-m", "sibling one")
+		mustGit(t, "commit", "-q", "--allow-empty", "-m", "sibling two")
+		mustGit(t, "checkout", "-q", "effort/b1")
+		for i := 0; i < own; i++ {
+			mustGit(t, "commit", "-q", "--allow-empty", "-m", "own")
+		}
+		mustGit(t, "rebase", "-q", integCP)
+		if n, ok, err := (Repo("")).CommitsSinceCut("b1", "effort/b1", integCP); n != own || !ok || err != nil {
+			t.Errorf("own %d: CommitsSinceCut = %d, %v, %v; want %d, true, nil", own, n, ok, err, own)
+		}
 	}
 }
 
@@ -1062,5 +1117,103 @@ func TestLandSubject(t *testing.T) {
 				t.Errorf("LandSubject = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A crewmate that rebased onto a container holding a sibling squash integrates only
+// its own change: one new squash, no conflict (the sibling squash is not replayed).
+func TestIntegrateRebasedEffortReplaysOnlyItsOwnWork(t *testing.T) {
+	integrateRepo(t)
+	mustGit(t, "update-ref", cutRefPrefix+"b1", "HEAD")
+	siblingMoves(t, "sib.txt", "sib\n")
+	commitFile(t, "work.txt", "mine\n")
+	siblingMoves(t, "sib.txt", "sib2\n")
+	before := mustGit(t, "rev-parse", integCP)
+	mustGit(t, "rebase", integCP)
+
+	sha, _, err := integrateB1()
+	if err != nil || sha == "" {
+		t.Fatalf("Integrate = (%q, %v), want one squash", sha, err)
+	}
+	if n := mustGit(t, "rev-list", "--count", before+".."+integCP); n != "1" {
+		t.Errorf("container gained %s commits, want 1", n)
+	}
+	for f, want := range map[string]string{"work.txt": "mine", "sib.txt": "sib2"} {
+		if got := mustGit(t, "show", integCP+":"+f); got != want {
+			t.Errorf("container %s = %q, want %q", f, got, want)
+		}
+	}
+	if cut, head := mustGit(t, "rev-parse", cutRefPrefix+"b1"), mustGit(t, "rev-parse", "HEAD"); cut != head {
+		t.Errorf("cut ref = %s, want integrated HEAD %s", cut, head)
+	}
+}
+
+// A crewmate that integrated once, then rebased onto a container holding its own
+// earlier squash and a sibling's, integrates only the work made since: the cut ref
+// (the last integrated HEAD) is no ancestor of the rebased branch.
+func TestIntegrateRebasedAfterEarlierIntegrateReplaysOnlyLaterWork(t *testing.T) {
+	integrateRepo(t)
+	mustGit(t, "update-ref", cutRefPrefix+"b1", "HEAD")
+	commitFile(t, "first.txt", "one\n")
+	if sha, _, err := integrateB1(); err != nil || sha == "" {
+		t.Fatalf("first Integrate = (%q, %v), want one squash", sha, err)
+	}
+	siblingMoves(t, "sib.txt", "sib\n")
+	commitFile(t, "second.txt", "two\n")
+	// A second sibling squash over the same file: replaying the stale cut..HEAD
+	// range would conflict with it, so only the amended own-work start converges.
+	siblingMoves(t, "sib.txt", "sib2\n")
+	before := mustGit(t, "rev-parse", integCP)
+	mustGit(t, "rebase", integCP)
+
+	sha, _, err := integrateB1()
+	if err != nil || sha == "" {
+		t.Fatalf("Integrate = (%q, %v), want one squash", sha, err)
+	}
+	if n := mustGit(t, "rev-list", "--count", before+".."+integCP); n != "1" {
+		t.Errorf("container gained %s commits, want 1", n)
+	}
+	if files := mustGit(t, "diff", "--name-only", before, integCP); files != "second.txt" {
+		t.Errorf("new squash touches %q, want only second.txt", files)
+	}
+	if cut, head := mustGit(t, "rev-parse", cutRefPrefix+"b1"), mustGit(t, "rev-parse", "HEAD"); cut != head {
+		t.Errorf("cut ref = %s, want integrated HEAD %s", cut, head)
+	}
+}
+
+// A real conflict in a rebased effort's own commits still stops as *IntegrateConflict.
+func TestIntegrateOwnConflictWithCutRefStops(t *testing.T) {
+	integrateRepo(t)
+	mustGit(t, "update-ref", cutRefPrefix+"b1", "HEAD")
+	siblingMoves(t, "sib.txt", "sib\n")
+	commitFile(t, "clash.txt", "mine\n")
+	siblingMoves(t, "clash.txt", "theirs\n")
+	_, _, err := integrateB1()
+	var c *IntegrateConflict
+	if !errors.As(err, &c) {
+		t.Fatalf("Integrate err = %v, want *IntegrateConflict", err)
+	}
+}
+
+// A hand integrate after the work already sits on the container publishes nothing,
+// yet leaves the effort at the rebased head with the cut ref on it (ADR 0394).
+func TestNoopIntegrateMovesTheCutRefAndKeepsTheEffort(t *testing.T) {
+	cutRepo(t)
+	commitFile(t, "w.txt", "w\n")
+	if sha, _, err := integrateB1(); err != nil || sha == "" {
+		t.Fatalf("first Integrate = (%q, %v)", sha, err)
+	}
+	if sha, _, err := integrateB1(); err != nil || sha != "" {
+		t.Fatalf("re-run = (%q, %v), want nothing", sha, err)
+	}
+	head := mustGit(t, "rev-parse", "HEAD")
+	if tip := mustGit(t, "rev-parse", integCP); head != tip {
+		t.Errorf("effort head %s, want the container tip %s", head, tip)
+	}
+	if cut := mustGit(t, "rev-parse", cutRefPrefix+"b1"); cut != head {
+		t.Errorf("cut ref %s, want effort head %s", cut, head)
+	}
+	if tip := mustGit(t, "rev-parse", "refs/heads/"+EffortBranch("b1")); tip != head {
+		t.Errorf("effort tip %s, want %s", tip, head)
 	}
 }

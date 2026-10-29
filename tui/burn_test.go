@@ -83,8 +83,8 @@ func TestBurnChartColour(t *testing.T) {
 		want lipgloss.Style
 	}{{50, burnSty}, {80, usageWarnSty}, {95, usageErrSty}} {
 		b := newBurn([]eventlog.Event{usageReadEv(burnNow.Add(-time.Minute), tc.pct, reset)}, burnWins[0], burnNow)
-		if b.sty.GetForeground() != tc.want.GetForeground() {
-			t.Errorf("pct %v: colour %v, want %v", tc.pct, b.sty.GetForeground(), tc.want.GetForeground())
+		if b.style().GetForeground() != tc.want.GetForeground() {
+			t.Errorf("pct %v: colour %v, want %v", tc.pct, b.style().GetForeground(), tc.want.GetForeground())
 		}
 	}
 }

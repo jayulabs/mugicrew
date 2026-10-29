@@ -9,6 +9,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -19,7 +21,7 @@ func shaded(t *testing.T, m Model, prefixes ...string) []string {
 	forceANSI256(t)
 	var out []string
 	for _, l := range strings.Split(m.View(), "\n") {
-		if !strings.Contains(l, "48;5;236") || strings.Contains(l, "transcript") { // the hint bar names t transcript
+		if !strings.Contains(l, "48;5;236") || strings.Contains(l, "transcript") || strings.Contains(ansi.Strip(l), "? keys") { // the hint bar names t transcript
 			continue
 		}
 		for _, p := range prefixes { // the hint bar is shaded too: it carries no prefix
@@ -149,5 +151,137 @@ func TestSelRowIsBlueAndDistinctFromShade(t *testing.T) {
 	}
 	if !selRow.GetBold() {
 		t.Error("selRow not bold")
+	}
+}
+
+// shadeBeads is a Checkpoint cp holding build b (nested member n under b), with an open
+// MR Watch, an open and a closed Landing, and an Errand e that only hints cp.
+func shadeBeads() func(string) *bd.Bead {
+	cp, bld, mr, ln := contract.KindCheckpoint, contract.KindBuild, contract.KindMRWatch, contract.KindLanding
+	m := map[string]*bd.Bead{
+		"ini":   {ID: "ini", Kind: contract.KindInitiative, Status: "open"},
+		"cp":    {ID: "cp", Kind: cp, Status: "open", Parent: "ini"},
+		"b":     {ID: "b", Kind: bld, Status: "open", Parent: "cp"},
+		"n":     {ID: "n", Kind: bld, Status: "open", Parent: "b"},
+		"mr":    {ID: "mr", Kind: mr, Status: "open", Parent: "cp"},
+		"ln":    {ID: "ln", Kind: ln, Status: "open", Parent: "cp"},
+		"old":   {ID: "old", Kind: ln, Status: "closed", Parent: "cp"},
+		"oldmr": {ID: "oldmr", Kind: mr, Status: "closed", Parent: "cp"},
+		"blk":   {ID: "blk", Kind: ln, Status: "blocked", Parent: "cp"},
+		"e":     {ID: "e", Kind: contract.KindErrand, Status: "open"},
+	}
+	return func(id string) *bd.Bead {
+		if b, ok := m[id]; ok {
+			return b
+		}
+		return &bd.Bead{ID: id}
+	}
+}
+
+func TestShadeSetLightsOpenMRWatchAndLandingOnChain(t *testing.T) {
+	rows := []shadeIn{
+		{id: "ini", head: true, grp: "ini"}, {id: "cp"}, {id: "b"}, {id: "n"}, {id: "mr"}, {id: "ln"}, {id: "old"}, {id: "e"},
+		{id: "mr", act: true}, {id: "ln", live: true}, {id: "oldmr"}, {id: "blk"},
+	}
+	shade := func(sel int) []int {
+		var out []int
+		for i := range shadeSet(shadeBeads(), rows, sel, rows, func(r shadeIn) shadeIn { return r }) {
+			out = append(out, i)
+		}
+		slices.Sort(out)
+		return out
+	}
+	const hdr, cp, b, n, mr, ln, _, e, mrAct, lnLive, _, blk = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+	for name, tc := range map[string]struct {
+		sel  int
+		want []int
+	}{
+		"member":            {b, []int{hdr, cp, mr, ln, mrAct, lnLive, blk}},
+		"nested member":     {n, []int{hdr, cp, b, mr, ln, mrAct, lnLive, blk}},
+		"checkpoint":        {cp, []int{hdr, mr, ln, mrAct, lnLive, blk}},
+		"mr watch":          {mr, []int{hdr, cp, ln, mrAct, lnLive, blk}},
+		"landing":           {ln, []int{hdr, cp, mr, mrAct, lnLive, blk}},
+		"errand with hint":  {e, []int{hdr}}, // its group header only
+		"initiative header": {hdr, nil},
+	} {
+		if got := shade(tc.sel); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: shaded %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// shadedKeys is the keys of the rows that shadeSet shades for the selected key, over the
+// rows a tab's builder produced.
+func shadedKeys[R any](t *testing.T, bead func(string) *bd.Bead, rows []R, key func(R) string, in func(R) shadeIn, sel string) []string {
+	t.Helper()
+	at := slices.IndexFunc(rows, func(r R) bool { return key(r) == sel })
+	if at < 0 {
+		t.Fatalf("no row %s", sel)
+	}
+	var out []string
+	for i := range shadeSet(bead, rows, at, rows, in) {
+		out = append(out, key(rows[i]))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Through Execute's row builder: a Checkpoint's open MR Watch row and open Landing rows (tree
+// and Live) are shaded from its members and itself, never the closed ones, and an Errand that
+// only hints the Checkpoint lights neither.
+func TestExecShadeLightsMRWatchAndLanding(t *testing.T) {
+	g := graphData{landName: git.LandStrategyGitlab, live: map[string]bool{"ln": true}, beads: []bd.Bead{
+		dbead("i1", contract.KindInitiative, "open", "", 1),
+		dbead("cp", contract.KindCheckpoint, "open", "i1", 1, isContainer),
+		dbead("b", contract.KindBuild, "open", "cp", 1),
+		dbead("mr", contract.KindMRWatch, "open", "cp", 2, described("MR: !7")),
+		dbead("ln", contract.KindLanding, "in_progress", "cp", 3),
+		dbead("mrOld", contract.KindMRWatch, "closed", "cp", 4, described("MR: !3")),
+		dbead("lnOld", contract.KindLanding, "closed", "cp", 5),
+		dbead("lnBlk", contract.KindLanding, "blocked", "cp", 6),
+		dbead("e", contract.KindErrand, "open", "", 1, blockedBy("cp")),
+	}}
+	rows := g.execList(execTab{g: g}.expanded())
+	shaded := func(sel string) []string {
+		return shadedKeys(t, g.beadByID, rows, func(r eRow) string { return r.key }, eRow.shadeIn, sel)
+	}
+	mrs, lnLive := mrsPrefix+"mr", livePrefix+"ln"
+	for name, tc := range map[string]struct {
+		sel  string
+		want []string
+	}{
+		"build":      {"b", []string{"cp", "cps:cp", "i:i1", lnLive, "ln", "lnBlk", "mr", mrs}},
+		"checkpoint": {"cp", []string{"i:i1", lnLive, "ln", "lnBlk", "mr", mrs}},
+		"mr row":     {mrs, []string{"cp", "cps:cp", "i:i1", lnLive, "ln", "lnBlk", "mr"}},
+		"landing":    {"ln", []string{"cp", "cps:cp", "i:i1", lnLive, "lnBlk", "mr", mrs}},
+		"errand":     {"side:e", []string{"i:i1"}}, // its group header only: the in → cp hint is not a Parent
+	} {
+		if got := shaded(tc.sel); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: shaded %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// Through Defog's row builder: a Chart's open MR Watch row and open Landing are shaded from
+// its child, and an Initiative header lights no MR row.
+func TestDefogShadeLightsMRWatchAndLanding(t *testing.T) {
+	g := graphData{landName: git.LandStrategyGitlab, beads: []bd.Bead{
+		dbead("ini", contract.KindInitiative, "open", "", 1),
+		dbead("c", contract.KindChart, "open", "ini", 1),
+		dbead("kid", contract.KindGrilling, "open", "c", 1),
+		dbead("mr", contract.KindMRWatch, "open", "c", 2, described("MR: !7")),
+		dbead("ln", contract.KindLanding, "open", "c", 3),
+		dbead("mrOld", contract.KindMRWatch, "closed", "c", 4, described("MR: !3")),
+	}}
+	rows := g.defogList(defogTab{g: g}.expanded())
+	shaded := func(sel string) []string {
+		return shadedKeys(t, g.beadByID, rows, func(r dRow) string { return r.key }, dRow.shadeIn, sel)
+	}
+	mrs := mrsPrefix + "mr"
+	if got, want := shaded("kid"), []string{"act:kid", "c", "charts:c", "i:ini", "ln", "mr", mrs}; !slices.Equal(got, want) {
+		t.Errorf("child: shaded %v, want %v", got, want)
+	}
+	if got := shaded("i:ini"); slices.Contains(got, mrs) {
+		t.Errorf("Initiative header shaded the MR row: %v", got)
 	}
 }

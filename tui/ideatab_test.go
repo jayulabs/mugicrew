@@ -151,7 +151,7 @@ func ideaLine(v, s string) string {
 func TestIdeateDetailToggleAndScroll(t *testing.T) {
 	bs := mixed()
 	bs[1].Description = strings.Repeat("line of raw markdown\n", 40)
-	m := ideaModel(t, 100, 30, bs, nil)
+	m := ideaModel(t, 100, 32, bs, nil)
 	m = ideaAt(t, m, "mc-1")
 	m = press(t, m, runeKey("d"))
 	v := ansi.Strip(m.View())
@@ -261,8 +261,9 @@ func TestIdeateNewAndEditForms(t *testing.T) {
 			t.Errorf("e on %s: %v", id, o.modals)
 		}
 	}
-	for _, k := range []string{"e", "z", "a", "A", "+", "-", "u", "t", "p", "x"} { // the create row takes enter, n and b (status only) alone
-		if o, cmd := send(t, m, runeKey(k)); cmd != nil || len(o.modals) != 0 || o.status != m.status {
+	for _, k := range []string{"e", "z", "a", "A", "+", "-", "u", "t", "p", "x", "X", "c", "B", "U", "w"} { // the create row takes enter, n and b alone; a bead verb answers "nothing selected"
+		o, cmd := send(t, m, runeKey(k))
+		if cmd != nil || len(o.modals) != 0 || (o.status != m.status && !strings.HasPrefix(o.status, "nothing selected")) {
 			t.Errorf("%s did something on the create row", k)
 		}
 	}
@@ -364,14 +365,15 @@ func TestIdeateHints(t *testing.T) {
 		}
 	}
 	want(m, "enter new · J/K section")
-	want(ideaAt(t, m, "i:ini"), "space fold · d detail · +/- prio · X cancel · J/K section")
-	want(press(t, ideaAt(t, m, "i:ini"), runeKey("d")), "space fold · d close · pgup/pgdn scroll · +/- prio · X cancel · J/K section")
+	want(ideaAt(t, m, "i:ini"), "space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
+	want(press(t, ideaAt(t, m, "i:ini"), runeKey("d")), "space fold · d close · pgup/pgdn scroll · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
 	want(ideaAt(t, m, "i:"), "space fold · J/K section")
 	o := ideaAt(t, m, "mc-1") // open, unclaimed, in an Initiative
-	want(o, "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
-	want(press(t, o, runeKey("d")), "enter triage · b bg · d close · pgup/pgdn scroll · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
-	want(ideaAt(t, m, "loose"), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective")
-	want(ideaAt(t, m, "mc-long-22"), "enter triage · d detail · p pause · x drop · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective")
+	want(o, "enter triage · b bg · d detail · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section")
+	want(press(t, o, runeKey("d")), "enter triage · b bg · d close · pgup/pgdn scroll · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section")
+	want(ideaAt(t, m, "loose"), "enter triage · b bg · d detail · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section")
+	want(ideaAt(t, m, "mc-long-22"), "enter triage · d detail · p pause · x drop · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section")
+	m, _ = send(t, m, tea.WindowSizeMsg{Width: 160, Height: 60}) // the longer verb list scrolls ? on a short terminal
 	o = press(t, ideaAt(t, m, "mc-1"), runeKey("?"))
 	for _, k := range []string{"enter", "triage", "reject", "adopt/release", "move"} {
 		if v := ansi.Strip(o.View()); !strings.Contains(v, k) {
@@ -511,7 +513,7 @@ func TestIdeateBadgeIgnoresFolds(t *testing.T) {
 func TestIdeateBacklogSignalKeys(t *testing.T) {
 	m := ideaModel(t, 100, 24, backlogBeads(), nil)
 	m = press(t, press(t, ideaAt(t, m, backlogKey), runeKey(" ")), runeKey("j"))
-	if got, want := hintsOf(m), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a adopt · J/K section · r retrospective"; got != want {
+	if got, want := hintsOf(m), "enter triage · b bg · d detail · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"; got != want {
 		t.Errorf("backlog Signal hints %q, want %q", got, want)
 	}
 }
@@ -621,7 +623,7 @@ func TestIdeateBg(t *testing.T) {
 		}
 	}
 	// the bar: b bg right after enter triage, hidden on a live session
-	if got, want := hintsOf(ideaAt(t, m, "n2")), "enter triage · b bg · d detail · z reject · p pause · X withdraw · t transcript · e edit · +/- prio · a/A adopt/release · J/K section · r retrospective"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "n2")), "enter triage · b bg · d detail · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"; got != want {
 		t.Errorf("bar %q, want %q", got, want)
 	}
 	if got := hintsOf(ideaAt(t, m, "tri")); strings.Contains(got, "b bg") {
@@ -854,10 +856,11 @@ func TestIdeatePause(t *testing.T) {
 	}
 
 	n := len(*calls)
-	for _, id := range []string{"", "i:ini"} {
-		if o, cmd := send(t, ideaAt(t, m, id), runeKey("p")); cmd != nil || len(*calls) != n || o.status != m.status {
-			t.Errorf("p on %q did something", id)
-		}
+	if o, cmd := send(t, ideaAt(t, m, ""), runeKey("p")); cmd != nil || len(*calls) != n || !strings.HasPrefix(o.status, "nothing selected") {
+		t.Errorf("p on the create row: status %q", o.status)
+	}
+	if got := hintsOf(ideaAt(t, m, "i:ini")); !strings.Contains(got, "p pause") {
+		t.Errorf("Initiative header hints %q lack p pause", got)
 	}
 }
 
@@ -925,8 +928,8 @@ func TestIdeateInitiativeRowsReprioritise(t *testing.T) {
 			m = press(t, ideaAt(t, m, backlogKey), runeKey(" "))
 		}
 		m = ideaAt(t, m, c.row)
-		if h := hintsOf(m); !strings.Contains(h, "+/- prio") {
-			t.Errorf("%s: hints %q lack +/- prio", c.name, h)
+		if h := hintsOf(m); !strings.Contains(h, "+/- prio") != (c.name == "closed refused") {
+			t.Errorf("%s: hints %q", c.name, h)
 		}
 		o, cmd := send(t, m, runeKey(c.k))
 		settle(t, o, cmd)
@@ -945,8 +948,8 @@ func TestIdeateInitiativeRowsReprioritise(t *testing.T) {
 			t.Errorf("%q hints %q offer prio", row, h)
 		}
 		calls = nil
-		if o, cmd := send(t, m, runeKey("+")); cmd != nil || len(calls) != 0 || o.status != m.status {
-			t.Errorf("+ on %q did something", row)
+		if o, cmd := send(t, m, runeKey("+")); cmd != nil || len(calls) != 0 || !strings.HasPrefix(o.status, "nothing selected") {
+			t.Errorf("+ on %q: status %q", row, o.status)
 		}
 	}
 }

@@ -82,7 +82,7 @@ func TestStrandedSignal(t *testing.T) {
 }
 
 // settle releases an in_progress Initiative; closed and open ones, and in_progress
-// Task, Surgery and Discussion, are left alone (Spec mc-so2z FR8, FR9).
+// Errand, Surgery and Discussion, are left alone (Spec mc-so2z FR8, FR9).
 func TestSettleInitiativeClaim(t *testing.T) {
 	origShow, origRelease := showBead, releaseClaim
 	defer func() { showBead, releaseClaim = origShow, origRelease }()
@@ -94,7 +94,7 @@ func TestSettleInitiativeClaim(t *testing.T) {
 		{contract.KindInitiative, "in_progress", true},
 		{contract.KindInitiative, "closed", false},
 		{contract.KindInitiative, "open", false},
-		{contract.KindTask, "in_progress", false},
+		{contract.KindErrand, "in_progress", false},
 		{contract.KindSurgery, "in_progress", false},
 		{contract.KindDiscussion, "in_progress", false},
 		{contract.KindCheckup, "in_progress", false},

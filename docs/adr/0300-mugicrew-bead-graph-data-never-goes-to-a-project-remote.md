@@ -1,6 +1,7 @@
 # ADR 0300: Bead Graph data never goes to a project remote
 
 Status: Accepted
+Amended by ADR 0367 (a-bead-graph-backs-up-off-machine-by-dolt-push…) (§1: a Dolt push to a remote named `backup`).
 Date: 2026-10-18
 
 Spec mc-g5jo8. Supersedes ADR 0216, ADR 0217, ADR 0218, ADR 0256 and ADR 0257. Amends ADR 0235 §1.

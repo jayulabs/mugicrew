@@ -262,3 +262,37 @@ func TestRunIsHiddenFromUsage(t *testing.T) {
 		t.Error("usage lists the hidden run verb")
 	}
 }
+
+// The run verb's host keeps the adopted hold across every bd write and the
+// dispatch, and drops it only after the last one (Spec D11): the lock reads held
+// at the unclaim of a failed start and inside Dispatch, and free once it returns.
+func TestRunHostHoldsTheLockUntilAfterTheRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		showErr error
+	}{{"dispatched", nil}, {"failed start", errors.New("boom")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRunStub(t)
+			s.showErr = tc.showErr
+			var heldIn []bool
+			unclaim, disp := runUnclaim, runDispatch
+			runUnclaim = func(id string) error { heldIn = append(heldIn, liveness.Held(id)); return unclaim(id) }
+			runDispatch = func(c contract.Ctx, cm contract.Crewmate, b bd.Bead, out io.Writer, id string, f dispatch.InflightFunc) (dispatch.Outcome, error) {
+				heldIn = append(heldIn, liveness.Held(b.ID))
+				return disp(c, cm, b, out, id, f)
+			}
+			runHost([]string{"mc-r", "--lock-fd=3"}, make(chan os.Signal), io.Discard)
+			if len(heldIn) == 0 {
+				t.Fatal("no bd write or dispatch observed")
+			}
+			for _, h := range heldIn {
+				if !h {
+					t.Errorf("lock free inside the host: %v", heldIn)
+				}
+			}
+			if liveness.Held("mc-r") {
+				t.Error("lock still held after the host returned")
+			}
+		})
+	}
+}

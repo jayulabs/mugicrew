@@ -62,6 +62,7 @@ var (
 	successorOf  = bd.SuccessorOf
 	listDrafts   = bd.Drafts
 	releaseClaim = bd.Unclaim
+	updateBead   = bd.Update
 )
 
 // hupGrace is how long a clean exit waits for a drop's hangup to land before
@@ -102,14 +103,16 @@ type publishPlan struct {
 	creator bd.Bead // the session's bead, whose marker line heads each merge's comment
 }
 
-// sessionPlan is PublishDrafts' plan: a Signal or Task with raise Drafts or recorded merges
-// takes raiseSession's; else the close alone: the bead itself when it is a Signal
-// with a Chart, Spec or Initiative successor (any status), or a Survey whose parent
-// Chart is closed (push-back) or whose Drafts include a child of the Chart (fog
-// seeded), else nil. A Go read, since the batch can't read: the keep path's fog
-// and the Survey close then land in one transaction, never a drained fog-less
-// Chart (Spec mc-r832 D8). The widening for a reroute is by kind, not a
-// status-blind SuccessorOf (ADR 0096 §2).
+// sessionPlan is PublishDrafts' plan: a Signal or Errand with raise Drafts or
+// recorded merges takes raiseSession's; else the close alone: the bead itself
+// when it is a Signal with a Chart, Spec or Initiative successor (any status),
+// or a Survey whose parent Chart is closed (push-back) or whose Drafts include a
+// child of the Chart (fog seeded) or is open and stamped chart:defogged with no
+// fog Draft (the human's assent stands in for the judge), else nil. A Go read,
+// since the batch can't read: the keep path's fog and the Survey close then land
+// in one transaction, never a drained, fog-less, unstamped Chart (Spec mc-r832
+// D8; ADR 0357 (mugicrew-a-survey-with-no-fog-finishes…) §7). The widening for a
+// reroute is by kind, not a status-blind SuccessorOf (ADR 0096 §2).
 func sessionPlan(bead string) (publishPlan, error) {
 	b, err := showBead(bead)
 	if err != nil {
@@ -117,7 +120,7 @@ func sessionPlan(bead string) (publishPlan, error) {
 	}
 	var done bool
 	switch b.Kind {
-	case contract.KindSignal, contract.KindTask:
+	case contract.KindSignal, contract.KindErrand:
 		if plan, ok, err := raiseSession(b); err != nil || ok {
 			plan.creator = b
 			return plan, err
@@ -127,6 +130,8 @@ func sessionPlan(bead string) (publishPlan, error) {
 		}
 	case contract.KindSurvey:
 		done, err = surveyDone(b)
+	case contract.KindApproval: // a gitlab fallback's exit opens the Draft MR; the Approval stays open
+		err = luffy.OpenFallbackMR(bead)
 	}
 	if err != nil || !done {
 		return publishPlan{}, err
@@ -143,20 +148,44 @@ func signalCharted(bead string) (bool, error) {
 	return false, nil
 }
 
+// surveyDone is whether the Survey closes in the clean-exit batch. Fog beats stamp:
+// a stamped Chart with fog Drafted gains a line in the Survey's notes and then loses
+// chart:defogged, both before the batch (it can't read) and both idempotent. The
+// notes go first: the stamp is what a retry reads, so a failed unstamp still sees
+// the stamp and converges, where a failed notes write after the unstamp would not.
 func surveyDone(s bd.Bead) (bool, error) {
 	chart, err := showBead(s.Parent)
 	if err != nil || chart.Status == "closed" {
 		return err == nil, err
 	}
 	drafts, err := listDrafts(s.ID)
-	return slices.ContainsFunc(drafts, func(d bd.Bead) bool { return d.Parent == s.Parent }), err
+	if err != nil {
+		return false, err
+	}
+	fog := slices.ContainsFunc(drafts, func(d bd.Bead) bool { return d.Parent == s.Parent })
+	if !chart.HasLabel(contract.LabelDefogged) {
+		return fog, nil
+	}
+	if !fog {
+		return true, nil
+	}
+	const line = "stamp removed at settle: fog seeded"
+	if !bd.HasBodyLine(s.Notes, line) {
+		if err := updateBead(s.ID, []string{"--notes", bd.AppendBodyLine(s.Notes, line)}); err != nil {
+			return false, err
+		}
+	}
+	if err := updateBead(chart.ID, []string{"--remove-label", contract.LabelDefogged}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // settle is a clean exit's settle, run after its publish: a bead still
 // in_progress goes back to open and unassigned, so a premature quit strands no
-// claim (Spec mc-rjvx) and a Survey quit before it seeded fog returns to the
+// claim (Spec mc-rjvx) and a Survey quit before it seeded fog or finished its Chart returns to the
 // Inbox (Spec mc-r832 D9). Judged by status, not by whether this launch claimed
-// it, so a Signal the publish closed is left alone. Exempt: a Task (stays claimed
+// it, so a Signal the publish closed is left alone. Exempt: an Errand (stays claimed
 // and idle for l), a Surgery (claimed at filing, as a drop treats it) and a
 // Discussion (an early /exit leaves it open and claimed for a rejoin, FR 35). A
 // closed Survey whose parent Chart the session closed (push-back) with no caused-by Spec successor names chart/<parent>
@@ -169,7 +198,7 @@ func settle(bead string) (branch string, err error) {
 		return "", err
 	}
 	if b.Status == "in_progress" {
-		if b.Kind == contract.KindTask || b.Kind == contract.KindSurgery || b.Kind == contract.KindDiscussion || b.Kind == contract.KindCheckup {
+		if b.Kind == contract.KindErrand || b.Kind == contract.KindSurgery || b.Kind == contract.KindDiscussion || b.Kind == contract.KindCheckup {
 			return "", nil
 		}
 		return "", releaseClaim(bead)
@@ -195,7 +224,7 @@ func settle(bead string) (branch string, err error) {
 // and returns the agent's exit status for the process to exit with. A clean exit
 // (rc=0) first marks its session Closing and switches its viewers to their TUIs
 // (ADR 0108 §1–2), then publishes the bead's Drafts (ADR 0059 §4), settles the
-// bead (settle: releases it if still in_progress, bar a Task, Surgery or
+// bead (settle: releases it if still in_progress, bar an Errand, Surgery or
 // Discussion; a failed release fails the session) and tears the session's
 // worktree down, then deletes a pushed-back Chart's branch after its Survey session (ADR 0130),
 // so the branch is free (§2). The last act, after hitl.exited, is killing the

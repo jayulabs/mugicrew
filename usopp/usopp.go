@@ -65,8 +65,8 @@ var (
 	head                    = git.Head
 	declaredRepos           = cfglayer.Repos
 	openPivots              = bd.OpenPivots
-	pivotsDiscoveredFrom    = bd.PivotsDiscoveredFrom
-	raisePivot              = bd.RaisePivot
+	runSession              = bd.RunSession
+	raiseIfPivoted          = bd.RaiseIfPivoted
 	closeOnPublish          = bd.CloseOnPublish
 	changedPaths            = git.ChangedPaths
 )
@@ -149,21 +149,14 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	if _, err := ctx.Harness().Run(ctx, inv); err != nil {
-		return sweptOr(bead.ID, err)
-	}
-	// Re-read: a concurrent confirm sweep may have closed the Review (FR49).
-	if bead, err = showBead(bead.ID); err != nil || !bead.Open() {
+	fresh, _, _, open, err := runSession(ctx, inv, showBead)
+	if err != nil || !open {
 		return err
 	}
-	pivots, err := pivotsDiscoveredFrom(bead.ID)
-	if err != nil {
+	if raised, err := raiseIfPivoted(ctx, fresh, specID); err != nil || raised {
 		return err
 	}
-	if len(pivots) > 0 {
-		return raisePivot(ctx, bead, bead.Parent, specID, pivots)
-	}
-	return approveIfClean(ctx, bead, pin)
+	return approveIfClean(ctx, fresh, pin)
 }
 
 // pinOf is the Checkpoint branch's live tip: read in the child repo for a repo
@@ -208,16 +201,6 @@ func focusReview(a *reviewArgs) (string, error) {
 	}
 	a.Context, a.Subtree, a.OutOfScope = name, subtree, contexts.OutOfScope(paths, subtree)
 	return contexts.FullLine(cs, cp), nil
-}
-
-// sweptOr is a failed fork's err — unless a concurrent confirm sweep closed the
-// Review out from under it (FR49): done, not a failure, so dispatch releases no
-// claim. Mirrors Franky's.
-func sweptOr(id string, err error) error {
-	if b, serr := showBead(id); serr == nil && !b.Open() {
-		return nil
-	}
-	return err
 }
 
 // approveIfClean is the hybrid clean→Approval transition (FR30/FR31). After the

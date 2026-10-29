@@ -383,6 +383,14 @@ func TestResolveFollowsAHeldLegacyLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// An exec replaces the old image's *os.File; here it stays, and its finalizer
+	// would close the adopted fd number under the new Lock. Hand over a dup of the
+	// same open file description (one flock) and close the old File.
+	fd, err = syscall.Dup(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
 	p, _ := Resolve(common)
 	lk, err := Adopt(fd, p, "abc", "", "")
 	if err != nil {

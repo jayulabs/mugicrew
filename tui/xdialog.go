@@ -1,6 +1,6 @@
 package tui
 
-// X: withdraw the chain or Task on the highlighted head row (Spec mc-5rttm D7, ADR 0313).
+// X: withdraw the chain or Errand on the highlighted head row (Spec mc-5rttm D7, ADR 0313).
 // X reads the verb's Plan (no write, no event) and opens a dialog that shows the
 // chain as a tree with what it loses; confirming runs the Withdraw verb in-process.
 // A refused Plan opens the same dialog barred. x never gets here: it keeps finish,
@@ -53,7 +53,7 @@ var (
 		return planVerb(head, nil)
 	}
 	runWithdraw = func(head string, discard bool) (withdraw.Result, error) {
-		return runVerb(head, nil, discard, withdraw.Withdraw)
+		return runVerb(head, "", nil, discard, withdraw.Withdraw)
 	}
 )
 
@@ -68,12 +68,12 @@ func planVerb(target string, release []string) (withdraw.Plan, error) {
 }
 
 // runVerb runs verb on target with the live in-flight test.
-func runVerb(target string, release []string, discard bool, verb func(string, withdraw.Opts) (withdraw.Result, error)) (withdraw.Result, error) {
+func runVerb(target, why string, release []string, discard bool, verb func(string, withdraw.Opts) (withdraw.Result, error)) (withdraw.Result, error) {
 	o, err := withdraw.LiveOpts(readSessions)
 	if err != nil {
 		return withdraw.Result{}, err
 	}
-	o.Release, o.Discard = release, discard
+	o.Why, o.Release, o.Discard = why, release, discard
 	return verb(target, o)
 }
 
@@ -107,7 +107,7 @@ type xState struct {
 }
 
 // isHead reports whether withdraw takes b in the TUI's own snapshot: a chain head or
-// an unclosed Task (Spec mc-xw3ez D1).
+// an unclosed Errand or Latch (Spec mc-xw3ez D1, mc-3cnhf.16 D6).
 func (g graphData) isHead(b *bd.Bead) bool { return b != nil && bd.IsWithdrawable(*b, g.beads) }
 
 // isOpenInitiative is X's cancel target: an Initiative that is not closed.
@@ -128,7 +128,7 @@ func (m Model) withdrawKey(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 		return m.cancelOpen(b)
 	}
 	if !g.isHead(&b) {
-		m.setStatus(b.ID + ": X withdraws a chain head or cancels an Initiative — select a Signal, Chart, Spec, Checkpoint, Rollback or Task, or an Initiative")
+		m.setStatus(b.ID + ": X withdraws a chain head or cancels an Initiative — select a Signal, Chart, Spec, Checkpoint, Rollback, Errand or Latch, or an Initiative")
 		return m, nil
 	}
 	id := b.ID
@@ -310,7 +310,7 @@ func pluralN(n int, noun string) string {
 }
 
 // xRole is how a row stands in the withdraw: closed with the chain, closed as a swept
-// Task, closed as a Task ordered before the set, or left open.
+// Errand, closed as an Errand ordered before the set, or left open.
 type xRole int
 
 const (
@@ -321,7 +321,7 @@ const (
 )
 
 // xRow is one bead of the tree with its drawn prefix. also is the unclosed beads a
-// swept or left-open Task waits on or blocks outside the closing set.
+// swept or left-open Errand waits on or blocks outside the closing set.
 type xRow struct {
 	prefix string
 	b      bd.Bead
@@ -335,8 +335,8 @@ func xTree(set []bd.Bead) []xRow { return xPlanTree(withdraw.Plan{Set: set}) }
 // xPlanTree lists the closing set as ADR 0313 §1 draws it: the head (the set's last bead)
 // first, then under each bead its parent-child members and its caused-by predecessor,
 // with ├/└. A bead the walk did not reach hangs off the head, after the walk. A swept
-// Task then hangs under the bead it is ordered after on ┄▸, after that bead's subtree,
-// then a before-closed Task under the bead it comes before on ┄◂, then a left-open Task
+// Errand then hangs under the bead it is ordered after on ┄▸, after that bead's subtree,
+// then a before-closed Errand under the bead it comes before on ┄◂, then a left-open Errand
 // under its Before bead on ┄◂ (ADR 0340 §1–§2, ADR 0351).
 func xPlanTree(p withdraw.Plan) []xRow {
 	if len(p.Set) == 0 {
@@ -382,13 +382,13 @@ func xPlanTree(p withdraw.Plan) []xRow {
 	for _, x := range set {
 		inTree[x.ID] = true
 	}
-	for _, w := range p.Swept { // a swept Task ordered after nothing drawn hangs off the head
+	for _, w := range p.Swept { // a swept Errand ordered after nothing drawn hangs off the head
 		if !inTree[w.After] && swept[w.After].Bead.ID == "" && before[w.After].Bead.ID == "" {
 			w.After = head.ID
 			swept[w.Bead.ID] = w
 		}
 	}
-	for _, w := range p.Before { // a before-closed Task whose Before bead is not drawn hangs off the head
+	for _, w := range p.Before { // a before-closed Errand whose Before bead is not drawn hangs off the head
 		if !inTree[w.Before] && swept[w.Before].Bead.ID == "" && before[w.Before].Bead.ID == "" {
 			w.Before = head.ID
 			before[w.Bead.ID] = w
@@ -543,7 +543,7 @@ func xSummary(inv withdraw.Inventory, set []bd.Bead) string {
 	return xSummaryOpen(inv, set, 0)
 }
 
-// xSummaryOpen is xSummary with the Tasks the withdraw leaves open counted (ADR 0340 §2).
+// xSummaryOpen is xSummary with the Errands the withdraw leaves open counted (ADR 0340 §2).
 func xSummaryOpen(inv withdraw.Inventory, set []bd.Bead, leftOpen int) string {
 	var all xTags
 	var held, rebasing int
@@ -590,22 +590,26 @@ func xLead(p withdraw.Plan) string {
 	if len(p.Set) == 0 {
 		return "The plan could not be read, so what this would close is unknown."
 	}
-	if head := p.Set[len(p.Set)-1]; head.Kind == contract.KindTask {
+	head := p.Set[len(p.Set)-1]
+	if head.Kind == contract.KindLatch {
+		return "Closes this Latch as withdrawn. Nothing else is closed; the beads it blocks stay open and are released. Its blocks edges stay as lineage."
+	}
+	if head.Kind == contract.KindErrand {
 		if k := len(p.Swept); k > 0 {
-			return fmt.Sprintf("Closes %s as withdrawn: this Task and the %s ordered after it. A Task has no tree or branch, so nothing is cleaned up.", pluralN(len(p.Set), "bead"), pluralN(k, "Task"))
+			return fmt.Sprintf("Closes %s as withdrawn: this Errand and the %s ordered after it. An Errand has no tree or branch, so nothing is cleaned up.", pluralN(len(p.Set), "bead"), pluralN(k, "Errand"))
 		}
-		return "A Task has no tree or branch, so nothing is cleaned up."
+		return "An Errand has no tree or branch, so nothing is cleaned up."
 	}
 	s := fmt.Sprintf("Closes %s as withdrawn", pluralN(len(p.Set), "bead"))
 	k, j := len(p.Swept), len(p.Before)
 	groups := []string{fmt.Sprintf("%d in the chain", len(p.Set)-k-j)}
-	task := pluralN
+	errand := pluralN
 	if k > 0 {
-		groups = append(groups, task(k, "Task")+" ordered after it")
-		task = func(n int, _ string) string { return fmt.Sprint(n) }
+		groups = append(groups, errand(k, "Errand")+" ordered after it")
+		errand = func(n int, _ string) string { return fmt.Sprint(n) }
 	}
 	if j > 0 {
-		groups = append(groups, task(j, "Task")+" ordered before it")
+		groups = append(groups, errand(j, "Errand")+" ordered before it")
 	}
 	if len(groups) > 1 {
 		s += ": " + strings.Join(groups[:len(groups)-1], ", ") + " and " + groups[len(groups)-1]
@@ -675,9 +679,17 @@ func (m Model) xView(d dialog) string {
 			}
 		}
 	}
+	if !d.xs.barred && len(p.LatchReleases) > 0 {
+		tail = append(tail, "", fmt.Sprintf("Releases %s:", pluralN(len(p.LatchReleases), "bead")))
+		for _, id := range p.LatchReleases {
+			for _, l := range wrapLines("⚑ "+m.titleOf(id), inner) {
+				tail = append(tail, warnSt.Bold(true).Render(l))
+			}
+		}
+	}
 	if !d.xs.barred {
 		for _, id := range p.Releases { // ADR 0340 §5: above the key hints, once per released land hold
-			for _, l := range wrapLines("⚑ "+m.titleOf(id)+" can then land without this Task's steps.", inner) {
+			for _, l := range wrapLines("⚑ "+m.titleOf(id)+" can then land without this Errand's steps.", inner) {
 				tail = append(tail, warnSt.Bold(true).Render(l))
 			}
 		}
@@ -723,8 +735,8 @@ func (m Model) titleOf(id string) string {
 	return id
 }
 
-// rowTag is the tag at a tree row's right edge (ADR 0313 §1, ADR 0340): a Task carries
-// no ✎/↑; a swept Task its outside waits, a left-open one why it stays, the head of a
+// rowTag is the tag at a tree row's right edge (ADR 0313 §1, ADR 0340): an Errand carries
+// no ✎/↑; a swept Errand its outside waits, a left-open one why it stays, the head of a
 // land-hold release ⚑.
 func (m Model) rowTag(p withdraw.Plan, r xRow, isHead, wide bool) string {
 	switch {
@@ -749,7 +761,7 @@ func (m Model) rowTag(p withdraw.Plan, r xRow, isHead, wide bool) string {
 			return warnSt.Render("⚑ releases a land hold")
 		}
 		return warnSt.Render("⚑")
-	case r.b.Kind == contract.KindTask:
+	case r.b.Kind == contract.KindErrand:
 		return ""
 	}
 	if tags := tagsOf(p.Inventory, r.b.ID); !tags.none() {

@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/git"
@@ -431,6 +432,24 @@ func RecordGate(event string, l bd.Bead, pin, base, composed string, attempt int
 	slog.Log(context.Background(), level, event, attrs...)
 }
 
+// Backup triggers: what ran a backup push.
+const (
+	BackupCLI  = "cli"
+	BackupLoop = "loop"
+)
+
+// RecordBackupPushed records backup.pushed: the commits a push sent to the backup
+// remote, how long it took, and the trigger (BackupCLI or BackupLoop).
+func RecordBackupPushed(trigger string, commits int, d time.Duration) {
+	slog.Info("backup.pushed", "trigger", trigger, "commits", commits, "duration_ms", d.Milliseconds())
+}
+
+// RecordBackupFailed records backup.failed at Error with Dolt's error as it came
+// (the caller scrubs credentials) and the trigger.
+func RecordBackupFailed(trigger string, err error) {
+	slog.Error("backup.failed", "trigger", trigger, "err", err.Error())
+}
+
 // RecordRevert records a Rollback's git.Revert of target's land (squash) on mainline:
 // revert.done with the revert sha, or revert.failed at Error (ADR 0029 §5, ADR 0047).
 // A re-run that finds the revert already on main records revert.done with its sha.
@@ -474,10 +493,10 @@ func RecordRevertRetried(b bd.Bead, mr, pipeline int, nested ...any) {
 	slog.Info("revert.retried", append(append(BeadAttrs(b), "mr", mr, "pipeline", pipeline), nested...)...)
 }
 
-// RecordRevertPipelineFailed records a revert MR held on a HITL Task: revert.pipeline_failed
-// at Warn with the pipeline, whether it was an infra failure, and the Task's id.
-func RecordRevertPipelineFailed(b bd.Bead, mr, pipeline int, infra bool, task string, nested ...any) {
-	slog.Warn("revert.pipeline_failed", append(append(BeadAttrs(b), "mr", mr, "pipeline", pipeline, "infra", infra, "task", task), nested...)...)
+// RecordRevertPipelineFailed records a revert MR held on a HITL Errand: revert.pipeline_failed
+// at Warn with the pipeline, whether it was an infra failure, and the Errand's id.
+func RecordRevertPipelineFailed(b bd.Bead, mr, pipeline int, infra bool, errand string, nested ...any) {
+	slog.Warn("revert.pipeline_failed", append(append(BeadAttrs(b), "mr", mr, "pipeline", pipeline, "infra", infra, "errand", errand), nested...)...)
 }
 
 // RecordRevertClosed records a human closing a Rollback's revert MR: revert.closed at Warn.

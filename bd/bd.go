@@ -28,6 +28,12 @@ var run = func(args ...string) (string, error) { return runIn("", args...) }
 // runIn is run from dir ("" for this process's cwd). bd -C ignores an ambient
 // BEADS_DIR, so a call that must resolve from a dir sets the cwd instead.
 func runIn(dir string, args ...string) (string, error) {
+	if sealed {
+		return "", errSealed(args...)
+	}
+	if err := errUnpinned(args...); err != nil {
+		return "", err
+	}
 	return retrying(func() (string, error) { return runOnce(dir, args...) })
 }
 
@@ -280,11 +286,7 @@ func NewSurgery(title, problem, initiative string, required bool) (surgeryID, ch
 // superseded) carrying external ref ref: the kind:initiative bead first, else the
 // kind:signal bead, never by result order (ADR 0006). ok is false when none does.
 func CarrierOf(ref string) (b Bead, ok bool, err error) {
-	out, err := run("list", "--external-ref", ref, "--json")
-	if err != nil {
-		return Bead{}, false, err
-	}
-	beads, err := parseBeads([]byte(out))
+	beads, err := core.List(Query{ExternalRef: ref, Limit: defaultListCap})
 	if err != nil {
 		return Bead{}, false, err
 	}
@@ -302,11 +304,7 @@ func CarrierOf(ref string) (b Bead, ok bool, err error) {
 // external ref ref exactly (case-sensitive, as bd matches). Not CarrierOf, which
 // skips closed beads; Enforce external ID's uniqueness spans closed Initiatives too.
 func InitiativesByRef(ref string) ([]Bead, error) {
-	out, err := run("list", "--external-ref", ref, "--all", "-n", "0", "--json")
-	if err != nil {
-		return nil, err
-	}
-	beads, err := parseBeads([]byte(out))
+	beads, err := core.List(Query{ExternalRef: ref, All: true})
 	if err != nil {
 		return nil, err
 	}
@@ -319,13 +317,15 @@ func InitiativesByRef(ref string) ([]Bead, error) {
 	return hits, nil
 }
 
+// External-ref prefixes of a Latch: the key (a Jira key, a canonical MR) follows.
+const (
+	JiraLatchRefPrefix = "jira-latch-"
+	MRLatchRefPrefix   = "gitlab-mr-latch-"
+)
+
 // LatchOf returns the live (open or Draft) kind:latch bead carrying external ref ref.
 func LatchOf(ref string) (b Bead, ok bool, err error) {
-	out, err := run("list", "--external-ref", ref, "--json")
-	if err != nil {
-		return Bead{}, false, err
-	}
-	beads, err := parseBeads([]byte(out))
+	beads, err := core.List(Query{ExternalRef: ref, Limit: defaultListCap})
 	if err != nil {
 		return Bead{}, false, err
 	}
@@ -337,22 +337,30 @@ func LatchOf(ref string) (b Bead, ok bool, err error) {
 	return Bead{}, false, nil
 }
 
-// NewLatch files an unparented kind:latch carrying ref; a non-empty draftedBy
-// files it as that bead's Draft.
-func NewLatch(title, body, ref, draftedBy string) (string, error) {
-	return run(unparentedArgs(Successor{Kind: contract.KindLatch, ExternalRef: ref, DraftedBy: draftedBy}, title, body)...)
+// newLatchArgs is the argv for filing a Latch born blocking every bead in blocks
+// (one blocks:<id> dep each, the offshoot filing's encoding), so no write leaves it blocking nothing.
+func newLatchArgs(title, body, ref, draftedBy string, blocks []string) []string {
+	args := unparentedArgs(Successor{Kind: contract.KindLatch, ExternalRef: ref, DraftedBy: draftedBy}, title, body)
+	if len(blocks) == 0 {
+		return args
+	}
+	deps := make([]string, len(blocks))
+	for i, id := range blocks {
+		deps[i] = "blocks:" + id
+	}
+	return append(args, "--deps", strings.Join(deps, ","))
+}
+
+// NewLatch files an unparented kind:latch carrying ref, born blocking every bead
+// in blocks in the same create; a non-empty draftedBy files it as that bead's Draft.
+func NewLatch(title, body, ref, draftedBy string, blocks []string) (string, error) {
+	return run(newLatchArgs(title, body, ref, draftedBy, blocks)...)
 }
 
 // ListAll returns every bead including closed lineage (`bd list --all`, spec
 // §9.1: the Graph tab shows all kinds and states). `-n 0` lifts the default
 // 50-row cap so the whole graph comes back.
-func ListAll() ([]Bead, error) {
-	out, err := run("list", "--all", "-n", "0", "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
-}
+func ListAll() ([]Bead, error) { return core.List(Query{All: true}) }
 
 // defaultIDsSQL is the TUI's default id set as one flat UNION (no CTEs: Dolt
 // fails them): open beads, closed members/Landings/Approvals of open Charts,
@@ -402,11 +410,7 @@ func ListByID(ids []string) ([]Bead, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	out, err := run("list", "--all", "-n", "0", "--id", strings.Join(ids, ","), "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{All: true, IDs: ids})
 }
 
 // SearchClosed finds the closed beads whose title and id contain every word of
@@ -471,13 +475,7 @@ func ListWithAncestors(id string) ([]Bead, error) {
 }
 
 // ListChildren fetches the beads whose parent is id, closed ones included.
-func ListChildren(id string) ([]Bead, error) {
-	out, err := run("list", "--all", "-n", "0", "--parent", id, "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
-}
+func ListChildren(id string) ([]Bead, error) { return childBeads(id) }
 
 // DependentIDs returns the ids of the beads that point at id by any edge (blocks,
 // caused-by, successor…): `bd dep list --direction=up`. The rows are thin, so the
@@ -498,11 +496,7 @@ func DependentIDs(id string) ([]string, error) {
 // open,in_progress,blocked,deferred`) — the TUI's fast-tier read (ADR 0197).
 // Not OpenList, which omits blocked and feeds the loop's frontier.
 func OpenSet() ([]Bead, error) {
-	out, err := run("list", "--status", "open,in_progress,blocked,deferred", "-n", "0", "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{Status: []string{"open", "in_progress", "blocked", "deferred"}})
 }
 
 // BuildChildren counts a Checkpoint's kind:build members across all statuses —
@@ -638,6 +632,10 @@ const (
 	// PausedNotBuilt: a Build's backstop integrated but found no integrate trailer
 	// for it on its Checkpoint; a re-run that integrates lifts it (ADR 0248).
 	PausedNotBuilt = "not-built"
+	// PausedUnmet: Brook read a Latch's watched MR closed unmerged or missing (a 404);
+	// a human unpause, or a run-now whose re-read finds it open or merged, lifts it.
+	// Loop-written, so it pauses only its own bead and does not cascade.
+	PausedUnmet = "unmet"
 	// PausedRecovering: recover's fence while it repairs a stranded bead; left
 	// behind only by a repair that failed partway, lifted by re-running it (ADR 0127 §6).
 	PausedRecovering = "recovering"
@@ -650,15 +648,33 @@ const pausedPrefix = "paused:"
 
 // PauseRank is every known cause, highest first (ADR 0078, 0082, 0104 §4, 0123
 // §3, 0127 §6, 0248): it ranks PausedCauses and is the list the TUI's pause colours must cover.
-var PauseRank = []string{PausedManual, PausedAbandoned, PausedRecovering, PausedCheckup, PausedIntegrateConflict, PausedNotBuilt, PausedFailing, PausedContext, PausedProfile, PausedForeignHold}
+var PauseRank = []string{PausedManual, PausedAbandoned, PausedRecovering, PausedCheckup, PausedIntegrateConflict, PausedNotBuilt, PausedUnmet, PausedFailing, PausedContext, PausedProfile, PausedForeignHold}
 
 // PauseNote is the pause line's words for cause on b: the cause itself, except
-// paused:context, which names the undeclared context and the three fixes (ADR 0158).
+// paused:context, which names the undeclared context and the three fixes (ADR 0158),
+// and paused:unmet, which names the closed or missing MR and the two fixes.
 func PauseNote(b Bead, cause string) string {
+	if cause == PausedUnmet {
+		note := "unmet (watched MR is closed or missing — reopen it and run-now, or withdraw the latch)"
+		if w := watchesLine(b); w != "" {
+			note += ": " + w
+		}
+		return note
+	}
 	if cause != PausedContext {
 		return cause
 	}
 	return fmt.Sprintf("context (%q undeclared — relabel it, remove the label, or declare it in .mugicrew/config.toml)", ContextOf(b))
+}
+
+// watchesLine is the item a Latch's "Watches:" line names, "" when it has none.
+func watchesLine(b Bead) string {
+	for _, l := range strings.Split(b.Description, "\n") {
+		if v, ok := strings.CutPrefix(l, "Watches:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // PausedCauses are the bead's pause causes off its own labels, ranked by
@@ -718,26 +734,16 @@ func PausedAncestor(b Bead, lookup func(id string) (Bead, error)) (string, error
 // and a closed manual ancestor still cascades — kept for parity with the TUI,
 // whose ListAll snapshot sees closed ancestors too; drop --all if the read bites.
 func PausedList() ([]Bead, error) {
-	out, err := run("list", "--all", "--json", "-n", "0", "--label-pattern", pausedPrefix+"*")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{All: true, LabelPattern: pausedPrefix + "*"})
 }
 
 // Pause adds paused:<cause> (ADR 0070 §3): one commutative label add, so a loop
 // foreign-hold racing a manual pause leaves both labels, a valid state.
-func Pause(id, cause string) error {
-	_, err := run("update", id, "--add-label", pausedPrefix+cause)
-	return err
-}
+func Pause(id, cause string) error { return core.AddLabels(id, pausedPrefix+cause) }
 
 // AddLabel adds label to id: one commutative label add (ADR 0070 §3), as Pause
 // is, for a marker a human removes with bd label remove.
-func AddLabel(id, label string) error {
-	_, err := run("update", id, "--add-label", label)
-	return err
-}
+func AddLabel(id, label string) error { return core.AddLabels(id, label) }
 
 // NotBuiltNote is the body of id's newest "Not built:" comment, prefix and
 // surrounding space trimmed; "" when none, or when the read fails (the pause it
@@ -769,13 +775,7 @@ type Comment struct {
 }
 
 // Comments is id's comments, oldest first (bd's order).
-func Comments(id string) ([]Comment, error) {
-	out, err := run("comments", id, "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseComments([]byte(out))
-}
+func Comments(id string) ([]Comment, error) { return core.Comments(id) }
 
 // AddComment appends text as a comment on id.
 func AddComment(id, text string) error {
@@ -943,23 +943,24 @@ func NewSurgeryOn(cpID, title, problem string) (string, error) {
 	return sg, Claim(sg)
 }
 
-// SpawnBlockingTask is SpawnBlockingTaskIfAbsent behind a seam for tests.
-var SpawnBlockingTask = SpawnBlockingTaskIfAbsent
+// SpawnBlockingErrand is SpawnBlockingErrandIfAbsent behind a seam for tests.
+var SpawnBlockingErrand = SpawnBlockingErrandIfAbsent
 
 // HoldForeign is the answer to a trailer another Bead Graph landed (ADR 0187 §3):
-// file one Brook-owned HITL Task blocking the container, idempotent on (container,
-// foreign sha), and return the refusal so a Landing stays open. It is the one home
-// of this land policy: Jinbe, Nami and the loop all call it; tests swap SpawnBlockingTask.
+// file one Brook-owned HITL Errand blocking the container, idempotent on (container,
+// foreign sha), and return the refusal once, on the call that files it. An already-filed
+// hold returns nil: the held bead stays pending, never failing toward a pause. It is the
+// one home of this land policy: Jinbe, Nami and the loop all call it; tests swap SpawnBlockingErrand.
 func HoldForeign(cp Bead, foreign *git.ForeignLanding) error {
 	where, probe := "Mainline", "mugicrew probe foreign"
 	if c := ContextOf(cp); RepoStampOf(cp) != "" && c != "" {
 		where, probe = "Mainline of context "+c, "mugicrew probe foreign --context "+c
 	}
 	branch := git.BranchName(string(cp.Kind), cp.ID)
-	body := TaskBody(
+	body := ErrandBody(
 		fmt.Sprintf("%s holds %q at %s under another Bead Graph.", where, foreign.Trailer, foreign.Sha),
 		[]string{"Foreign: " + foreign.Sha, "Graph (theirs): " + foreign.Theirs, "Graph (ours): " + foreign.Ours},
-		[]TaskStep{{
+		[]ErrandStep{{
 			Title:   fmt.Sprintf("Close the merge request for %s.", branch),
 			Markers: []string{"irreversible"},
 			Do:      fmt.Sprintf("close the Forge merge request whose source branch is %s.", branch),
@@ -970,13 +971,17 @@ func HoldForeign(cp Bead, foreign *git.ForeignLanding) error {
 			Ask:   "is the loop stopped?",
 		}, {
 			Title: "Give this graph a prefix distinct from the other graph's.",
-			Do: "after this Task closes, run `bd rename-prefix` to a prefix distinct from the other graph's (not a per-bead rename), " +
+			Do: "after this Errand closes, run `bd rename-prefix` to a prefix distinct from the other graph's (not a per-bead rename), " +
 				"re-cut each open container branch under its new id, and restart the loop. " +
 				"`" + probe + "` may be run first to confirm the foreign land.",
-			Ask: "will you run the rename, the branch re-cuts and the loop restart after this Task closes?",
+			Ask: "will you run the rename, the branch re-cuts and the loop restart after this Errand closes?",
 		}}, "")
-	if _, _, err := SpawnBlockingTask(cp.ID, "Foreign: "+foreign.Sha+"\n", cp.Title+": mainline holds a foreign land of this bead", body); err != nil {
+	_, created, err := SpawnBlockingErrand(cp.ID, "Foreign: "+foreign.Sha+"\n", cp.Title+": mainline holds a foreign land of this bead", body)
+	if err != nil {
 		return err
+	}
+	if !created {
+		return nil
 	}
 	return foreign
 }
@@ -1049,9 +1054,65 @@ func SetLineIfUnset(update func(id string, args []string) error, id, body, key, 
 	return next, update(id, []string{"--description", next})
 }
 
+// AutoApprovedPrefix opens every auto-approved Approval History line.
+const AutoApprovedPrefix = "auto-approved ("
+
+// ApprovalHistoryLast is the last non-blank line of the body's last Approval History section
+// (in reports whether the body has one), ignoring the "MR:" and "MR link:" lines Go appends
+// once it opens the Merge Request.
+func ApprovalHistoryLast(body string) (last string, in bool) {
+	for _, l := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "#") {
+			in, last = strings.TrimLeft(t, "# ") == "Approval History", ""
+			continue
+		}
+		if in && t != "" && !strings.HasPrefix(t, git.MRKey) && !strings.HasPrefix(t, git.MRLinkKey) {
+			last = t
+		}
+	}
+	return last, in
+}
+
 // AppendBodyLine is body with line appended: the one body-line appender.
 func AppendBodyLine(body, line string) string {
 	return strings.TrimRight(body, "\n") + "\n" + line + "\n"
+}
+
+// EndApprovalHistory appends line to the body's last Approval History section, before the next
+// heading (or the end), and adds the section when the body has none. A body already ending
+// that section with line is returned as is, so a retry after a crash before the close writes it once.
+func EndApprovalHistory(body, line string) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	start := -1
+	for i, l := range lines {
+		if t := strings.TrimSpace(l); strings.HasPrefix(t, "#") && strings.TrimLeft(t, "# ") == "Approval History" {
+			start = i
+		}
+	}
+	if start < 0 {
+		return strings.Join(lines, "\n") + "\n\n### Approval History\n\n" + line + "\n"
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+			end = i
+			break
+		}
+	}
+	sec := lines[start:end]
+	for len(sec) > 1 && strings.TrimSpace(sec[len(sec)-1]) == "" {
+		sec = sec[:len(sec)-1]
+	}
+	if strings.TrimSpace(sec[len(sec)-1]) == line {
+		return body
+	}
+	out := slices.Concat(lines[:start], sec, []string{line})
+	if end < len(lines) {
+		out = append(out, "")
+		out = append(out, lines[end:]...)
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 // SetBodyLine is body with every line starting prefix replaced by line, appended when
@@ -1110,18 +1171,18 @@ func Kinds() (map[string]contract.Kind, error) {
 // (mugicrew init) that need bd's raw argv.
 func RunIn(dir string, args ...string) (string, error) { return runIn(dir, args...) }
 
-// TaskChildren counts a Spec's kind:task dependents over discovered-from in every
-// status (deferred, open, closed) — the Task-existence check reconcileSpec gates
-// the slicing re-fork on. Not an open-only scan: a closed Task still counts, or
-// the loop would re-fork over a Spec whose Tasks are done.
-func TaskChildren(specID string) (int, error) {
+// ErrandChildren counts a Spec's kind:errand dependents over discovered-from in every
+// status (deferred, open, closed) — the Errand-existence check reconcileSpec gates
+// the slicing re-fork on. Not an open-only scan: a closed Errand still counts, or
+// the loop would re-fork over a Spec whose Errands are done.
+func ErrandChildren(specID string) (int, error) {
 	rows, err := depTargets(specID, "up", "discovered-from")
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	for _, r := range rows {
-		if r.Kind == contract.KindTask {
+		if r.Kind == contract.KindErrand {
 			n++
 		}
 	}

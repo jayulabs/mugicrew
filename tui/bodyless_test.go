@@ -101,3 +101,25 @@ func TestGraphDrawerEndsAtBodyOnInitiative(t *testing.T) {
 		}
 	}
 }
+
+// A Robin-drafted Initiative (a headingless labelled-prose seed) is absent from the
+// Initiatives tab while a Draft, and once published shows as a bodyless, memberless
+// row with no body yet.
+func TestRobinInitiativeSeedDraftThenPublished(t *testing.T) {
+	seed := "Done when: it ships.\nPhases: one, two.\nNotes: none."
+	mk := func(status string) Model {
+		m, _ := focusModel(t, 160, 40, []bd.Bead{dbead("rob", contract.KindInitiative, status, "", 2, titled("Robin seeded"), func(b *bd.Bead) { b.Description = seed })},
+			map[string]session.Info{}, map[string]bool{})
+		return press(t, m, runeKey("5"))
+	}
+	if v := ansi.Strip(mk("deferred").View()); strings.Contains(v, "Robin seeded") {
+		t.Errorf("a deferred Initiative Draft is on the tab:\n%s", v)
+	}
+	m := mk("open")
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "Robin seeded") {
+		t.Fatalf("published Initiative missing:\n%s", v)
+	}
+	if got, want := line2Of(m, "Robin seeded"), "no body yet · its cut session settles Done when and Phases first"; got != want {
+		t.Errorf("line 2 = %q, want %q", got, want)
+	}
+}

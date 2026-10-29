@@ -63,8 +63,9 @@
 - **Carry** — when a Signal, Chart or Spec closes in **succession**, the beads it
   _orders_ (blocks) become ordered by its successor, so a dependent waits for
   the real work, not the stage that described it. Outgoing ordering only,
-  except that an open Latch blocking it also comes to block its
-  successor; the old edge stays as lineage. A Spec's dependents
-  therefore wait for its Checkpoint to **land**. A Checkpoint obsoleted by a confirmed or escalated
-  **pivot** carries the same way, to the corrected Spec or the escalated Chart.
+  except that an open Latch blocking it also comes to block its successor,
+  unless that successor is an Initiative; the old edge
+  stays as lineage. A Spec's dependents therefore wait for its Checkpoint to
+  **land**. A Checkpoint obsoleted by a confirmed or escalated **pivot** carries
+  the same way, to the corrected Spec or the escalated Chart.
   _Avoid:_ "moving" edges (nothing is removed).

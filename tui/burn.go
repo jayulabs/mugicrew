@@ -31,7 +31,7 @@ const (
 )
 
 // burnSty is the chart's base colour: muted orange, never the live warn 214.
-var burnSty = lipgloss.NewStyle().Foreground(lipgloss.Color("180"))
+var burnSty lipgloss.Style
 
 type burnRead struct {
 	at  time.Time
@@ -44,8 +44,29 @@ type burn struct {
 	reads        []burnRead
 	start, reset time.Time
 	now          time.Time
-	sty          lipgloss.Style
+	role         burnRole
 	reason       string
+}
+
+// burnRole is which colour the chart draws in; the cache stores the role, not a
+// style, so a theme switch repaints the line without a recompute.
+type burnRole int
+
+const (
+	burnNormal burnRole = iota
+	burnCaution
+	burnError
+)
+
+// style is the role's style under the theme in force.
+func (b burn) style() lipgloss.Style {
+	switch b.role {
+	case burnError:
+		return usageErrSty
+	case burnCaution:
+		return usageWarnSty
+	}
+	return burnSty
 }
 
 // burnNum reads an attr the log decoded as json.Number; ok is false when absent or unparsable.
@@ -82,7 +103,7 @@ func newBurn(evs []eventlog.Event, w burnWin, now time.Time) burn {
 		rs = append(rs, r)
 	}
 	slices.SortStableFunc(rs, func(a, b read) int { return a.at.Compare(b.at) })
-	b := burn{win: w, now: now, sty: burnSty}
+	b := burn{win: w, now: now}
 	var reset time.Time
 	for i := len(rs) - 1; i >= 0; i-- {
 		if i == len(rs)-1 || rs[i].reset.After(now) {
@@ -112,9 +133,9 @@ func newBurn(evs []eventlog.Event, w burnWin, now time.Time) burn {
 	if n := len(b.reads); n > 0 {
 		switch p := b.reads[n-1].pct; {
 		case p >= usageErrPct:
-			b.sty = usageErrSty
+			b.role = burnError
 		case p >= usageWarnPct:
-			b.sty = usageWarnSty
+			b.role = burnCaution
 		}
 	}
 	return b
@@ -183,7 +204,7 @@ func (b burn) blocks(w, h int) []string {
 				if lvl == 0 && n == 0 {
 					n = 1 // data shows even at 0%
 				}
-				sb.WriteString(b.sty.Render(string(rn[min(8, max(0, n-8*lvl))])))
+				sb.WriteString(b.style().Render(string(rn[min(8, max(0, n-8*lvl))])))
 			}
 		}
 		lines[r] = sb.String()

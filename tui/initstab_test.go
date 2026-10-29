@@ -13,6 +13,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -153,7 +154,7 @@ func initsAt(t *testing.T, m Model, key string) Model {
 // refreshInits sends a snapshot of the fixture after edit.
 func refreshInits(t *testing.T, m Model, edit func([]bd.Bead) []bd.Bead) Model {
 	t.Helper()
-	m, _ = send(t, m, loadedMsg{slowTier: true, beads: edit(initsFixture()), live: map[string]bool{}, efforts: map[string]bool{}})
+	m, _ = send(t, m, loadedMsg{slowTier: true, beads: edit(initsFixture()), live: map[string]bool{}, efforts: git.NewEffortSet()})
 	return m
 }
 
@@ -218,13 +219,13 @@ func line2Of(m Model, title string) string {
 
 // Billing revamp's subtree by hand: checkpoint cp (open); open descendants s1-s4, c,
 // g, cp, mem = 8 (closed s5 and Draft s6 out); live s1, g = 2; waiting s1 and the
-// side Task holding cp's land = 2, the back bar's ●N.
+// side Errand holding cp's land = 2, the back bar's ●N.
 func TestInitsLine2Counts(t *testing.T) {
 	sess := map[string]session.Info{
-		"s1":    {State: session.Alive, Waiting: session.WaitTurn},
-		"g":     {State: session.Alive},
-		"task":  {State: session.Alive, Waiting: session.WaitAsk},
-		"loose": {State: session.Alive, Waiting: session.WaitTurn},
+		"s1":     {State: session.Alive, Waiting: session.WaitTurn},
+		"g":      {State: session.Alive},
+		"errand": {State: session.Alive, Waiting: session.WaitAsk},
+		"loose":  {State: session.Alive, Waiting: session.WaitTurn},
 	}
 	m, _ := focusModel(t, 160, 40, focusFixture(), sess, map[string]bool{})
 	m = press(t, m, runeKey("5"))
@@ -267,7 +268,7 @@ func TestInitsLine2StaleUntilRefresh(t *testing.T) {
 	if got := line2Of(m, "Billing revamp"); !strings.Contains(got, "0 live") {
 		t.Errorf("counts changed without a refresh: %q", got)
 	}
-	m, _ = send(t, m, loadedMsg{slowTier: true, beads: focusFixture(), live: map[string]bool{}, sessions: m.sessions, efforts: map[string]bool{}})
+	m, _ = send(t, m, loadedMsg{slowTier: true, beads: focusFixture(), live: map[string]bool{}, sessions: m.sessions, efforts: git.NewEffortSet()})
 	if got := line2Of(m, "Billing revamp"); !strings.Contains(got, "1 live") {
 		t.Errorf("counts did not update on refresh: %q", got)
 	}
@@ -358,7 +359,7 @@ func TestInitsHeaderEnterAndI(t *testing.T) {
 
 func TestInitsUnboundKeysDoNothing(t *testing.T) {
 	m, _ := onInitsRow(t)
-	for _, k := range []string{"b", "p", "+", "-", "x", "a", "A", "e"} {
+	for _, k := range []string{"b"} { // the bead verbs act now (Spec mc-w2a8c); b is not one
 		n, cmd := send(t, m, runeKey(k))
 		if cmd != nil || n.View() != m.View() || n.status != "" {
 			t.Errorf("%s moved state: status %q", k, n.status)
@@ -368,7 +369,7 @@ func TestInitsUnboundKeysDoNothing(t *testing.T) {
 
 func TestInitsRowHintsAndCoverage(t *testing.T) {
 	m, _ := onInitsRow(t)
-	if h := strings.TrimSpace(ansi.Strip(m.hintsView())); h != "enter focus • t transcript • r retrospective | g goto • n new • d detail | ? keys" {
+	if h := strings.TrimSpace(ansi.Strip(m.hintsView())); h != "enter focus • t transcript • p pause • X cancel • e edit • +/- • c checkup • B | g goto • n new • d detail | ? keys" {
 		t.Errorf("row hints = %q", h)
 	}
 	if h := strings.TrimSpace(ansi.Strip(press(t, m, runeKey("d")).hintsView())); !strings.Contains(h, "g goto • n new • d close") {
@@ -379,7 +380,7 @@ func TestInitsRowHintsAndCoverage(t *testing.T) {
 		t.Errorf("? lacks i:\n%s", v)
 	}
 	checkCoverage(t, "Inits row", m, true, "5", "J", "K", "ctrl+down", "ctrl+up")
-	short, _ := send(t, m, tea.WindowSizeMsg{Width: 120, Height: 12})               // the detail overflows, so it scrolls
+	short, _ := send(t, m, tea.WindowSizeMsg{Width: 120, Height: 13})               // the detail overflows, so it scrolls
 	open := press(t, press(t, short, runeKey("d")), tea.KeyMsg{Type: tea.KeyCtrlD}) // mid-scroll, so up and down both move
 	checkCoverage(t, "Inits row drawer", open, true, "5", "J", "K", "ctrl+down", "ctrl+up")
 }
@@ -394,7 +395,7 @@ func TestInitStatsOfStaysCheapOnALargeGraph(t *testing.T) {
 		parent := root
 		for n := 0; n < 400; n++ { // a chain of 5 levels under each Initiative, many Checkpoints
 			id := fmt.Sprintf("b%d-%d", in, n)
-			kind := contract.KindTask
+			kind := contract.KindErrand
 			if n%5 == 0 {
 				kind = contract.KindCheckpoint
 			}
@@ -524,15 +525,15 @@ func TestInitsLine2AlignsAndClosedGap(t *testing.T) {
 	gap(initsModel(t, only, nil))
 }
 
-// FR40: a member Task counts in the Initiative's line-2 rollup, and a member Task Draft
+// FR40: a member Errand counts in the Initiative's line-2 rollup, and a member Errand Draft
 // counts as a member but not as an open descendant.
-func TestInitStatsCountMemberTasks(t *testing.T) {
+func TestInitStatsCountMemberErrands(t *testing.T) {
 	m := sized(t, 160, 40)
 	m.beads = []bd.Bead{
 		dbead("i", contract.KindInitiative, "open", "", 1),
-		dbead("t1", contract.KindTask, "open", "i", 1),
-		dbead("t2", contract.KindTask, "deferred", "i", 2),
-		dbead("t3", contract.KindTask, "closed", "i", 3),
+		dbead("t1", contract.KindErrand, "open", "i", 1),
+		dbead("t2", contract.KindErrand, "deferred", "i", 2),
+		dbead("t3", contract.KindErrand, "closed", "i", 3),
 	}
 	st := m.initStatsOf()["i"]
 	if st.members != 3 || st.open != 1 {

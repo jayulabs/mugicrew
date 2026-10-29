@@ -192,7 +192,7 @@ func TestCancelRefusesOpenLanding(t *testing.T) {
 	if err != nil || p.Kind != KindCancel || len(p.Refusals) != 1 || p.Refusals[0].Kind != OpenLanding || !strings.Contains(p.Refusals[0].Fix, "cancel") && !strings.Contains(p.Refusals[0].Fix, "Landing") {
 		t.Fatalf("plan = %+v, %v", p, err)
 	}
-	if _, err := Cancel("in", Opts{}); !errors.As(err, new(*RefusedError)) || len(*calls) != 0 {
+	if _, err := Cancel("in", Opts{Why: "why"}); !errors.As(err, new(*RefusedError)) || len(*calls) != 0 {
 		t.Errorf("err %v calls %v", err, *calls)
 	}
 }

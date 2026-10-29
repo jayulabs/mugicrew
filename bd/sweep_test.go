@@ -5,26 +5,29 @@ import (
 	"testing"
 )
 
-// IsWithdrawable is IsChainHead plus an unclosed, published Task; IsChainHead
-// itself still says a Task is no chain head.
+// IsWithdrawable is IsChainHead plus an unclosed, published Errand; IsChainHead
+// itself still says an Errand is no chain head.
 func TestIsWithdrawable(t *testing.T) {
 	g := []node{
-		{id: "task", kind: "task", status: "open"},
-		{id: "claimed", kind: "task", status: "in_progress"},
-		{id: "done", kind: "task", status: "closed"},
-		{id: "draft", kind: "task", status: "deferred", draft: true},
+		{id: "errand", kind: "errand", status: "open"},
+		{id: "claimed", kind: "errand", status: "in_progress"},
+		{id: "done", kind: "errand", status: "closed"},
+		{id: "draft", kind: "errand", status: "deferred", draft: true},
 		{id: "sig", kind: "signal", status: "open"},
 		{id: "build", kind: "build", status: "open"},
+		{id: "latch", kind: "latch", status: "open"},
+		{id: "latchdone", kind: "latch", status: "closed"},
+		{id: "latchdraft", kind: "latch", status: "deferred", draft: true},
 	}
 	all, _ := heads(t, g)
 	by := func(id string) Bead { return all[slices.IndexFunc(all, func(b Bead) bool { return b.ID == id })] }
-	for id, want := range map[string]bool{"task": true, "claimed": true, "done": false, "draft": false, "sig": true, "build": false} {
+	for id, want := range map[string]bool{"errand": true, "claimed": true, "done": false, "draft": false, "sig": true, "build": false, "latch": true, "latchdone": false, "latchdraft": false} {
 		if got := IsWithdrawable(by(id), all); got != want {
 			t.Errorf("IsWithdrawable(%s) = %v, want %v", id, got, want)
 		}
 	}
-	if IsChainHead(by("task"), all) {
-		t.Error("IsChainHead(task) = true, want false")
+	if IsChainHead(by("errand"), all) {
+		t.Error("IsChainHead(errand) = true, want false")
 	}
 }
 
@@ -46,7 +49,7 @@ func sweepWith(t *testing.T, backward bool, closing []string, g []node) Sweep {
 	for _, id := range closing {
 		set = append(set, all[slices.IndexFunc(all, func(b Bead) bool { return b.ID == id })])
 	}
-	return SweepTasks(set, all, backward)
+	return SweepErrands(set, all, backward)
 }
 
 func beforeIDs(s Sweep) []string {
@@ -73,12 +76,12 @@ func sweptIDs(s Sweep) []string {
 	return out
 }
 
-// Spec D2: the Task sweep over a snapshot.
-func TestSweepTasks(t *testing.T) {
-	t.Run("post-land Task", func(t *testing.T) {
+// Spec D2: the Errand sweep over a snapshot.
+func TestSweepErrands(t *testing.T) {
+	t.Run("post-land Errand", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open"},
-			{id: "tk", kind: "task", status: "open", blockedBy: []string{"cp"}},
+			{id: "tk", kind: "errand", status: "open", blockedBy: []string{"cp"}},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"tk"}) || s.Swept[0].After != "cp" || len(s.LeftOpen)+len(s.Releases) != 0 {
 			t.Errorf("sweep = %+v", s)
@@ -88,17 +91,17 @@ func TestSweepTasks(t *testing.T) {
 		s := sweepOf(t, []string{"ch", "sp"}, []node{
 			{id: "ch", kind: "chart", status: "open"},
 			{id: "sp", kind: "spec", status: "open"},
-			{id: "t1", kind: "task", status: "in_progress", blockedBy: []string{"ch"}},
-			{id: "t2", kind: "task", status: "open", blockedBy: []string{"sp"}},
+			{id: "t1", kind: "errand", status: "in_progress", blockedBy: []string{"ch"}},
+			{id: "t2", kind: "errand", status: "open", blockedBy: []string{"sp"}},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"t1", "t2"}) || s.Swept[0].After != "ch" || s.Swept[1].After != "sp" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("transitive Task chain", func(t *testing.T) {
+	t.Run("transitive Errand chain", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp"}, []node{
-			{id: "t2", kind: "task", status: "open", blockedBy: []string{"t1"}},
-			{id: "t1", kind: "task", status: "open", blockedBy: []string{"cp"}},
+			{id: "t2", kind: "errand", status: "open", blockedBy: []string{"t1"}},
+			{id: "t1", kind: "errand", status: "open", blockedBy: []string{"cp"}},
 			{id: "cp", kind: "checkpoint", status: "open"},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"t1", "t2"}) || s.Swept[1].After != "t1" {
@@ -110,43 +113,43 @@ func TestSweepTasks(t *testing.T) {
 			{id: "cp", kind: "checkpoint", status: "open"},
 			{id: "other", kind: "checkpoint", status: "open"},
 			{id: "gone", kind: "checkpoint", status: "closed"},
-			{id: "tk", kind: "task", status: "open", blockedBy: []string{"cp", "other", "gone"}},
+			{id: "tk", kind: "errand", status: "open", blockedBy: []string{"cp", "other", "gone"}},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"tk"}) || !slices.Equal(s.Swept[0].Also, []string{"other"}) {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("pre-land Task is left open", func(t *testing.T) {
+	t.Run("pre-land Errand is left open", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 		})
 		if len(s.Swept) != 0 || len(s.LeftOpen) != 1 || s.LeftOpen[0].Bead.ID != "tk" || s.LeftOpen[0].Before != "cp" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("pre- and post-land Task is swept", func(t *testing.T) {
+	t.Run("pre- and post-land Errand is swept", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp", "sp"}, []node{
 			{id: "sp", kind: "spec", status: "open"},
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open", blockedBy: []string{"sp"}},
+			{id: "tk", kind: "errand", status: "open", blockedBy: []string{"sp"}},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"tk"}) || len(s.LeftOpen) != 0 {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a lone Task gating a Checkpoint releases it", func(t *testing.T) {
+	t.Run("a lone Errand gating a Checkpoint releases it", func(t *testing.T) {
 		s := sweepOf(t, []string{"tk"}, []node{
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
 		})
 		if !slices.Equal(s.Releases, []string{"cp"}) {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Checkpoint also blocked by a non-Task is no release", func(t *testing.T) {
+	t.Run("a Checkpoint also blocked by a non-Errand is no release", func(t *testing.T) {
 		s := sweepOf(t, []string{"tk", "sig"}, []node{
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 			{id: "sig", kind: "signal", status: "open"},
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk", "sig"}},
 		})
@@ -154,13 +157,13 @@ func TestSweepTasks(t *testing.T) {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a non-Task after a swept Task stays ordered after", func(t *testing.T) {
+	t.Run("a non-Errand after a swept Errand stays ordered after", func(t *testing.T) {
 		all, _ := heads(t, []node{
 			{id: "cp", kind: "checkpoint", status: "open"},
-			{id: "tk", kind: "task", status: "open", blockedBy: []string{"cp"}},
+			{id: "tk", kind: "errand", status: "open", blockedBy: []string{"cp"}},
 			{id: "sig", kind: "signal", status: "open", blockedBy: []string{"tk"}},
 		})
-		s := SweepTasks(all[:1], all, false)
+		s := SweepErrands(all[:1], all, false)
 		final := append(slices.Clone(all[:1]), s.Swept[0].Bead)
 		if got := IDs(OrderedAfter(final, all)); !slices.Equal(got, []string{"sig"}) || len(s.Releases) != 0 {
 			t.Errorf("ordered after %v, sweep %+v", got, s)
@@ -169,7 +172,7 @@ func TestSweepTasks(t *testing.T) {
 	t.Run("Drafts are excluded", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"dr"}},
-			{id: "dr", kind: "task", status: "deferred", draft: true, blockedBy: []string{"cp"}},
+			{id: "dr", kind: "errand", status: "deferred", draft: true, blockedBy: []string{"cp"}},
 		})
 		if len(s.Swept)+len(s.LeftOpen) != 0 {
 			t.Errorf("sweep = %+v", s)
@@ -177,12 +180,12 @@ func TestSweepTasks(t *testing.T) {
 	})
 }
 
-// ADR 0351: a chain's withdraw also before-closes the Tasks ordered before the set.
-func TestSweepTasksBackwardRule(t *testing.T) {
-	t.Run("a direct pre-land Task before-closes", func(t *testing.T) {
+// ADR 0351: a chain's withdraw also before-closes the Errands ordered before the set.
+func TestSweepErrandsBackwardRule(t *testing.T) {
+	t.Run("a direct pre-land Errand before-closes", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 		})
 		if !slices.Equal(beforeIDs(s), []string{"tk"}) || s.Before[0].Before != "cp" || len(s.LeftOpen)+len(s.Swept) != 0 {
 			t.Errorf("sweep = %+v", s)
@@ -190,101 +193,101 @@ func TestSweepTasksBackwardRule(t *testing.T) {
 	})
 	t.Run("a transitive-only chain closes both", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
-			{id: "a", kind: "task", status: "open"},
-			{id: "b", kind: "task", status: "open", blockedBy: []string{"a"}},
+			{id: "a", kind: "errand", status: "open"},
+			{id: "b", kind: "errand", status: "open", blockedBy: []string{"a"}},
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"b"}},
 		})
 		if !slices.Equal(beforeIDs(s), []string{"b", "a"}) || s.Before[1].Before != "b" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task also holding an outside Checkpoint stays open", func(t *testing.T) {
+	t.Run("an Errand also holding an outside Checkpoint stays open", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
 			{id: "other", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 		})
 		if len(s.Before) != 0 || !slices.Equal(leftOpenIDs(s), []string{"tk"}) ||
 			s.LeftOpen[0].Before != "cp" || !slices.Equal(s.LeftOpen[0].Also, []string{"other"}) || len(s.Releases) != 0 {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task holding two closing Checkpoints before-closes", func(t *testing.T) {
+	t.Run("an Errand holding two closing Checkpoints before-closes", func(t *testing.T) {
 		s := sweepBack(t, []string{"c1", "c2"}, []node{
 			{id: "c1", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
 			{id: "c2", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 		})
 		if !slices.Equal(beforeIDs(s), []string{"tk"}) || s.Before[0].Before != "c1" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task before a swept Task before-closes", func(t *testing.T) {
+	t.Run("an Errand before a swept Errand before-closes", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open"},
-			{id: "post", kind: "task", status: "open", blockedBy: []string{"cp", "pre"}},
-			{id: "pre", kind: "task", status: "open"},
+			{id: "post", kind: "errand", status: "open", blockedBy: []string{"cp", "pre"}},
+			{id: "pre", kind: "errand", status: "open"},
 		})
 		if !slices.Equal(sweptIDs(s), []string{"post"}) || !slices.Equal(beforeIDs(s), []string{"pre"}) || s.Before[0].Before != "post" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("Hold Tasks on a closing Chart and Rollback before-close", func(t *testing.T) {
+	t.Run("Hold Errands on a closing Chart and Rollback before-close", func(t *testing.T) {
 		s := sweepBack(t, []string{"ch", "rb"}, []node{
 			{id: "ch", kind: "chart", status: "open", blockedBy: []string{"h1"}},
 			{id: "rb", kind: "rollback", status: "open", blockedBy: []string{"h2"}},
-			{id: "h1", kind: "task", status: "open"},
-			{id: "h2", kind: "task", status: "open"},
+			{id: "h1", kind: "errand", status: "open"},
+			{id: "h2", kind: "errand", status: "open"},
 		})
 		if !slices.Equal(beforeIDs(s), []string{"h1", "h2"}) || s.Before[0].Before != "ch" || s.Before[1].Before != "rb" {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task also blocking an outside Task stays open and that Task is not swept", func(t *testing.T) {
+	t.Run("an Errand also blocking an outside Errand stays open and that Errand is not swept", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
-			{id: "out", kind: "task", status: "open", blockedBy: []string{"tk"}},
+			{id: "tk", kind: "errand", status: "open"},
+			{id: "out", kind: "errand", status: "open", blockedBy: []string{"tk"}},
 		})
 		if len(s.Before)+len(s.Swept) != 0 || !slices.Equal(leftOpenIDs(s), []string{"tk"}) || !slices.Equal(s.LeftOpen[0].Also, []string{"out"}) {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task blocking nothing unclosed is not pulled in", func(t *testing.T) {
+	t.Run("an Errand blocking nothing unclosed is not pulled in", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open"},
-			{id: "free", kind: "task", status: "open"},
-			{id: "old", kind: "task", status: "open", blockedBy: []string{"gone"}},
-			{id: "gone", kind: "task", status: "closed"},
+			{id: "free", kind: "errand", status: "open"},
+			{id: "old", kind: "errand", status: "open", blockedBy: []string{"gone"}},
+			{id: "gone", kind: "errand", status: "closed"},
 		})
 		if len(s.Before)+len(s.Swept)+len(s.LeftOpen) != 0 {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Draft Task is never before-closed", func(t *testing.T) {
+	t.Run("a Draft Errand is never before-closed", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"dr"}},
-			{id: "dr", kind: "task", status: "deferred", draft: true},
+			{id: "dr", kind: "errand", status: "deferred", draft: true},
 		})
 		if len(s.Before)+len(s.LeftOpen) != 0 {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("a Task held open by a non-Checkpoint is left open", func(t *testing.T) {
+	t.Run("an Errand held open by a non-Checkpoint is left open", func(t *testing.T) {
 		s := sweepBack(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"tk"}},
-			{id: "tk", kind: "task", status: "open"},
+			{id: "tk", kind: "errand", status: "open"},
 			{id: "ch", kind: "chart", status: "open", blockedBy: []string{"tk"}},
 		})
 		if !slices.Equal(leftOpenIDs(s), []string{"tk"}) || !slices.Equal(s.LeftOpen[0].Also, []string{"ch"}) {
 			t.Errorf("sweep = %+v", s)
 		}
 	})
-	t.Run("with the rule off a pre-land Task stays left open", func(t *testing.T) {
+	t.Run("with the rule off a pre-land Errand stays left open", func(t *testing.T) {
 		s := sweepOf(t, []string{"cp"}, []node{
 			{id: "cp", kind: "checkpoint", status: "open", blockedBy: []string{"b"}},
-			{id: "b", kind: "task", status: "open", blockedBy: []string{"a"}},
-			{id: "a", kind: "task", status: "open"},
+			{id: "b", kind: "errand", status: "open", blockedBy: []string{"a"}},
+			{id: "a", kind: "errand", status: "open"},
 		})
 		if len(s.Before) != 0 || !slices.Equal(leftOpenIDs(s), []string{"b"}) {
 			t.Errorf("sweep = %+v", s)
@@ -292,7 +295,7 @@ func TestSweepTasksBackwardRule(t *testing.T) {
 	})
 }
 
-// Withdraw's close is bd close --force, which closes an in_progress Task claimed by
+// Withdraw's close is bd close --force, which closes an in_progress Errand claimed by
 // another actor (checked against a real bd 2026-10-22; Spec mc-xw3ez D4).
 func TestForceCloseAllPassesForce(t *testing.T) {
 	var got []string

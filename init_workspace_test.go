@@ -79,6 +79,9 @@ func TestInitWorkspaceFirstRunWritesEveryOwnedKey(t *testing.T) {
 	if strings.Contains(got, "jira") {
 		t.Fatalf("blank site wrote a jira key:\n%s", got)
 	}
+	if strings.Contains(got, "mouse") || strings.Contains(out, "Enable mouse mode?") {
+		t.Fatalf("init workspace touched mouse mode:\n%s\n%s", got, out)
+	}
 	if s := e.status(t); s != "" {
 		t.Fatalf("main worktree status %q", s)
 	}

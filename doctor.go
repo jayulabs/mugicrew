@@ -10,10 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
+	"jayulabs.org/mugicrew/backup"
+	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
@@ -91,8 +95,10 @@ var doctorExec = func(argv []string) (string, error) {
 // runDoctorFix is `mugicrew doctor fix`: run every check once, apply each
 // warn/FAIL row's safe fix in roll-call order (a failure does not stop the
 // next), list the manual rows left, then re-check. It returns 1 if the
-// re-check has a FAIL. It touches only what the fixes touch: no event log, no
-// bead graph (ADR 0301 §5).
+// re-check has a FAIL. It touches only what the fixes touch: no event log, and
+// no bead graph (ADR 0301 §5) except two fixes: the task beads one, which relabels
+// kind:task beads to kind:errand (ADR 0355), and the bare-name claims one, which
+// reassigns this user's in-progress claims to the full Bead actor (ADR 0376 §5).
 func runDoctorFix(w io.Writer) int {
 	s := styleFor(w)
 	rows := doctorRows()
@@ -185,10 +191,13 @@ func doctorRows() []result {
 // contexts, gate), agent profiles, preview renderer.
 var doctorChecks = []check{
 	checkTools,
+	checkTmuxMouse,
 	checkBinary,
 	checkGitRepo,
 	checkBeadGraph,
-	checkBdStore,
+	checkBdStoreAndBackup,
+	checkBdActor,
+	checkLegacyTasks,
 	checkTrackedBeads,
 	checkConfigLayers,
 	checkWorkspaceSetUp,
@@ -197,6 +206,7 @@ var doctorChecks = []check{
 	checkSequences,
 	checkGitlab,
 	checkJira,
+	checkOldFormSpecs,
 	checkProfiles,
 	checkMDRenderer,
 	checkBrowser,
@@ -248,29 +258,190 @@ func graphSource(root, path string) string {
 	return "routed"
 }
 
-// checkBdStore reports the bd store mode (ADR 0153) and fails when it is
-// embedded, whatever the AFK pool size. An unreadable mode skips: the bead graph
-// row is the single report of an unresolvable graph.
-func checkBdStore(root string) []result {
-	if root == "" {
-		return []result{quiet(stSkip, "bd store", "no git repo")}
-	}
+// bdStoreMode is bd's dolt_mode for root's graph, "" when bd cannot say.
+func bdStoreMode(root string) string {
 	var ctx struct {
 		DoltMode string `json:"dolt_mode"`
 	}
 	out, err := doctorBD(root, "context", "--json")
 	if err != nil || json.Unmarshal([]byte(out), &ctx) != nil {
-		return []result{quiet(stSkip, "bd store", "mode unknown")}
+		return ""
 	}
-	switch ctx.DoltMode {
+	return ctx.DoltMode
+}
+
+// checkBdStoreAndBackup reports the bd store mode (ADR 0153), failing when it is
+// embedded whatever the AFK pool size, then the backup rows (Spec D6), off one bd
+// context read. An unreadable mode skips: the bead graph row is the single report
+// of an unresolvable graph.
+func checkBdStoreAndBackup(root string) []result {
+	if root == "" {
+		return append([]result{quiet(stSkip, "bd store", "no git repo")}, backupRows(root, "")...)
+	}
+	mode := bdStoreMode(root)
+	return append(bdStoreRows(root, mode), backupRows(root, mode)...)
+}
+
+func bdStoreRows(root, mode string) []result {
+	switch mode {
 	case "server":
 		return []result{quiet(stOK, "bd store", "server")}
 	case "embedded":
 		detail := fmt.Sprintf("embedded, AFK pool %d", loop.PoolSetting(root).N)
 		return []result{problem(stFail, "bd store", detail, "bd runs in server mode; the TUI and loop need it",
-			manual("", "on a fresh clone run `mugicrew init`", `otherwise see README "Bd store mode" to migrate`))}
+			manual("", "on a fresh clone run `mugicrew init`", `otherwise see docs/bd-store.md to migrate`))}
 	}
 	return []result{quiet(stSkip, "bd store", "mode unknown")}
+}
+
+// The backup module's reads, vars so tests stub them like doctorBD.
+var (
+	doctorBackupRemote   = backup.Remote
+	doctorBackupUnpushed = backup.Unpushed
+	doctorNow            = time.Now
+)
+
+const (
+	backupRow      = "off-machine backup"
+	backupStaleRow = "backup freshness"
+)
+
+// backupRows yields the off-machine backup and backup freshness rows given the
+// already-read bd store mode.
+// Both only ever warn or skip, and neither probes the destination or its
+// credentials. Doctor ignores bd's default local backup and dolt.last_sync.
+func backupRows(root, mode string) []result {
+	skip := func(why string) []result {
+		return []result{quiet(stSkip, backupRow, why), quiet(stSkip, backupStaleRow, "backup not configured")}
+	}
+	if root == "" {
+		return skip("no git repo")
+	}
+	var where struct {
+		Path string `json:"path"`
+	}
+	out, err := doctorBD(root, "where", "--json")
+	if err != nil || json.Unmarshal([]byte(out), &where) != nil || where.Path == "" {
+		return skip("bead graph not resolvable")
+	}
+	if mode != "server" {
+		return skip("bd store is not a server")
+	}
+	url, ok, err := doctorBackupRemote(where.Path)
+	if err != nil {
+		return skip("backup remote unreadable: " + firstLine(err.Error()))
+	}
+	fix := manual("backup", `follow install.md's Backup section to add the "backup" remote`)
+	if !ok {
+		return []result{
+			problem(stWarn, backupRow, "no off-machine backup configured", "the Bead Graph has a Dolt remote named backup", fix),
+			quiet(stSkip, backupStaleRow, "backup not configured"),
+		}
+	}
+	rows := []result{quiet(stOK, backupRow, backup.RedactURL(url))}
+	if backup.SameFilesystem(url, where.Path) {
+		rows[0] = problem(stWarn, backupRow, "file:// destination is on this machine's filesystem",
+			"the backup remote is off this machine's filesystem",
+			manual("backup", "point the backup remote at an off-machine mount or a remotesapi, per install.md's Backup section"))
+	}
+	count, oldest, err := doctorBackupUnpushed(where.Path)
+	now := doctorNow()
+	switch {
+	case err != nil:
+		rows = append(rows, problem(stWarn, backupStaleRow, "unpushed commits unreadable: "+firstLine(err.Error()),
+			"the backup remote has a first push and its unpushed commits are readable",
+			manual("backup", "do install.md's Backup section's First push, or see its Troubleshooting list")))
+	case backup.Stale(oldest, now):
+		rows = append(rows, problem(stWarn, backupStaleRow,
+			fmt.Sprintf("%d commits unpushed, oldest %s", count, now.Sub(oldest).Round(time.Minute)),
+			"the oldest commit not yet pushed to backup is under 24 h old",
+			manual("backup", "see install.md's Backup troubleshooting list for why the push is failing")))
+	default:
+		rows = append(rows, quiet(stOK, backupStaleRow, fmt.Sprintf("%d commits unpushed", count)))
+	}
+	return rows
+}
+
+// doctorActor is the Bead actor this process claims as; a var so tests stub it.
+var doctorActor = bd.Actor
+
+// checkBdActor shows the Bead actor this Device runs as. An actor without a Device
+// name warns with the exact config line to add and never fails or refuses: mugicrew
+// keeps working under the bare name (ADR 0376 §4). It skips when bd can't be read.
+func checkBdActor(root string) []result {
+	if root == "" {
+		return []result{quiet(stSkip, "bd actor", "no git repo")}
+	}
+	name, degraded := doctorActor()
+	if degraded {
+		return []result{quiet(stSkip, "bd actor", "cannot read the actor from bd; claims fall back to "+name)}
+	}
+	if user, device, ok := strings.Cut(name, "@"); ok && user != "" && device != "" {
+		return append([]result{quiet(stOK, "bd actor", name)}, checkBareClaims(root, user, name)...)
+	}
+	bare, _, _ := strings.Cut(name, "@")
+	if bare == "" {
+		bare = "<user>"
+	}
+	return []result{
+		problem(stWarn, "bd actor", "actor "+name+" carries no Device name", "the Bead actor is <user>@<device>",
+			manual("", "add the line `actor: "+bare+"@<device>` to ~/.config/bd/config.yaml, <device> a Device name you choose and keep")),
+		quiet(stSkip, "bare-name claims", "the actor has no Device name; nothing to reassign to"),
+	}
+}
+
+// doctorBareClaims lists the in-progress beads assigned to the bare name; a var so
+// tests stub it.
+var doctorBareClaims = bd.InProgressAssignedTo
+
+// checkBareClaims lists in-progress beads still assigned to the bare user once the
+// actor carries a Device. The fix is safe: one bd update guarded by --if-assignee, so
+// a bead changed meanwhile is left alone. Every bare claim was made on this Device
+// before sharing (ADR 0376 §5), so it doesn't try to tell Devices apart.
+func checkBareClaims(root, bare, actor string) []result {
+	beads, err := doctorBareClaims(root, bare)
+	if err != nil {
+		return []result{quiet(stSkip, "bare-name claims", "cannot list beads: "+firstLine(err.Error()))}
+	}
+	if len(beads) == 0 {
+		return []result{quiet(stOK, "bare-name claims", "none assigned to "+bare)}
+	}
+	argv := []string{"bd", "update"}
+	for _, b := range beads {
+		argv = append(argv, b.ID)
+	}
+	argv = append(argv, "--if-assignee", bare, "--assignee", actor)
+	detail := fmt.Sprintf("%d in-progress bead(s) still assigned to %s", len(beads), bare)
+	return []result{problem(stWarn, "bare-name claims", detail, "every claim of this Device names "+actor,
+		fix{safe: argv, steps: []string{"run `mugicrew doctor fix`; a bead whose assignee changed meanwhile is left alone on purpose, even if bd then exits non-zero"}})}
+}
+
+// doctorLegacyTasks lists the beads still labelled kind:task; a var so tests stub it.
+var doctorLegacyTasks = bd.LegacyTaskBeads
+
+// checkLegacyTasks warns while any bead still carries kind:task, the label ADR 0354
+// retired. The fix is safe: `mugicrew errand relabel` moves each to kind:errand
+// (ADR 0355). It stays behind no version flag. It skips when the graph is unreadable:
+// the bead graph and bd store rows report that.
+func checkLegacyTasks(root string) []result {
+	if root == "" {
+		return []result{quiet(stSkip, "task beads", "no git repo")}
+	}
+	beads, err := doctorLegacyTasks(root)
+	if err != nil {
+		return []result{quiet(stSkip, "task beads", "cannot list beads: "+firstLine(err.Error()))}
+	}
+	if len(beads) == 0 {
+		return []result{quiet(stOK, "task beads", "none labelled kind:task")}
+	}
+	detail := fmt.Sprintf("%d bead(s) still labelled kind:task", len(beads))
+	// The running binary, not the first mugicrew on PATH: an older one has no errand relabel.
+	exe := "mugicrew"
+	if p, err := doctorExe(); err == nil && p != "" {
+		exe = p
+	}
+	return []result{problem(stWarn, "task beads", detail, "every walk-through bead carries kind:errand",
+		fix{safe: []string{exe, "errand", "relabel"}, steps: []string{"run `mugicrew doctor fix`"}})}
 }
 
 // trackedBeadsSteps is the untrack guidance shared by doctor and init's guard
@@ -398,33 +569,99 @@ func checkContexts(root string) []result {
 	return out
 }
 
+// shellWords are first words checkGate cannot resolve on PATH or at the repo root:
+// shell keywords and builtins, so a command starting with one is "not checked".
+var shellWords = map[string]bool{
+	"if": true, "for": true, "while": true, "until": true, "case": true, "select": true,
+	"function": true, "time": true, "coproc": true, "[[": true, "{": true, "}": true,
+	"cd": true, "exec": true, "export": true, "set": true, "source": true, ".": true,
+	"eval": true, "test": true, "[": true, "true": true, "false": true, ":": true,
+	"umask": true, "ulimit": true, "exit": true, "unset": true, "trap": true,
+}
+
+var shellAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// gateCommandRow checks gate_command's first word from the scope's repo root.
+func gateCommandRow(name, cmd, repoRoot string) result {
+	f := strings.Fields(cmd)
+	if len(f) == 0 {
+		return quiet(stOK, name, "not checked")
+	}
+	w := f[0]
+	if strings.ContainsAny(w[:1], "({!$'\"`\\") || shellAssign.MatchString(w) || shellWords[w] {
+		return quiet(stOK, name, "not checked")
+	}
+	var err error
+	if strings.Contains(w, "/") {
+		path := w
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(repoRoot, path)
+		}
+		if fi, serr := os.Stat(path); serr != nil || fi.IsDir() {
+			err = errors.New("not a file")
+		}
+	} else {
+		_, err = lookPath(w)
+	}
+	if err != nil {
+		return problem(stFail, name, "first word "+w+" cannot run", "the gate command's first word can run",
+			manual("", "install it or fix gate_command", "every gated land will fail without it"))
+	}
+	return quiet(stOK, name, w)
+}
+
 func checkGate(root string) []result {
 	if root == "" {
 		return []result{quiet(stSkip, "nix", "no git repo")}
 	}
-	var set []string
-	if cfglayer.Gate(root) != "" {
-		set = append(set, "top-level gate")
+	type scope struct{ label, repoRoot string }
+	var (
+		out     []result
+		nixSets []string
+	)
+	check := func(sc scope, spec cfglayer.GateSpec) {
+		name := "gate command (" + sc.label + ")"
+		switch {
+		case spec.Err != nil:
+			out = append(out, problem(stFail, name, spec.Err.Error(), "a scope sets only one of gate and gate_command",
+				manual("", "keep one of gate or gate_command in "+sc.label)))
+		case spec.Kind == cfglayer.GateNix:
+			if sc.label == "top level" {
+				nixSets = append(nixSets, "top-level gate")
+			} else {
+				nixSets = append(nixSets, sc.label+" gate")
+			}
+		case spec.Kind == cfglayer.GateCommand:
+			out = append(out, gateCommandRow(name, spec.Value, sc.repoRoot))
+		}
 	}
+	check(scope{"top level", root}, cfglayer.ResolveGate(root))
 	table := declaredContexts(root)
 	names := make([]string, 0, len(table))
-	for n, c := range table {
-		if c.Gate != "" {
-			names = append(names, n)
-		}
+	for n := range table {
+		names = append(names, n)
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		set = append(set, "context "+n+" gate")
+		repoRoot := root
+		if table[n].Repo != "" {
+			repoRoot = filepath.Join(root, table[n].Repo)
+		}
+		spec := cfglayer.ResolveContextGate(root, n)
+		if table[n].Repo == "" && spec.Kind == cfglayer.GateCommand {
+			continue // a subtree context lands under the top-level gate; its own gate_command is never honoured
+		}
+		check(scope{"context " + n, repoRoot}, spec)
 	}
-	if len(set) == 0 {
-		return nil
+	if len(nixSets) > 0 {
+		if _, err := lookPath("nix"); err != nil {
+			out = append(out, problem(stFail, "nix", "not on PATH but set: "+strings.Join(nixSets, ", "), "nix is on PATH when a gate is set",
+				manual("", "install nix", "every gated land will fail without it")))
+		} else {
+			out = append(out, quiet(stOK, "nix", "on PATH"))
+		}
 	}
-	if _, err := lookPath("nix"); err != nil {
-		return []result{problem(stFail, "nix", "not on PATH but set: "+strings.Join(set, ", "), "nix is on PATH when a gate is set",
-			manual("", "install nix", "every gated land will fail without it"))}
-	}
-	return []result{quiet(stOK, "nix", "on PATH")}
+	return out
 }
 
 // checkSequences runs Land's rule reader and overlap rule for the Workspace repo and
@@ -471,6 +708,47 @@ func checkSequences(root string) []result {
 	return out
 }
 
+var (
+	oldSpecHeading = regexp.MustCompile(`(?m)^#{1,6}[ \t]+Tasks\b.*$`)
+	oldSpecAdopt   = regexp.MustCompile(`(?m)^[ \t]*task:[ \t]*\S`)
+)
+
+// checkOldFormSpecs warns once per open Spec still written with a ## Tasks
+// heading or a task: <id> adopt line. Doctor never rewrites Spec prose, so the
+// fix is manual; closed Specs are history and are not read.
+func checkOldFormSpecs(root string) []result {
+	if root == "" {
+		return []result{quiet(stSkip, "old-form specs", "no git repo")}
+	}
+	out, err := doctorBD(root, "list", "--label", "kind:spec", "-n", "0", "--json")
+	var specs []struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &specs) != nil {
+		return []result{quiet(stSkip, "old-form specs", "cannot list open Specs")}
+	}
+	var rows []result
+	for _, sp := range specs {
+		var found []string
+		if oldSpecHeading.MatchString(sp.Description) {
+			found = append(found, "## Tasks heading")
+		}
+		if oldSpecAdopt.MatchString(sp.Description) {
+			found = append(found, "task: adopt line")
+		}
+		if len(found) == 0 {
+			continue
+		}
+		rows = append(rows, problem(stWarn, "old-form spec "+sp.Title, "still has a "+strings.Join(found, " and a "),
+			"no open Spec uses ## Tasks or task: <id>", manual("", "edit it to ## Errands / errand: <id>")))
+	}
+	if len(rows) == 0 {
+		return []result{quiet(stOK, "old-form specs", "no open Spec uses ## Tasks or task: <id>")}
+	}
+	return rows
+}
+
 func checkProfiles(root string) []result {
 	if root == "" {
 		return []result{quiet(stSkip, "agent profiles", "no git repo")}
@@ -486,6 +764,16 @@ func checkProfiles(root string) []result {
 			out = append(out, problem(stWarn, name, err.Error(), pre, fix))
 		} else {
 			out = append(out, quiet(stOK, name, "from "+displayPath(root, e.Path)))
+		}
+	}
+	oldLocal, oldShared := loop.LegacyTaskKey(root)
+	for _, l := range []struct {
+		old   bool
+		label string
+	}{{oldLocal, "local"}, {oldShared, "shared"}} {
+		if l.old {
+			out = append(out, problem(stWarn, "agent profiles", "kind_profiles has a task key in the "+l.label+" config", "kind_profiles keys the retired kind errand, not task",
+				manual("", "rename key task → errand in the "+l.label+" config's [kind_profiles]")))
 		}
 	}
 	local, shared := loop.KindProfiles(root)

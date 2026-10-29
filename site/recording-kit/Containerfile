@@ -1,0 +1,50 @@
+# The recording image (ADR 0365): the fresh-install image plus mugicrew's
+# prerequisites and the recording tools. record.sh builds the base from
+# containers/fresh-install/fedora.Containerfile and passes it in as BASE.
+ARG BASE=localhost/mugicrew-fresh-install
+FROM ${BASE}
+
+USER root
+
+# tmux and chromium from Fedora; ffmpeg from RPM Fusion, because Fedora's own
+# ffmpeg-free has no H.264 encoder and the recordings are MP4 (H.264).
+RUN dnf install -y --setopt=install_weak_deps=False tar gzip xz tmux chromium \
+      "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+ && dnf install -y --setopt=install_weak_deps=False --allowerasing ffmpeg \
+ && dnf clean all
+
+# dolt: the pinned 2.5.0 tarball from docs/install.md.
+RUN curl -fsSL https://github.com/dolthub/dolt/releases/download/v2.5.0/dolt-linux-amd64.tar.gz | tar -xz -C /tmp \
+ && install /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt \
+ && rm -rf /tmp/dolt-linux-amd64
+
+# vhs and ttyd (the terminal vhs drives through Chromium).
+ARG VHS_VERSION=0.12.1
+ARG TTYD_VERSION=1.7.7
+RUN curl -fsSL "https://github.com/charmbracelet/vhs/releases/download/v${VHS_VERSION}/vhs_${VHS_VERSION}_Linux_x86_64.tar.gz" | tar -xz -C /tmp \
+ && install "$(find /tmp -name vhs -type f | head -n1)" /usr/local/bin/vhs \
+ && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+ && chmod +x /usr/local/bin/ttyd
+
+# A monospace face with box-drawing glyphs, so the TUI's frame renders.
+RUN dnf install -y --setopt=install_weak_deps=False dejavu-sans-mono-fonts && dnf clean all
+
+USER tester
+
+# bd, mugicrew (from npm, as a visitor installs it) and claude.
+RUN npm i -g @beads/bd @jayulabs/mugicrew \
+ && curl -fsSL https://claude.ai/install.sh | bash
+
+# Chromium runs as a user in a rootless container, without a sandbox.
+ENV VHS_NO_SANDBOX=true \
+    PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
+COPY --chown=tester:tester seed.sh /kit/seed.sh
+COPY --chown=tester:tester settings.tape /kit/settings.tape
+COPY --chown=tester:tester inside.sh /kit/inside.sh
+COPY --chown=tester:tester tapes /kit/tapes
+COPY --chown=tester:tester stub-bin /kit/stub-bin
+COPY --chown=tester:tester stub-triage /kit/stub-triage
+COPY --chown=tester:tester stub-loop /kit/stub-loop
+
+ENTRYPOINT ["bash", "/kit/inside.sh"]

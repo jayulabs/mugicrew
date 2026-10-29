@@ -2,6 +2,7 @@ package bd
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -74,4 +75,78 @@ func editSection(body, section, line string, drop bool) (string, bool, error) {
 		lines = slices.Insert(lines, head+1, "")
 	}
 	return strings.Join(slices.Insert(lines, head+2, line, ""), "\n"), true, nil
+}
+
+// FinishChart is `mugicrew chart finish <chart> --survey <survey>` (ADR 0357): the
+// guarded stamp of a Chart whose Survey found no fog. Under the land lock it
+// re-reads the beads and refuses, loudly and writing nothing, unless the Survey is
+// the Chart's own claimed in_progress kind:survey child with non-empty notes, the
+// Chart is open with no other unclosed child and an empty Not-yet-specified, and
+// some Decisions-so-far line names the Survey. The guards run first, so a Chart
+// already stamped chart:defogged then succeeds without a write and a relaunched
+// session can re-check. It never writes notes or decisions, and records no assent.
+func FinishChart(chartID, surveyID string) error {
+	return git.WithLandLock(func() error {
+		chart, err := Show(chartID)
+		if err != nil {
+			return err
+		}
+		survey, err := Show(surveyID)
+		if err != nil {
+			return err
+		}
+		switch {
+		case survey.Kind != contract.KindSurvey:
+			return fmt.Errorf("chart finish: %s is not a survey", surveyID)
+		case survey.Parent != chartID:
+			return fmt.Errorf("chart finish: survey %s is not a child of %s", surveyID, chartID)
+		case survey.Status != "in_progress" || survey.Assignee == "":
+			return fmt.Errorf("chart finish: survey %s is not open and claimed", surveyID)
+		case chart.Kind != contract.KindChart || !chart.Open():
+			return fmt.Errorf("chart finish: %s is not an open chart", chartID)
+		case strings.TrimSpace(survey.Notes) == "":
+			return fmt.Errorf("chart finish: survey %s has no notes; write the settled decisions with bd update --notes first", surveyID)
+		}
+		kids, err := ListChildren(chartID)
+		if err != nil {
+			return err
+		}
+		var others []Bead
+		for _, k := range kids {
+			if k.ID != surveyID {
+				others = append(others, k)
+			}
+		}
+		if open, _ := DrainBlockersOver(others, nil); open > 0 || slices.ContainsFunc(others, func(k Bead) bool { return k.Status == "blocked" }) {
+			return fmt.Errorf("chart finish: %s still has unclosed children besides the survey", chartID)
+		}
+		lines := strings.Split(chart.Description, "\n")
+		secs := contract.ChartSections(lines)
+		section := func(name string) (string, bool) {
+			i := slices.IndexFunc(secs, func(s contract.Section) bool { return s.Name == name })
+			if i < 0 {
+				return "", false
+			}
+			return strings.Join(lines[secs[i].Head+1:secs[i].End], "\n"), true
+		}
+		if fog, ok := section("Not-yet-specified"); !ok {
+			return fmt.Errorf("chart finish: body has no ## Not-yet-specified section")
+		} else if strings.TrimSpace(fog) != "" {
+			return fmt.Errorf("chart finish: ## Not-yet-specified is not empty")
+		}
+		if decided, _ := section("Decisions-so-far"); !namesID(decided, surveyID) {
+			return fmt.Errorf("chart finish: no ## Decisions-so-far line names survey %s; mugicrew chart append one first", surveyID)
+		}
+		if chart.HasLabel(contract.LabelDefogged) {
+			return nil
+		}
+		_, err = run("update", chartID, "--add-label", contract.LabelDefogged)
+		return err
+	})
+}
+
+// namesID reports whether text names id as a whole token, so a line naming mc-s1
+// does not name mc-s.
+func namesID(text, id string) bool {
+	return regexp.MustCompile(`(?:^|[^A-Za-z0-9._-])` + regexp.QuoteMeta(id) + `(?:$|[^A-Za-z0-9_.-]|\.(?:[^A-Za-z0-9]|$))`).MatchString(text)
 }

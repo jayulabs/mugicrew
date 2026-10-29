@@ -81,18 +81,28 @@ func TestLaunchDiscussionComposesReadOnlySession(t *testing.T) {
 		"combine their Sources lines",
 		"bd delete <id> --force on the rest",
 		"Report every edit, merge and discard in chat, naming the Draft by title",
-		"bd create for a new Signal Draft only on the human's explicit yes",
+		"File a new Signal Draft only on the human's explicit yes",
 		"changing a Draft's status or labels",
 		"priority, type or edges",
 		"writing to or deleting any bead not labelled drafted-by:ws-disc",
 		"bd close ws-disc",
 		contract.ClosingLine(),
+		"propose\nSignals and Initiatives, nothing else.",
+		"You create no bead kind but a Signal or an Initiative.",
+		"bd create --type epic -s deferred --no-inherit-labels -l kind:initiative,drafted-by:ws-disc --deps discovered-from:ws-disc",
+		"Create an Initiative only on the human's explicit yes",
+		"one Initiative per yes",
+		"never a ## heading",
+		"a ## Done when heading would skip Luffy's first-body step",
+		"never --parent a Signal",
+		"never file a member Signal into it",
+		"never cut phases",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	for _, gone := range []string{"only on the human's yes", "propose\nthe edit in chat"} {
+	for _, gone := range []string{"You create no bead kind but a Signal.", "only on the human's yes", "propose\nthe edit in chat", "propose\nSignals, nothing else", "propose Signals, nothing else"} {
 		if strings.Contains(p, gone) {
 			t.Errorf("prompt still contains %q", gone)
 		}

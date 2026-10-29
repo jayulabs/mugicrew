@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/forge"
@@ -46,23 +47,23 @@ type jinbeSeamRec struct {
 	trailerLanded  bool                // landedBase(checkpointTrailer) succeeds → already landed
 	foreign        *git.ForeignLanding // non-nil → landedBase refuses a foreign land
 	landedErr      error               // non-nil → landedBase fails with it (not a miss)
-	taskBody       string
-	tasks          []string        // blocking Task keys bd.SpawnBlockingTask was asked for, deduped
-	approvalBody   string          // one closed Approval's body; "" → no closed Approval (single-approval shorthand)
-	approvalBodies []string        // >1 closed Approval bodies in creation order; wins over approvalBody
-	rewritten      bool            // the landed Tip: is not an ancestor of head
-	head           string          // the checkpoint branch tip approvedAtHead compares the pin to
-	landErr        error           // non-nil → git.Land failure (a *git.RebaseConflict raises a bead)
-	landed         []string        // branches landBranch was called for
-	strategyErr    error           // non-nil → landStrategy fails (an unusable land_strategy)
-	landings       []bd.Bead       // the container's Landings landingsOf returns
-	reasons        []string        // close reasons, parallel to closed
-	spawned        []bd.Successor  // members spawned (Landing, Conflict or Review)
-	closed         []string        // checkpoints closed
-	kids           []bd.Bead       // the Checkpoint's children ReviewDue reads; a spawn adds an open one
-	efforts        map[string]bool // ids holding effort/<id>
-	pivots         []bd.Bead       // the Checkpoint's open pivots
-	blockers       []bd.Bead       // the Checkpoint's open incoming blockers (the land hold)
+	errandBody     string
+	errands        []string       // blocking Errand keys bd.SpawnBlockingErrand was asked for, deduped
+	approvalBody   string         // one closed Approval's body; "" → no closed Approval (single-approval shorthand)
+	approvalBodies []string       // >1 closed Approval bodies in creation order; wins over approvalBody
+	rewritten      bool           // the landed Tip: is not an ancestor of head
+	head           string         // the checkpoint branch tip approvedAtHead compares the pin to
+	landErr        error          // non-nil → git.Land failure (a *git.RebaseConflict raises a bead)
+	landed         []string       // branches landBranch was called for
+	strategyErr    error          // non-nil → landStrategy fails (an unusable land_strategy)
+	landings       []bd.Bead      // the container's Landings landingsOf returns
+	reasons        []string       // close reasons, parallel to closed
+	spawned        []bd.Successor // members spawned (Landing, Conflict or Review)
+	closed         []string       // checkpoints closed
+	kids           []bd.Bead      // the Checkpoint's children ReviewDue reads; a spawn adds an open one
+	efforts        *git.EffortSet // ids holding effort/<id>
+	pivots         []bd.Bead      // the Checkpoint's open pivots
+	blockers       []bd.Bead      // the Checkpoint's open incoming blockers (the land hold)
 
 	gated           bool               // land_strategy resolves to local (the gate applies to a Checkpoint)
 	composeErr      error              // non-nil → composeLanding fails
@@ -102,9 +103,12 @@ type jinbeSeamRec struct {
 	discussions     []forge.Discussion // forgeDiscussions' answer
 	discussionsErr  error
 	discussionsRead bool           // forgeDiscussions was called
+	discussionGETs  int            // forgeDiscussions calls
 	threadKids      []bd.Bead      // the container's children of the asked kind, any status (Forge Reviews)
 	reviewSpawned   []bd.Successor // Forge Reviews spawnChild was asked for
 	spawnReviewErr  error
+	spawnWatchErr   error    // non-nil → spawning an MR Watch fails
+	bodyErr         error    // non-nil → updateBody fails
 	sends           []string // "reply <disc> <body>" / "resolve <disc>", in order
 	replyErr        error
 	resolveErr      error
@@ -199,14 +203,20 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	forgeDiscussions = func(p forge.Project, _ int) ([]forge.Discussion, error) {
 		r.projects = append(r.projects, p)
 		r.discussionsRead = true
+		r.discussionGETs++
 		return r.discussions, r.discussionsErr
 	}
 	childrenOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) {
 		return slices.DeleteFunc(slices.Clone(r.threadKids), func(b bd.Bead) bool { return b.Kind != k }), nil
 	}
 	clock = func() time.Time { return testNow }
-	oFind, oCloseMR := forgeFindOpenMR, forgeCloseMR
-	t.Cleanup(func() { forgeFindOpenMR, forgeCloseMR = oFind, oCloseMR })
+	oFind, oCloseMR, oNote := forgeFindOpenMR, forgeCloseMR, forgeNote
+	t.Cleanup(func() { forgeFindOpenMR, forgeCloseMR, forgeNote = oFind, oCloseMR, oNote })
+	forgeNote = func(p forge.Project, iid int, body string) error {
+		r.projects = append(r.projects, p)
+		r.sends = append(r.sends, fmt.Sprintf("note !%d %s", iid, body))
+		return nil
+	}
 	forgeFindOpenMR = func(p forge.Project, _ string) (*forge.MR, error) {
 		r.projects = append(r.projects, p)
 		return r.openMR, r.findErr
@@ -264,11 +274,11 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		closeBead, spawnChild, closedChildrenOfKind, landBranch, landedBase, approvedAtHead, reviewDue, branchHead, membersDrained, openBlockers = oClose, oSpawn, oClosedChildren, oLand, oLandedBase, oApproved, oDue, oHead, oDrained, oBlockers
 		landStrategy, landingsOf, showBead = oStrategy, oLandings, oShow
 	})
-	oCompose, oGate, oSB, oCrit, oAttr := composeLanding, gateBuild, sameBaseLand, openCritiques, gateAttr
+	oCompose, oGate, oSB, oCrit, oAttr := composeLanding, gateBuild, sameBaseLand, openCritiques, gateSpec
 	t.Cleanup(func() {
-		composeLanding, gateBuild, sameBaseLand, openCritiques, gateAttr = oCompose, oGate, oSB, oCrit, oAttr
+		composeLanding, gateBuild, sameBaseLand, openCritiques, gateSpec = oCompose, oGate, oSB, oCrit, oAttr
 	})
-	gateAttr = func() string { return "mugicrew" }
+	gateSpec = func() cfglayer.GateSpec { return cfglayer.GateSpec{Kind: cfglayer.GateNix, Value: "mugicrew"} }
 	openCritiques = func(string) ([]bd.Bead, error) {
 		var out []bd.Bead
 		for _, k := range r.kids {
@@ -311,6 +321,9 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	landingsOf = func(string) ([]bd.Bead, error) { return r.landings, nil }
 	showBead = func(string) (bd.Bead, error) { return openCheckpoint(), nil }
 	openBlockers = func(string) ([]bd.Bead, error) { return r.blockers, nil }
+	oPivots := openPivots
+	t.Cleanup(func() { openPivots = oPivots })
+	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
 	membersDrained = func(string) (bool, error) { return bd.MembersDrainedOver(r.kids, r.efforts), nil }
 	reviewDue = func(id string, approved func(string, string) bool) (bool, error) {
 		atHead := func(body string) bool { return approved(body, "checkpoint/"+id) }
@@ -321,6 +334,9 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		return nil
 	}
 	spawnChild = func(_ string, s bd.Successor) (string, bool, error) {
+		if s.Kind == contract.KindMRWatch && r.spawnWatchErr != nil {
+			return "", false, r.spawnWatchErr
+		}
 		if s.Kind == contract.KindForgeReview {
 			if r.spawnReviewErr != nil {
 				return "", false, r.spawnReviewErr
@@ -358,6 +374,9 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	oBody := updateBody
 	t.Cleanup(func() { updateBody = oBody })
 	updateBody = func(_ string, args []string) error {
+		if r.bodyErr != nil {
+			return r.bodyErr
+		}
 		r.bodies = append(r.bodies, args[1])
 		return nil
 	}
@@ -413,16 +432,16 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		r.abandons = append(r.abandons, entry)
 		return fmt.Sprintf("ws-aband%d", len(r.abandons)-1), true, nil
 	}
-	oTask := bd.SpawnBlockingTask
-	t.Cleanup(func() { bd.SpawnBlockingTask = oTask })
-	bd.SpawnBlockingTask = func(container, key, _, body string) (string, bool, error) { // bd's (container, key) guard
+	oErrand := bd.SpawnBlockingErrand
+	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
+	bd.SpawnBlockingErrand = func(container, key, _, body string) (string, bool, error) { // bd's (container, key) guard
 		k := container + "|" + key
-		if slices.Contains(r.tasks, k) {
-			return "ws-task", false, nil
+		if slices.Contains(r.errands, k) {
+			return "ws-errand", false, nil
 		}
-		r.tasks = append(r.tasks, k)
-		r.taskBody = body
-		return "ws-task", true, nil
+		r.errands = append(r.errands, k)
+		r.errandBody = body
+		return "ws-errand", true, nil
 	}
 	// Stand in for git.ApprovedAtHead's pin==tip compare, reading the recorded tip so
 	// the real git.Head shell-out is swapped out entirely.
@@ -503,10 +522,10 @@ func TestApprovedAtHeadGateSpawnsOneLanding(t *testing.T) {
 }
 
 // The land hold (Spec FR 15): an Approval at head never spawns a Landing past an
-// open incoming blocker; once the Task closes, the same Approval spawns it.
+// open incoming blocker; once the Errand closes, the same Approval spawns it.
 func TestApprovedLandHeldByOpenBlocker(t *testing.T) {
 	r := &jinbeSeamRec{approvalBody: "Clean pass.\nCommit: cafef00d", head: "cafef00d",
-		blockers: []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open"}}}
+		blockers: []bd.Bead{{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}}}
 	stubJinbeSeams(t, r)
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
 		t.Fatalf("reconcileCheckpoint: %v", err)
@@ -514,7 +533,7 @@ func TestApprovedLandHeldByOpenBlocker(t *testing.T) {
 	if len(r.landed)+len(r.closed)+len(r.spawned) != 0 {
 		t.Fatalf("a held land must do nothing, landed %v closed %v spawned %v", r.landed, r.closed, r.spawned)
 	}
-	r.blockers = nil // the Task closed
+	r.blockers = nil // the Errand closed
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
 		t.Fatalf("reconcileCheckpoint: %v", err)
 	}
@@ -527,9 +546,9 @@ func TestApprovedLandHeldByOpenBlocker(t *testing.T) {
 func TestApprovedLandWaitsOnLiveEffortRef(t *testing.T) {
 	kids := []bd.Bead{{ID: "ws-conf", Kind: contract.KindConflict, Status: "closed"}}
 	for _, tc := range []struct {
-		efforts map[string]bool
+		efforts *git.EffortSet
 		lands   bool
-	}{{map[string]bool{"ws-conf": true}, false}, {nil, true}} {
+	}{{&git.EffortSet{Branches: map[string]bool{"ws-conf": true}}, false}, {nil, true}} {
 		r := &jinbeSeamRec{approvalBody: "Clean pass.\nCommit: cafef00d", head: "cafef00d", kids: kids, efforts: tc.efforts}
 		stubJinbeSeams(t, r)
 		evs := eventlogtest.Capture(t)
@@ -791,26 +810,27 @@ func TestSequenceConfigRefusalFilesNothing(t *testing.T) {
 }
 
 // A foreign land of the Landing's trailer leaves it open, returns the refusal and
-// files one blocking Task naming both graphs, the sha and the fix, across ticks (FR 41).
-func TestLandingForeignLandHoldsOnOneTask(t *testing.T) {
+// files one blocking Errand naming both graphs, the sha and the fix, across ticks (FR 41);
+// later ticks under the filed hold return nil (Spec D2).
+func TestLandingForeignLandHoldsOnOneErrand(t *testing.T) {
 	r := &jinbeSeamRec{head: "cafef00d", foreign: &git.ForeignLanding{Trailer: "Checkpoint: ws-cp", Ours: "ourgraph", Theirs: "theirgraph", Sha: "f00dbeef"}}
 	stubJinbeSeams(t, r)
-	for range 2 {
+	for i := range 3 {
 		var fe *git.ForeignLanding
-		if err := landingRun(r, "cafef00d"); !errors.As(err, &fe) {
-			t.Fatalf("err = %v, want *ForeignLanding", err)
+		if err := landingRun(r, "cafef00d"); (i == 0) != errors.As(err, &fe) || (i > 0 && err != nil) { // refuses once, then pending (Spec D2)
+			t.Fatalf("call %d err = %v, want the refusal once, then nil", i, err)
 		}
 	}
-	if len(r.closed)+len(r.landed)+len(r.spawned) != 0 || len(r.tasks) != 1 {
-		t.Errorf("closed %v landed %v spawned %v tasks %v, want the Landing open and one Task", r.closed, r.landed, r.spawned, r.tasks)
+	if len(r.closed)+len(r.landed)+len(r.spawned) != 0 || len(r.errands) != 1 {
+		t.Errorf("closed %v landed %v spawned %v errands %v, want the Landing open and one Errand", r.closed, r.landed, r.spawned, r.errands)
 	}
 	for _, want := range []string{"ourgraph", "theirgraph", "f00dbeef", "bd rename-prefix", "re-cut"} {
-		if !strings.Contains(r.taskBody, want) {
-			t.Errorf("Task body %q lacks %q", r.taskBody, want)
+		if !strings.Contains(r.errandBody, want) {
+			t.Errorf("Errand body %q lacks %q", r.errandBody, want)
 		}
 	}
-	if strings.Contains(r.taskBody, "`bd rename`") {
-		t.Errorf("Task body %q still offers a per-bead bd rename", r.taskBody)
+	if strings.Contains(r.errandBody, "`bd rename`") {
+		t.Errorf("Errand body %q still offers a per-bead bd rename", r.errandBody)
 	}
 }
 
@@ -861,7 +881,7 @@ func TestLandingPendingRecordsTheMRLinkBesideTheMR(t *testing.T) {
 
 // Each gitlab pending tick re-reads the MR its body names and classifies the snapshot
 // (Spec FR 13, 22, 26, 33–36): only a closed MR it recorded obsoletes the Landing and
-// files one Task; an opened MR (armed, unchecked, need_rebase, a stale conflict status
+// files one Errand; an opened MR (armed, unchecked, need_rebase, a stale conflict status
 // with has_conflicts=false) asserts its description and skips the write leg (FR 36).
 func TestLandingMirrorsItsMR(t *testing.T) {
 	for _, c := range []struct {
@@ -899,25 +919,25 @@ func TestLandingMirrorsItsMR(t *testing.T) {
 				t.Errorf("description asserts %v, want one per tick", r.descAsserts)
 			}
 			if c.obsolete {
-				if r.reasons[0] != "obsolete: merge request closed" || len(r.tasks) != 1 {
-					t.Errorf("reason %q tasks %v, want obsolete: merge request closed and one Task across ticks", r.reasons[0], r.tasks)
+				if r.reasons[0] != "obsolete: merge request closed" || len(r.errands) != 1 {
+					t.Errorf("reason %q errands %v, want obsolete: merge request closed and one Errand across ticks", r.reasons[0], r.errands)
 				}
 				for _, want := range []string{"!7", "reopen", "merge", "withdraw"} {
-					if !strings.Contains(r.taskBody, want) {
-						t.Errorf("Task body %q lacks %q", r.taskBody, want)
+					if !strings.Contains(r.errandBody, want) {
+						t.Errorf("Errand body %q lacks %q", r.errandBody, want)
 					}
 				}
-			} else if len(r.tasks) != 0 {
-				t.Errorf("tasks %v, want none", r.tasks)
+			} else if len(r.errands) != 0 {
+				t.Errorf("errands %v, want none", r.errands)
 			}
 		})
 	}
 }
 
-// The closed-MR Hold Task body (Spec D5): lead, then the key line as a whole line and the
+// The closed-MR Hold Errand body (Spec D5): lead, then the key line as a whole line and the
 // MR link right after it, then one irreversible step checked by mugicrew probe, with no
 // Fix: line and no bare "merged" pass.
-func TestClosedMRTaskBodyCarriesStepsCheckedByProbe(t *testing.T) {
+func TestClosedMRErrandBodyCarriesStepsCheckedByProbe(t *testing.T) {
 	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, mr: &forge.MR{IID: 7, State: "closed", WebURL: "https://gl/p/-/merge_requests/7"}}
 	stubJinbeSeams(t, r)
 	l := openLanding("cafef00d")
@@ -925,15 +945,15 @@ func TestClosedMRTaskBodyCarriesStepsCheckedByProbe(t *testing.T) {
 	if err := reconcileLanding(l); err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	lines := strings.Split(r.taskBody, "\n")
+	lines := strings.Split(r.errandBody, "\n")
 	idx := func(want string) int { return slices.Index(lines, want) }
 	steps := idx("## Steps")
 	key, link := idx("Closed MR: !7"), idx("MR link: https://gl/p/-/merge_requests/7")
 	if !(key > 0 && link == key+1 && steps > link) {
-		t.Fatalf("lead/key/link/steps order wrong (key %d link %d steps %d) in %q", key, link, steps, r.taskBody)
+		t.Fatalf("lead/key/link/steps order wrong (key %d link %d steps %d) in %q", key, link, steps, r.errandBody)
 	}
-	if !strings.HasPrefix(r.taskBody, "MR !7 for ws-cp was closed on the Forge") {
-		t.Errorf("body %q does not open with the lead", r.taskBody)
+	if !strings.HasPrefix(r.errandBody, "MR !7 for ws-cp was closed on the Forge") {
+		t.Errorf("body %q does not open with the lead", r.errandBody)
 	}
 	for _, want := range []string{
 		"[irreversible]",
@@ -942,12 +962,12 @@ func TestClosedMRTaskBodyCarriesStepsCheckedByProbe(t *testing.T) {
 		"needs Maintainer on p",
 		"Check: `mugicrew probe mr '!7'` prints `opened`, or `mugicrew probe landed ws-cp` prints `landed`, or `bd show ws-cp` shows it closed.",
 	} {
-		if !strings.Contains(r.taskBody, want) {
-			t.Errorf("body %q lacks %q", r.taskBody, want)
+		if !strings.Contains(r.errandBody, want) {
+			t.Errorf("body %q lacks %q", r.errandBody, want)
 		}
 	}
-	if strings.Contains(r.taskBody, "Fix:") || strings.Contains(r.taskBody, "merged`") {
-		t.Errorf("body %q carries a Fix: line or accepts a bare merged", r.taskBody)
+	if strings.Contains(r.errandBody, "Fix:") || strings.Contains(r.errandBody, "merged`") {
+		t.Errorf("body %q carries a Fix: line or accepts a bare merged", r.errandBody)
 	}
 }
 
@@ -978,7 +998,7 @@ func TestStaleHeadPipelineIsPending(t *testing.T) {
 	}
 }
 
-// An infra-failed retried pipeline files its Task once; later ticks find it open and
+// An infra-failed retried pipeline files its Errand once; later ticks find it open and
 // read no jobs or traces (FR 36).
 func TestInfraFailureReadsJobsOnce(t *testing.T) {
 	r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7},
@@ -990,7 +1010,7 @@ func TestInfraFailureReadsJobsOnce(t *testing.T) {
 	if err := reconcileLanding(l); err != nil || r.jobReads != 1 {
 		t.Fatalf("first tick err %v jobReads %d", err, r.jobReads)
 	}
-	r.blockers = []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open", Description: r.taskBody}}
+	r.blockers = []bd.Bead{{ID: "ws-errand", Kind: contract.KindErrand, Status: "open", Description: r.errandBody}}
 	if err := reconcileLanding(l); err != nil || r.jobReads != 1 {
 		t.Errorf("second tick err %v jobReads %d, want no further read", err, r.jobReads)
 	}
@@ -1033,8 +1053,8 @@ func TestLandingConflictFromTrialOrMR(t *testing.T) {
 }
 
 // The head pipeline arm (Spec FR 27–32, ADR 0188): a first failure is retried once and
-// recorded, staying pending; a retried failure is a Task when infra, else a Critique
-// (Checkpoint) or Task (Chart) and the Landing closes obsolete: pipeline failed.
+// recorded, staying pending; a retried failure is an Errand when infra, else a Critique
+// (Checkpoint) or Errand (Chart) and the Landing closes obsolete: pipeline failed.
 func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 	failed := &forge.Pipeline{ID: 42, Status: "failed", WebURL: "https://gl/p/42"}
 	infra := []forge.Job{{ID: 5, Name: "unit", WebURL: "https://gl/j/5", FailureReason: "runner_system_failure"}}
@@ -1047,7 +1067,7 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 		pipeline    *forge.Pipeline
 		wantRetries int
 		wantReason  string
-		wantTasks   int
+		wantErrands int
 		wantCrit    int
 		wantBase    string
 		held        bool
@@ -1057,10 +1077,10 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 		{"retried then real, Checkpoint", true, real, contract.KindCheckpoint, failed, 0, "obsolete: pipeline failed", 0, 1, "", false},
 		{"retried then real, merged results", true, real, contract.KindCheckpoint, &forge.Pipeline{ID: 42, Status: "failed", WebURL: "https://gl/p/42", Ref: "refs/merge-requests/7/merge", SHA: "m1"}, 0, "obsolete: pipeline failed", 0, 1, "Base: base9", false},
 		{"retried then real, Chart", true, real, contract.KindChart, failed, 0, "obsolete: pipeline failed", 1, 0, "", false},
-		{"infra Task closed, pipeline unchanged", true, infra, contract.KindCheckpoint, failed, 0, "", 0, 0, "", true},
+		{"infra Errand closed, pipeline unchanged", true, infra, contract.KindCheckpoint, failed, 0, "", 0, 0, "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, jobs: c.jobs, targetSHA: "base9",
+			r := &jinbeSeamRec{head: "cafef00d", landErr: &git.LandPending{MR: 7}, jobs: c.jobs, targetSHA: "base9", rewritten: true,
 				mr: &forge.MR{IID: 7, State: "opened", HeadPipeline: c.pipeline}}
 			stubJinbeSeams(t, r)
 			showBead = func(string) (bd.Bead, error) { return bd.Bead{ID: "ws-cp", Kind: c.kind, Title: "Ship"}, nil }
@@ -1090,13 +1110,13 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 			if c.wantRetries == 1 && !strings.Contains(l.Description, "\nRetried: pipeline 42\n") {
 				t.Errorf("body %q lacks Retried:", l.Description)
 			}
-			if len(r.tasks) != c.wantTasks || len(r.spawned) != c.wantCrit {
-				t.Errorf("tasks %v spawned %d, want %d and %d across two ticks", r.tasks, len(r.spawned), c.wantTasks, c.wantCrit)
+			if len(r.errands) != c.wantErrands || len(r.spawned) != c.wantCrit {
+				t.Errorf("errands %v spawned %d, want %d and %d across two ticks", r.errands, len(r.spawned), c.wantErrands, c.wantCrit)
 			}
 			if (c.wantReason == "") != (len(r.reasons) == 0) || (c.wantReason != "" && r.reasons[0] != c.wantReason) {
 				t.Errorf("reasons %v, want %q", r.reasons, c.wantReason)
 			}
-			detail := r.taskBody
+			detail := r.errandBody
 			if c.wantCrit == 1 {
 				s := r.spawned[0]
 				detail = s.Description
@@ -1107,7 +1127,7 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 					t.Errorf("Critique body %q, want Base %q", detail, c.wantBase)
 				}
 			}
-			if c.wantTasks+c.wantCrit == 1 {
+			if c.wantErrands+c.wantCrit == 1 {
 				for _, want := range []string{"https://gl/p/42", c.jobs[0].Name, c.jobs[0].WebURL, c.jobs[0].FailureReason, fmt.Sprintf("tail of job %d", c.jobs[0].ID)} {
 					if !strings.Contains(detail, want) {
 						t.Errorf("body %q lacks %q", detail, want)
@@ -1120,17 +1140,17 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 
 // A Forge retry keeps the pipeline id but moves updated_at: Held: suppresses only the run
 // it recorded (Spec FR 28–31, 33). The same run files nothing again; a re-run that fails
-// for a real reason is classified; one that fails for infra again files one fresh Task.
+// for a real reason is classified; one that fails for infra again files one fresh Errand.
 func TestLandingHeldPipelineIsPerRun(t *testing.T) {
 	infra := []forge.Job{{ID: 5, Name: "unit", FailureReason: "runner_system_failure"}}
 	real := []forge.Job{{ID: 6, Name: "lint", FailureReason: "script_failure"}}
 	for _, c := range []struct {
-		name      string
-		updated   string
-		jobs      []forge.Job
-		wantTasks int
-		wantCrit  int
-		wantClose bool
+		name        string
+		updated     string
+		jobs        []forge.Job
+		wantErrands int
+		wantCrit    int
+		wantClose   bool
 	}{
 		{"same run", "t1", infra, 0, 0, false},
 		{"re-run fails for real", "t2", real, 0, 1, true},
@@ -1153,8 +1173,8 @@ func TestLandingHeldPipelineIsPerRun(t *testing.T) {
 					l.Description = r.bodies[len(r.bodies)-1]
 				}
 			}
-			if len(r.tasks) != c.wantTasks || len(r.spawned) != c.wantCrit || (len(r.reasons) > 0) != c.wantClose {
-				t.Errorf("tasks %v spawned %d reasons %v, want %d, %d, closed=%v", r.tasks, len(r.spawned), r.reasons, c.wantTasks, c.wantCrit, c.wantClose)
+			if len(r.errands) != c.wantErrands || len(r.spawned) != c.wantCrit || (len(r.reasons) > 0) != c.wantClose {
+				t.Errorf("errands %v spawned %d reasons %v, want %d, %d, closed=%v", r.errands, len(r.spawned), r.reasons, c.wantErrands, c.wantCrit, c.wantClose)
 			}
 		})
 	}
@@ -1224,11 +1244,11 @@ func TestLandingMirrorRateLimitedLogsOnceOtherErrorsReturn(t *testing.T) {
 			limited++
 		}
 	}
-	if limited != 1 || len(r.closed)+len(r.landed)+len(r.tasks) != 0 {
-		t.Errorf("limited events %d, closed %v landed %v tasks %v, want one event and nothing else", limited, r.closed, r.landed, r.tasks)
+	if limited != 1 || len(r.closed)+len(r.landed)+len(r.errands) != 0 {
+		t.Errorf("limited events %d, closed %v landed %v errands %v, want one event and nothing else", limited, r.closed, r.landed, r.errands)
 	}
 	r.mrErr = &forge.Error{Status: 500, Msg: "down"}
-	if err := reconcileLanding(l); err == nil || len(r.closed)+len(r.landed)+len(r.tasks) != 0 {
+	if err := reconcileLanding(l); err == nil || len(r.closed)+len(r.landed)+len(r.errands) != 0 {
 		t.Errorf("500: err %v closed %v landed %v, want the error and the Landing open", err, r.closed, r.landed)
 	}
 }
@@ -1276,8 +1296,8 @@ func TestLandingForgeRateLimitAnywhereLogsOnce(t *testing.T) {
 					t.Errorf("land.failed logged on a 429, want only land.rate_limited")
 				}
 			}
-			if limited != 1 || len(r.closed)+len(r.tasks)+len(r.spawned) != 0 {
-				t.Errorf("limited %d closed %v tasks %v spawned %v, want one event and nothing else", limited, r.closed, r.tasks, r.spawned)
+			if limited != 1 || len(r.closed)+len(r.errands)+len(r.spawned) != 0 {
+				t.Errorf("limited %d closed %v errands %v spawned %v, want one event and nothing else", limited, r.closed, r.errands, r.spawned)
 			}
 		})
 	}
@@ -1615,15 +1635,15 @@ func TestRollbackRevertsThenHandsOff(t *testing.T) {
 	assertHandedOff(t, &r)
 }
 
-// Rollback ignores Tasks (Spec D9, FR 40): a Task the target's land
+// Rollback ignores Errands (Spec D9, FR 40): an Errand the target's land
 // released is never read, reopened, closed or named in the handoff.
-func TestRollbackIgnoresReleasedTask(t *testing.T) {
+func TestRollbackIgnoresReleasedErrand(t *testing.T) {
 	r := rollbackRec{target: "ws-cp", targetSt: "closed", onMain: true, body: "main broke because …"}
 	stubRollbackSeams(t, &r)
 	show := showBead
 	showBead = func(id string) (bd.Bead, error) {
-		if id == "ws-task" {
-			t.Errorf("Rollback read the released Task %s", id)
+		if id == "ws-errand" {
+			t.Errorf("Rollback read the released Errand %s", id)
 		}
 		return show(id)
 	}
@@ -1631,8 +1651,8 @@ func TestRollbackIgnoresReleasedTask(t *testing.T) {
 		t.Fatalf("reconcileRollback: %v", err)
 	}
 	assertHandedOff(t, &r)
-	if got := fmt.Sprint(r.closed, r.successors, r.builds); strings.Contains(got, "ws-task") {
-		t.Errorf("the handoff names the released Task: %s", got)
+	if got := fmt.Sprint(r.closed, r.successors, r.builds); strings.Contains(got, "ws-errand") {
+		t.Errorf("the handoff names the released Errand: %s", got)
 	}
 }
 
@@ -1968,7 +1988,7 @@ func TestPreReviewProbe(t *testing.T) {
 		}
 	})
 	t.Run("review not due runs no probe", func(t *testing.T) {
-		r := &jinbeSeamRec{kids: built, efforts: map[string]bool{"b1": true}, probeErr: errors.New("x")}
+		r := &jinbeSeamRec{kids: built, efforts: &git.EffortSet{Branches: map[string]bool{"b1": true}}, probeErr: errors.New("x")}
 		stubJinbeSeams(t, r)
 		if err := reconcileCheckpoint(openCheckpoint()); err != nil || r.probeCalls != 0 {
 			t.Errorf("err %v probes %d, want none", err, r.probeCalls)
@@ -1981,7 +2001,7 @@ func TestPreReviewProbe(t *testing.T) {
 func TestReviewHeldByLiveRefOrPivot(t *testing.T) {
 	built := []bd.Bead{{ID: "b1", Kind: contract.KindBuild, Status: "closed"}}
 	for name, r := range map[string]*jinbeSeamRec{
-		"live effort ref": {kids: built, efforts: map[string]bool{"b1": true}},
+		"live effort ref": {kids: built, efforts: &git.EffortSet{Branches: map[string]bool{"b1": true}}},
 		"open pivot":      {kids: built, pivots: []bd.Bead{{ID: "p1", Kind: contract.KindPivot, Status: "open"}}},
 	} {
 		stubJinbeSeams(t, r)
@@ -2053,7 +2073,7 @@ func chartLandingRun(r *jinbeSeamRec, pin string) error {
 
 // A Chart-parent Landing lands chart/<id> and closes landed: <sha>.
 func TestChartLandingLandsThenClosesLanded(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d"}
+	r := &jinbeSeamRec{head: "cafef00d", rewritten: true}
 	stubJinbeSeams(t, r)
 	if err := chartLandingRun(r, "cafef00d"); err != nil {
 		t.Fatalf("reconcileLanding: %v", err)
@@ -2074,7 +2094,7 @@ func TestChartLandingConflictFilesChartConflict(t *testing.T) {
 		"clash":  {&git.NumberClash{Clashes: []string{"docs/adr/0031-a.md"}, Base: "basesha"}, nami.ConflictNumberClash},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := &jinbeSeamRec{head: "cafef00d", landErr: tc.err}
+			r := &jinbeSeamRec{head: "cafef00d", landErr: tc.err, rewritten: true}
 			stubJinbeSeams(t, r)
 			if err := chartLandingRun(r, "cafef00d"); err != nil {
 				t.Fatalf("a conflict must NOT propagate: %v", err)
@@ -2225,7 +2245,7 @@ func TestNonLocalStrategyNeverGates(t *testing.T) {
 
 // A Chart's Landing never composes or gates, even under the local strategy.
 func TestChartLandingNeverGates(t *testing.T) {
-	r := &jinbeSeamRec{head: "cafef00d", gated: true}
+	r := &jinbeSeamRec{head: "cafef00d", gated: true, rewritten: true} // rewritten: the Chart has a commit ahead of main
 	stubJinbeSeams(t, r)
 	showBead = func(string) (bd.Bead, error) {
 		return bd.Bead{ID: "ws-cp", Kind: contract.KindChart, Status: "open"}, nil
@@ -2236,6 +2256,73 @@ func TestChartLandingNeverGates(t *testing.T) {
 	}
 	if err := reconcileLanding(openLanding("cafef00d")); err != nil || r.composes+r.gates != 0 || len(r.landed) != 1 {
 		t.Errorf("err %v composes %d gates %d landed %v", err, r.composes, r.gates, r.landed)
+	}
+}
+
+// Under the local strategy a Chart whose pinned head is an ancestor of main (nothing
+// ahead) lands as an Anchor: pin at main's tip: no land, the Landing closes landed:
+// <pin>, and a retry with the pin written closes it again without landing (ADR 0358).
+func TestLocalChartWithNothingAheadLandsAsPin(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", gated: true}
+	stubJinbeSeams(t, r)
+	chart := bd.Bead{ID: "ws-cp", Kind: contract.KindChart, Status: "open", Description: "body\n"}
+	showBead = func(string) (bd.Bead, error) { return chart, nil }
+	landBranch = func(branch, _ string, _ git.LandStrategy) (string, error) {
+		r.landed = append(r.landed, branch)
+		return "landsha", nil
+	}
+	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
+		t.Fatalf("reconcileLanding: %v", err)
+	}
+	if len(r.landed) != 0 {
+		t.Errorf("landed %v, want no squash for a Chart with nothing ahead", r.landed)
+	}
+	if len(r.bodies) != 1 || !strings.Contains(r.bodies[0], "\nAnchor: basesha\n") {
+		t.Fatalf("bodies = %q, want the Chart body with Anchor: basesha", r.bodies)
+	}
+	if len(r.reasons) != 1 || r.reasons[0] != "landed: basesha" {
+		t.Errorf("close reasons = %q, want landed: basesha", r.reasons)
+	}
+	// Retry after the pin write: the pin is the landed fact, so nothing lands or is re-pinned.
+	chart.Description = r.bodies[0]
+	r.bodies, r.reasons = nil, nil
+	if err := reconcileLanding(openLanding("cafef00d")); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if len(r.landed) != 0 || len(r.bodies) != 0 || len(r.reasons) != 1 || r.reasons[0] != "landed: basesha" {
+		t.Errorf("retry landed %v bodies %q reasons %q, want only the landed: basesha close", r.landed, r.bodies, r.reasons)
+	}
+}
+
+// Under gitlab a Chart whose pinned head is an ancestor of the fetched Forge main opens no
+// Land MR: the pin is written at the fetched main, a stale open MR is noted and closed, and
+// only then the Landing closes landed: <pin>; the Closed-MR hold is never filed (ADR 0358).
+func TestGitlabChartWithNothingAheadLandsAsPin(t *testing.T) {
+	r := &jinbeSeamRec{head: "cafef00d", openMR: &forge.MR{IID: 9, State: "opened"}}
+	stubJinbeSeams(t, r)
+	chart := bd.Bead{ID: "ws-cp", Kind: contract.KindChart, Status: "open", Description: "body\n"}
+	showBead = func(string) (bd.Bead, error) { return chart, nil }
+	landBranch = func(branch, _ string, _ git.LandStrategy) (string, error) {
+		r.landed = append(r.landed, branch)
+		return "landsha", nil
+	}
+	r.closeAfterMR(t)
+	l := openLanding("cafef00d")
+	l.Description += "\nMR: !9\n"
+	if err := reconcileLanding(l); err != nil {
+		t.Fatalf("reconcileLanding: %v", err)
+	}
+	if len(r.landed) != 0 || len(r.errands) != 0 {
+		t.Errorf("landed %v errands %v, want no land and no hold", r.landed, r.errands)
+	}
+	if len(r.bodies) != 1 || !strings.Contains(r.bodies[0], "\nAnchor: forgesha\n") {
+		t.Fatalf("bodies = %q, want the Chart body with Anchor: forgesha", r.bodies)
+	}
+	if !slices.Equal(r.mrsClosed, []int{9}) || len(r.sends) != 1 || !strings.Contains(r.sends[0], "note !9 ") || !strings.Contains(r.sends[0], "landed as a pin") {
+		t.Errorf("MRs closed %v sends %q, want a pin note then MR 9 closed", r.mrsClosed, r.sends)
+	}
+	if !slices.Equal(r.closed, []string{"ws-land"}) {
+		t.Errorf("closed %v, want the Landing", r.closed)
 	}
 }
 
@@ -2363,7 +2450,7 @@ func TestNoGateKeySkipsBuild(t *testing.T) {
 	r := &jinbeSeamRec{head: "cafef00d", gated: true}
 	evs := eventlogtest.Capture(t)
 	stubJinbeSeams(t, r)
-	gateAttr = func() string { return "" }
+	gateSpec = func() cfglayer.GateSpec { return cfglayer.GateSpec{} }
 	err := reconcileLanding(openLanding("cafef00d"))
 	if err != nil || r.gates != 0 || len(r.landed) != 1 {
 		t.Errorf("err %v gates %d landed %v", err, r.gates, r.landed)
@@ -2498,7 +2585,7 @@ func TestLocalLandingDoesNotFetch(t *testing.T) {
 }
 
 // A merged MR is read after the fetch (Spec FR 18–21): a trailer on mainline closes the
-// Landing landed; a trailerless merge leaves it open, errors and files one Task across
+// Landing landed; a trailerless merge leaves it open, errors and files one Errand across
 // ticks; a stale-pin merge closes landed and files one Signal naming Tip:, head and range,
 // winning over "obsolete: branch advanced" for the same tick.
 func TestLandingMergedMR(t *testing.T) {
@@ -2511,32 +2598,32 @@ func TestLandingMergedMR(t *testing.T) {
 	}
 	t.Run("merged", func(t *testing.T) {
 		r := &jinbeSeamRec{head: "cafef00d", fetchLands: true, landedTip: "cafef00d", mr: merged}
-		if err := land(r, "cafef00d"); err != nil || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" || len(r.signals)+len(r.tasks) != 0 {
-			t.Errorf("err %v reasons %v signals %v tasks %v, want landed and nothing filed", err, r.reasons, r.signals, r.tasks)
+		if err := land(r, "cafef00d"); err != nil || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" || len(r.signals)+len(r.errands) != 0 {
+			t.Errorf("err %v reasons %v signals %v errands %v, want landed and nothing filed", err, r.reasons, r.signals, r.errands)
 		}
 	})
 	t.Run("merged-after-race", func(t *testing.T) { // the merge landed between the tick's fetch and the MR read
 		r := &jinbeSeamRec{head: "cafef00d", landsOnFetch: 2, landedTip: "cafef00d", mr: merged}
-		if err := land(r, "cafef00d"); err != nil || r.fetches != 2 || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" || len(r.tasks) != 0 {
-			t.Errorf("err %v fetches %d reasons %v tasks %v, want a second fetch, landed and no Task", err, r.fetches, r.reasons, r.tasks)
+		if err := land(r, "cafef00d"); err != nil || r.fetches != 2 || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" || len(r.errands) != 0 {
+			t.Errorf("err %v fetches %d reasons %v errands %v, want a second fetch, landed and no Errand", err, r.fetches, r.reasons, r.errands)
 		}
 	})
 	t.Run("merged-trailerless", func(t *testing.T) {
 		r := &jinbeSeamRec{head: "cafef00d", mr: merged}
-		for range 2 {
-			if err := land(r, "cafef00d"); err == nil || !strings.Contains(err.Error(), "m3rg3") {
-				t.Fatalf("err = %v, want one naming the merge sha", err)
+		for i := range 3 { // errors once naming the sha, then pending under the filed hold (Spec D2)
+			if err := land(r, "cafef00d"); (i == 0) != (err != nil && strings.Contains(err.Error(), "m3rg3")) || (i > 0 && err != nil) {
+				t.Fatalf("call %d err = %v, want one naming the merge sha, then nil", i, err)
 			}
 		}
-		if len(r.closed) != 0 || len(r.tasks) != 1 || !strings.Contains(r.taskBody, "!7") || !strings.Contains(r.taskBody, "m3rg3") {
-			t.Errorf("closed %v tasks %v body %q, want the Landing open and one Task naming the MR and sha", r.closed, r.tasks, r.taskBody)
+		if len(r.closed) != 0 || len(r.errands) != 1 || !strings.Contains(r.errandBody, "!7") || !strings.Contains(r.errandBody, "m3rg3") {
+			t.Errorf("closed %v errands %v body %q, want the Landing open and one Errand naming the MR and sha", r.closed, r.errands, r.errandBody)
 		}
 	})
 	t.Run("merged-landedbase-fails", func(t *testing.T) { // a transient read failure is not a trailerless merge
 		boom := errors.New("bd sql down")
 		r := &jinbeSeamRec{head: "cafef00d", mr: merged, landedErr: boom}
-		if err := land(r, "cafef00d"); !errors.Is(err, boom) || len(r.closed) != 0 || len(r.tasks) != 0 {
-			t.Errorf("err %v closed %v tasks %v, want the read error, the Landing open and no Task", err, r.closed, r.tasks)
+		if err := land(r, "cafef00d"); !errors.Is(err, boom) || len(r.closed) != 0 || len(r.errands) != 0 {
+			t.Errorf("err %v closed %v errands %v, want the read error, the Landing open and no Errand", err, r.closed, r.errands)
 		}
 	})
 	t.Run("merged-stale-pin", func(t *testing.T) {
@@ -2721,19 +2808,19 @@ func TestLandingLocalNeverInvokesGlab(t *testing.T) {
 	}
 }
 
-// reconcileCheckpoint on a foreign land files the hold Task once even with no Landing
+// reconcileCheckpoint on a foreign land files the hold Errand once even with no Landing
 // (FR 41), and keeps returning the refusal.
 func TestReconcileCheckpointForeignLandFilesHoldOnce(t *testing.T) {
 	r := &jinbeSeamRec{head: "cafef00d", foreign: &git.ForeignLanding{Trailer: "Checkpoint: ws-cp", Ours: "ourgraph", Theirs: "theirgraph", Sha: "f00dbeef"}}
 	stubJinbeSeams(t, r)
-	for range 2 {
+	for i := range 3 {
 		var fe *git.ForeignLanding
-		if err := reconcileCheckpoint(openCheckpoint()); !errors.As(err, &fe) {
-			t.Fatalf("err = %v, want *ForeignLanding", err)
+		if err := reconcileCheckpoint(openCheckpoint()); (i == 0) != errors.As(err, &fe) || (i > 0 && err != nil) { // refuses once, then pending (Spec D2)
+			t.Fatalf("call %d err = %v, want the refusal once, then nil", i, err)
 		}
 	}
-	if len(r.tasks) != 1 || len(r.spawned) != 0 {
-		t.Errorf("tasks %v spawned %v, want one hold Task and no Landing", r.tasks, r.spawned)
+	if len(r.errands) != 1 || len(r.spawned) != 0 {
+		t.Errorf("errands %v spawned %v, want one hold Errand and no Landing", r.errands, r.spawned)
 	}
 }
 
@@ -2955,10 +3042,11 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 		{"checkpoint packet", "checkpoint", git.CommitPin("cafef00d") + "\n\n## Background\n\nwhy\n", "## Background\n\nwhy", ""},
 		{"packet-less approval", "checkpoint", git.CommitPin("cafef00d"), "", ""},
 		{"chart summary", "chart", "", "Go here.", ""},
+		{"chart packet", "chart", git.CommitPin("cafef00d") + "\nPatch-id: abc\n\n## Background\n\nwhy\n", "## Background\n\nwhy", ""},
 		{"jira key", "chart", "", "Go here.", "ABC-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &jinbeSeamRec{head: "cafef00d", approvalBody: tc.approval, landErr: &git.LandPending{MR: 5}}
+			r := &jinbeSeamRec{head: "cafef00d", approvalBody: tc.approval, landErr: &git.LandPending{MR: 5}, rewritten: true}
 			stubJinbeSeams(t, r)
 			approvedAtHead = func(string, string) bool { return true }
 			t.Cleanup(func() { approvedAtHead = git.ApprovedAtHead })
@@ -2992,6 +3080,33 @@ func TestGitlabLandingPresentsTheMR(t *testing.T) {
 			}
 			if want := (git.MRPresentation{Title: wantTitle, Body: tc.want}); got != want {
 				t.Errorf("presentation = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// A local Chart land commit's body is the approved Approval's Chart Packet; a pre-change
+// Chart Landing (no approved Approval at its pin) carries none, and still never gates.
+func TestLocalChartLandBodyIsTheChartPacket(t *testing.T) {
+	for _, tc := range []struct{ name, approval, want string }{
+		{"packet", git.CommitPin("cafef00d") + "\nPatch-id: abc\n\n## Background\n\nwhy\n", "## Background\n\nwhy"},
+		{"pre-change", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &jinbeSeamRec{head: "cafef00d", approvalBody: tc.approval, gated: true, rewritten: true}
+			stubJinbeSeams(t, r)
+			var got string
+			o := strategyFor
+			t.Cleanup(func() { strategyFor = o })
+			strategyFor = func(_ string, _ git.Repo, _, body string) (git.LandStrategy, error) {
+				got = body
+				return func(string, string) (string, error) { return "landsha", nil }, nil
+			}
+			if err := chartLandingRun(r, "cafef00d"); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want || r.composes+r.gates != 0 || len(r.landed) != 1 {
+				t.Errorf("body %q composes %d gates %d landed %v, want body %q, an ungated land", got, r.composes, r.gates, r.landed, tc.want)
 			}
 		})
 	}
@@ -3054,6 +3169,29 @@ func TestGitlabRollForwardNoMRAndErrors(t *testing.T) {
 	c.closeMRErr = nil
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil || !slices.Equal(c.mrsClosed, []int{9}) || len(c.closed) != 2 {
 		t.Fatalf("retry: err %v MRs %v beads %v", err, c.mrsClosed, c.closed)
+	}
+}
+
+// A Checkpoint that lands by trailer while its Approval waits for the un-draft leaves no open Approval.
+func TestGitlabRollForwardClosesAWaitingApproval(t *testing.T) {
+	ap := bd.Bead{ID: "ws-ap", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Description: "Commit: abc\nMR: !9\n\n### Approval History\n\nfirst.\n"}
+	r := &jinbeSeamRec{trailerLanded: true, openMR: &forge.MR{IID: 9}, threadKids: []bd.Bead{ap}, landings: []bd.Bead{openLanding("cafef00d")}}
+	stubJinbeSeams(t, r)
+	oShow := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		if id == ap.ID {
+			return ap, nil
+		}
+		return oShow(id)
+	}
+	var body string
+	updateBody = func(_ string, args []string) error { body = args[1]; return nil }
+	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(r.closed, "ws-ap")
+	if i < 0 || i > slices.Index(r.closed, "ws-cp") || r.reasons[i] != "approved" || !strings.Contains(body, landedPastLine) {
+		t.Errorf("closed %v %v body %q, want the Approval closed approved before the container", r.closed, r.reasons, body)
 	}
 }
 
@@ -3125,10 +3263,10 @@ func trailerlessBody(t *testing.T, r *jinbeSeamRec, trailer, kind string) string
 	t.Helper()
 	stubJinbeSeams(t, r)
 	_ = holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, trailer, 7, "m3rg3")
-	return r.taskBody
+	return r.errandBody
 }
 
-// The land trailerless Task body (Spec D6): lead, the key line whole before ## Steps with
+// The land trailerless Errand body (Spec D6): lead, the key line whole before ## Steps with
 // the MR link after it, one irreversible stamp step checked by mugicrew probe, no Fix:.
 func TestTrailerlessLandBodyCarriesStampStepAndClash(t *testing.T) {
 	clean := trailerlessBody(t, &jinbeSeamRec{}, "Checkpoint: ws-cp", "land")
@@ -3171,5 +3309,113 @@ func TestTrailerlessRevertBodyHasNoClashLine(t *testing.T) {
 	}
 	if strings.Contains(body, "Sequence clash") || strings.Contains(body, "Fix:") || r.clashRead != 0 {
 		t.Errorf("revert body %q carries a clash line or Fix:, clash reads %d", body, r.clashRead)
+	}
+}
+
+// OpenApprovalMR pushes the Approval's pin with the Packet as body, records MR:/MR link:
+// once however often it runs, and spawns the MR Watch (the Landing's later spawn is a no-op).
+func TestOpenApprovalMRRecordsTheMRAndSpawnsTheWatchOnce(t *testing.T) {
+	r := &jinbeSeamRec{landErr: &git.LandPending{MR: 5, WebURL: "https://gl/ns/p/-/merge_requests/5", Opened: true}}
+	stubJinbeSeams(t, r)
+	var got []git.MRPresentation
+	o := pinnedGitlab
+	t.Cleanup(func() { pinnedGitlab = o })
+	pinnedGitlab = func(_ git.Repo, pin string, p git.MRPresentation) git.LandStrategy {
+		got = append(got, p)
+		if pin != "cafef00d" {
+			t.Errorf("pin = %q, want the Approval's", pin)
+		}
+		return func(string, string) (string, error) { return "", r.landErr }
+	}
+	approval := bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp",
+		Description: git.CommitPin("cafef00d") + "\n\n### Decision Packet\nWhy it ships.\n"}
+	for i := 0; i < 2; i++ {
+		if err := OpenApprovalMR(openCheckpoint(), approval, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range got {
+		if p.Draft || !p.Undraft || !strings.Contains(p.Body, "Why it ships.") || !strings.HasSuffix(p.Title, "Ship the thing") {
+			t.Errorf("presentation = %+v, want ready, un-drafting, Packet body, the Landing's subject", p)
+		}
+	}
+	if len(r.spawned) != 1 || r.spawned[0].Kind != contract.KindMRWatch {
+		t.Errorf("spawned = %+v, want one MR Watch", r.spawned)
+	}
+	if len(r.bodies) == 0 || strings.Count(r.bodies[len(r.bodies)-1], "MR: !5") != 1 || !strings.Contains(r.bodies[len(r.bodies)-1], "MR link:") {
+		t.Errorf("bodies = %q, want one MR: !5 and an MR link:", r.bodies)
+	}
+	if err := OpenApprovalMR(openCheckpoint(), approval, true); err != nil || !got[len(got)-1].Draft || got[len(got)-1].Undraft {
+		t.Errorf("draft open: err %v presentation %+v, want Draft", err, got[len(got)-1])
+	}
+}
+
+// The MR Watch is spawned before the MR: line is written: a failed spawn leaves the Approval
+// without the line, so it stays re-dispatchable, and a failed line write leaves the Watch.
+// A Chart's MR body is its Approval's Chart Packet too (pin lines dropped), never the
+// mechanical ChartSummary of its body.
+func TestOpenApprovalMRChartBodyIsTheChartPacket(t *testing.T) {
+	r := &jinbeSeamRec{landErr: &git.LandPending{MR: 5, WebURL: "https://gl/ns/p/-/merge_requests/5", Opened: true}}
+	stubJinbeSeams(t, r)
+	var got []git.MRPresentation
+	o := pinnedGitlab
+	t.Cleanup(func() { pinnedGitlab = o })
+	pinnedGitlab = func(_ git.Repo, _ string, p git.MRPresentation) git.LandStrategy {
+		got = append(got, p)
+		return func(string, string) (string, error) { return "", r.landErr }
+	}
+	chart := bd.Bead{ID: "ws-ch", Kind: contract.KindChart, Status: "open", Title: "Chart it",
+		Description: "## Destination\nSummary-only text.\n"}
+	approval := bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-ch",
+		Description: git.CommitPin("cafef00d") + "\n" + git.PatchIDPin("abc123") + "\n\n## Background\nThe Chart Packet.\n"}
+	if err := OpenApprovalMR(chart, approval, true); err != nil {
+		t.Fatal(err)
+	}
+	b := got[0].Body
+	if !strings.Contains(b, "The Chart Packet.") || strings.Contains(b, "Summary-only") || strings.Contains(b, "Commit:") || strings.Contains(b, "Patch-id:") {
+		t.Errorf("body = %q, want the Chart Packet without pin lines", b)
+	}
+}
+
+func TestOpenApprovalMRSpawnsTheWatchBeforeRecordingTheMRLine(t *testing.T) {
+	approval := bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp",
+		Description: git.CommitPin("cafef00d") + "\n\n### Decision Packet\nWhy it ships.\n"}
+	pending := &git.LandPending{MR: 5, WebURL: "https://gl/ns/p/-/merge_requests/5", Opened: true}
+	t.Run("spawn fails", func(t *testing.T) {
+		r := &jinbeSeamRec{landErr: pending, spawnWatchErr: errors.New("1213 lock retry exhausted")}
+		stubJinbeSeams(t, r)
+		if err := OpenApprovalMR(openCheckpoint(), approval, true); err == nil {
+			t.Fatal("a failed Watch spawn must fail OpenApprovalMR")
+		}
+		if len(r.bodies) != 0 {
+			t.Errorf("bodies = %q, want no MR: line on the Approval", r.bodies)
+		}
+	})
+	t.Run("line write fails", func(t *testing.T) {
+		r := &jinbeSeamRec{landErr: pending, bodyErr: errors.New("write failed")}
+		stubJinbeSeams(t, r)
+		if err := OpenApprovalMR(openCheckpoint(), approval, true); err == nil {
+			t.Fatal("a failed MR: write must fail OpenApprovalMR")
+		}
+		if len(r.spawned) != 1 || r.spawned[0].Kind != contract.KindMRWatch {
+			t.Errorf("spawned = %+v, want the MR Watch to exist", r.spawned)
+		}
+	})
+}
+
+// Spec D2: the call that files a trailerless hold errors once; every later call, under
+// the already-filed hold, returns nil so the held bead stays pending.
+func TestTrailerlessHoldReturnsNilOnceAlreadyFiled(t *testing.T) {
+	stubJinbeSeams(t, &jinbeSeamRec{})
+	hold := func() error {
+		return holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, "Checkpoint: ws-cp", 7, "m3rg3")
+	}
+	if err := hold(); err == nil {
+		t.Fatal("the call that files the hold returned nil")
+	}
+	for i := range 3 {
+		if err := hold(); err != nil {
+			t.Fatalf("call %d under the filed hold = %v, want nil", i+2, err)
+		}
 	}
 }

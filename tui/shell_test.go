@@ -17,6 +17,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/chopper"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/loop"
 )
 
 var mirrorBeads []bd.Bead
@@ -26,15 +27,37 @@ func send(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
 	mirrorBeads = m.beads // the default bd stub mirrors the model, so a Graph-entry reload keeps a fixture
 	if l, ok := msg.(loadedMsg); ok {
 		mirrorBeads = l.beads
+		if l.frontier == nil { // a fixture that names no frontier gets bd ready's reading of its beads
+			l.frontier = fixtureReady(l.beads)
+			msg = l
+		}
 	}
 	next, cmd := m.Update(msg)
 	return next.(Model), cmd
+}
+
+// fixtureReady is the bd ready frontier of beads: open beads with no open Ordering blocker.
+func fixtureReady(beads []bd.Bead) []bd.Bead {
+	open := map[string]bool{}
+	for _, b := range beads {
+		if b.Unclosed() {
+			open[b.ID] = true
+		}
+	}
+	var out []bd.Bead
+	for _, b := range beads {
+		if b.Status == "open" && !slices.ContainsFunc(b.BlockedBy, func(id string) bool { return open[id] }) {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func runeKey(k string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)} }
 
 func sized(t *testing.T, w, h int) Model {
 	t.Helper()
+	t.Cleanup(loop.StubTrees(nil)) // Orphans reads no ambient repo
 	m, _ := send(t, New(nil, nil), tea.WindowSizeMsg{Width: w, Height: h})
 	m.loading = false // idle: Init's startup load has landed
 	return m
@@ -383,6 +406,16 @@ func TestBindingCoverage(t *testing.T) {
 	}
 }
 
+// Ideate's bead rows take every bead verb through the shared router: handled == bound on
+// a Signal, an Initiative header, a drained header and the drained cue row.
+func TestBindingCoverageIdeateBeadRows(t *testing.T) {
+	base, _ := ideaParityModel(t)
+	for _, id := range []string{"loose", "mc-long-22", "pz", "i:d", "h:d"} {
+		m := ideaGo(base, id)
+		checkCoverage(t, "Ideate "+id, m, true, tabDefs[tabIdeate].key, "J", "K", "ctrl+down", "ctrl+up")
+	}
+}
+
 // checkCoverage asserts, over every candidate key, handled == bound in m's mode.
 // own is the digit naming the current tab (bound but a no-op there).
 func checkCoverage(t *testing.T, name string, m Model, checkOwn bool, own ...string) {
@@ -464,7 +497,7 @@ func TestRemainingDialogsRunNoSubprocess(t *testing.T) {
 	log := fakeTools(t)
 	m := sized(t, 120, 40)
 	inv := chopper.Inventory{Files: 2, Tree: "/wt"}
-	m1 := m.push(promptDialog("Recover?", func(w int) []string { return []string{confirmRecoverPrompt("a bead", "dead", inv, w)} }, "b", nil))
+	m1 := m.push(promptDialog("Recover?", func(w int) []string { return []string{confirmRecoverPrompt("a bead", "dead", inv, false, w)} }, "b", nil))
 	m2 := m.push(confirmDialog("Discard changes?", []string{confirmDiscardPrompt(inv)}, "b", nil))
 	m3 := m.push(promptDialog("Drop orphaned worktree?", func(w int) []string { return []string{confirmOrphanPrompt("a bead", "/wt", w)} }, "b", nil))
 	m4, _ := send(t, m, runeKey("$"))

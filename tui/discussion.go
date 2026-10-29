@@ -103,6 +103,9 @@ func (m Model) discussionsOpen() (tea.Model, tea.Cmd) {
 func (m Model) discussionNew() (Model, tea.Cmd) {
 	title := "Discussion " + time.Now().Format("2006-01-02 15:04")
 	return m, func() tea.Msg {
+		if err := refuseLegacy(); err != nil { // before filing: a refusal leaves no unlaunched bead
+			return discussionCreatedMsg{err: err}
+		}
 		id, err := newDiscussion(title, "A Robin discussion: read-only Q&A about the Workspace, started from the TUI.")
 		return discussionCreatedMsg{b: bd.Bead{ID: id, Kind: contract.KindDiscussion, Status: "open", Title: title}, err: err}
 	}

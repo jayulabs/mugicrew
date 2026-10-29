@@ -23,14 +23,14 @@ var (
 	landedOnMainline = luffy.HostLanded
 )
 
-// raiseSession is a Signal's or Task's publish plan when it has raise Drafts (pivot or
+// raiseSession is a Signal's or Errand's publish plan when it has raise Drafts (pivot or
 // Critique Drafts); recorded merges alone are a leftover and are ignored unless their
 // lineage edges already exist (mergesOnlyPlan) (Spec decisions 4 and 6, ADR 0323 §2, §3,
 // ADR 0326 §4):
 // it re-reads each host, re-checks it, and hands the gate edges of every pivot Draft
 // carrying raise_checkpoint, whoever drafted it, and each merge's lineage edge (all
 // filtered by HasEdge). A Signal also gets the close rerouted: <ids>, handed only when
-// it is not already closed, so a re-publish converges; a Task is never closed (ADR 0326
+// it is not already closed, so a re-publish converges; an Errand is never closed (ADR 0326
 // §6). ok is false when the creator has no raise Draft.
 func raiseSession(creator bd.Bead) (plan publishPlan, ok bool, err error) {
 	drafts, err := listDrafts(creator.ID)
@@ -95,7 +95,7 @@ func raiseSession(creator bd.Bead) (plan publishPlan, ok bool, err error) {
 }
 
 // lineage is the edge type a merged-into pivot carries to its raise's creator: caused-by
-// a Signal, discovered-from a Task (ADR 0326 §5).
+// a Signal, discovered-from an Errand (ADR 0326 §5).
 func lineage(creator bd.Bead) string {
 	if creator.Kind == contract.KindSignal {
 		return "caused-by"
@@ -132,13 +132,13 @@ func recheckHost(id string) (host bd.Bead, spec string, err error) {
 }
 
 // postMerges posts each merge's evidence as a comment on its pivot once the batch has
-// landed. The first line is the marker "Rerouted from <signal>" or "Raised by Task
-// <task>"; a pivot already carrying it is skipped, so a re-publish re-posts a lost
+// landed. The first line is the marker "Rerouted from <signal>" or "Raised by Errand
+// <errand>"; a pivot already carrying it is skipped, so a re-publish re-posts a lost
 // comment and never doubles one.
 func postMerges(creator bd.Bead, merges []luffy.RaiseMerge) error {
 	marker := "Rerouted from " + creator.ID
-	if creator.Kind == contract.KindTask {
-		marker = "Raised by Task " + creator.ID
+	if creator.Kind == contract.KindErrand {
+		marker = "Raised by Errand " + creator.ID
 	}
 	for _, m := range merges {
 		cs, err := commentsOf(m.Pivot)

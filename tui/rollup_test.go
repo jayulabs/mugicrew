@@ -57,7 +57,7 @@ func TestRollupWords(t *testing.T) {
 		{"approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip))}, nil, nil, "approved", 10, ""},
 		{"review due", at, []bd.Bead{k("m", contract.KindBuild, "closed")}, nil, nil, "review due", 11, ""},
 		{"cut", at, nil, nil, nil, "cut", 12, ""},
-		{"cut with only a task", at, []bd.Bead{k("t", contract.KindTask, "closed")}, nil, nil, "cut", 12, ""},
+		{"cut with only an errand", at, []bd.Bead{k("t", contract.KindErrand, "closed")}, nil, nil, "cut", 12, ""},
 		// precedence pairs from the prototype replay
 		{"fixing beats in review", at, []bd.Bead{k("c", contract.KindCritique, "open"), k("r", contract.KindReview, "open")}, nil, nil, "fixing", 6, "in review"},
 		{"landing beats approved", at, []bd.Bead{k("l", contract.KindLanding, "open"), k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip))}, nil, nil, "landing", 3, ""},

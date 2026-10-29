@@ -149,8 +149,10 @@ type MR struct {
 	IID                 int       `json:"iid"`
 	State               string    `json:"state"`
 	Title               string    `json:"title"`
+	Draft               bool      `json:"draft"` // GitLab's own flag; never keyed on the title or detailed_merge_status
 	Description         string    `json:"description"`
 	DetailedMergeStatus string    `json:"detailed_merge_status"` // decoded so tests prove conflict is never keyed on it (Spec FR 24–26)
+	MergeStatus         string    `json:"merge_status"`          // raw and deprecated, kept apart from detailed_merge_status: its transients say a conflict read is not fresh (Spec D1)
 	HasConflicts        bool      `json:"has_conflicts"`
 	MergeError          string    `json:"merge_error"`
 	SquashCommitSHA     string    `json:"squash_commit_sha"`
@@ -400,6 +402,12 @@ func Reply(p Project, iid int, discussionID, body string) error {
 	return err
 }
 
+// CommentMR posts a plain comment on merge request iid.
+func CommentMR(p Project, iid int, body string) error {
+	_, err := callField(p, "POST", fmt.Sprintf("merge_requests/%d/notes", iid), "body", body)
+	return err
+}
+
 // Resolve marks the discussion resolved; resolving a resolved one is harmless.
 func Resolve(p Project, iid int, discussionID string) error {
 	_, err := call(p, "PUT", fmt.Sprintf("merge_requests/%d/discussions/%s?resolved=true", iid, discussionID), "")
@@ -431,10 +439,23 @@ func FindOpenMR(p Project, branch string) (*MR, error) {
 	return &mrs[0], nil
 }
 
-// CreateMR opens a squash-on merge request from branch into target. A 409 is
-// ErrDuplicate: another tick won the race, so re-list. A non-zero assigneeID is sent
-// as assignee_id in the same POST.
-func CreateMR(p Project, branch, target, title, description string, assigneeID int) (*MR, error) {
+// DraftPrefix is the title prefix GitLab reads as Draft: its REST API has no draft
+// parameter on create or update.
+const DraftPrefix = "Draft: "
+
+// DraftTitle is subject as a Draft's title when draft, else the bare subject.
+func DraftTitle(subject string, draft bool) string {
+	if draft {
+		return DraftPrefix + subject
+	}
+	return subject
+}
+
+// CreateMR opens a squash-on merge request from branch into target, as a GitLab Draft
+// when draft (the title carries DraftPrefix). A 409 is ErrDuplicate: another tick won
+// the race, so re-list. A non-zero assigneeID is sent as assignee_id in the same POST.
+func CreateMR(p Project, branch, target, title, description string, assigneeID int, draft bool) (*MR, error) {
+	title = DraftTitle(title, draft)
 	fields := []string{"-f", "source_branch=" + branch, "-f", "target_branch=" + target, "-f", "title=" + title, "-F", "squash=true"}
 	if assigneeID != 0 {
 		fields = append(fields, "-F", fmt.Sprintf("assignee_id=%d", assigneeID))
@@ -465,6 +486,14 @@ func SetMR(p Project, iid int, title, description string) error {
 		return &Error{Msg: "empty merge request description"}
 	}
 	_, err := call(p, "PUT", fmt.Sprintf("merge_requests/%d", iid), description, "-f", "title="+title)
+	return err
+}
+
+// SetDraft sets or clears the merge request's GitLab Draft state by rewriting only its
+// title from the known subject ("Draft: <subject>" or the bare subject): no description
+// is sent, so it is not SetMR.
+func SetDraft(p Project, iid int, subject string, draft bool) error {
+	_, err := call(p, "PUT", fmt.Sprintf("merge_requests/%d", iid), "", "-f", "title="+DraftTitle(subject, draft))
 	return err
 }
 
@@ -511,13 +540,13 @@ type ProjectRefusal struct {
 	Field, Value, Fix string
 }
 
-// Wrong is what is wrong with the project, without the fix or the README pointer.
+// Wrong is what is wrong with the project, without the fix or the docs pointer.
 func (e *ProjectRefusal) Wrong() string {
 	return fmt.Sprintf("project %s is %q", e.Field, e.Value)
 }
 
 func (e *ProjectRefusal) Error() string {
-	return fmt.Sprintf("forge: project %s is %q: %s (README, \"GitLab land strategy\")", e.Field, e.Value, e.Fix)
+	return fmt.Sprintf("forge: project %s is %q: %s (docs/gitlab.md)", e.Field, e.Value, e.Fix)
 }
 
 // ValidateSettings refuses a project whose squash_commit_template lacks

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/jira"
 )
@@ -30,9 +31,10 @@ var (
 	keyMoveUD   = key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("↑/↓", "move")) // the picker's keyDown/keyUp pair
 )
 
-// newOpts builds the menu's rows in the fixed order s, j, i, u, r, d; the j row shows only
+// newOpts builds the menu's rows in the fixed order s, j, i, u, r, t, d; the j row shows only
 // with a [jira] site, the u row only when its target list is not empty and the r row only
-// when the selection captured at open is an open Chart or Checkpoint (ADR 0241 §3).
+// when the selection captured at open is an open Chart or Checkpoint and the t row only
+// when it is a Signal, Chart, Spec, Checkpoint or Initiative (ADR 0241 §3).
 func (m Model) newOpts() []gotoOpt {
 	cp, ini := m.surgeryContext() // captured at open, so the form's default pick is where the human was
 	opts := []gotoOpt{
@@ -56,6 +58,17 @@ func (m Model) newOpts() []gotoOpt {
 	if sel := m.selection(); sel != nil && canRebase(sel) {
 		id := sel.ID // pinned at open, like the Surgery row
 		opts = append(opts, gotoOpt{keys: []string{"r"}, desc: "New rebase request", run: func(m Model) (Model, tea.Cmd) { return m.rebaseRequest(id) }})
+	}
+	if sel := m.selection(); canRetro(sel) {
+		id := sel.ID // pinned at open, so a reload can't redirect it
+		opts = append(opts, gotoOpt{keys: []string{"t"}, desc: "New retrospective", run: func(m Model) (Model, tea.Cmd) {
+			var b *bd.Bead
+			if i := m.gateData().beadIndex(id); i >= 0 {
+				b = &m.beads[i] // a vanished bead stays nil: retrospective answers it
+			}
+			next, cmd := m.retrospective(b)
+			return next.(Model), cmd
+		}})
 	}
 	return append(opts, gotoOpt{keys: []string{"d"}, desc: "New Discussion", run: func(m Model) (Model, tea.Cmd) { return m.discussionNew() }})
 }

@@ -20,7 +20,7 @@ import (
 // outside a git checkout and blind to the host repo's effort/* branches; a test
 // that wants refs sets its own.
 func TestMain(m *testing.M) {
-	effortRefs = func() (map[string]bool, error) { return nil, nil }
+	effortRefs = func() (*git.EffortSet, error) { return nil, nil }
 	os.Exit(m.Run())
 }
 
@@ -168,8 +168,41 @@ func TestPausedListArgv(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].Parent != "mc-0" {
 		t.Fatalf("PausedList = %+v, %v", got, err)
 	}
-	if want := []string{"list", "--all", "--json", "-n", "0", "--label-pattern", "paused:*"}; !reflect.DeepEqual(argv, want) {
+	if want := []string{"list", "--all", "-n", "0", "--label-pattern", "paused:*", "--json"}; !reflect.DeepEqual(argv, want) {
 		t.Errorf("argv = %v, want %v", argv, want)
+	}
+}
+
+// Ready reads the whole frontier: -n 0 lifts bd's silent 100-row default cap.
+func TestReadyArgv(t *testing.T) {
+	var argv []string
+	orun := run
+	t.Cleanup(func() { run = orun })
+	run = func(args ...string) (string, error) {
+		argv = args
+		return `[{"id":"mc-1"},{"id":"mc-2"}]`, nil
+	}
+	got, err := Ready()
+	if err != nil || len(got) != 2 || got[1].ID != "mc-2" {
+		t.Fatalf("Ready = %+v, %v", got, err)
+	}
+	if want := []string{"ready", "-n", "0", "--json"}; !reflect.DeepEqual(argv, want) {
+		t.Errorf("argv = %v, want %v", argv, want)
+	}
+}
+
+// unmet ranks below not-built and above failing, and its note names the two fixes.
+func TestPausedUnmetRankAndNote(t *testing.T) {
+	b := Bead{Labels: []string{"paused:failing", "paused:unmet", "paused:not-built"}}
+	if got, want := PausedCauses(b), []string{PausedNotBuilt, PausedUnmet, PausedFailing}; !slices.Equal(got, want) {
+		t.Errorf("PausedCauses = %q, want %q", got, want)
+	}
+	if n := PauseNote(b, PausedUnmet); !strings.Contains(n, "watched MR is closed or missing — reopen it and run-now, or withdraw the latch") {
+		t.Errorf("PauseNote = %q", n)
+	}
+	b.Description = "Watches: mr gitlab.com/grp/sub/proj!7\n\ntitle"
+	if n := PauseNote(b, PausedUnmet); !strings.HasSuffix(n, ": mr gitlab.com/grp/sub/proj!7") {
+		t.Errorf("PauseNote = %q, want it to name the MR", n)
 	}
 }
 
@@ -263,7 +296,9 @@ func TestClosedChildWithEffortRefUndrains(t *testing.T) {
 		return `[{"id":"mc-1.1","title":"landed","status":"closed","labels":["kind:research"],"parent":"mc-1"},
 		         {"id":"mc-1.2","title":"unintegrated","status":"closed","labels":["kind:research"],"parent":"mc-1"}]`, nil
 	}
-	effortRefs = func() (map[string]bool, error) { return map[string]bool{"mc-1.2": true, "mc-9": true}, nil }
+	effortRefs = func() (*git.EffortSet, error) {
+		return &git.EffortSet{Branches: map[string]bool{"mc-1.2": true, "mc-9": true}}, nil
+	}
 	if n, err := OpenChildren("mc-1", nil); err != nil || n != 1 {
 		t.Errorf("OpenChildren = %d, %v; want 1 (mc-1.2 holds effort/mc-1.2)", n, err)
 	}
@@ -529,7 +564,7 @@ func TestReviewDue(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		kids    []string
-		efforts map[string]bool
+		efforts *git.EffortSet
 		pivots  string
 		want    bool
 	}{
@@ -539,7 +574,8 @@ func TestReviewDue(t *testing.T) {
 		{"open review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("r1", "open", contract.KindReview, "")}, nil, "[]", false},
 		{"open forge review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("f1", "open", contract.KindForgeReview, "")}, nil, "[]", false},
 		{"closed forge review", []string{kid("b1", "closed", contract.KindBuild, ""), kid("f1", "closed", contract.KindForgeReview, "")}, nil, "[]", true},
-		{"closed child with live ref", []string{kid("b1", "closed", contract.KindBuild, "")}, map[string]bool{"b1": true}, "[]", false},
+		{"closed child with live ref", []string{kid("b1", "closed", contract.KindBuild, "")}, &git.EffortSet{Branches: map[string]bool{"b1": true}}, "[]", false},
+		{"closed child with integrated ref", []string{kid("b1", "closed", contract.KindBuild, "")}, &git.EffortSet{Branches: map[string]bool{"b1": true}, Integrated: map[string]bool{"b1": true}}, "[]", true},
 		{"open pivot", []string{kid("b1", "closed", contract.KindBuild, "")}, nil,
 			`[{"id":"p1","status":"open","labels":["kind:pivot"]}]`, false},
 		{"approved approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", "approved")}, nil, "[]", false},
@@ -557,7 +593,7 @@ func TestReviewDue(t *testing.T) {
 			}
 			return tc.pivots, nil
 		}
-		effortRefs = func() (map[string]bool, error) { return tc.efforts, nil }
+		effortRefs = func() (*git.EffortSet, error) { return tc.efforts, nil }
 		if got, err := ReviewDue("ws-cp", nil, atHead); err != nil || got != tc.want {
 			t.Errorf("%s: ReviewDue = %v, %v; want %v", tc.name, got, err, tc.want)
 		}
@@ -672,7 +708,7 @@ func TestNestedClosedEffortHoldsTheContainer(t *testing.T) {
 	t.Chdir(ws)
 
 	refs, err := EffortRefsAcross()
-	if err != nil || !refs["mc-1.2"] {
+	if err != nil || !refs.Branches["mc-1.2"] {
 		t.Fatalf("EffortRefsAcross = %v, %v; want mc-1.2 from the child", refs, err)
 	}
 	orun := run
@@ -703,7 +739,7 @@ func TestEffortRefsAcrossSkipsAbsentChild(t *testing.T) {
 	t.Chdir(ws)
 
 	refs, err := EffortRefsAcross()
-	if err != nil || !refs["mc-1.1"] {
+	if err != nil || !refs.Branches["mc-1.1"] {
 		t.Fatalf("EffortRefsAcross = %v, %v; want mc-1.1 from the Workspace", refs, err)
 	}
 }
@@ -716,8 +752,8 @@ func TestDrainBlockersWithAGivenSetReadsNoRefs(t *testing.T) {
 	run = func(...string) (string, error) {
 		return `[{"id":"mc-1.1","title":"x","status":"closed","labels":["kind:build"],"parent":"mc-1"}]`, nil
 	}
-	effortRefs = func() (map[string]bool, error) { t.Error("effortRefs read despite a given set"); return nil, nil }
-	if open, held, err := DrainBlockers("mc-1", map[string]bool{}); err != nil || open != 0 || len(held) != 0 {
+	effortRefs = func() (*git.EffortSet, error) { t.Error("effortRefs read despite a given set"); return nil, nil }
+	if open, held, err := DrainBlockers("mc-1", git.NewEffortSet()); err != nil || open != 0 || len(held) != 0 {
 		t.Errorf("DrainBlockers = %d, %v, %v; want none", open, held, err)
 	}
 }
@@ -786,7 +822,7 @@ func TestRefsAcrossReadsCheckpointTipsPerRepo(t *testing.T) {
 	t.Chdir(ws)
 
 	efforts, tips, err := RefsAcross()
-	if err != nil || !efforts["mc-1.1"] || len(efforts) != 1 {
+	if err != nil || !efforts.Branches["mc-1.1"] || len(efforts.Branches) != 1 {
 		t.Fatalf("efforts = %v, %v", efforts, err)
 	}
 	want := map[string]string{"mc-1": g(ws, "rev-parse", "checkpoint/mc-1"), "mc-2.1": g(child, "rev-parse", "checkpoint/mc-2.1")}
@@ -841,7 +877,7 @@ func TestInitiativesByRef(t *testing.T) {
 	if err != nil || len(hits) != 1 || hits[0].ID != "a" {
 		t.Fatalf("hits = %+v, %v; want only a", hits, err)
 	}
-	if want := []string{"list", "--external-ref", "PROJ-1", "--all", "-n", "0", "--json"}; !slices.Equal(got, want) {
+	if want := []string{"list", "--all", "-n", "0", "--external-ref", "PROJ-1", "--json"}; !slices.Equal(got, want) {
 		t.Errorf("argv = %v, want %v", got, want)
 	}
 }
@@ -862,7 +898,7 @@ func TestLatchOfIgnoresClosedAndOtherKinds(t *testing.T) {
 	if err != nil || !ok || got.ID != "mc-l" {
 		t.Fatalf("LatchOf = %+v, %v, %v", got, ok, err)
 	}
-	if want := []string{"list", "--external-ref", "jira-latch-ABC-1", "--json"}; !reflect.DeepEqual(argv, want) {
+	if want := []string{"list", "-n", "50", "--external-ref", "jira-latch-ABC-1", "--json"}; !reflect.DeepEqual(argv, want) {
 		t.Errorf("argv = %v, want %v", argv, want)
 	}
 	run = func(...string) (string, error) {
@@ -875,10 +911,10 @@ func TestLatchOfIgnoresClosedAndOtherKinds(t *testing.T) {
 
 // A nested container's foreign-land hold names whose mainline holds it; a Workspace one doesn't.
 func TestHoldForeignNamesTheNestedContext(t *testing.T) {
-	o := SpawnBlockingTask
-	t.Cleanup(func() { SpawnBlockingTask = o })
+	o := SpawnBlockingErrand
+	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingTask = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Labels: []string{"context:kid", "repo:kid"}}, f)
 	if !strings.HasPrefix(body, `Mainline of context kid holds "Checkpoint: x"`) {
@@ -1000,8 +1036,8 @@ var defaultSetFixture = []fixtureIssue{
 	{id: "open-cp.land", label: "kind:landing", status: "closed", reason: "landed: x", parent: "open-cp", closedAgo: 900},
 	{id: "open-init", label: "kind:initiative", status: "open"},
 	{id: "open-init.1", label: "kind:chart", status: "closed", parent: "open-init", closedAgo: 900},
-	{id: "open-task", label: "kind:task", status: "in_progress"},
-	{id: "old-closed", label: "kind:task", status: "closed", closedAgo: 900},
+	{id: "open-errand", label: "kind:errand", status: "in_progress"},
+	{id: "old-closed", label: "kind:errand", status: "closed", closedAgo: 900},
 	{id: "closed-init", label: "kind:initiative", status: "closed", closedAgo: 900},
 	{id: "closed-init.1", label: "kind:build", status: "closed", parent: "closed-init", closedAgo: 900},
 	{id: "in-chart", label: "kind:chart", status: "closed", closedAgo: 23},
@@ -1071,7 +1107,7 @@ func TestDefaultSetClientSideComputation(t *testing.T) {
 	want := []string{
 		"closed-init", "closed-init.1", "in-chart", "in-chart.1", "in-landing", "in-spec",
 		"old-cp", "open-chart", "open-chart.1", "open-cp", "open-cp.1", "open-cp.land",
-		"open-init", "open-init.1", "open-task", "swept-cp", "swept-cp.w",
+		"open-errand", "open-init", "open-init.1", "swept-cp", "swept-cp.w",
 	}
 	if got := defaultSetOf(defaultSetFixture); !slices.Equal(got, want) {
 		t.Errorf("default set\n got %v\nwant %v", got, want)
@@ -1219,7 +1255,7 @@ func TestNewCheckup(t *testing.T) {
 func TestOpenCheckupOn(t *testing.T) {
 	beads := []Bead{
 		{ID: "a", Kind: contract.KindCheckup, Status: "open", Related: []string{"other"}},
-		{ID: "b", Kind: contract.KindTask, Status: "open", Related: []string{"t"}},
+		{ID: "b", Kind: contract.KindErrand, Status: "open", Related: []string{"t"}},
 		{ID: "c", Kind: contract.KindCheckup, Status: "closed", Related: []string{"t"}},
 		{ID: "d", Kind: contract.KindCheckup, Status: "in_progress", Related: []string{"t"}},
 	}
@@ -1238,45 +1274,45 @@ func TestPausedCheckupRanksAfterRecovering(t *testing.T) {
 	}
 }
 
-// TaskChildren counts a Spec's kind:task dependents over discovered-from in every
-// status, and ignores a non-task row (a Signal) on the same edge.
-func TestTaskChildrenCountsTasksInEveryStatus(t *testing.T) {
+// ErrandChildren counts a Spec's kind:errand dependents over discovered-from in every
+// status, and ignores a non-errand row (a Signal) on the same edge.
+func TestErrandChildrenCountsErrandsInEveryStatus(t *testing.T) {
 	old := run
 	t.Cleanup(func() { run = old })
 	var got []string
 	run = func(args ...string) (string, error) {
 		got = args
 		return `[
-			{"id":"t1","status":"deferred","labels":["kind:task"]},
-			{"id":"t2","status":"open","labels":["kind:task"]},
-			{"id":"t3","status":"closed","labels":["kind:task"]},
+			{"id":"t1","status":"deferred","labels":["kind:errand"]},
+			{"id":"t2","status":"open","labels":["kind:errand"]},
+			{"id":"t3","status":"closed","labels":["kind:errand"]},
 			{"id":"s1","status":"open","labels":["kind:signal"]}]`, nil
 	}
-	n, err := TaskChildren("spec-1")
+	n, err := ErrandChildren("spec-1")
 	if err != nil || n != 3 {
-		t.Fatalf("TaskChildren = %d, %v; want 3", n, err)
+		t.Fatalf("ErrandChildren = %d, %v; want 3", n, err)
 	}
 	if want := []string{"dep", "list", "spec-1", "--direction=up", "--json", "-t", "discovered-from"}; !slices.Equal(got, want) {
 		t.Errorf("argv = %v, want %v", got, want)
 	}
 }
 
-func TestTaskChildrenPropagatesListError(t *testing.T) {
+func TestErrandChildrenPropagatesListError(t *testing.T) {
 	old := run
 	t.Cleanup(func() { run = old })
 	run = func(...string) (string, error) { return "", errors.New("boom") }
-	if _, err := TaskChildren("spec-1"); err == nil {
+	if _, err := ErrandChildren("spec-1"); err == nil {
 		t.Error("a failing dep list must error")
 	}
 }
 
-// The foreign-land Hold Task body (Spec D8): lead, the Foreign: key line whole before
+// The foreign-land Hold Errand body (Spec D8): lead, the Foreign: key line whole before
 // ## Steps, then the three steps with markers and the probe Check, and no Fix: line.
 func TestHoldForeignBodyCarriesSteps(t *testing.T) {
-	o := SpawnBlockingTask
-	t.Cleanup(func() { SpawnBlockingTask = o })
+	o := SpawnBlockingErrand
+	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingTask = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Kind: "checkpoint"}, f)
 	lines := strings.Split(body, "\n")
@@ -1291,7 +1327,7 @@ func TestHoldForeignBodyCarriesSteps(t *testing.T) {
 		"Check: `mugicrew probe mr --branch checkpoint/cp` prints `none`.",
 		"Do: run `mugicrew loop stop`.",
 		"Ask: is the loop stopped?",
-		"Ask: will you run the rename, the branch re-cuts and the loop restart after this Task closes?",
+		"Ask: will you run the rename, the branch re-cuts and the loop restart after this Errand closes?",
 		"`bd rename-prefix`",
 		"`mugicrew probe foreign`",
 	} {
@@ -1306,13 +1342,45 @@ func TestHoldForeignBodyCarriesSteps(t *testing.T) {
 
 // A nested container's foreign-land body names its context on the probe foreign hint.
 func TestHoldForeignNestedHintsContext(t *testing.T) {
-	o := SpawnBlockingTask
-	t.Cleanup(func() { SpawnBlockingTask = o })
+	o := SpawnBlockingErrand
+	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingTask = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Kind: "checkpoint", Labels: []string{"context:nest", "repo:nest"}}, f)
 	if !strings.Contains(body, "`mugicrew probe foreign --context nest`") {
 		t.Errorf("body %q lacks the --context hint", body)
+	}
+}
+
+func TestNewLatchArgsCarryBlocksRefAndDraftedBy(t *testing.T) {
+	args := newLatchArgs("t", "b", "jira-latch-ABC-1", "ws-me", []string{"ws-a", "ws-b"})
+	i := slices.Index(args, "--deps")
+	if i < 0 || args[i+1] != "blocks:ws-a,blocks:ws-b" {
+		t.Errorf("args = %v, want --deps blocks:ws-a,blocks:ws-b", args)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--external-ref jira-latch-ABC-1", "drafted-by:ws-me", "kind:latch", "--status deferred", "--no-inherit-labels"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, args)
+		}
+	}
+	if plain := strings.Join(newLatchArgs("t", "b", "r", "", []string{"ws-a"}), " "); strings.Contains(plain, "drafted-by") {
+		t.Errorf("no draftedBy still labelled: %s", plain)
+	}
+}
+
+// Spec D2: HoldForeign returns the refusal on the call that files the Errand and nil once it exists.
+func TestHoldForeignReturnsNilOnceAlreadyFiled(t *testing.T) {
+	o := SpawnBlockingErrand
+	t.Cleanup(func() { SpawnBlockingErrand = o })
+	created := true
+	SpawnBlockingErrand = func(_, _, _, _ string) (string, bool, error) { c := created; created = false; return "t", c, nil }
+	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
+	if err := HoldForeign(Bead{ID: "cp"}, f); err != error(f) {
+		t.Fatalf("first call = %v, want the refusal", err)
+	}
+	if err := HoldForeign(Bead{ID: "cp"}, f); err != nil {
+		t.Fatalf("second call = %v, want nil", err)
 	}
 }

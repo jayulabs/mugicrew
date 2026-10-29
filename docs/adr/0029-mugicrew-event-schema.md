@@ -68,6 +68,7 @@ failed-session stderr-tail research §5).
    | `hitl.resumed` | Info | `session` |
    | `hitl.failed` | Error | `session`, `exit`, `signal`, `dur_ms`, `err` |
    | `hitl.continued` | Info | `session` (join to its `hitl.exited`), `continued_in`, `tail_ms`; `cost_known=true` + remainder `cost_usd`/`api_ms`/`models`, or `cost_known=false` + `reason` (`timeout`/`not_found`); written late by the detached `hitl-follow` (ADR 0254), never a session end |
+   | `tmux.mouse.failed` | Warn | `on`, `err` (the TUI's `set-option mouse` on its own session failed; swallowed) |
    | `hitl.dropped` | Info | `session`, `state` (`alive`/`exited`), `err` |
    | `claim.taken` / `.released` | Info | `by` |
    | `claim.failed` | Error | `by`, `err` |
@@ -116,7 +117,7 @@ failed-session stderr-tail research §5).
    | `run.failed` | Error | (common attrs); `effort`, `err` (a run-now host never reached Dispatch, `proc` run: bad `--lock-fd`, failed re-read; or the TUI's `Start` of the host failed, `proc` tui; Logs tab only, ADR 0331) |
    | `effort.abandoned` | Warn | (common attrs; claim not released, `proc` loop or tui); `paused` (did its `paused:abandoned` write land, ADR 0082), `error` when it didn't |
    | `effort.aborted` | Warn | (common attrs); `by` (cli or tui), `pids` (the liveness scan's matches, before the SIGTERM), `paused` (always true: logged only after the `paused:manual` write lands, ADR 0083) |
-   | `recover.done` | Info | (common attrs); `verdict` (`dead`, `ambiguous-resolved` or `forced`), `rebase_aborted` (it aborted a rebase stopped in the tree), `tree` (the dropped effort tree, "" none), `discarded` (it held uncommitted files), `drafts` (Draft ids deleted), `unclaimed`, `lifted` (pause causes lifted), `remaining` (pause causes left: manual, integrate-conflict) (ADR 0127 §10) |
+   | `recover.done` | Info | (common attrs); `verdict` (`dead` or `forced`), `rebase_aborted` (it aborted a rebase stopped in the tree), `tree` (the dropped effort tree, "" none), `discarded` (it held uncommitted files), `drafts` (Draft ids deleted), `unclaimed`, `lifted` (pause causes lifted), `remaining` (pause causes left: manual, integrate-conflict) (ADR 0127 §10) |
    | `recover.refused` | Warn | (common attrs); `reason` (the refusal and its way out) |
    | `recover.failed` | Error | (common attrs); `step` (check, fence, re-check, abort rebase, drop tree, delete Drafts, unclaim, lift <cause>), `error`; `paused:recovering` stays |
    | `build.started` | Info | `rev` (ADR 0062 §8) |

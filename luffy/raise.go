@@ -20,9 +20,9 @@ const leg = "pivot raise"
 // fallback is what every refusal of `pivot raise` tells Brook to do.
 const fallback = "fall back to the offshoot Signal"
 
-// heldUp lists the beads a Task blocks (its up blocks edges); a seam so the probe's
-// tests script the Task's graph.
-var heldUp = func(task string) ([]bd.Bead, error) { return bd.LiveHeldReads(nil).Up(task) }
+// heldUp lists the beads an Errand blocks (its up blocks edges); a seam so the probe's
+// tests script the Errand's graph.
+var heldUp = func(errand string) ([]bd.Bead, error) { return bd.LiveHeldReads(nil).Up(errand) }
 
 // heldReads are bd.HeldReads over this package's seams: the same show, SpecOf and
 // landed-by-trailer reads the reroute's CheckHost makes.
@@ -52,38 +52,38 @@ func (r RaiseRequest) None() bool {
 
 // raiseTarget is what `pivot raise` resolves before it names or writes anything.
 type raiseTarget struct {
-	task bd.Bead
-	host bd.Bead
-	spec string
+	errand bd.Bead
+	host   bd.Bead
+	spec   string
 }
 
-// raiseTask is the Task a raise is for: an open kind:task. Every refusal says to fall
+// raiseErrand is the Errand a raise is for: an open kind:errand. Every refusal says to fall
 // back to the offshoot Signal.
-func raiseTask(taskID string) (bd.Bead, error) {
-	task, err := show(taskID)
+func raiseErrand(errandID string) (bd.Bead, error) {
+	errand, err := show(errandID)
 	if err != nil {
 		return bd.Bead{}, err
 	}
 	switch {
-	case task.Kind != contract.KindTask:
-		return bd.Bead{}, refuseRaise(leg, "%s is kind %q, not a task", taskID, task.Kind)
-	case !task.Open():
-		return bd.Bead{}, refuseRaise(leg, "task %s is not open (status %q)", taskID, task.Status)
+	case errand.Kind != contract.KindErrand:
+		return bd.Bead{}, refuseRaise(leg, "%s is kind %q, not an Errand", errandID, errand.Kind)
+	case !errand.Open():
+		return bd.Bead{}, refuseRaise(leg, "errand %s is not open (status %q)", errandID, errand.Status)
 	}
-	return task, nil
+	return errand, nil
 }
 
-// resolveRaise is the held-Checkpoint resolver and the Landing refusal over an open Task
+// resolveRaise is the held-Checkpoint resolver and the Landing refusal over an open Errand
 // (Spec FR 2–5). Its order: the resolver, then the Landing refusal.
-func resolveRaise(task bd.Bead) (raiseTarget, error) {
-	host, spec, err := bd.HeldCheckpoint(task.ID, heldReads())
+func resolveRaise(errand bd.Bead) (raiseTarget, error) {
+	host, spec, err := bd.HeldCheckpoint(errand.ID, heldReads())
 	var several *bd.SeveralHeldError
 	var noSpec *bd.NoSpecError
 	switch {
 	case errors.Is(err, bd.ErrNoHeldCheckpoint):
-		return raiseTarget{}, refuseRaise(leg, "task %s %s (none is open, or its land is already on mainline)", task.ID, err)
+		return raiseTarget{}, refuseRaise(leg, "errand %s %s (none is open, or its land is already on mainline)", errand.ID, err)
 	case errors.As(err, &several), errors.As(err, &noSpec):
-		return raiseTarget{}, refuseRaise(leg, "task %s %s", task.ID, err)
+		return raiseTarget{}, refuseRaise(leg, "errand %s %s", errand.ID, err)
 	case err != nil:
 		return raiseTarget{}, err
 	}
@@ -94,25 +94,25 @@ func resolveRaise(task bd.Bead) (raiseTarget, error) {
 	if slices.ContainsFunc(landings, bd.Bead.Unclosed) {
 		return raiseTarget{}, refuseRaise(leg, "checkpoint %s is landing; a raise never freezes code that is landing", host.ID)
 	}
-	return raiseTarget{task: task, host: host, spec: spec}, nil
+	return raiseTarget{errand: errand, host: host, spec: spec}, nil
 }
 
-// ProbeRaise is a flagless `mugicrew pivot raise <task>` (Spec FR 2–8): when the Task
+// ProbeRaise is a flagless `mugicrew pivot raise <errand>` (Spec FR 2–8): when the Errand
 // has raise Drafts it reports them and their Checkpoint; otherwise it names the one
-// open, unlanded Checkpoint the Task holds, its Spec and its branch, with the MR warning
+// open, unlanded Checkpoint the Errand holds, its Spec and its branch, with the MR warning
 // and Surgery note ADR 0324 §3–4 give a reroute, or returns the reason a raise is
 // refused. It writes nothing.
-func ProbeRaise(taskID string, w io.Writer) error {
-	task, err := raiseTask(taskID)
+func ProbeRaise(errandID string, w io.Writer) error {
+	errand, err := raiseErrand(errandID)
 	if err != nil {
 		return err
 	}
-	if drafts, err := raiseDrafts(task); err != nil {
+	if drafts, err := raiseDrafts(errand); err != nil {
 		return err
 	} else if len(drafts) > 0 {
-		return reportRaise(task, drafts, w)
+		return reportRaise(errand, drafts, w)
 	}
-	t, err := resolveRaise(task)
+	t, err := resolveRaise(errand)
 	if err != nil {
 		return err
 	}
@@ -127,19 +127,19 @@ func ProbeRaise(taskID string, w io.Writer) error {
 	return nil
 }
 
-// raiseDrafts is the Task's raise Drafts: its pivot Drafts carrying raise_checkpoint and
+// raiseDrafts is the Errand's raise Drafts: its pivot Drafts carrying raise_checkpoint and
 // its Critique Drafts.
-func raiseDrafts(task bd.Bead) ([]bd.Bead, error) {
-	drafts, err := draftsOf(task.ID)
+func raiseDrafts(errand bd.Bead) ([]bd.Bead, error) {
+	drafts, err := draftsOf(errand.ID)
 	if err != nil {
 		return nil, err
 	}
-	pivots, critiques := RaiseDrafts(task, drafts)
+	pivots, critiques := RaiseDrafts(errand, drafts)
 	return append(pivots, critiques...), nil
 }
 
 // reportRaise lists the raise Drafts a flagless run finds and the Checkpoint they name.
-func reportRaise(task bd.Bead, drafts []bd.Bead, w io.Writer) error {
+func reportRaise(errand bd.Bead, drafts []bd.Bead, w io.Writer) error {
 	var pivots, critiques []bd.Bead
 	for _, d := range drafts {
 		if d.Kind == contract.KindPivot {
@@ -150,9 +150,9 @@ func reportRaise(task bd.Bead, drafts []bd.Bead, w io.Writer) error {
 	}
 	hosts, err := RaiseHosts(pivots, critiques)
 	if err != nil {
-		return fmt.Errorf("pivot raise: task %s: %w", task.ID, err)
+		return fmt.Errorf("pivot raise: errand %s: %w", errand.ID, err)
 	}
-	fmt.Fprintf(w, "task %s already has raise Drafts on checkpoint %s; drop the session to change the raise\n", task.ID, strings.Join(hosts, ", "))
+	fmt.Fprintf(w, "errand %s already has raise Drafts on checkpoint %s; drop the session to change the raise\n", errand.ID, strings.Join(hosts, ", "))
 	for _, d := range drafts {
 		fmt.Fprintf(w, "%s: %s %s\n", d.Kind, d.ID, d.Title)
 	}
@@ -179,33 +179,33 @@ func checkRaiseShape(r RaiseRequest) error {
 	return checkRerouteBodies(nil, r.Merges)
 }
 
-// RaiseFromTask is the flagged `mugicrew pivot raise <task>` (Spec FR 1–15): it files the
-// raise onto the Task's one held Checkpoint as Drafts by the Task — a kind:pivot
-// (discovered-from the Task, the Checkpoint in its metadata, no gate edge), a Critique
-// parented to the Checkpoint and discovered-from the Task, an Ask Critique also
-// discovered-from its pivot or merge target — and records --merge-into on the Task's
+// RaiseFromErrand is the flagged `mugicrew pivot raise <errand>` (Spec FR 1–15): it files the
+// raise onto the Errand's one held Checkpoint as Drafts by the Errand — a kind:pivot
+// (discovered-from the Errand, the Checkpoint in its metadata, no gate edge), a Critique
+// parented to the Checkpoint and discovered-from the Errand, an Ask Critique also
+// discovered-from its pivot or merge target — and records --merge-into on the Errand's
 // metadata, writing nothing to the target. (Spec decision 3 has the verb write no edge
 // for a merge; the Ask's discovered-from edge to the merge target is written here, as the
 // Signal reroute does, and a drop deletes it with the Draft.) Every refusal runs before any write. The
-// clean-exit publish hands the gate and opens the Drafts; nothing blocks the Task on
+// clean-exit publish hands the gate and opens the Drafts; nothing blocks the Errand on
 // them and nothing closes it.
-func RaiseFromTask(taskID string, r RaiseRequest) error {
+func RaiseFromErrand(errandID string, r RaiseRequest) error {
 	if r.None() {
 		return errors.New(leg + ": nothing to raise; pass --critique, --pivot or --merge-into")
 	}
-	task, err := raiseTask(taskID)
+	errand, err := raiseErrand(errandID)
 	if err != nil {
 		return err
 	}
-	if existing, err := raiseDrafts(task); err != nil {
+	if existing, err := raiseDrafts(errand); err != nil {
 		return err
 	} else if len(existing) > 0 {
-		return fmt.Errorf("%s: task %s already has raise Drafts; drop the session to change the raise", leg, task.ID)
+		return fmt.Errorf("%s: errand %s already has raise Drafts; drop the session to change the raise", leg, errand.ID)
 	}
 	if err := checkRaiseShape(r); err != nil {
 		return fmt.Errorf("%s: %w", leg, err)
 	}
-	t, err := resolveRaise(task)
+	t, err := resolveRaise(errand)
 	if err != nil {
 		return err
 	}
@@ -217,19 +217,19 @@ func RaiseFromTask(taskID string, r RaiseRequest) error {
 		notify(leg, "%s", n)
 	}
 	fail := func(err error) error {
-		return eventlog.Record("task.raise", "task.raise.failed", err, eventlog.BeadAttrs(task)...)
+		return eventlog.Record("errand.raise", "errand.raise.failed", err, eventlog.BeadAttrs(errand)...)
 	}
 	// before any Draft, so a crash cannot lose them; always written, so a re-run with no
 	// --merge-into replaces any leftover merges instead of publishing them
 	if len(r.Merges) > 0 {
-		err = setMetadata(task.ID, RaiseMergesMeta, r.Merges)
+		err = setMetadata(errand.ID, RaiseMergesMeta, r.Merges)
 	} else {
-		err = clearMetadata(task.ID, RaiseMergesMeta)
+		err = clearMetadata(errand.ID, RaiseMergesMeta)
 	}
 	if err != nil {
 		return fail(err)
 	}
-	from := "discovered-from:" + task.ID
+	from := "discovered-from:" + errand.ID
 	var pivots, critiques []string
 	askDeps := []string{from}
 	for _, body := range r.Pivots {
@@ -237,7 +237,7 @@ func RaiseFromTask(taskID string, r RaiseRequest) error {
 		if err != nil {
 			return err
 		}
-		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindPivot, Title: draftTitle(body, task.Title), Description: body, DraftedBy: task.ID, Metadata: string(meta)}, from)
+		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindPivot, Title: draftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Metadata: string(meta)}, from)
 		if err != nil {
 			return fail(err)
 		}
@@ -248,14 +248,14 @@ func RaiseFromTask(taskID string, r RaiseRequest) error {
 		askDeps = append(askDeps, "discovered-from:"+m.Pivot)
 	}
 	for _, body := range r.Critiques {
-		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindCritique, Title: draftTitle(body, task.Title), Description: body, DraftedBy: task.ID, Parent: host.ID}, askDeps...)
+		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindCritique, Title: draftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Parent: host.ID}, askDeps...)
 		if err != nil {
 			return fail(err)
 		}
 		critiques = append(critiques, id)
 	}
-	return eventlog.Record("task.raise", "task.raise.failed", nil,
-		append(eventlog.BeadAttrs(task), "checkpoint", host.ID, "pivots", pivots, "critiques", critiques, "merges", mergeTargets(r.Merges))...)
+	return eventlog.Record("errand.raise", "errand.raise.failed", nil,
+		append(eventlog.BeadAttrs(errand), "checkpoint", host.ID, "pivots", pivots, "critiques", critiques, "merges", mergeTargets(r.Merges))...)
 }
 
 // refuseRaise is a probe refusal: its reason, then the fallback.

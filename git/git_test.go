@@ -3,6 +3,7 @@ package git
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,6 +321,10 @@ func newRepo(t *testing.T) {
 	mustGit(t, "init", "-b", "main")
 	mustGit(t, "config", "user.email", "test@example.com")
 	mustGit(t, "config", "user.name", "test")
+	// A commit's detached auto-maintenance can still be writing under .git when
+	// t.TempDir's cleanup runs, failing it with "directory not empty".
+	mustGit(t, "config", "gc.auto", "0")
+	mustGit(t, "config", "maintenance.auto", "false")
 	writeFile(t, "README", "root\n")
 	mustGit(t, "add", ".")
 	mustGit(t, "commit", "-m", "root")
@@ -341,6 +346,32 @@ func TestRepoRootIsTheWorkspaceFromAnywhereInside(t *testing.T) {
 		got, err := RepoRoot()
 		if err != nil || got != root {
 			t.Errorf("RepoRoot from %s = %q, %v; want %q", dir, got, err, root)
+		}
+	}
+}
+
+// The root resolved from a git common dir is the root git.RepoRoot names from
+// anywhere in the repo (Spec FR12); a dir that isn't a git dir is an error.
+func TestRepoRootAtNamesTheSameRootAsRepoRoot(t *testing.T) {
+	newRepo(t)
+	root, _ := os.Getwd()
+	mustGit(t, "branch", "chart/mc-x")
+	wt := filepath.Join(t.TempDir(), "wt")
+	mustGit(t, worktreeAddArgs(wt, "chart/mc-x")...)
+	if err := os.Mkdir(filepath.Join(wt, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RepoRootAt(filepath.Join(root, ".git"))
+	if err != nil || got != root {
+		t.Fatalf("RepoRootAt(common dir) = %q, %v; want %q", got, err, root)
+	}
+	t.Chdir(filepath.Join(wt, "sub"))
+	if viaCwd, err := RepoRoot(); err != nil || viaCwd != got {
+		t.Errorf("RepoRoot from a linked worktree subdir = %q, %v; want %q", viaCwd, err, got)
+	}
+	for _, dir := range []string{t.TempDir(), filepath.Join(root, "gone")} {
+		if got, err := RepoRootAt(dir); err == nil {
+			t.Errorf("RepoRootAt(%s) = %q, nil; want an error", dir, got)
 		}
 	}
 }
@@ -428,10 +459,11 @@ func TestLandRoundTrip(t *testing.T) {
 	}
 }
 
-// A fog-only Chart (branch cut, zero artifact commits) still lands: it stamps
-// its "Chart: <id>" anchor via an empty squash commit, so LandedBase resolves
-// and Zoro has a base to cut from. Regression guard for the two ways this used
-// to break — the squash "nothing to commit", and branch-ancestry idempotency
+// The git-level backstop for a fog-only Chart (branch cut, zero artifact
+// commits): git.Land stamps its "Chart: <id>" anchor via an empty squash commit,
+// so LandedBase resolves. Jinbe no longer reaches this for a zero-commit Chart,
+// which lands as an Anchor pin (TestLocalChartWithNothingAheadLandsAsPin).
+// Regression guard for the two ways this used to break — the squash "nothing to commit", and branch-ancestry idempotency
 // mistaking the un-landed empty branch (sitting at base) for already-landed.
 func TestLandEmptyChartStampsAnchor(t *testing.T) {
 	newRepo(t)
@@ -2258,7 +2290,7 @@ func TestSquashCommitArgsLandSubject(t *testing.T) {
 func TestLandLocalWritesConventionalSubject(t *testing.T) {
 	pre := landRepo(t)
 	const subject = "feat(mugicrew): Add thing (MC-1)"
-	repoStrategy, err := LandStrategyFor(LandStrategyLocal, "", subject)
+	repoStrategy, err := LandStrategyFor(LandStrategyLocal, "", subject, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2637,5 +2669,74 @@ func TestCommonDirFollowsCwd(t *testing.T) {
 	b, err := CommonDir()
 	if err != nil || b == a {
 		t.Fatalf("CommonDir in a second repo = %q, %v; want a path other than %q", b, err, a)
+	}
+}
+
+// A gate command's leftovers (dirty and staged tracked files, an untracked file at a
+// path the new base adds, ignored outputs, a nested repo, a stopped rebase) are reset
+// away so the next Compose is clean and never reads them as a RebaseConflict.
+func TestResetTreeClearsLeftoversBeforeCompose(t *testing.T) {
+	landRepo(t)
+	mustGit(t, "config", "user.email", "test@example.com")
+	mustGit(t, "config", "user.name", "test")
+	if _, _, _, err := Compose("checkpoint/x", "Checkpoint: x", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The command left a rebase stopped on a conflict over README.
+	writeFile(t, "README", "tree side\n")
+	mustGit(t, "commit", "-qam", "tree side")
+	mainDir := strings.TrimPrefix(strings.SplitN(mustGit(t, "worktree", "list", "--porcelain"), "\n", 2)[0], "worktree ")
+	// Mainline moves, adding the path the command also left untracked.
+	writeFile(t, filepath.Join(mainDir, "README"), "main side\n")
+	writeFile(t, filepath.Join(mainDir, "later.txt"), "main\n")
+	mustGit(t, "-C", mainDir, "commit", "-qam", "later")
+	mustGit(t, "-C", mainDir, "add", "later.txt")
+	mustGit(t, "-C", mainDir, "commit", "-qm", "later file")
+	if _, err := run("rebase", Mainline()); err == nil || !rebaseInProgress() {
+		t.Fatalf("setup: no rebase in progress (%v)", err)
+	}
+	writeFile(t, "staged.txt", "s\n")
+	mustGit(t, "add", "staged.txt")
+	writeFile(t, "later.txt", "untracked\n")
+	if err := os.MkdirAll("out", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, "out/bin", "b\n")
+	if err := os.MkdirAll("nested", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run("-C", "nested", "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(mustGit(t, "rev-parse", "--git-path", "info"), "exclude"), "out/\n")
+
+	if err := Repo("").ResetTree(); err != nil {
+		t.Fatalf("ResetTree: %v", err)
+	}
+	if rebaseInProgress() {
+		t.Error("rebase still in progress")
+	}
+	if st := mustGit(t, "status", "--porcelain", "--ignored"); st != "" {
+		t.Errorf("tree not clean:\n%s", st)
+	}
+	if _, _, _, err := Compose("checkpoint/x", "Checkpoint: x", "", ""); err != nil {
+		t.Errorf("Compose after reset: %v", err)
+	}
+}
+
+// parseLandedLog maps each requested trailer to its newest commit and drops a foreign Graph:.
+func TestParseLandedLog(t *testing.T) {
+	out := "aaa\x1fsubject\n\nCheckpoint: mc-1\nGraph: us\n\x1e" +
+		"bbb\x1fsubject\n\nChart: mc-2\nGraph: them\n\x1e" +
+		"ccc\x1fsubject\n\nCheckpoint: mc-1\n\x1e" +
+		"ddd\x1fsubject\n\nChart: mc-3\n\x1e"
+	trailers := []string{"Checkpoint: mc-1", "Chart: mc-2", "Chart: mc-3"}
+	got := parseLandedLog(out, trailers, "us")
+	want := map[string]string{"Checkpoint: mc-1": "aaa", "Chart: mc-3": "ddd"}
+	if !maps.Equal(got, want) {
+		t.Errorf("gitlab: got %v, want %v", got, want)
+	}
+	if got := parseLandedLog(out, trailers, ""); got["Chart: mc-2"] != "bbb" {
+		t.Errorf("non-gitlab keeps every Graph: got %v", got)
 	}
 }

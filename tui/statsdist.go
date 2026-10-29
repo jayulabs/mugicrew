@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	tealSt = lipgloss.NewStyle().Foreground(lipgloss.Color("109"))
+	tealSt lipgloss.Style
 
 	timeEdges  = []float64{1, 2, 5, 10, 30, 60} // minutes
 	timeLabels = []string{"<1m", "1–2m", "2–5m", "5–10m", "10–30m", "30m–1h", "1h+"}

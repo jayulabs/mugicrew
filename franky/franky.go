@@ -82,12 +82,13 @@ var (
 	closeBead = bd.Close
 	rationale = bd.RationaleNote
 
-	openPivots           = bd.OpenPivots
-	pivotsDiscoveredFrom = bd.PivotsDiscoveredFrom
-	raisePivot           = bd.RaisePivot
-	specOf               = bd.SpecOf
-	surgeriesOf          = bd.SurgeriesOf
-	childrenOfKind       = bd.ChildrenOfKind
+	runSession     = bd.RunSession
+	raiseIfPivoted = bd.RaiseIfPivoted
+
+	openPivots     = bd.OpenPivots
+	specOf         = bd.SpecOf
+	surgeriesOf    = bd.SurgeriesOf
+	childrenOfKind = bd.ChildrenOfKind
 
 	commitsAhead         = git.Repo.CommitsAhead
 	commitsByTrailer     = git.Repo.CommitsByTrailer
@@ -111,7 +112,7 @@ func integrateEffort(sg bd.Bead, r git.Repo) error {
 	}
 	if err != nil || id != sg.ID {
 		refs, err := r.EffortRefs()
-		if err == nil && refs[sg.ID] {
+		if err == nil && refs.Branches[sg.ID] {
 			err = fmt.Errorf("surgery end: run it in the Surgery's tree on %s, so its work is integrated first", git.EffortBranch(sg.ID))
 		}
 		return err
@@ -318,10 +319,7 @@ func runImplement(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	if _, err := ctx.Harness().Run(ctx, inv); err != nil {
-		return sweptOr(bead.ID, err)
-	}
-	return afterRun(ctx, bead.ID)
+	return runAndFinish(ctx, inv, specID)
 }
 
 // runConflict is the conflict handler: read the "Base: <sha>" pin off the bead body
@@ -341,47 +339,21 @@ func runConflict(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	if _, err := ctx.Harness().Run(ctx, inv); err != nil {
-		return sweptOr(bead.ID, err)
-	}
-	return afterRun(ctx, bead.ID)
+	return runAndFinish(ctx, inv, specID)
 }
 
-// sweptOr is a failed fork's err — unless the bead was closed out from under the
-// effort by a concurrent confirm sweep (FR49), which is done, not a failure: no
-// error means dispatch records no failure and releases no claim.
-func sweptOr(id string, err error) error {
-	if b, serr := showBead(id); serr == nil && !b.Open() {
-		return nil
-	}
-	return err
-}
-
-// afterRun re-reads the bead once the agent returns (its pre-dispatch snapshot is
-// stale). If the agent raised a pivot — created one, or merged into an existing
-// same-FR pivot, both discovered-from this bead — it drives the raise tail; else
-// finish. An already-closed bead (a prior dispatch, or a
-// concurrent confirm sweep) is done, not an error (FR49).
-func afterRun(ctx contract.Ctx, id string) error {
-	b, err := showBead(id)
-	if err != nil {
+// runAndFinish is the tail both handlers share: run the session (a bead closed
+// out from under it is done, FR49), then raise a pivot the agent filed — else
+// finish.
+func runAndFinish(ctx contract.Ctx, inv contract.Invocation, specID string) error {
+	fresh, _, _, open, err := runSession(ctx, inv, showBead)
+	if err != nil || !open {
 		return err
 	}
-	if !b.Open() {
-		return nil
-	}
-	pivots, err := pivotsDiscoveredFrom(b.ID)
-	if err != nil {
+	if raised, err := raiseIfPivoted(ctx, fresh, specID); err != nil || raised {
 		return err
 	}
-	if len(pivots) > 0 {
-		spec, _, err := specOf(b.Parent)
-		if err != nil {
-			return err
-		}
-		return raisePivot(ctx, b, b.Parent, spec, pivots)
-	}
-	return finish(b)
+	return finish(fresh)
 }
 
 // finish is the shared tail of all three handlers (Spec D8, FR 32): it

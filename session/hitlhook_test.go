@@ -77,17 +77,13 @@ func TestAutoExitEdge(t *testing.T) {
 		{"bad JSON keeps", `not json`, time.Minute, keep},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var read string
 			got := time.Duration(keep)
-			d, ok := autoExitEdge([]byte(tc.event), func(cwd string) time.Duration { read = cwd; return tc.setting })
+			d, ok := autoExitEdge([]byte(tc.event), func() time.Duration { return tc.setting })
 			if ok {
 				got = d
 			}
 			if got != tc.want {
 				t.Errorf("autoExitEdge = %v (change %v), want %v", d, ok, tc.want)
-			}
-			if tc.want > 0 && read != "/wt" {
-				t.Errorf("setting read from %q, want the event cwd /wt", read)
 			}
 		})
 	}
@@ -169,6 +165,8 @@ func noAutoExit(string) time.Duration { panic("setting read") }
 
 // hitl-hook against real tmux: a closing-line Stop writes a deadline of now plus
 // the setting to @autofinish, a reply unsets it, and Sessions() reads both.
+// The setting is stubbed (time.Hour): this proves the socket reaches it, not that the
+// armed @autofinish equals a real Workspace value (main's autoExitAt tests cover that).
 func TestHitlHookAutoExitRealTmux(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not on PATH")
@@ -191,8 +189,12 @@ func TestHitlHookAutoExitRealTmux(t *testing.T) {
 		return s["mc-x"].AutoExit
 	}
 	before := time.Now()
-	HitlHook(strings.NewReader(`{"hook_event_name":"Stop","last_assistant_message":"**The work for this session is finished.**"}`),
-		func(string) time.Duration { return time.Hour })
+	var readSock string
+	HitlHook(strings.NewReader(`{"hook_event_name":"Stop","cwd":"/nonexistent","last_assistant_message":"**The work for this session is finished.**"}`),
+		func(s string) time.Duration { readSock = s; return time.Hour })
+	if readSock != sock {
+		t.Errorf("setting read for socket %q, want the pane's %q", readSock, sock)
+	}
 	if got := deadline(); got.Before(before.Add(time.Hour).Truncate(time.Second)) || got.After(time.Now().Add(time.Hour)) {
 		t.Fatalf("armed deadline = %v, want about now+1h", got)
 	}

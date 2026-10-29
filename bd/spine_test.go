@@ -60,9 +60,9 @@ func TestSpineOf(t *testing.T) {
 			e("parent-child", "cp:checkpoint:closed", "in:initiative:open"),
 			e("parent-child", "other:signal:open", "in:initiative:open"),
 		}, []string{"b", "cp"}, false},
-		{"initiative: union, own bead, caused-by signal; open task holds", "in", []spineRow{
+		{"initiative: union, own bead, caused-by signal; open errand holds", "in", []spineRow{
 			e("parent-child", "s1:signal:closed", "in:initiative:closed"),
-			e("parent-child", "t:task:open", "in:initiative:closed"),
+			e("parent-child", "t:errand:open", "in:initiative:closed"),
 			e("parent-child", "pk:signal:closed", "in:initiative:closed"),
 			e("caused-by", "in:initiative:closed", "isig:signal:closed"),
 			e("caused-by", "ch:chart:closed", "s1:signal:closed"),

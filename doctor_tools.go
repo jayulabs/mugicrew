@@ -11,6 +11,8 @@ import (
 
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/loop"
+	"jayulabs.org/mugicrew/session"
 )
 
 // doctorToolVersion runs `bin args...` and returns its output; a var so tests
@@ -22,6 +24,10 @@ var doctorToolVersion = func(bin string, args ...string) (string, error) {
 
 // doctorExe is the running binary's path; a var so tests stub it.
 var doctorExe = os.Executable
+
+// doctorEnv reads the environment (the devShell wrapper's MUGICREW_WRAPPER
+// marker); a var so tests stub it.
+var doctorEnv = os.Getenv
 
 // doctorOS is the OS that picks an install hint; a var so tests pin it.
 var doctorOS = runtime.GOOS
@@ -190,7 +196,8 @@ func resolved(p string) string {
 }
 
 // checkBinary always prints the running binary; WARN when the first mugicrew on
-// PATH is another file.
+// PATH is another file. A from-source binary (sourceRoot stamped) launched by
+// the devShell wrapper expects the wrapper, named by MUGICREW_WRAPPER, instead.
 func checkBinary(string) []result {
 	const binaryPre = "the running mugicrew is the first one on PATH"
 	exe, err := doctorExe()
@@ -199,9 +206,64 @@ func checkBinary(string) []result {
 			manual("", "run mugicrew from a path the OS can resolve"))}
 	}
 	detail := fmt.Sprintf("%s (version %s)", exe, versionString())
-	if onPath, err := lookPath("mugicrew"); err == nil && resolved(onPath) != resolved(exe) {
+	want := exe
+	if sourceRoot != "" {
+		detail = fmt.Sprintf("%s (from source %s)", exe, sourceRoot)
+		if w := doctorEnv("MUGICREW_WRAPPER"); w != "" {
+			want = w
+		}
+	}
+	if onPath, err := lookPath("mugicrew"); err == nil && resolved(onPath) != resolved(want) {
 		return []result{problem(stWarn, "binary", detail, binaryPre,
 			manual("", "the first mugicrew on PATH is "+onPath+", a different file", "put the running binary first on PATH, or remove the other"))}
 	}
 	return []result{quiet(stOK, "binary", detail)}
+}
+
+// doctorMouse is Mouse mode resolved for the Workspace root; a var so tests stub it.
+var doctorMouse = func(root string) loop.Mouse {
+	if root == "" {
+		return loop.Mouse{Source: "default"}
+	}
+	return loop.MouseSetting(root)
+}
+
+// doctorInsidePrivate reports whether $TMUX names mugicrew's private socket; a
+// var so tests stub it.
+var doctorInsidePrivate = session.InsideEnv
+
+// doctorTmuxMouse reads the outer tmux's mouse option with plain tmux, keeping
+// $TMUX; a var so tests stub it.
+var doctorTmuxMouse = func() (string, error) {
+	out, err := exec.Command("tmux", "show", "-gv", "mouse").Output()
+	return string(out), err
+}
+
+// tmuxMouseRow names the doctor row checkTmuxMouse reports.
+const tmuxMouseRow = "tmux mouse"
+
+// checkTmuxMouse is the opt-in tmuxMouseRow row: only with Mouse mode on, whether
+// the outer tmux mugicrew runs inside passes mouse events. Never FAIL.
+func checkTmuxMouse(root string) []result {
+	if !doctorMouse(root).On {
+		return nil
+	}
+	env := doctorEnv("TMUX")
+	if env == "" {
+		return []result{quiet(stOK, tmuxMouseRow, "no outer tmux")}
+	}
+	// An unresolvable private socket counts as not inside.
+	if in, err := doctorInsidePrivate(env); err == nil && in {
+		return []result{quiet(stSkip, tmuxMouseRow, "inside mugicrew's tmux server; the outer tmux cannot be read")}
+	}
+	out, err := doctorTmuxMouse()
+	switch v := strings.TrimSpace(out); {
+	case err == nil && v == "on":
+		return []result{quiet(stOK, tmuxMouseRow, "on")}
+	case err == nil && v == "off":
+		return []result{problem(stWarn, tmuxMouseRow, "off in the outer tmux", "the tmux mugicrew runs inside has mouse on",
+			manual("", `add "set -g mouse on" to ~/.tmux.conf`, "run `tmux source-file ~/.tmux.conf`"))}
+	}
+	return []result{problem(stWarn, tmuxMouseRow, "unreadable", "the outer tmux's mouse option can be read",
+		manual("", "run `tmux show -gv mouse`"))}
 }

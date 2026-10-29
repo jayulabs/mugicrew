@@ -14,21 +14,31 @@ import (
 var newOffshoot = bd.NewOffshoot
 
 // runSignalOffshoot files an offshoot Signal ordered against its cause's
-// container, or unordered with the reason (ADR 0267). An ordered follow-up or
-// prerequisite joins its cause's open Initiative (ADR 0348 §6, §7); every other
-// offshoot is born outside it. It prints the new id,
-// then the body's Order: line, then the Initiative: placement line.
+// container, or unordered with the reason (ADR 0267). Whatever the order, it
+// climbs to its cause's Initiative and is born that open Initiative's direct
+// member unless --outside opts out (ADR 0371). It prints the new id, then the
+// body's Order: line, then the Initiative: line. --dry-run stops before any
+// create and prints those two lines, then the climbed Initiative's Done when
+// (open or closed); it cannot know a pair bd would refuse, so it shows the
+// order as if the edge applies.
 func runSignalOffshoot(argv []string, w io.Writer) error {
-	const usage = "usage: mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none --title T --description D"
+	const usage = "usage: mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none [--outside <why>] [--dry-run] --title T --description D"
 	fs := flag.NewFlagSet("signal offshoot", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // main prints the error once
 	from := fs.String("from", "", "the bead that found the work")
 	by := fs.String("drafted-by", "", "the filing crewmate's bead")
 	order := fs.String("order", "", "follow-up|prerequisite|none")
+	outside := fs.String("outside", "", "why the work is outside the cause's Initiative")
+	dry := fs.Bool("dry-run", false, "print the Order: and Initiative: lines and the Initiative's Done when; file nothing")
 	title := fs.String("title", "", "")
 	desc := fs.String("description", "", "")
 	if err := fs.Parse(argv); err != nil || fs.NArg() != 0 || *from == "" || *by == "" || *title == "" || *desc == "" ||
 		*order != "follow-up" && *order != "prerequisite" && *order != "none" {
+		return errors.New(usage)
+	}
+	outsideSet := false
+	fs.Visit(func(f *flag.Flag) { outsideSet = outsideSet || f.Name == "outside" })
+	if outsideSet && *outside == "" {
 		return errors.New(usage)
 	}
 	cause, err := showBead(*from)
@@ -36,19 +46,42 @@ func runSignalOffshoot(argv []string, w io.Writer) error {
 		return fmt.Errorf("signal offshoot: cause %s: %w", *from, err)
 	}
 
-	line, edge := "Order: none", ""
-	parent, place := "", "Initiative: outside (unordered)"
-	if *order != "none" {
-		var container, init bd.Bead
-		if cause.Parent != "" {
-			if p, err := showBead(cause.Parent); err != nil {
-				return fmt.Errorf("signal offshoot: container of %s: %w", *from, err)
-			} else if p.Kind == contract.KindCheckpoint || p.Kind == contract.KindChart {
-				container = p
-			} else if p.Kind == contract.KindInitiative && cause.Kind == contract.KindTask && cause.Unclosed() {
-				container, init = cause, p
+	// The container is the cause's Checkpoint or Chart parent, or an unclosed
+	// member Errand itself; the Initiative is the container's parent, else the
+	// cause's own Initiative parent (a Discussion supplies none).
+	var container, init bd.Bead
+	if cause.Parent != "" {
+		p, err := showBead(cause.Parent)
+		if err != nil {
+			return fmt.Errorf("signal offshoot: container of %s: %w", *from, err)
+		}
+		switch {
+		case p.Kind == contract.KindCheckpoint || p.Kind == contract.KindChart:
+			container = p
+		case p.Kind == contract.KindInitiative && cause.Kind != contract.KindDiscussion:
+			init = p
+			if cause.Kind == contract.KindErrand && cause.Unclosed() {
+				container = cause
 			}
 		}
+	}
+	if container.ID != "" && init.ID == "" && container.Parent != "" {
+		// any status: a closed Initiative is not "no Initiative"
+		if init, err = bd.ParentInitiative(container, showBead); err != nil {
+			return fmt.Errorf("signal offshoot: initiative %s: %w", container.Parent, err)
+		}
+	}
+	orphan := cause.Title
+	if container.ID != "" {
+		orphan = container.Title
+	}
+	parent, place := bd.InitiativePlacement(init, orphan)
+	if parent != "" && outsideSet {
+		parent, place = "", "Initiative: outside (filer: "+*outside+")"
+	}
+
+	line, edge := "Order: none", ""
+	if *order != "none" {
 		switch {
 		case container.ID == "":
 			line = fmt.Sprintf("Order: unordered (%s has no container)", cause.Title)
@@ -59,26 +92,24 @@ func runSignalOffshoot(argv []string, w io.Writer) error {
 		default:
 			line, edge = "Order: prerequisite of "+container.Title, "blocks:"+container.ID
 		}
-		if edge != "" {
-			if init.ID == "" && container.Parent != "" {
-				// any status: a closed Initiative is not "no Initiative"
-				if init, err = bd.ParentInitiative(container, showBead); err != nil {
-					return fmt.Errorf("signal offshoot: initiative %s: %w", container.Parent, err)
-				}
-			}
-			parent, place = bd.InitiativePlacement(init, container.Title)
-		}
 	}
 
+	if *dry {
+		fmt.Fprintf(w, "%s\n%s\n", line, place)
+		if init.ID != "" {
+			fmt.Fprintf(w, "\nDone when (%s):\n%s\n", init.Title, bd.DoneWhen(init.Description))
+		}
+		return nil
+	}
 	body := *desc + "\n\n"
-	id, err := newOffshoot(*title, body+line, *by, *from, edge, parent)
+	id, err := newOffshoot(*title, body+line+"\n"+place, *by, *from, edge, parent)
 	if err != nil && edge != "" {
 		reason := bd.CarrySkipReason(err)
 		if reason == "" {
 			return fmt.Errorf("signal offshoot: %w", err)
 		}
-		line, place = fmt.Sprintf("Order: unordered (%s)", reason), "Initiative: outside (unordered)"
-		id, err = newOffshoot(*title, body+line, *by, *from, "", "")
+		line = fmt.Sprintf("Order: unordered (%s)", reason)
+		id, err = newOffshoot(*title, body+line+"\n"+place, *by, *from, "", parent)
 	}
 	if err != nil {
 		return fmt.Errorf("signal offshoot: %w", err)

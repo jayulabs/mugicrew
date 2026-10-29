@@ -203,9 +203,9 @@ func TestFailedReadKeepsLastGoodBeads(t *testing.T) {
 func slowReads(t *testing.T) (n *int, pool *int) {
 	t.Helper()
 	n, pool = new(int), new(int)
-	seam(t, &readRefs, func() (map[string]bool, map[string]string, error) {
+	seam(t, &readRefs, func() (*git.EffortSet, map[string]string, error) {
 		*n++
-		return map[string]bool{"e": true}, map[string]string{"cp": "tip"}, nil
+		return &git.EffortSet{Branches: map[string]bool{"e": true}}, map[string]string{"cp": "tip"}, nil
 	})
 	seam(t, &readKindProfiles, func() kindProfiles { *n++; return kindProfiles{} })
 	seam(t, &readMainline, func() ([]git.MainlineCommit, error) { *n++; return []git.MainlineCommit{{}}, nil })
@@ -223,7 +223,7 @@ func TestSlowReadsRunOnlyOnSlowLoads(t *testing.T) {
 	*pool = 3
 	m := sized(t, 120, 30)
 	m = runLoad(t, m, m.loadSlow())
-	if *n != 6 || m.pool.N != 3 || !m.efforts["e"] || len(m.histCommits) != 1 {
+	if *n != 6 || m.pool.N != 3 || !m.efforts.Branches["e"] || len(m.histCommits) != 1 {
 		t.Fatalf("slow load: reads %d pool %d efforts %v commits %d", *n, m.pool.N, m.efforts, len(m.histCommits))
 	}
 	if m.gateData().cpTips["cp"] != "tip" {
@@ -234,7 +234,7 @@ func TestSlowReadsRunOnlyOnSlowLoads(t *testing.T) {
 	if *n != 0 {
 		t.Errorf("fast load ran %d slow reads", *n)
 	}
-	if m.pool.N != 3 || !m.efforts["e"] || len(m.histCommits) != 1 {
+	if m.pool.N != 3 || !m.efforts.Branches["e"] || len(m.histCommits) != 1 {
 		t.Errorf("fast load dropped slow values: pool %d efforts %v commits %d", m.pool.N, m.efforts, len(m.histCommits))
 	}
 }

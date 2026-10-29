@@ -94,7 +94,7 @@ func TestDefogLiveShadeAndFallbackAndKeys(t *testing.T) {
 		full := tab.g.defogList(tab.expanded())
 		for i, r := range rows {
 			if r.key == k {
-				return shadeSet(tab.g.parentOf, rows, tab.selIndex(rows), full, dRow.shadeIn)[i]
+				return shadeSet(tab.g.beadByID, rows, tab.selIndex(rows), full, dRow.shadeIn)[i]
 			}
 		}
 		t.Fatalf("no row %s", k)
@@ -168,7 +168,7 @@ func TestDefogInitiativesCursorAndShade(t *testing.T) {
 	rows := tab.rows()
 	full := tab.g.defogList(tab.expanded())
 	ti := slices.IndexFunc(rows, func(r dRow) bool { return r.key == treeKey })
-	if shadeSet(tab.g.parentOf, rows, tab.selIndex(rows), full, dRow.shadeIn)[ti] {
+	if shadeSet(tab.g.beadByID, rows, tab.selIndex(rows), full, dRow.shadeIn)[ti] {
 		t.Errorf("a selected group shades the Initiatives header")
 	}
 	tab.flip = map[string]bool{treeKey: true} // folded away under the cursor

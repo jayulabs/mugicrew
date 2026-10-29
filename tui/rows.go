@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
@@ -17,13 +18,15 @@ import (
 )
 
 // leafTitleStyle styles a bead row's title, shared by every tab that lists
-// beads: closed > hot (an open blocker of the selection) > AFK mute (any non-HITL
+// beads: closed > Draft (dim) > hot (an open blocker of the selection) > AFK mute (any non-HITL
 // kind) > normal. plain reports the normal case (no recolour), so a caller can
 // keep its own richer rendering there without repeating the precedence.
 func leafTitleStyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain bool) {
 	switch {
 	case b.Status == "closed":
 		return closedSty, false
+	case b.Draft():
+		return dimSt, false
 	case hot:
 		return pinkFg, false
 	case !isHITL(b):
@@ -38,6 +41,8 @@ func containerTitleStyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain bool) {
 	switch {
 	case b.Status == "closed":
 		return closedSty, false
+	case b.Draft():
+		return dimSt, false
 	case hot:
 		return pinkFg, false
 	}
@@ -111,7 +116,11 @@ func (g graphData) sbrnAround(b *bd.Bead, live bool, kindW int, p string) (head,
 	}
 	tag := kindTag(b)
 	pad := strings.Repeat(" ", max(0, kindW-lipgloss.Width(tag)))
-	return mark + " " + tag + pad + " " + p + sep(), sep() + softSt.Render(b.ID)
+	idSt := softSt
+	if b.Draft() {
+		idSt = dimSt
+	}
+	return mark + " " + tag + pad + " " + p + sep(), sep() + idSt.Render(b.ID)
 }
 
 // leafTitle is a leaf's title styled by leafTitleStyle.
@@ -133,20 +142,69 @@ func drawerH(open bool, h int) int {
 // drawerContentW is the drawer's text width for a body w wide.
 func drawerContentW(w int) int { return max(w-2, 1) }
 
+// memoCap bounds each drawer memo: a few entries cover the open bead at the current width
+// across a resize or a refresh.
+const memoCap = 4
+
+// memoEntry is one cached result keyed on the content itself and the width it was built at,
+// so a changed body or a resize is a miss by construction.
+type memoEntry struct {
+	text string
+	w    int
+	out  string
+}
+
+// memo is a small bounded memo, newest last. It is pure (results depend only on the key), so
+// one process-wide instance behind a mutex is safe for parallel tests and for any goroutine.
+type memo struct {
+	mu sync.Mutex
+	es []memoEntry
+}
+
+func (c *memo) get(text string, w int, build func() string) string {
+	c.mu.Lock()
+	for _, e := range c.es {
+		if e.w == w && e.text == text {
+			c.mu.Unlock()
+			return e.out
+		}
+	}
+	c.mu.Unlock()
+	out := build()
+	c.mu.Lock()
+	if len(c.es) >= memoCap {
+		c.es = c.es[1:]
+	}
+	c.es = append(c.es, memoEntry{text, w, out})
+	c.mu.Unlock()
+	return out
+}
+
+var (
+	mdMemo   memo // mdBody: (body, width) -> rendered Markdown
+	wrapMemo memo // drawerVP: (text, content width) -> wrapped text
+)
+
 // mdBody renders a bead body as Markdown at the drawer's text width; an empty body
-// stays empty. ponytail: no cache; a one-entry (body, width) memo behind a pointer
-// if rendering per frame ever shows up in a profile.
+// stays empty. Memoized on (body, w) per ADR 0383, so a wheel event never re-renders it.
+// The memos are package-level because memo guards itself with a mutex, so sharing one
+// across Model copies is race-free and wants no pointer threaded through.
 func mdBody(body string, w int) string {
 	if body == "" {
 		return ""
 	}
-	return strings.Trim(mdrender.Render(body, drawerContentW(w)), "\n")
+	return mdMemo.get(body, w, func() string {
+		return strings.Trim(mdrender.Render(body, drawerContentW(w)), "\n")
+	})
 }
 
-// drawerVP is the drawer's detail viewport: width w-2, the rows under the list and its rule.
+// drawerVP is the drawer's detail viewport: width w-2, the rows under the list and its top
+// edge, less the bottom edge's row. The wrapped content is memoized on (text, content width).
 func drawerVP(open bool, w, h int, text string, off int) viewport.Model {
-	vp := viewport.New(drawerContentW(w), max(h-drawerH(open, h)-1, 1))
-	vp.SetContent(lipgloss.NewStyle().Width(vp.Width).Render(text))
+	vp := viewport.New(drawerContentW(w), max(h-drawerH(open, h)-2, 1))
+	vp.SetContent(wrapMemo.get(text, vp.Width, func() string {
+		return lipgloss.NewStyle().Width(vp.Width).Render(text)
+	}))
 	vp.SetYOffset(off)
 	return vp
 }
@@ -186,26 +244,32 @@ func blockerGutter(blockers map[string]bool, id string, hidden []bd.Bead) string
 // maxFooterBlockers-1 blockers show and a "… +N more blockers" row sums the rest.
 const maxFooterBlockers = 3
 
+// blockerRows is the footer's content for the open blockers bl of the selection over the
+// drawn window [off, off+lh) of rowIDs: the blockers whose id is not among the window's
+// ids, the first maxFooterBlockers-1 of them past the cap, and how many more the cap hid.
+func blockerRows(bl []*bd.Bead, rowIDs []string, off, lh int) (shown []*bd.Bead, more int) {
+	drawn := rowIDs[min(off, len(rowIDs)):min(off+lh, len(rowIDs))]
+	for _, b := range bl {
+		if !slices.Contains(drawn, b.ID) {
+			shown = append(shown, b)
+		}
+	}
+	if len(shown) > maxFooterBlockers {
+		more = len(shown) - (maxFooterBlockers - 1)
+		shown = shown[:maxFooterBlockers-1]
+	}
+	return shown, more
+}
+
 // blockerFooter builds drawer's footer for the open blockers bl of the selection:
 // those whose id is not among the rowIDs of the drawn window [off, off+lh), each a
 // !-led SBRN row cut to w; past maxFooterBlockers, a dim "… +N more blockers" row
 // replaces the rest. No rows when none are off screen.
 func blockerFooter(g graphData, bl []*bd.Bead, rowIDs []string, w int) func(off, lh int) []string {
 	return func(off, lh int) []string {
-		drawn := rowIDs[min(off, len(rowIDs)):min(off+lh, len(rowIDs))]
-		var hidden []*bd.Bead
-		for _, b := range bl {
-			if !slices.Contains(drawn, b.ID) {
-				hidden = append(hidden, b)
-			}
-		}
-		more := 0
-		if len(hidden) > maxFooterBlockers {
-			more = len(hidden) - (maxFooterBlockers - 1)
-			hidden = hidden[:maxFooterBlockers-1]
-		}
+		shown, more := blockerRows(bl, rowIDs, off, lh)
 		var rows []string
-		for _, b := range hidden {
+		for _, b := range shown {
 			rows = append(rows, ansi.Truncate(blockerMk.Render("!")+g.sbrn(b, cmp.Or(b.Title, b.ID), true, 0), w, "…"))
 		}
 		if more > 0 {
@@ -215,49 +279,194 @@ func blockerFooter(g graphData, bl []*bd.Bead, rowIDs []string, w int) func(off,
 	}
 }
 
+// blockerLinks is blockerFooter's linked rows alone: the bead ids of the footer's "!" rows,
+// the "+N more blockers" row not among them.
+func blockerLinks(bl []*bd.Bead, rowIDs []string) func(off, lh int) []string {
+	return func(off, lh int) []string {
+		shown, _ := blockerRows(bl, rowIDs, off, lh)
+		ids := make([]string, len(shown))
+		for i, b := range shown {
+			ids[i] = b.ID
+		}
+		return ids
+	}
+}
+
 // drawerWin is the bottom-drawer body shared by the list-over-detail tabs: n lines
-// windowed to drawerH around sel, and when open padded to that height, a dim
-// full-width rule, then the detail viewport. line(i) is called only for the drawn
+// windowed to drawerH around sel, and when open padded to that height, then the
+// detail viewport in an accent rounded box. line(i) is called only for the drawn
 // window, so n, sel and the footer's ids are all it needs from the full set. The
 // footer's rows (footer may be nil) take the list area's last rows: the window shrinks
 // by their count, followOffset runs against it, and since the rows depend on the offset
 // the reservation settles over at most 2 passes. A footer that leaves no list row is
 // dropped.
-func drawerWin(n int, line func(i int) string, sel int, open bool, w, h int, vp viewport.Model, footer func(off, lh int) []string) string {
-	full := drawerH(open, h)
-	lh, off := full, followOffset(n, full, sel)
-	var foot []string
-	if footer != nil {
-		k := 0
-		for range 3 { // pass 0 measures the unreserved window; two passes settle
-			off = followOffset(n, full-k, sel)
-			foot = footer(off, full-k)
-			if len(foot) == k {
-				break
-			}
-			if k = len(foot); k >= full {
-				k, foot = 0, nil
-				off = followOffset(n, full, sel)
-				break
-			}
-		}
-		foot = foot[:min(len(foot), k)]
-		lh = full - len(foot)
-		off = followOffset(n, lh, sel)
-	}
-	win := make([]string, 0, lh)
-	for i := off; i < min(off+lh, n); i++ {
+func drawerWin(n int, line func(i int) string, sel int, open bool, w, h int, vp viewport.Model, footer func(off, lh int) []string, offs offsetFn) string {
+	g := drawerGeometry(n, sel, open, h, footer, offs)
+	win := make([]string, 0, g.lh)
+	for i := g.off; i < min(g.off+g.lh, n); i++ {
 		win = append(win, line(i))
 	}
 	list := strings.Join(win, "\n")
-	if len(foot) > 0 { // the footer is the list area's last rows
-		list += strings.Repeat("\n", max(0, lh-1-strings.Count(list, "\n"))) + "\n" + strings.Join(foot, "\n")
+	if len(g.foot) > 0 { // the footer is the list area's last rows
+		list += strings.Repeat("\n", max(0, g.lh-1-strings.Count(list, "\n"))) + "\n" + strings.Join(g.foot, "\n")
 	}
 	if !open {
 		return list
 	}
-	pad := strings.Repeat("\n", max(0, full-1-strings.Count(list, "\n")))
-	return list + pad + "\n" + dimSt.Render(strings.Repeat("─", w)) + "\n" + vp.View()
+	pad := strings.Repeat("\n", max(0, g.full-1-strings.Count(list, "\n")))
+	return list + pad + "\n" + drawerBox(w, vp.View())
+}
+
+// drawerBox frames the detail viewport's view in a rounded accent box w wide: a top edge,
+// each line as │ + the line padded to w-2 + │, a bottom edge.
+func drawerBox(w int, view string) string {
+	bd := lipgloss.NewStyle().Foreground(accent)
+	iw := max(w-2, 0)
+	ls := []string{bd.Render("╭" + strings.Repeat("─", iw) + "╮")}
+	for _, l := range strings.Split(view, "\n") {
+		ls = append(ls, bd.Render("│")+l+strings.Repeat(" ", max(iw-lipgloss.Width(l), 0))+bd.Render("│"))
+	}
+	return strings.Join(append(ls, bd.Render("╰"+strings.Repeat("─", iw)+"╯")), "\n")
+}
+
+// drawerGeo is drawerWin's arithmetic, pure: where the window starts, how tall it and the
+// whole list area are, and the footer that took the list area's last rows.
+type drawerGeo struct {
+	full, lh, off int      // the list area's height, the window's height (full less the footer), its first line
+	foot          []string // the footer rows drawn
+	footOff       int      // the window offset the footer rows were built for,
+	footLh        int      // and its height: what a hit re-asks blockerLinks with
+}
+
+// drawerGeometry settles drawerWin's window over n lines selected at sel in a body h tall,
+// with the drawer open or shut and an optional footer.
+func drawerGeometry(n, sel int, open bool, h int, footer func(off, lh int) []string, offs offsetFn) drawerGeo {
+	if offs == nil {
+		offs = followOffset
+	}
+	full := drawerH(open, h)
+	g := drawerGeo{full: full, lh: full, off: offs(n, full, sel)}
+	if footer == nil {
+		return g
+	}
+	k := 0
+	for range 3 { // pass 0 measures the unreserved window; two passes settle
+		g.off = offs(n, full-k, sel)
+		g.footOff, g.footLh = g.off, full-k
+		g.foot = footer(g.off, full-k)
+		if len(g.foot) == k {
+			break
+		}
+		if k = len(g.foot); k >= full {
+			k, g.foot = 0, nil
+			g.off = offs(n, full, sel)
+			break
+		}
+	}
+	g.foot = g.foot[:min(len(g.foot), k)]
+	g.lh = full - len(g.foot)
+	g.off = offs(n, g.lh, sel)
+	return g
+}
+
+// listGeom is what a drawer list's renderer and its pointer share about one frame: n lines
+// selected at sel in a body h tall, the drawer open or shut, the blocker footer and its links,
+// each line's anchor key and what a line is to the pointer (the zero hitTarget for an inert one).
+type listGeom struct {
+	n, sel, h int
+	open      bool
+	footer    func(off, lh int) []string
+	links     func(off, lh int) []string // names the blockers the footer rows jump to
+	keys      []string                   // each line's anchor key, from anchorKeys
+	at        func(k int) hitTarget
+}
+
+// geometry is the frame's drawerGeo under the list's viewport lv.
+func (g listGeom) geometry(lv listView) drawerGeo {
+	return drawerGeometry(g.n, g.sel, g.open, g.h, g.footer, lv.offsets(g.keys))
+}
+
+// hit maps body line y through the same geometry as the renderer.
+func (g listGeom) hit(lv listView, y int) hitTarget {
+	geo := g.geometry(lv)
+	t := hitTarget{caret: -1, line: y}
+	switch {
+	case y < 0 || y >= g.h:
+	case y < geo.lh:
+		if k := geo.off + y; k < g.n {
+			if r := g.at(k); r.kind != hitNone {
+				t.kind, t.key, t.bead = r.kind, r.key, r.bead
+				if s := g.at(g.sel); g.sel < g.n && s.kind != hitNone {
+					t.sel = s.kind == r.kind && s.key == r.key
+				}
+			}
+		}
+	case y < geo.full:
+		if j := y - geo.lh; j < len(geo.foot) && g.links != nil {
+			if ids := g.links(geo.footOff, geo.footLh); j < len(ids) {
+				t.kind, t.key = hitBlockerLink, ids[j]
+			}
+		}
+	case g.open && y > geo.full && y < g.h-1: // the box's top and bottom edges are inert
+		t.kind = hitDrawer
+	}
+	return t
+}
+
+// wheeled is lv after the wheel moved the window by delta lines: Scrolled, anchored on the
+// new top line. A list that fits its window has nothing to scroll.
+func (g listGeom) wheeled(lv listView, delta int) listView {
+	geo := g.geometry(lv)
+	if g.n <= geo.lh || len(g.keys) != g.n {
+		return lv
+	}
+	top := min(max(geo.off+delta, 0), g.n-geo.lh)
+	return scrolledTo(g.keys, top)
+}
+
+// snapped is lv after a key: Following. If the selection is on screen at the held offset the
+// list resumes from it and scrolls only as far as keeping the selection visible takes, else
+// it re-centres as followOffset does.
+func (g listGeom) snapped(lv listView) listView {
+	if !lv.scrolled && !lv.resume {
+		return lv
+	}
+	geo := g.geometry(lv)
+	if g.sel < geo.off || g.sel >= geo.off+geo.lh {
+		return listView{}
+	}
+	return listView{resume: true, off: geo.off}
+}
+
+// stopTarget is the hitTarget of a stop: a row when it carries a bead, else a header.
+func stopTarget(key string, bead bool) hitTarget {
+	if bead {
+		return hitTarget{kind: hitRow, key: key, bead: true}
+	}
+	return hitTarget{kind: hitHeader, key: key}
+}
+
+// queueGeom is the listGeom of a queue tab's drawRows body. idx holds each post-gap line's
+// row number as text ("" for a gap, inert), key is row i's key, stop reports row i's key,
+// whether it carries a bead and whether j/k can land on it (a placeholder is not a stop).
+func queueGeom(idx []string, sel int, open bool, h int, footer, links func(off, lh int) []string, rowKey func(i int) string, stop func(i int) (key string, bead, ok bool)) listGeom {
+	keys := make([]string, len(idx))
+	for k, s := range idx {
+		if s != "" {
+			i, _ := strconv.Atoi(s)
+			keys[k] = rowKey(i)
+		}
+	}
+	return listGeom{n: len(idx), sel: sel, h: h, open: open, footer: footer, links: links, keys: anchorKeys(keys), at: func(k int) hitTarget {
+		if idx[k] == "" {
+			return hitTarget{}
+		}
+		i, _ := strconv.Atoi(idx[k])
+		if key, bead, ok := stop(i); ok {
+			return stopTarget(key, bead)
+		}
+		return hitTarget{}
+	}}
 }
 
 // gapAt inserts a blank separator line before line at (0 < at < len(lines)),
@@ -304,7 +513,7 @@ func fitRow(line func(i int) (left, right string), w, sel, i int) string {
 // drawRows is drawerWin over n queue-tab rows with gaps: idx holds each line's row
 // number as text ("" for a gap line, as gapAt inserts them), so only the drawn window
 // is formatted, shaded when its row is in shade.
-func drawRows(idx []string, line func(i int) (left, right string), shade map[int]bool, sel, selRow int, open bool, w, h int, vp viewport.Model, footer func(off, lh int) []string) string {
+func drawRows(idx []string, line func(i int) (left, right string), shade map[int]bool, sel, selRow int, open bool, w, h int, vp viewport.Model, footer func(off, lh int) []string, offs offsetFn) string {
 	return drawerWin(len(idx), func(k int) string {
 		if idx[k] == "" {
 			return ""
@@ -315,7 +524,7 @@ func drawRows(idx []string, line func(i int) (left, right string), shade map[int
 			l = shadeRow(l, w, ancRow)
 		}
 		return l
-	}, sel, open, w, h, vp, footer)
+	}, sel, open, w, h, vp, footer, offs)
 }
 
 // expandAll is the flip set that opens every row: it keeps flipping the folded rows
@@ -422,9 +631,11 @@ type shadeIn struct {
 // its Parent chain (headers included), the group header its tree twin sits under in
 // full (the fully expanded rows), and its twin in the other section. A selection that
 // is not a bead row shades nothing; a group header shades only the Actionable row it
-// twins (ADR 0180 §4) and that row's Parent chain. in maps a row; a tree row's group
+// twins (ADR 0180 §4) and that row's Parent chain. Every row of an unclosed MR Watch or
+// Landing whose Parent is a Checkpoint or Chart on that chain, the selection included, is
+// shaded too (ADR 0179 §5). bead looks a bead up by id; in maps a row; a tree row's group
 // is the last header above it.
-func shadeSet[R any](parent func(string) string, rows []R, sel int, full []R, in func(R) shadeIn) map[int]bool {
+func shadeSet[R any](bead func(string) *bd.Bead, rows []R, sel int, full []R, in func(R) shadeIn) map[int]bool {
 	ins := func(rs []R) []shadeIn {
 		out, grp := make([]shadeIn, len(rs)), ""
 		for i, r := range rs {
@@ -450,12 +661,24 @@ func shadeSet[R any](parent func(string) string, rows []R, sel int, full []R, in
 			break
 		}
 	}
-	chain := map[string]bool{}
-	for id := parent(s.id); id != "" && !chain[id]; id = parent(id) {
-		chain[id] = true
+	// ctrs holds the Checkpoints and Charts on the chain, the selection included.
+	chain, ctrs := map[string]bool{}, map[string]bool{}
+	for b, first := bead(s.id), true; b.ID != "" && !chain[b.ID]; b = bead(b.Parent) {
+		if !first {
+			chain[b.ID] = true
+		}
+		if b.Kind == contract.KindCheckpoint || b.Kind == contract.KindChart {
+			ctrs[b.ID] = true
+		}
+		first = false
+	}
+	// ridesChain: id is an unclosed MR Watch or Landing of a Checkpoint or Chart on the chain.
+	ridesChain := func(id string) bool {
+		b := bead(id)
+		return b.Unclosed() && (b.Kind == contract.KindMRWatch || b.Kind == contract.KindLanding) && ctrs[b.Parent]
 	}
 	for i, r := range rs {
-		if twin := r.id == s.id && (r.act != s.act || r.live != s.live); i != sel && (twin || chain[r.id] || !s.head && r.head && grp != "" && r.grp == grp) {
+		if twin := r.id == s.id && (r.act != s.act || r.live != s.live); i != sel && (twin || chain[r.id] || r.id != "" && len(ctrs) > 0 && ridesChain(r.id) || !s.head && r.head && grp != "" && r.grp == grp) {
 			set[i] = true
 		}
 	}
@@ -464,9 +687,6 @@ func shadeSet[R any](parent func(string) string, rows []R, sel int, full []R, in
 	}
 	return set
 }
-
-// parentOf is bead id's Parent ("" for none or an unknown id).
-func (g graphData) parentOf(id string) string { return g.beadByID(id).Parent }
 
 // band is rows split by leafState into the three Actionable bands (Spec D1), each in
 // beadCmp order: waiting on the human (sTurn, sAsk), the takeable frontier (sReady), then
@@ -477,7 +697,7 @@ func band[R any](g graphData, rows []R, bead func(R) *bd.Bead) (wait, ready, pau
 		switch g.leafState(bead(r)) {
 		case sTurn, sAsk:
 			wait = append(wait, r)
-		case sReady:
+		case sReady, sUndraft: // an un-draft is the human's, on GitLab: it waits with the frontier, not in the badged wait band
 			ready = append(ready, r)
 		case sPaused:
 			if bd.Paused(*bead(r)) {

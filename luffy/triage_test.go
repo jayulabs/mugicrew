@@ -3,6 +3,7 @@ package luffy
 import (
 	"errors"
 	"fmt"
+	"io"
 	"jayulabs.org/mugicrew/cfglayer"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
+	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/promptguard"
 )
@@ -80,6 +82,7 @@ func (g *fakeSignalGraph) drop(k contract.Kind) {
 
 func stubSignalSeams(t *testing.T) *fakeSignalGraph {
 	t.Helper()
+	swap[io.Writer](t, &stdout, io.Discard) // SeedInitiative prints the Initiative's id
 	g := &fakeSignalGraph{succ: map[contract.Kind]string{}, bodies: map[string]bd.Successor{}, trailers: map[string]bool{}, pins: map[string]string{}, surveys: map[string][]bd.Successor{}}
 	swap(t, &successorOf, func(_ string, k contract.Kind) (string, bool, error) { id, ok := g.succ[k]; return id, ok, nil })
 	swap(t, &spawnSuccessor, func(_ string, s bd.Successor) (string, bool, error) {
@@ -576,7 +579,7 @@ func TestLaunchSignalComposesTriageSession(t *testing.T) {
 // beside the Chart (both Drafts, published together, never a second), find it,
 // retitle it to the Destination leaving its body alone, and send the human to it.
 func TestTriageAcceptSeedsAndTendsSurvey(t *testing.T) {
-	_, accept, _ := strings.Cut(triagePrompt("ws-sig", "", "", nil, nil), "### ACCEPT")
+	_, accept, _ := strings.Cut(triagePrompt("ws-sig", "", "", "", nil, nil), "### ACCEPT")
 	accept, _, _ = strings.Cut(accept, "\n### ")
 	accept = strings.Join(strings.Fields(accept), " ")
 	for _, want := range []string{
@@ -594,7 +597,7 @@ func TestTriageAcceptSeedsAndTendsSurvey(t *testing.T) {
 
 // ADR 0096: no reconcile closes the Signal; mugicrew does at the clean-exit publish.
 func TestTriagePromptSaysSignalClosesAtPublish(t *testing.T) {
-	got := strings.Join(strings.Fields(triagePrompt("ws-sig", "", "", nil, nil)), " ")
+	got := strings.Join(strings.Fields(triagePrompt("ws-sig", "", "", "", nil, nil)), " ")
 	if strings.Count(got, "does NOT close the Signal") != 4 || !strings.Contains(got, "mugicrew closes it when this session exits cleanly") {
 		t.Errorf("triage prompt must say, on every reconcile leg, that mugicrew closes the Signal at publish:\n%s", got)
 	}
@@ -603,7 +606,7 @@ func TestTriagePromptSaysSignalClosesAtPublish(t *testing.T) {
 // Spec D6 (ADR 0088) over the triage prompt as rendered: no skill call, no ADR
 // citation, every crew-doc reference resolves, and it renders cleanly.
 func TestTriagePromptSkillFree(t *testing.T) {
-	p := triagePrompt("mc-x", "", "", nil, nil)
+	p := triagePrompt("mc-x", "", "", "", nil, nil)
 	promptguard.Check(t, "triage", p)
 	refs := promptguard.CrewDocRefs(p)
 	for _, d := range []string{"grilling.md", "domain-modeling.md", "chart-body.md", "spec-template.md"} {
@@ -767,7 +770,7 @@ func TestAcceptAndFastLaneRefuseBesideInitiative(t *testing.T) {
 // the human's yes, with its reconcile verb, the three-section body, the priority
 // call, and phase 1's member Signal filed as a Draft child of the Initiative.
 func TestTriagePromptOffersInitiative(t *testing.T) {
-	p := triagePrompt("ws-sig", "", "", nil, nil)
+	p := triagePrompt("ws-sig", "", "", "", nil, nil)
 	_, ini, ok := strings.Cut(p, "### INITIATIVE")
 	if !ok {
 		t.Fatalf("triage prompt has no ### INITIATIVE outcome:\n%s", p)
@@ -793,7 +796,7 @@ func TestTriagePromptOffersInitiative(t *testing.T) {
 // Spec mc-6qokc decision 10 (FRs 31, 51-52): the prompt checks the code's location
 // before FAST LANE with the locate verb and offers REROUTE as a sixth outcome.
 func TestTriagePromptOffersRerouteAfterLocate(t *testing.T) {
-	p := triagePrompt("ws-sig", "", "", nil, nil)
+	p := triagePrompt("ws-sig", "", "", "", nil, nil)
 	locate, _, _ := strings.Cut(p, "### ACCEPT")
 	for _, want := range []string{
 		"Before FAST LANE: is the Signal's code only on one open Checkpoint?",
@@ -834,7 +837,7 @@ func TestTriagePromptOffersRerouteAfterLocate(t *testing.T) {
 // Spec D3, D5, FR9: with the human's yes, INITIATIVE triage may adopt existing
 // open chains as the first phases instead of filing a new member Signal.
 func TestTriagePromptAdoptsChainsOnYes(t *testing.T) {
-	_, ini, _ := strings.Cut(triagePrompt("ws-sig", "", "", nil, nil), "### INITIATIVE")
+	_, ini, _ := strings.Cut(triagePrompt("ws-sig", "", "", "", nil, nil), "### INITIATIVE")
 	ini, _, _ = strings.Cut(ini, "\n### ")
 	for _, want := range []string{"mugicrew initiative adopt <head> <initiativeID>", "instead of filing", "yes"} {
 		if !strings.Contains(ini, want) {
@@ -906,7 +909,7 @@ func TestNestedSignalChartAndAnchorGoToTheChild(t *testing.T) {
 // Spec mc-dbxb FR2-FR10: the FAST LANE and INITIATIVE outcomes show their draft in
 // the shared sibling doc pane and pass the shown body file to reconcile.
 func TestTriageDraftsShowInGlowPane(t *testing.T) {
-	p := triagePrompt("ws-sig", "", "", nil, nil)
+	p := triagePrompt("ws-sig", "", "", "", nil, nil)
 	if strings.Contains(p, "%!") {
 		t.Fatalf("triage prompt has a format artifact:\n%s", p)
 	}
@@ -971,13 +974,13 @@ func TestSeedInitiativeCarriesJiraRefAndTitle(t *testing.T) {
 }
 
 func TestTriagePromptJiraSectionOnlyForJiraRef(t *testing.T) {
-	if strings.Contains(triagePrompt("ws-sig", "", "", nil, nil), "A Jira Signal") {
+	if strings.Contains(triagePrompt("ws-sig", "", "", "", nil, nil), "A Jira Signal") {
 		t.Error("ref-less Signal must not get the Jira section")
 	}
-	if strings.Contains(triagePrompt("ws-sig", "other-1", "", nil, nil), "A Jira Signal") {
+	if strings.Contains(triagePrompt("ws-sig", "other-1", "", "", nil, nil), "A Jira Signal") {
 		t.Error("non-jira ref must not get the Jira section")
 	}
-	if !strings.Contains(triagePrompt("ws-sig", "jira-ABC-1", "", nil, nil), "## A Jira Signal") {
+	if !strings.Contains(triagePrompt("ws-sig", "jira-ABC-1", "", "", nil, nil), "## A Jira Signal") {
 		t.Error("jira- ref Signal must get the Jira section")
 	}
 }
@@ -1024,5 +1027,67 @@ func TestFastLaneNestedGitlabPinsChildTip(t *testing.T) {
 	}
 	if sha, ok := git.ParseAnchor(body); !ok || sha != "kid-tip" || g.anchors != 0 {
 		t.Errorf("pin=(%q,%v) anchors=%d, want kid-tip and no commit", sha, ok, g.anchors)
+	}
+}
+
+// Spec mc-3cnhf.12 FR4: reconcile --initiative names each Latch Carry skipped with
+// reason initiative by id, verb and key, after the Initiative's id; other skip
+// reasons add nothing.
+func TestSeedInitiativePrintsSkippedLatches(t *testing.T) {
+	for name, tc := range map[string]struct {
+		skipped []bd.CarrySkip
+		want    string
+	}{
+		"latches": {[]bd.CarrySkip{{Bead: "lt-j", Reason: "initiative"}, {Bead: "ws-x", Reason: "hierarchy"}, {Bead: "lt-m", Reason: "initiative"}},
+			"ws-initiative\nlatch lt-j jira PROJ-1\nlatch lt-m mr https://gl.example.com/grp/proj/-/merge_requests/7\n"},
+		"none":  {nil, "ws-initiative\n"},
+		"other": {[]bd.CarrySkip{{Bead: "ws-x", Reason: "cycle"}}, "ws-initiative\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubSignalSeams(t)
+			stubInitiative(t)
+			swap(t, &carry, func(string, string) ([]string, []bd.CarrySkip, error) { return nil, tc.skipped, nil })
+			swap(t, &show, func(id string) (bd.Bead, error) {
+				ref := map[string]string{"lt-j": "jira-latch-PROJ-1", "lt-m": "gitlab-mr-latch-gl.example.com/grp/proj!7"}[id]
+				return bd.Bead{ID: id, ExternalRef: ref}, nil
+			})
+			var buf strings.Builder
+			swap[io.Writer](t, &stdout, &buf)
+			if err := SeedInitiative(openSignal(), "", "body", ""); err != nil {
+				t.Fatalf("SeedInitiative: %v", err)
+			}
+			if buf.String() != tc.want {
+				t.Errorf("output = %q, want %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// Spec mc-3cnhf.12 FR5-FR7: the INITIATIVE outcome asks which member waits on each
+// skipped Latch and re-latches through the verb, never a raw dep add.
+func TestTriagePromptRelatchesSkippedLatches(t *testing.T) {
+	_, ini, _ := strings.Cut(triagePrompt("ws-sig", "", "", "", nil, nil), "### INITIATIVE")
+	ini, _, _ = strings.Cut(ini, "\n### ")
+	for _, want := range []string{"mugicrew latch <verb> <key> --blocks <member> --drafted-by ws-sig", "none waits", "Never use a raw bd dep add"} {
+		if !strings.Contains(ini, want) {
+			t.Errorf("INITIATIVE section missing %q:\n%s", want, ini)
+		}
+	}
+}
+
+// The key printed for an MR Latch reads back through latch mr's parser to the same
+// canonical ref the Latch carries, so re-latching reuses it.
+func TestLatchVerbKeyMRRoundTrips(t *testing.T) {
+	ref := "gitlab-mr-latch-gl.example.com/grp/sub/proj!7"
+	verb, key := latchVerbKey(ref)
+	if verb != "mr" {
+		t.Fatalf("verb = %q", verb)
+	}
+	p, iid, err := forge.ParseMRRef(key, forge.Project{Host: "gl.example.com", ID: "x"})
+	if err != nil {
+		t.Fatalf("ParseMRRef(%q): %v", key, err)
+	}
+	if got := "gitlab-mr-latch-" + forge.MRCanonical(p, iid); got != ref {
+		t.Errorf("round trip = %q, want %q", got, ref)
 	}
 }

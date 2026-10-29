@@ -64,7 +64,7 @@ func windowFixture(now time.Time) []bd.Bead {
 	}
 	for i := range 6 {
 		add(fmt.Sprintf("sig%d", i), contract.KindSignal, "open", "")
-		add(fmt.Sprintf("task%d", i), "", "open", "")
+		add(fmt.Sprintf("errand%d", i), "", "open", "")
 	}
 	return beads
 }
@@ -175,7 +175,7 @@ func TestDrawRowsFormatsOnlyWindow(t *testing.T) {
 	idx, _, _ = gapAt(idx, make([]string, 500), 250, 100)
 	calls := 0
 	line := func(i int) (string, string) { calls++; return fmt.Sprint("row", i), "" }
-	out := drawRows(idx, line, nil, 251, 250, false, 40, 10, viewport.Model{}, nil)
+	out := drawRows(idx, line, nil, 251, 250, false, 40, 10, viewport.Model{}, nil, nil)
 	if calls != 10 || strings.Count(out, "\n") != 9 {
 		t.Errorf("line called %d times, %d lines out", calls, strings.Count(out, "\n")+1)
 	}

@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-09-19
+Superseded in part by ADR 0388 (a-chart-lands-through-an-approval-carrying-a-chart-packet): a Chart now lands through an Approval, so "no review gate" no longer holds for Charts.
 
 Amends: ADR 0002 (adds the `conflict` kind — 11 kinds become 12).
 

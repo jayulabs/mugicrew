@@ -232,7 +232,7 @@ func closeOutDue(cp bd.Bead, lg legs, mr *forge.MR, filed []bd.Bead, due []dueBe
 	}
 	var discussions []forge.Discussion
 	if err == nil {
-		discussions, err = forgeDiscussions(lg.proj, mr.IID)
+		discussions, err = lg.discussions(mr.IID)
 	}
 	if err != nil {
 		for _, x := range due {

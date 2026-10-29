@@ -56,7 +56,7 @@ type specSeamRec struct {
 	spawned    []bd.Successor
 	closed     []string         // Spec ids closed (via closeOnPublish, outside an effort)
 	builds     int              // buildChildren: kind:build members the slicing fork laid on the Checkpoint
-	tasks      int              // taskChildren: kind:task dependents the Spec holds over discovered-from
+	errands    int              // errandChildren: kind:errand dependents the Spec holds over discovered-from
 	seq        []string         // carry and close calls, in order: "carry <pred> <succ>" / "close <id>"
 	carryErr   error            // carry: the error bd.Carry returns
 	closeErr   error            // closeBead: the error closing the Checkpoint returns
@@ -70,9 +70,9 @@ type specSeamRec struct {
 // real funcs on cleanup. Mirrors nami_test's stubChartSeams.
 func stubSpecSeams(t *testing.T, r *specSeamRec, chartID string, found bool, baseErr error) {
 	t.Helper()
-	oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oTasks, oCarry := causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, taskChildren, carry
+	oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oErrands, oCarry := causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, errandChildren, carry
 	t.Cleanup(func() {
-		causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, taskChildren, carry = oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oTasks, oCarry
+		causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, errandChildren, carry = oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oErrands, oCarry
 	})
 	carry = func(pred, succ string) ([]string, []bd.CarrySkip, error) {
 		r.seq = append(r.seq, "carry "+pred+" "+succ)
@@ -124,7 +124,7 @@ func stubSpecSeams(t *testing.T, r *specSeamRec, chartID string, found bool, bas
 	}
 	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Kind: contract.KindSpec, Status: "open"}, nil }
 	buildChildren = func(string) (int, error) { return r.builds, nil }
-	taskChildren = func(string) (int, error) { return r.tasks, nil }
+	errandChildren = func(string) (int, error) { return r.errands, nil }
 }
 
 func openSpec() bd.Bead {
@@ -321,7 +321,7 @@ func TestReconcileSpecChartBackedCutsFromChartLandedBase(t *testing.T) {
 // the Spec must stay OPEN (not closed) for the loop to re-dispatch — the gate is
 // the artifact existing, not the session merely having run.
 func TestReconcileSpecEmptySkeletonLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{builds: 0, tasks: 0} // fork returned nil but laid neither Builds nor Tasks
+	r := &specSeamRec{builds: 0, errands: 0} // fork returned nil but laid neither Builds nor Errands
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	h := &recordingHarness{} // nil err: the fork "succeeded"
 
@@ -337,10 +337,10 @@ func TestReconcileSpecEmptySkeletonLeavesSpecOpen(t *testing.T) {
 	}
 }
 
-// A Spec that already holds Tasks and no Builds is not re-forked (the re-fork
-// republished a fresh copy of each Task); it drains as a Task-only Spec.
-func TestReconcileSpecSkipsForkWhenTasksExist(t *testing.T) {
-	r := &specSeamRec{builds: 0, tasks: 1}
+// A Spec that already holds Errands and no Builds is not re-forked (the re-fork
+// republished a fresh copy of each Errand); it drains as an Errand-only Spec.
+func TestReconcileSpecSkipsForkWhenErrandsExist(t *testing.T) {
+	r := &specSeamRec{builds: 0, errands: 1}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	h := &recordingHarness{}
 
@@ -348,16 +348,16 @@ func TestReconcileSpecSkipsForkWhenTasksExist(t *testing.T) {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
 	if len(h.invs) != 0 {
-		t.Errorf("must NOT re-fork slicing when Tasks already exist, ran %d", len(h.invs))
+		t.Errorf("must NOT re-fork slicing when Errands already exist, ran %d", len(h.invs))
 	}
 }
 
-// A fork that lays only Tasks is a fine slice: it drains as Task-only.
-func TestReconcileSpecForkLayingOnlyTasksIsNotAnError(t *testing.T) {
+// A fork that lays only Errands is a fine slice: it drains as Errand-only.
+func TestReconcileSpecForkLayingOnlyErrandsIsNotAnError(t *testing.T) {
 	r := &specSeamRec{}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	calls := 0
-	taskChildren = func(string) (int, error) { calls++; return (calls - 1) * 2, nil } // none before the fork, two after
+	errandChildren = func(string) (int, error) { calls++; return (calls - 1) * 2, nil } // none before the fork, two after
 	h := &recordingHarness{}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
@@ -367,20 +367,20 @@ func TestReconcileSpecForkLayingOnlyTasksIsNotAnError(t *testing.T) {
 		t.Errorf("slicing must fork once, ran %d", len(h.invs))
 	}
 	if len(r.closed) != 1 {
-		t.Errorf("the Task-only Spec must close, got %v", r.closed)
+		t.Errorf("the Errand-only Spec must close, got %v", r.closed)
 	}
 }
 
-// Task-only: Carry, the Checkpoint closed nothing-to-land, the branch delete,
+// Errand-only: Carry, the Checkpoint closed nothing-to-land, the branch delete,
 // then the Spec's close handed to the publish — in that order.
-func TestReconcileSpecTaskOnlyCarriesClosesCheckpointDeletesBranchThenClosesSpec(t *testing.T) {
-	r := &specSeamRec{tasks: 2, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp"}}
+func TestReconcileSpecErrandOnlyCarriesClosesCheckpointDeletesBranchThenClosesSpec(t *testing.T) {
+	r := &specSeamRec{errands: 2, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp"}}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	want := []string{"carry ws-spec ws-cp", "closecp ws-cp nothing to land: Task-only Spec ws-spec", "delete checkpoint/ws-cp", "close ws-spec"}
+	want := []string{"carry ws-spec ws-cp", "closecp ws-cp nothing to land: Errand-only Spec ws-spec", "delete checkpoint/ws-cp", "close ws-spec"}
 	if !slices.Equal(r.seq, want) {
 		t.Errorf("seq = %v, want %v", r.seq, want)
 	}
@@ -388,11 +388,11 @@ func TestReconcileSpecTaskOnlyCarriesClosesCheckpointDeletesBranchThenClosesSpec
 
 // Re-entry with the Checkpoint already closed nothing-to-land: no cut, no fork,
 // no second Checkpoint close; the Spec's close is handed to the publish.
-func TestReconcileSpecTaskOnlyReentrySkipsCutForkAndCheckpointClose(t *testing.T) {
-	r := &specSeamRec{tasks: 2}
+func TestReconcileSpecErrandOnlyReentrySkipsCutForkAndCheckpointClose(t *testing.T) {
+	r := &specSeamRec{errands: 2}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Task-only Spec ws-spec"}, nil
+		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Errand-only Spec ws-spec"}, nil
 	}
 	h := &recordingHarness{}
 
@@ -408,33 +408,33 @@ func TestReconcileSpecTaskOnlyReentrySkipsCutForkAndCheckpointClose(t *testing.T
 }
 
 // reentryClosedCheckpoint stubs a Checkpoint already closed nothing-to-land, with
-// the Spec's Task count and Build count read before and after the re-fork.
-func reentryClosedCheckpoint(t *testing.T, r *specSeamRec, tasksAfter, buildsAfter int) {
+// the Spec's Errand count and Build count read before and after the re-fork.
+func reentryClosedCheckpoint(t *testing.T, r *specSeamRec, errandsAfter, buildsAfter int) {
 	t.Helper()
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Task-only Spec ws-spec"}, nil
+		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Errand-only Spec ws-spec"}, nil
 	}
-	taskCalls := 0
-	taskChildren = func(string) (int, error) {
-		taskCalls++
-		if taskCalls == 1 {
+	errandCalls := 0
+	errandChildren = func(string) (int, error) {
+		errandCalls++
+		if errandCalls == 1 {
 			return 0, nil
 		}
-		return tasksAfter, nil
+		return errandsAfter, nil
 	}
 	buildChildren = func(string) (int, error) {
-		if taskCalls == 0 {
+		if errandCalls == 0 {
 			return 0, nil
 		}
 		return buildsAfter, nil
 	}
 }
 
-// FR19: re-entry with the Checkpoint closed nothing-to-land and zero Tasks (a
+// FR19: re-entry with the Checkpoint closed nothing-to-land and zero Errands (a
 // failed publish deleted the Drafts) re-forks slicing, with no cut, Checkpoint
 // close or branch delete; the Spec's close follows the re-count.
-func TestReconcileSpecReentryZeroTasksReforksThenClosesSpec(t *testing.T) {
+func TestReconcileSpecReentryZeroErrandsReforksThenClosesSpec(t *testing.T) {
 	r := &specSeamRec{}
 	reentryClosedCheckpoint(t, r, 2, 0)
 	h := &recordingHarness{}
@@ -443,7 +443,7 @@ func TestReconcileSpecReentryZeroTasksReforksThenClosesSpec(t *testing.T) {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
 	if len(h.invs) != 1 {
-		t.Errorf("re-entry with zero Tasks must re-fork once, ran %d", len(h.invs))
+		t.Errorf("re-entry with zero Errands must re-fork once, ran %d", len(h.invs))
 	}
 	if want := []string{"close ws-spec"}; !slices.Equal(r.seq, want) || len(r.cuts) != 0 {
 		t.Errorf("seq = %v cuts = %v, want only the Spec close", r.seq, r.cuts)
@@ -477,25 +477,25 @@ func TestReconcileSpecReentryReforkLayingBuildFailsLoud(t *testing.T) {
 	}
 }
 
-// A Task-only Checkpoint closed for another reason fails loud; so does the
+// An Errand-only Checkpoint closed for another reason fails loud; so does the
 // Builds arm's closed Checkpoint (above).
-func TestReconcileSpecTaskOnlyCheckpointClosedOtherwiseFailsLoud(t *testing.T) {
-	r := &specSeamRec{tasks: 1}
+func TestReconcileSpecErrandOnlyCheckpointClosedOtherwiseFailsLoud(t *testing.T) {
+	r := &specSeamRec{errands: 1}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	showBead = func(id string) (bd.Bead, error) {
 		return bd.Bead{ID: id, Status: "closed", CloseReason: "Closed"}, nil
 	}
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
-		t.Fatal("a Task-only Checkpoint closed for another reason must hard-fail")
+		t.Fatal("an Errand-only Checkpoint closed for another reason must hard-fail")
 	}
 	if len(r.seq) != 0 {
 		t.Errorf("nothing may carry, close or delete, got %v", r.seq)
 	}
 }
 
-// A Carry error on the Task-only arm closes nothing.
-func TestReconcileSpecTaskOnlyCarryErrorClosesNothing(t *testing.T) {
-	r := &specSeamRec{tasks: 1, carryErr: errors.New("bd down")}
+// A Carry error on the Errand-only arm closes nothing.
+func TestReconcileSpecErrandOnlyCarryErrorClosesNothing(t *testing.T) {
+	r := &specSeamRec{errands: 1, carryErr: errors.New("bd down")}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a carry error must fail the reconcile")
@@ -506,8 +506,8 @@ func TestReconcileSpecTaskOnlyCarryErrorClosesNothing(t *testing.T) {
 }
 
 // A refused branch delete never fails the pass; the Spec still closes.
-func TestReconcileSpecTaskOnlyRefusedBranchDeleteStillSucceeds(t *testing.T) {
-	r := &specSeamRec{tasks: 1, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp", Err: errors.New("held by worktree")}}
+func TestReconcileSpecErrandOnlyRefusedBranchDeleteStillSucceeds(t *testing.T) {
+	r := &specSeamRec{errands: 1, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp", Err: errors.New("held by worktree")}}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -517,9 +517,9 @@ func TestReconcileSpecTaskOnlyRefusedBranchDeleteStillSucceeds(t *testing.T) {
 	}
 }
 
-// Builds and Tasks together: the Checkpoint is not closed.
-func TestReconcileSpecBuildsAndTasksLeaveCheckpointOpen(t *testing.T) {
-	r := &specSeamRec{builds: 1, tasks: 1}
+// Builds and Errands together: the Checkpoint is not closed.
+func TestReconcileSpecBuildsAndErrandsLeaveCheckpointOpen(t *testing.T) {
+	r := &specSeamRec{builds: 1, errands: 1}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -531,9 +531,9 @@ func TestReconcileSpecBuildsAndTasksLeaveCheckpointOpen(t *testing.T) {
 	}
 }
 
-// Builds and Tasks together take today's path: Carry, then the close.
-func TestReconcileSpecBuildsAndTasksCarryThenClose(t *testing.T) {
-	r := &specSeamRec{builds: 1, tasks: 2}
+// Builds and Errands together take today's path: Carry, then the close.
+func TestReconcileSpecBuildsAndErrandsCarryThenClose(t *testing.T) {
+	r := &specSeamRec{builds: 1, errands: 2}
 	stubSpecSeams(t, r, "ws-chart", true, nil)
 	h := &recordingHarness{}
 
@@ -750,17 +750,17 @@ func TestSlicingPromptDraftsBuildsBySpec(t *testing.T) {
 	}
 }
 
-// Spec decision C (FR14–FR17): the slicing prompt files each of the Spec's Tasks
-// through mugicrew task new, maps the ordering lines to its flags, and rolls
-// forward over the Spec's existing Tasks.
-func TestSlicingPromptFilesSpecTasks(t *testing.T) {
+// Spec decision C (FR14–FR17): the slicing prompt files each of the Spec's Errands
+// through mugicrew errand new, maps the ordering lines to its flags, and rolls
+// forward over the Spec's existing Errands.
+func TestSlicingPromptFilesSpecErrands(t *testing.T) {
 	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
 	for _, want := range []string{
-		"## Tasks",
-		"crew doc task-body.md",
+		"## Errands",
+		"crew doc errand-body.md",
 		"bd dep list mc-x --direction=up -t discovered-from --json", // roll forward by edge
-		"kind:task",
-		"mugicrew task new --drafted-by mc-x",
+		"kind:errand",
+		"mugicrew errand new --drafted-by mc-x",
 		"`after: land` → `--after <checkpointID>`",
 		"`before: land` → `--before <checkpointID>`",
 		"`after: <T>` → `--after <T>`",
@@ -772,20 +772,20 @@ func TestSlicingPromptFilesSpecTasks(t *testing.T) {
 		}
 	}
 	filing := p[:strings.Index(p, "### Adopted entries")] // adopted entries keep the edge-only path
-	for _, bad := range []string{"bd list --all -l kind:task", "NO `--parent`", "free-standing", "bd dep add <task>", "bd dep add <checkpointID> <task>", "-l kind:task,"} {
+	for _, bad := range []string{"bd list --all -l kind:errand", "NO `--parent`", "free-standing", "bd dep add <errand>", "bd dep add <checkpointID> <errand>", "-l kind:errand,"} {
 		if strings.Contains(filing, bad) {
 			t.Errorf("slicing prompt still carries %q", bad)
 		}
 	}
 }
 
-// Each --after <T> needs T's id when the later Task is filed, so the slicing
-// prompt files Tasks in dependency order and says where <T> comes from.
-func TestSlicingPromptFilesTasksInDependencyOrder(t *testing.T) {
+// Each --after <T> needs T's id when the later Errand is filed, so the slicing
+// prompt files Errands in dependency order and says where <T> comes from.
+func TestSlicingPromptFilesErrandsInDependencyOrder(t *testing.T) {
 	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
 	for _, want := range []string{
-		"File each Task after every Task its `after:` lines name, whatever order the `## Tasks` section lists them in",
-		"`<T>` is the id on the first stdout line of that Task's own `mugicrew task new`, or an adopted entry's id",
+		"File each Errand after every Errand its `after:` lines name, whatever order the `## Errands` section lists them in",
+		"`<T>` is the id on the first stdout line of that Errand's own `mugicrew errand new`, or an adopted entry's id",
 		"an adopted entry's `after: <filed T>` edge is added only after T is filed",
 	} {
 		if !strings.Contains(p, want) {
@@ -794,16 +794,16 @@ func TestSlicingPromptFilesTasksInDependencyOrder(t *testing.T) {
 	}
 }
 
-// FR 43–46: a Tasks entry with a task: <id> line is adopted, not filed.
-func TestSlicingPromptAdoptsTaskByID(t *testing.T) {
+// FR 43–46: an Errands entry with an errand: <id> line is adopted, not filed.
+func TestSlicingPromptAdoptsErrandByID(t *testing.T) {
 	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
 	for _, want := range []string{
-		"`task: <id>` line",
+		"`errand: <id>` line",
 		"files nothing for an adopted entry",
 		"left out of the title-dedupe enumeration",
 		"bd show <id>",
-		"open `kind:task`",
-		"A closed Task is skipped with a line saying so",
+		"open `kind:errand`",
+		"A closed Errand is skipped with a line saying so",
 		"fail the slice loudly",
 		"added only if missing",
 		"adds no `discovered-from` edge",
@@ -1148,8 +1148,39 @@ func TestCheckpointBaseNestedChartGitlabFetchesFirst(t *testing.T) {
 	var order []string
 	swap(t, &repoFetch, func(git.Repo) (string, error) { order = append(order, "fetch"); return "tip", nil })
 	swap(t, &repoLanded, func(_ git.Repo, tr string) (string, error) { order = append(order, tr); return "chartsha", nil })
+	swap(t, &showBead, func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: "chart body"}, nil })
 	if got, err := checkpointBase(bd.Bead{ID: "k-s"}); err != nil || got != "chartsha" || len(order) != 2 || order[0] != "fetch" {
 		t.Errorf("checkpointBase = %q, %v, order %v", got, err, order)
+	}
+}
+
+// A Chart-backed Spec cuts from the Chart's Anchor: pin first, the legacy Chart: trailer
+// second, and neither is a hard error — for a Workspace Chart and a nested-repo Chart.
+func TestCheckpointBaseChartPinThenTrailer(t *testing.T) {
+	for _, repo := range []git.Repo{"", "kid"} {
+		t.Run("repo="+string(repo), func(t *testing.T) {
+			swap(t, &landStrategy, func() (string, error) { return git.LandStrategyLocal, nil })
+			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "ws-c", true, nil })
+			swap(t, &repoOf, func(bd.Bead) git.Repo { return repo })
+			var chartBody string
+			swap(t, &showBead, func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: chartBody}, nil })
+			var trailer error
+			swap(t, &landedBase, func(string) (string, error) { return "trailersha", trailer })
+			swap(t, &repoLanded, func(git.Repo, string) (string, error) { return "trailersha", trailer })
+			spec := bd.Bead{ID: "ws-s"}
+			chartBody = "body\nAnchor: pinsha\n"
+			if got, err := checkpointBase(spec); err != nil || got != "pinsha" {
+				t.Errorf("pinned: checkpointBase = %q, %v; want pinsha", got, err)
+			}
+			chartBody = "body"
+			if got, err := checkpointBase(spec); err != nil || got != "trailersha" {
+				t.Errorf("legacy: checkpointBase = %q, %v; want trailersha", got, err)
+			}
+			trailer = git.ErrNotLanded
+			if _, err := checkpointBase(spec); !errors.Is(err, git.ErrNotLanded) {
+				t.Errorf("no pin, no trailer: err = %v; want a hard ErrNotLanded", err)
+			}
+		})
 	}
 }
 
@@ -1189,32 +1220,46 @@ func TestCheckpointSuccessorCitesADRWithSlug(t *testing.T) {
 	}
 }
 
-// ADR 0325: the pivot prompt reads a Task raiser, comments the verdict on the
-// Task, and adopts the Checkpoint's held Tasks into a corrected Spec by id.
-func TestPivotPromptReadsTaskRaiser(t *testing.T) {
+// ADR 0325: the pivot prompt reads an Errand raiser, comments the verdict on the
+// Errand, and adopts the Checkpoint's held Errands into a corrected Spec by id.
+func TestPivotPromptReadsErrandRaiser(t *testing.T) {
 	p := strings.Join(strings.Fields(pivotPrompt("ws-pv", "ws-cp", "ws-sp")), " ") // line wraps are not content
 	if strings.Contains(p, "%!") {
 		t.Fatalf("bad pivot prompt render: %q", p)
 	}
 	for _, want := range []string{
-		"A Task raiser: a `kind:task` row", // Raised by read
+		"An Errand raiser: a `kind:errand` row", // Raised by read
 		"stuck comment",
-		"`Raised by Task` line",
-		"pivot <pivotID> dismissed|amended: <gist>", // Task comment on dismiss/amend
+		"`Raised by Errand` line",
+		"pivot <pivotID> dismissed|amended: <gist>", // Errand comment on dismiss/amend
 		"which Critique to wait for",
 		"the step may be wrong; amend it on resume", // ...
 		"skip the step-1 refile",                    // Ask Critique already exists
-		"the open `kind:task` rows",                 // held-Task listing
+		"the open `kind:errand` rows",               // held-Errand listing
 		"adopt it or leave it out",                  // confirm: put each to the human
-		"### <Task title>",                          // confirm: Spec entry
-		"task: <id>",                                // ...
+		"### <Errand title>",                        // confirm: Spec entry
+		"errand: <id>",                              // ...
 		"before: land",                              // ...
 		"no Steps body",                             // ...
-		"stays open for the human to abandon",       // left-out Task
-		"name each held Task and whether the human wants it adopted", // escalate evidence
+		"stays open for the human to abandon",       // left-out Errand
+		"name each held Errand and whether the human wants it adopted", // escalate evidence
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("pivot prompt missing %q", want)
+		}
+	}
+}
+
+// ADR 0354: the slicing prompt refuses the retired Task forms and names the new ones.
+func TestSlicingPromptRefusesRetiredTaskForms(t *testing.T) {
+	p := strings.Join(strings.Fields(slicingPrompt("mc-x")), " ")
+	for _, want := range []string{
+		"carries a `## Tasks` heading or a `task: <id>` line, fail the slice loudly",
+		"`## Errands`",
+		"`errand: <id>`",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("slicing prompt missing retired-form refusal %q", want)
 		}
 	}
 }

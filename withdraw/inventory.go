@@ -270,7 +270,7 @@ func (c collector) measure(left *BeadLeftovers, b bd.Bead, d route.Destination, 
 		left.Unintegrated, err = r.CommitsAhead(d.Tip, d.Branch)
 		return err
 	}
-	n, ok, err := r.CommitsSinceCut(b.ID, d.Branch)
+	n, ok, err := r.CommitsSinceCut(b.ID, d.Branch, d.Container)
 	if err != nil {
 		return err
 	}

@@ -19,7 +19,7 @@ const (
 	ItemTree   ItemKind = "tree"
 	ItemBranch ItemKind = "branch"
 	ItemDrafts ItemKind = "drafts"
-	// ItemSession is a Task's exited pane, killed with no tree behind it.
+	// ItemSession is an Errand's exited pane, killed with no tree behind it.
 	ItemSession ItemKind = "session"
 )
 

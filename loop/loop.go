@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"jayulabs.org/mugicrew/backup"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/brook"
 	"jayulabs.org/mugicrew/cfglayer"
@@ -91,6 +92,8 @@ type Loop struct {
 	asks      chan struct{}       // SIGUSR2 requests, one slot so repeats merge; answered by request
 	restartTo string              // set while draining for a restart; a stop clears it (ADR 0062 §6), a cancel of that stop drain sets it again (ADR 0236 §3)
 
+	holdChecked map[string]time.Time // Hold Errand id → last hold check end (ADR 0393); pruned when the Errand leaves the open set, memory only
+
 	checked map[string]time.Time // latch or Landing id → last effort end (Spec mc-8ymw.9 D5); memory only, so a restart makes every latch due once
 
 	limitedUntil time.Time      // a Plan usage limit hit holds claude dispatch until then (reset + 1m); zero: no hold. Memory only
@@ -127,6 +130,36 @@ type Restart struct{ Rev, Bin string }
 // zero it; a window test sets and restores its own); `loop stop --force` waits it out.
 var StopWindow = time.Second
 
+// BackupInterval is how often the loop pushes the Bead Graph to its backup remote
+// (ADR 0370), in every state but off. Not config; a var so tests shrink it.
+var BackupInterval = time.Hour
+
+// backupSync is the push the backup job runs, the same code path as `mugicrew
+// backup push`; a var so tests stub it.
+var backupSync = backup.Sync
+
+// runBackups pushes once at start, then every BackupInterval until quit closes.
+// The start push keeps a loop that restarts onto each landed build from never
+// reaching its first tick; Sync is a cheap no-op with nothing unpushed. Independent of the
+// tick and of dispatch, through on, limited and draining. Sync records its own
+// backup.pushed and backup.failed, and a failure is never the loop's: the job
+// ignores what it returns. done closes on return, so Run joins an in-flight push
+// before it returns a Restart to the exec.
+func runBackups(quit <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	push, every := backupSync, BackupInterval
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		push(os.Getenv("BEADS_DIR"), eventlog.BackupLoop)
+		select {
+		case <-quit:
+			return
+		case <-t.C:
+		}
+	}
+}
+
 // ErrForced is Run's return after a second stop signal abandoned in-flight efforts.
 var ErrForced = errors.New("loop: force-stopped")
 
@@ -152,6 +185,11 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 	if err := chdirRepoRoot(); err != nil {
 		return nil, err
 	}
+	// Old beads must not fail silently under this binary: refuse before taking work,
+	// and relabel nothing unasked (ADR 0355).
+	if err := refuseLegacyTasks("."); err != nil {
+		return nil, err
+	}
 	l.onState = onState
 	l.JiraPoll = cfglayer.JiraPollInterval(".")
 	l.GitlabPoll = cfglayer.GitlabPollInterval(".")
@@ -165,9 +203,11 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 	defer t.Stop()
 	l.gen.Store(newGen())
 	l.built, l.notify, l.asks = make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
-	quit, stopped := make(chan struct{}), make(chan struct{})
-	defer func() { close(quit); <-stopped }() // joined, so nothing reads StopWindow after Run returns
+	quit, stopped, backedUp := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	// joined, so nothing reads StopWindow after Run returns and no push outlives it into the exec
+	defer func() { close(quit); <-stopped; <-backedUp }()
 	go func() { defer close(stopped); l.signals(sig, quit) }()
+	go runBackups(quit, backedUp)
 	for {
 		g := l.gen.Load()
 		ctx, cancel := context.WithCancel(context.Background()) // a stop cancels it, so each polling phase gets its own
@@ -590,8 +630,9 @@ func (l *Loop) poll() {
 // tick is one poll (spec §6.4): re-derive inflight + candidates from bd, then
 // for each candidate the AFK pool admits, claim synchronously and dispatch Run.
 func (l *Loop) tick() error {
-	StampAutoApprove() // live: an Approval's mode follows this tick's setting (ADR 0346)
+	StampModeSnapshots() // live: an Approval's mode follows this tick's setting (ADR 0346)
 	effortSet.Store(memoEfforts(effortRefsAcross))
+	reapIntegrated(tickEfforts())
 	ready, err := readyBeads()
 	if err != nil {
 		return err
@@ -617,6 +658,7 @@ func (l *Loop) tick() error {
 	resume(ready)
 	resumeProfiles(l.Ctx, ready)
 	pauseContexts(ready, open, paused, inProgress)
+	l.clearHolds(open)
 	cands, err := l.candidates(Readmit(ready, open), slices.Concat(paused, inProgress))
 	if err != nil {
 		return err
@@ -637,7 +679,7 @@ func (l *Loop) tick() error {
 		})
 	}
 	// "." is the Workspace root: Run chdirs there (chdirRepoRoot) before any tick.
-	for _, b := range selectDispatch(cands, Pool("."), CountInflight(inProgress), held) {
+	for _, b := range selectDispatch(cands, Pool("."), CountInflight(inProgress, Orphans(inProgress)), held) {
 		if l.leaving() { // a stop (or a restart) mid-tick claims nothing more
 			break
 		}
@@ -733,8 +775,8 @@ func retireStragglers(open []bd.Bead) (map[string]bool, error) {
 // so a before-land prerequisite would freeze the whole Checkpoint. It re-admits an open
 // Checkpoint whose every open blocker's kind admits a land-only hold
 // (contract.Kind.AdmitsLandOnlyHold), and that Checkpoint's open members
-// with no open blocker of their own; the land guard in CheckpointReady then holds
-// only the land (FR 16). An open Rollback held only on Tasks is re-admitted too, so
+// with no open blocker of their own; the verdict's Checkpoint arm then holds
+// only the land (FR 16). An open Rollback held only on Errands is re-admitted too, so
 // Jinbe still sees a human's merge or close of its revert MR. Any other open blocker
 // (a pivot's gate) re-admits nothing.
 // open is every Open bead (closed rows may ride along: the TUI passes its full
@@ -744,19 +786,19 @@ func Readmit(ready, open []bd.Bead) []bd.Bead {
 	for _, b := range open {
 		byID[b.ID] = b
 	}
-	blockers := func(b bd.Bead) (n, tasks, landOnly int) {
+	blockers := func(b bd.Bead) (n, errands, landOnly int) {
 		for _, id := range b.BlockedBy {
 			if x, ok := byID[id]; ok && x.Open() {
 				n++
-				if x.Kind == contract.KindTask {
-					tasks++
+				if x.Kind == contract.KindErrand {
+					errands++
 				}
 				if x.Kind.AdmitsLandOnlyHold() {
 					landOnly++
 				}
 			}
 		}
-		return n, tasks, landOnly
+		return n, errands, landOnly
 	}
 	held := map[string]bool{}
 	for _, b := range open {
@@ -770,8 +812,8 @@ func Readmit(ready, open []bd.Bead) []bd.Bead {
 	}
 	out := slices.Clone(ready)
 	for _, b := range open {
-		n, tasks, _ := blockers(b)
-		heldRollback := b.Kind == contract.KindRollback && b.Status == "open" && n > 0 && n == tasks
+		n, errands, _ := blockers(b)
+		heldRollback := b.Kind == contract.KindRollback && b.Status == "open" && n > 0 && n == errands
 		if !in[b.ID] && (held[b.ID] || heldRollback || (held[b.Parent] && b.Status == "open" && n == 0)) {
 			out = append(out, b)
 		}
@@ -779,117 +821,74 @@ func Readmit(ready, open []bd.Bead) []bd.Bead {
 	return out
 }
 
-// InheritedPause is the inherited-pause check candidates() runs, shared with TUI
-// run-now so the two keep parity (Spec FR5, B): it returns a func
-// naming b's nearest paused:manual ancestor ("" for none). Ids resolve off known
-// and ready, then miss (cached); when neither holds a manual pause, nothing is
-// inherited-paused and no walk runs.
-func InheritedPause(ready, known []bd.Bead, miss func(id string) (bd.Bead, error)) func(bd.Bead) (string, error) {
-	byID := map[string]bd.Bead{}
-	manual := false
-	for _, b := range slices.Concat(known, ready) {
-		byID[b.ID] = b
-		manual = manual || bd.PausedBy(b, bd.PausedManual) || bd.PausedBy(b, bd.PausedContext)
-	}
-	lookup := func(id string) (bd.Bead, error) {
-		if b, ok := byID[id]; ok {
-			return b, nil
-		}
-		// ponytail: one miss per non-paused intermediate hop outside known and
-		// ready, only while some manual pause exists; batch-read if that gets hot.
-		b, err := miss(id)
-		if err == nil {
-			byID[id] = b
-		}
-		return b, err
-	}
-	return func(b bd.Bead) (string, error) {
-		if !manual {
-			return "", nil
-		}
-		return bd.PausedAncestor(b, lookup)
-	}
-}
-
-// candidates classifies the ready frontier into AFK dispatch candidates in
-// bd-ready order (spec §6.4): a research leaf is always a candidate; a published
-// Chart is a candidate when drained (0 open children, Drafts included, §8.4) — it
-// no longer gates on chart:defogged, and reconcileChart discriminates
-// promote-or-stamp vs land downstream. Non-mugicrew
-// beads (no kind) and known-but-unowned kinds (e.g. kind:spec) fall through —
-// left sitting open (§6.1).
+// candidates admits the ready frontier's AFK dispatch candidates in bd-ready order
+// (spec §6.4): each ready bead gets the eligibility verdict in loop mode over one live view
+// built for the tick, and the runnable ones are admitted (a review-due Checkpoint
+// included; Jinbe spawns the Review). Non-mugicrew beads (no kind) and known-but-unowned
+// kinds (e.g. kind:spec) are not candidates, left sitting open (§6.1).
 //
-// Chart candidates come off the same bd.Ready() poll rather than a second
-// open-containers list query: parent-child edges never gate `bd ready` of an
-// unblocked parent (bd command mapping §3, verified), so an open Chart appears throughout its life —
-// with open children, with all children closed, or with none. The OpenChildren
-// call below is §6.4's second detection (the children + label check).
-//
-// A paused bead (any paused:<cause> label on the bead itself, ADR 0055 §3) is
-// never a candidate, whatever its kind; nor is one under a manual-paused ancestor
-// (inherited pause, ADR 0081). known is the tick's paused list (closed included)
-// plus its in-progress rows: when it holds no manual pause, nothing is inherited-
-// paused and no walk runs. Otherwise the walk resolves ids off known and ready, then
-// bd show, and a failed lookup fails the tick, never a silent "not paused".
+// known is the tick's paused list (closed included) plus its in-progress rows, which seed
+// the view so the inherited-pause walk (ADR 0081) resolves them without a bd show. A
+// foreign-landing verdict files its hold Errand here and skips that bead; a failed read
+// or filing fails the tick, never a silent "not paused" or "not landed".
 func (l *Loop) candidates(ready, known []bd.Bead) ([]bd.Bead, error) {
-	inherited := InheritedPause(ready, known, showBead)
+	view := newLiveView(tickEfforts, known, ready)
+	// known holds every paused bead, so without a manual or context pause there, no
+	// bead inherits one and the ancestor walk is skipped.
+	in := Inputs{Paced: l.paceNotDue, NoInheritable: !slices.ContainsFunc(slices.Concat(known, ready), func(b bd.Bead) bool {
+		return bd.PausedBy(b, bd.PausedManual) || bd.PausedBy(b, bd.PausedContext)
+	})}
 	var out []bd.Bead
 	l.pruneChecked(ready)
 	for _, b := range ready {
-		if bd.Paused(b) { // own pause: skipped, no walk
-			continue
-		}
-		anc, err := inherited(b)
+		v, err := Judge(b, ModeLoop, ready, in, view)
 		if err != nil {
 			return nil, err
 		}
-		switch {
-		case anc != "": // inherited pause: skipped
-		case IsAFKLeaf(b):
-			if l.paceNotDue(b) {
-				continue
-			}
-			if held, err := SurgeryHold(b); err != nil {
+		if v.Cause == CauseForeignLanding {
+			if err := holdForeign(b, v.Foreign); err != nil {
 				return nil, err
-			} else if len(held) > 0 {
-				continue
 			}
+			continue
+		}
+		if v.Runnable {
 			out = append(out, b)
-		case IsDrainedChartCandidate(b):
-			n, err := openChildren(b.ID)
-			if err != nil {
-				return nil, err
-			}
-			if n == 0 {
-				held, err := ChartLandingHeld(b)
-				if skip, err := skipForeign(b, err); err != nil {
-					return nil, err
-				} else if skip {
-					continue
-				}
-				if err != nil {
-					return nil, err
-				}
-				if !held {
-					out = append(out, b)
-				}
-			}
-		case IsCheckpointCandidate(b):
-			ready, err := CheckpointReady(b)
-			if skip, err := skipForeign(b, err); err != nil {
-				return nil, err
-			} else if skip {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			if ready {
-				out = append(out, b)
-			}
 		}
 	}
 	return out, nil
+}
+
+// ClearHolds is the hold clearing step the tick runs as housekeeping (ADR 0393): Jinbe
+// owns it, main wires it, and nil is no step. due and checked carry the loop's pacing.
+var ClearHolds func(open []bd.Bead, due func(id string) bool, checked func(id string))
+
+// clearHolds runs the hold clearing step over the tick's open list, paced by
+// LandingPoll from the end of each hold's last check, pass or fail, and prunes the
+// stamps of Errands that left the open set. It runs under the claude-limit hold.
+func (l *Loop) clearHolds(open []bd.Bead) {
+	l.mu.Lock()
+	for id := range l.holdChecked {
+		if !slices.ContainsFunc(open, func(b bd.Bead) bool { return b.ID == id }) {
+			delete(l.holdChecked, id)
+		}
+	}
+	l.mu.Unlock()
+	if ClearHolds == nil {
+		return
+	}
+	ClearHolds(open, func(id string) bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		at, ok := l.holdChecked[id]
+		return !ok || now().Sub(at) >= l.LandingPoll
+	}, func(id string) {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.holdChecked == nil {
+			l.holdChecked = map[string]time.Time{}
+		}
+		l.holdChecked[id] = now()
+	})
 }
 
 // pruneChecked drops last-checked stamps of ids no longer in the tick's ready set.
@@ -903,7 +902,7 @@ func (l *Loop) pruneChecked(ready []bd.Bead) {
 	}
 }
 
-// paceNotDue is whether b is a latch, Landing or MR Watch whose last effort ended within its
+// paceNotDue is whether b is a latch, Landing, MR Watch or Rollback with a recorded revert MR whose last effort ended within its
 // poll interval: a latch by its system's (GitlabPoll for mr, else JiraPoll,
 // including an unparseable body, whose check then errors and pauses), a Landing or MR Watch by
 // LandingPoll. Decided only here, never in Run: a skip must not reset the
@@ -918,6 +917,11 @@ func (l *Loop) paceNotDue(b bd.Bead) bool {
 		}
 	case contract.KindLanding, contract.KindMRWatch:
 		poll = l.LandingPoll
+	case contract.KindRollback:
+		if git.RecordedMR(b.Description) == 0 {
+			return false // still building or pushing its revert, closing invalid, or local: due every tick
+		}
+		poll = l.LandingPoll
 	default:
 		return false
 	}
@@ -927,22 +931,18 @@ func (l *Loop) paceNotDue(b bd.Bead) bool {
 	return ok && now().Sub(at) < poll
 }
 
-// skipForeign reports whether err is a trailer another Bead Graph landed: that one
-// container is refused (FR 42, ADR 0187), never the whole tick. It files the hold
-// Task here, since a skipped container is never dispatched to a reconcile. The blocks
-// edge takes a Chart out of bd ready, but Readmit re-admits a Checkpoint whose only
-// open blockers admit a land-only hold, so a held Checkpoint reruns this (warn + idempotent Task
-// query) every tick. A Task-filing error fails the tick.
-func skipForeign(b bd.Bead, err error) (bool, error) {
-	var foreign *git.ForeignLanding
-	if !errors.As(err, &foreign) {
-		return false, nil
+// holdForeign files the hold Errand for a container whose trailer another Bead Graph
+// landed: that one container is refused (FR 42, ADR 0187), never the whole tick, and since
+// a skipped container is never dispatched to a reconcile the loop files the Errand here.
+// The blocks edge takes a Chart out of bd ready, but Readmit re-admits a Checkpoint whose
+// only open blockers admit a land-only hold, so a held Checkpoint reruns this (warn +
+// idempotent Errand query) every tick. An Errand-filing error fails the tick.
+func holdForeign(b bd.Bead, foreign *git.ForeignLanding) error {
+	slog.Warn("loop.foreign_landing", append(eventlog.BeadAttrs(b), "err", foreign.Error())...)
+	if err := bd.HoldForeign(b, foreign); err != error(foreign) {
+		return err // HoldForeign returns the refusal itself on the call that files the Errand
 	}
-	slog.Warn("loop.foreign_landing", append(eventlog.BeadAttrs(b), "err", err.Error())...)
-	if herr := bd.HoldForeign(b, foreign); herr != error(foreign) {
-		return false, herr // HoldForeign returns the refusal itself once the Task exists
-	}
-	return true, nil
+	return nil
 }
 
 // dispatch first passes dispatch.Admit: a bead whose Agent Profile can't run is
@@ -1010,9 +1010,11 @@ func (l *Loop) dispatch(b bd.Bead) {
 	}()
 }
 
-// stampChecked records a latch's, Landing's or MR Watch's effort end, pass or fail, as its last check.
+// stampChecked records a latch's, Landing's, MR Watch's or Rollback's effort end, pass or
+// fail, as its last check. A Rollback is stamped before its MR is recorded too: the effort
+// that writes the MR: line started without it, and paceNotDue decides from the current body.
 func (l *Loop) stampChecked(b bd.Bead) {
-	if b.Kind != contract.KindLatch && !b.Kind.PacedLeaf() {
+	if b.Kind != contract.KindLatch && b.Kind != contract.KindRollback && !b.Kind.PacedLeaf() {
 		return
 	}
 	l.mu.Lock()
@@ -1261,7 +1263,11 @@ func LiveAFK(list func() ([]bd.Bead, error), alive func([]string) map[string]boo
 // research). Unknown, unowned, HITL, and container kinds are not leaves. Exported
 // because it is the parity contract the TUI run-now trigger reuses to admit only
 // what the loop itself would dispatch (Spec FR5) — never re-spelled.
+// An Approval waiting on its MR's un-draft is no leaf.
 func IsAFKLeaf(b bd.Bead) bool {
+	if bd.AwaitingUndraft(b) {
+		return false // waiting on the human's un-draft: only the MR Watch closes it (Spec FR 9)
+	}
 	e, err := registry.Lookup(b.Kind)
 	return err == nil && registry.ModeOf(b.Kind, b.Labels) == registry.AFK && !e.Container
 }
@@ -1293,44 +1299,20 @@ func IsDrainedChartCandidate(b bd.Bead) bool {
 	return err == nil && e.Mode == registry.AFK && e.Container && b.Kind == contract.KindChart
 }
 
-// ChartLandingHeld reports whether a drained Chart's open Landing is landing it, so
-// the loop must not re-dispatch it. A Chart whose trailer is already on mainline is
-// never held: its reconcile backstops a stranded Landing (ADR 0145).
-func ChartLandingHeld(chart bd.Bead) (bool, error) {
-	if _, landed, err := contexts.Landed(chart, git.TrailerFor(string(contract.KindChart), chart.ID), landedBase); err != nil || landed {
-		return false, err
-	}
-	open, err := openChildrenOf(chart.ID, contract.KindLanding)
-	return open > 0, err
-}
-
 // IsCheckpointCandidate reports whether a ready bead is the Checkpoint container the
 // loop should hand to Jinbe (spec §6.4, FR43): a registry AFK container of kind
 // checkpoint. It is the pure twin of IsDrainedChartCandidate — a Checkpoint has no
 // chart:defogged-style label, so its readiness (approvedAtHead || landed-trailer ||
-// reviewDue) is the I/O check CheckpointReady adds. Exported alongside IsDrainedChartCandidate as
+// reviewDue) is the verdict's Checkpoint arm. Exported alongside IsDrainedChartCandidate as
 // the parity contract the TUI run-now trigger reuses.
 func IsCheckpointCandidate(b bd.Bead) bool {
 	e, err := registry.Lookup(b.Kind)
 	return err == nil && e.Mode == registry.AFK && e.Container && b.Kind == contract.KindCheckpoint
 }
 
-// Seams over the git/bd legs CheckpointReady reads, so the drain-candidacy arm
-// (approvedAtHead || landed-trailer || reviewDue) is testable with no live bd/git
-// (mirrors the worktreeRun var seam). These alias the real package funcs; the loop test swaps them.
-var (
-	closedApprovalsOf = bd.ClosedChildrenOfKindBeads
-	openChildrenOf    = bd.OpenChildrenOfKind
-	openChildren      = func(id string) (int, error) { return bd.OpenChildren(id, tickEfforts()) } // candidates()' drained-Chart count
-	approvedAtHead    = git.ApprovedAtHead
-	landedBase        = git.LandedBase
-	reviewDue         = func(id string, atHead func(string, string) bool) (bool, error) {
-		return bd.ReviewDue(id, tickEfforts(), atHead)
-	}
-	membersDrained = func(id string) (bool, error) { return bd.MembersDrained(id, tickEfforts()) }
-	openBlockers   = bd.OpenBlockers
-	openSurgeries  = func(id string) ([]bd.Bead, error) { return bd.OpenChildrenOfKindBeads(id, contract.KindSurgery) }
-)
+// refuseLegacyTasks is Run's start check, the predicate doctor and the TUI share; a
+// var so tests never reach a live bd.
+var refuseLegacyTasks = bd.RefuseLegacyTasks
 
 // effortSet is the current tick's effort-ref set, resolved lazily and at most once per tick
 // (Spec FR 46): the Workspace's refs plus each declared child's, so a nested leaf's
@@ -1338,15 +1320,15 @@ var (
 // run-now reuse can run before then) tickEfforts is nil and the bd gates read the set
 // themselves.
 var (
-	effortSet        atomic.Pointer[func() map[string]bool]
+	effortSet        atomic.Pointer[func() *git.EffortSet]
 	effortRefsAcross = bd.EffortRefsAcross
 )
 
 // memoEfforts wraps read so the first call per tick pays for the git and config
 // reads; a failed read yields nil, which the gates retry themselves.
-func memoEfforts(read func() (map[string]bool, error)) *func() map[string]bool {
+func memoEfforts(read func() (*git.EffortSet, error)) *func() *git.EffortSet {
 	once := sync.OnceValues(read)
-	f := func() map[string]bool {
+	f := func() *git.EffortSet {
 		set, err := once()
 		if err != nil {
 			return nil
@@ -1356,104 +1338,11 @@ func memoEfforts(read func() (map[string]bool, error)) *func() map[string]bool {
 	return &f
 }
 
-func tickEfforts() map[string]bool {
+func tickEfforts() *git.EffortSet {
 	if f := effortSet.Load(); f != nil {
 		return (*f)()
 	}
 	return nil
-}
-
-// SurgeryHold is the open Surgeries holding b (ADR 0160): a Critique is not
-// admitted for AFK dispatch while its Checkpoint has any open Surgery, running
-// or idle, so a hand fix and an AFK fix never race on the same lines. Empty for
-// any other bead. Exported as the parity contract the TUI run-now trigger reuses.
-func SurgeryHold(b bd.Bead) ([]bd.Bead, error) {
-	if b.Kind != contract.KindCritique || b.Parent == "" {
-		return nil, nil
-	}
-	return openSurgeries(b.Parent)
-}
-
-// CheckpointReady is the Checkpoint drain-candidacy I/O check (FR43/FR44): an open
-// Checkpoint is a candidate when a closed Approval's Commit: pin still equals its
-// branch tip (approvedAtHead), OR the land trailer is already on mainline (a roll-
-// forward after a post-land crash, so Jinbe rolls the close forward) — the former only
-// once its members are drained (bd.MembersDrained) — OR its Review
-// is due (bd.ReviewDue: drained, no Approval at head), so Jinbe re-derives the
-// Review spawn every tick and a crash between a member's close and the spawn can't
-// strand it (Spec FR 30). Mainline drift never re-reviews; a tip moved
-// past a stale Approval does (FR 31).
-//
-// First, though, an open kind:conflict or kind:critique member undrains the Checkpoint:
-// Jinbe files a conflict on a rebase collision without moving the tip, so
-// approvedAtHead stays true — without this gate the loop would re-dispatch Jinbe every
-// tick (Land→abort→no-op) until the fix moves HEAD. Excluding an open conflict/critique
-// child restores the undrain property the drained-Chart 0-open-children gate has (FR40).
-//
-// The at-head arm also holds while the Checkpoint has any open incoming blocker
-// (bd.OpenBlockers, Spec FR 14): a before-land Task holds only the land, so
-// the Review arm still runs (FR 16), and the Task's close releases it (FR 17).
-//
-// Exported alongside IsCheckpointCandidate as the parity contract the TUI run-now
-// trigger reuses (Spec FR5): the checkpoint readiness I/O is the git/bd half
-// of that arm, and the TUI runs it verbatim rather than re-spelling it — mirroring
-// how the drained-Chart arm reuses IsDrainedChartCandidate + OpenChildren.
-func CheckpointReady(cp bd.Bead) (bool, error) {
-	ready, _, err := CheckpointLandHold(cp)
-	return ready, err
-}
-
-// CheckpointLandHold is CheckpointReady that also returns the open blockers holding an
-// approved-at-head, drained Checkpoint's land (nil otherwise), so the TUI's t
-// refusal names them (Spec FR 45).
-func CheckpointLandHold(cp bd.Bead) (ready bool, held []bd.Bead, err error) {
-	for _, k := range []contract.Kind{contract.KindConflict, contract.KindCritique} {
-		open, err := openChildrenOf(cp.ID, k)
-		if err != nil {
-			return false, nil, err
-		}
-		if open > 0 {
-			return false, nil, nil
-		}
-	}
-	// The trailer on mainline first: a stranded Landing is backstopped by this
-	// Checkpoint's reconcile, so the open-Landing hold below must not mask it.
-	if _, landed, err := contexts.Landed(cp, git.TrailerFor(string(contract.KindCheckpoint), cp.ID), landedBase); err != nil {
-		return false, nil, err
-	} else if landed {
-		return true, nil, nil
-	}
-	// An open Landing is landing it: don't re-dispatch the Checkpoint every tick.
-	if open, err := openChildrenOf(cp.ID, contract.KindLanding); err != nil || open > 0 {
-		return false, nil, err
-	}
-	approvals, err := closedApprovalsOf(cp.ID, contract.KindApproval)
-	if err != nil {
-		return false, nil, err
-	}
-	// ANY at-head Approval closed approved lands, not the first: a stale-Approval
-	// self-heal leaves the stale obsoleted Approval ahead of the real at-head
-	// one in creation order, so a first-match read strands the land.
-	// An at-head Approval still waits on drained members (Spec FR 28), as
-	// reconcileCheckpoint's land does; otherwise fall through, where reviewDue is
-	// false for it. A drained one still waits on the land hold.
-	atHead := contexts.AtHead(cp, approvedAtHead)
-	for _, a := range approvals {
-		if a.ApprovedClosed() && atHead(a.Description, git.BranchName(string(contract.KindCheckpoint), cp.ID)) {
-			drained, err := membersDrained(cp.ID)
-			if err != nil {
-				return false, nil, err
-			}
-			if !drained {
-				break
-			}
-			// The land hold (Spec FR 14): any open incoming blocker.
-			held, err := openBlockers(cp.ID)
-			return err == nil && len(held) == 0, held, err
-		}
-	}
-	ready, err = reviewDue(cp.ID, atHead)
-	return ready, nil, err
 }
 
 // ownerOf resolves a bead's owning crewmate name via the registry, or "" for an
@@ -1469,13 +1358,28 @@ func ownerOf(b bd.Bead) string {
 // CountInflight re-derives the AFK pool's in-flight total from the in_progress
 // beads, whatever their owner (spec §6.4 step 1; ADR 0003: busy re-derived from
 // bd, never held in memory). Only mode:afk beads count: a human's in-progress HITL
-// bead (grilling/task/signal) takes no pool slot (§6.3, Spec FR10).
+// bead (grilling/errand/signal) takes no pool slot (§6.3, Spec FR10).
 // Exported because the TUI run-now trigger reuses it (never re-spelled) to honor
 // the pool before claiming, so the two launch paths count inflight identically.
-func CountInflight(inProgress []bd.Bead) int {
+// orphaned is the shared Orphaned-claim reading (Orphans, ADR 0391): an AFK bead it
+// marks orphaned holds no slot, since no live host holds it. Nothing is written for
+// an orphan; repair stays with the human's recover.
+func CountInflight(inProgress []bd.Bead, orphaned map[string]bool) int {
+	return countAFK(inProgress, orphaned, false)
+}
+
+// CountOrphaned is CountInflight's other half: the AFK beads in inProgress that
+// orphaned marks, the ones CountInflight leaves out.
+func CountOrphaned(inProgress []bd.Bead, orphaned map[string]bool) int {
+	return countAFK(inProgress, orphaned, true)
+}
+
+// countAFK is the one filter behind both counts: the AFK beads of inProgress whose
+// orphaned mark equals wantOrphaned.
+func countAFK(inProgress []bd.Bead, orphaned map[string]bool, wantOrphaned bool) int {
 	n := 0
 	for _, b := range inProgress {
-		if registry.IsMode(b.Kind, b.Labels, registry.AFK) {
+		if registry.IsMode(b.Kind, b.Labels, registry.AFK) && orphaned[b.ID] == wantOrphaned {
 			n++
 		}
 	}
@@ -1551,4 +1455,47 @@ func containerStep(b bd.Bead) string {
 		return cmp.Or(d.Container, d.Branch)
 	}
 	return ""
+}
+
+// Seams under the reap, so the loop's tests run with no live bd/git.
+var (
+	reapBeads      = bd.ListByID
+	reapCheckedOut = func(r git.Repo) (map[string]bool, error) { return r.CheckedOut() }
+	reapDelete     = func(r git.Repo, branch string) error { return r.DeleteBranch(branch) }
+)
+
+// reapIntegrated deletes effort/<id> and its cut ref for each closed bead in the
+// tick's integrated set that no worktree has checked out (ADR 0394
+// (a-closed-effort-whose-tip-is-its-cut-ref…)), each in the repo that owns it. It
+// removes no worktree: once the human does, the next tick reaps the branch. A failure
+// is logged and never fails the tick; the drain gates never depend on this having run.
+func reapIntegrated(set *git.EffortSet) {
+	if set == nil || len(set.Integrated) == 0 {
+		return
+	}
+	ids := slices.Sorted(maps.Keys(set.Integrated))
+	beads, err := reapBeads(ids)
+	if err != nil {
+		slog.Warn("branch.reap_failed", "err", err.Error())
+		return
+	}
+	checked := map[git.Repo]map[string]bool{}
+	for _, b := range beads {
+		if b.Status != "closed" || !set.Integrated[b.ID] {
+			continue
+		}
+		repo := set.Owner[b.ID]
+		out, ok := checked[repo]
+		if !ok {
+			if out, err = reapCheckedOut(repo); err != nil {
+				slog.Warn("branch.reap_failed", "err", err.Error(), "repo", string(repo))
+			}
+			checked[repo] = out
+		}
+		branch := git.EffortBranch(b.ID)
+		if out == nil || out[branch] { // unread tree list, or a tree has it: keep
+			continue
+		}
+		eventlog.RecordBranches([]bd.BranchOutcome{{Branch: branch, Err: reapDelete(repo, branch)}}, eventlog.BeadAttrs(b)...)
+	}
 }

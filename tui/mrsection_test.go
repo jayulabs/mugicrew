@@ -305,3 +305,95 @@ func TestLandStrategyReadOnSlowTierOnly(t *testing.T) {
 		t.Errorf("slow load did not carry the error")
 	}
 }
+
+// mrWithKid is mrGraph plus one extra child of cp (and of ch), shaped by mod.
+func mrWithKid(kind contract.Kind, mod ...func(*bd.Bead)) graphData {
+	g := mrGraph("mergeable")
+	g.landEv = map[string]string{}
+	g.beads = append(g.beads,
+		dbead("k1", kind, "open", "cp", 9, append([]func(*bd.Bead){func(b *bd.Bead) { b.Title = "kid" }}, mod...)...),
+		dbead("k2", kind, "open", "ch", 9, append([]func(*bd.Bead){func(b *bd.Bead) { b.Title = "kid" }}, mod...)...))
+	return g
+}
+
+func mrWords(t *testing.T, g graphData) (exec, defog string) {
+	t.Helper()
+	return ansi.Strip(g.mrLine(g.beadByID("w1"), g.beadByID("cp"))), ansi.Strip(g.mrLine(g.beadByID("w3"), g.beadByID("ch")))
+}
+
+func TestMRRowStabilizing(t *testing.T) {
+	causes := map[string]graphData{}
+	for name, k := range map[string]contract.Kind{
+		"forge review": contract.KindForgeReview, "build": contract.KindBuild, "critique": contract.KindCritique,
+		"review": contract.KindReview, "approval": contract.KindApproval, "grilling": contract.KindGrilling,
+	} {
+		causes[name] = mrWithKid(k)
+	}
+	g := mrGraph("mergeable")
+	g.beadByID("cp").Description = "Close-outs due: 2\n"
+	g.beadByID("ch").Description = "Close-outs failing: 1: boom\n"
+	causes["close-outs"] = g
+	g = mrGraph("mergeable")
+	g.landEv = map[string]string{"ln": "land.failed"}
+	g.beads = append(g.beads, dbead("cl", contract.KindLanding, "open", "ch", 5))
+	g.landEv["cl"] = "gate.infra"
+	causes["retrying"] = g
+	for name, g := range causes {
+		e, d := mrWords(t, g)
+		if !strings.HasSuffix(e, "· stabilizing") || strings.Contains(e, "awaiting merge") {
+			t.Errorf("%s: Execute %q", name, e)
+		}
+		if !strings.HasSuffix(d, "· stabilizing") {
+			t.Errorf("%s: Defog %q", name, d)
+		}
+	}
+
+	none := map[string]graphData{
+		"paused": mrWithKid(contract.KindBuild, func(b *bd.Bead) { b.Labels = append(b.Labels, "paused:manual") }),
+		"pending": func() graphData {
+			g := mrGraph("mergeable")
+			g.landEv = map[string]string{"ln": "land.pending"}
+			return g
+		}(),
+		"closed": mrWithKid(contract.KindBuild, func(b *bd.Bead) { b.Status = "closed" }),
+	}
+	for name, g := range none {
+		if e, _ := mrWords(t, g); strings.Contains(e, "stabilizing") {
+			t.Errorf("%s must not stabilize: %q", name, e)
+		}
+	}
+
+	g = mrWithKid(contract.KindBuild)
+	g.beads[0].Status = "closed"
+	g.beadByID("w1").Description = "MR: !7\nClose-outs due: 1\n"
+	if e, _ := mrWords(t, g); !strings.HasSuffix(e, "closing out · 1 due") || strings.Contains(e, "stabilizing") {
+		t.Errorf("outliving Watch %q", e)
+	}
+}
+
+func TestMRDetailStabilizingField(t *testing.T) {
+	g := mrWithKid(contract.KindBuild)
+	g.beadByID("cp").Description = "Close-outs due: 2\n"
+	tab, dt := execTab{g: g}, defogTab{g: g}
+	for _, r := range g.execList(map[string]bool{}) {
+		if r.kind == eMR && r.b.ID == "w1" {
+			d := ansi.Strip(tab.rowText(r))
+			if !strings.Contains(d, "stabilizing") || !strings.Contains(d, "k1 kid") || !strings.Contains(d, "close-outs due: 2") {
+				t.Errorf("exec detail:\n%s", d)
+			}
+		}
+	}
+	for _, r := range g.defogList(map[string]bool{}) {
+		if r.kind == dMR && r.b.ID == "w3" {
+			if d := ansi.Strip(dt.rowText(r)); !strings.Contains(d, "k2 kid") {
+				t.Errorf("defog detail:\n%s", d)
+			}
+		}
+	}
+	g = mrGraph("mergeable")
+	for _, r := range g.execList(map[string]bool{}) {
+		if r.kind == eMR && strings.Contains(ansi.Strip((execTab{g: g}).rowText(r)), "stabilizing") {
+			t.Errorf("%s: field present though not stabilizing", r.b.ID)
+		}
+	}
+}

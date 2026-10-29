@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/x/ansi"
 
 	"jayulabs.org/mugicrew/bd"
 )
@@ -73,22 +72,15 @@ func TestQueueRowPauseClosed(t *testing.T) {
 	}
 }
 
-// Rows without a bead, and the focus Initiative header, leave p alone.
+// Rows without a bead leave p alone.
 func TestQueueRowPauseNoBead(t *testing.T) {
 	m, calls := defogActModel(t)
-	for _, id := range []string{"i:ini", "c/closed"} {
-		at := defogAt(t, m, id)
-		if n, cmd := send(t, at, runeKey("p")); cmd != nil || n.View() != at.View() {
-			t.Errorf("%s: p did something", id)
-		}
+	at := defogAt(t, m, "c/closed")
+	if n, cmd := send(t, at, runeKey("p")); cmd != nil || statusOf(n) != "nothing selected" {
+		t.Errorf("c/closed: p did something")
 	}
-	f, fcalls := defaultFocus(t)
-	f = ideaFocus(t, f)
-	if n, cmd := send(t, f, runeKey("p")); cmd != nil || ansi.Strip(n.View()) != ansi.Strip(f.View()) {
-		t.Errorf("focus header: p did something")
-	}
-	if len(*calls)+len(*fcalls) != 0 {
-		t.Errorf("wrote %v %v", *calls, *fcalls)
+	if len(*calls) != 0 {
+		t.Errorf("wrote %v", *calls)
 	}
 }
 
@@ -122,12 +114,12 @@ func TestActionableRowPauseKey(t *testing.T) {
 	}
 	m, calls := drainedModel(t, drainedBeads(), nil)
 	m = ideaAt(t, m, "act:d")
-	if h := hintsOf(m); strings.Contains(h, "p pause") {
-		t.Errorf("combined Initiative row hints p: %q", h)
+	if h := hintsOf(m); !strings.Contains(h, "p pause") {
+		t.Errorf("combined Initiative row lacks p: %q", h)
 	}
 	n, cmd := send(t, m, runeKey("p"))
 	settle(t, n, cmd)
-	if len(*calls) != 0 {
-		t.Errorf("wrote %v", *calls)
+	if !slices.Contains(*calls, "pauseBead d") {
+		t.Errorf("calls = %v, want pauseBead d", *calls)
 	}
 }

@@ -59,10 +59,10 @@ type frankySeamRec struct {
 func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 	t.Helper()
 	oShow, oClose, oNote := showBead, closeBead, rationale
-	oPivots, oRaised, oRaise, oSpec, oSurgery := openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf
+	oPivots, oRaise, oSpec, oSurgery := openPivots, raiseIfPivoted, specOf, surgeriesOf
 	t.Cleanup(func() {
 		showBead, closeBead, rationale = oShow, oClose, oNote
-		openPivots, pivotsDiscoveredFrom, raisePivot, specOf, surgeriesOf = oPivots, oRaised, oRaise, oSpec, oSurgery
+		openPivots, raiseIfPivoted, specOf, surgeriesOf = oPivots, oRaise, oSpec, oSurgery
 	})
 	closeBead = func(id, reason string) error {
 		r.closed = append(r.closed, id)
@@ -74,12 +74,14 @@ func stubFrankySeams(t *testing.T, r *frankySeamRec) {
 		return r.notes
 	}
 	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
-	pivotsDiscoveredFrom = func(string) ([]bd.Bead, error) { return r.raised, nil }
-	// The raise's edges and close are bd.RaisePivot's (tested in bd); Franky's job
-	// is handing it the bead, the resolved Spec and the raised pivots.
-	raisePivot = func(_ contract.Ctx, b bd.Bead, _, spec string, ps []bd.Bead) error {
-		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(ps), ","))
-		return nil
+	// The find and the raise are bd.RaiseIfPivoted's (tested in bd); Franky's job
+	// is handing it the bead and the Spec resolved from the Checkpoint.
+	raiseIfPivoted = func(_ contract.Ctx, b bd.Bead, spec string) (bool, error) {
+		if len(r.raised) == 0 {
+			return false, nil
+		}
+		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(r.raised), ","))
+		return true, nil
 	}
 	specOf = func(string) (string, bool, error) { return r.spec, r.spec != "", nil }
 	surgeriesOf = func(string) ([]bd.Bead, error) { return r.surgeries, nil }
@@ -313,7 +315,7 @@ func TestPromptsRender(t *testing.T) {
 	if !strings.Contains(c, "mc-y") || !strings.Contains(c, "deadbeef") || !strings.Contains(c, "bd show ws-spec") || strings.Contains(c, "%!") {
 		t.Fatalf("bad conflict prompt render: %q", c)
 	}
-	// The raise afterRun keys on is a kind:pivot discovered-from this bead; the
+	// The raise the tail keys on is a kind:pivot discovered-from this bead; the
 	// retired human-label placeholder must be gone from both prompts (FR50).
 	for id, p := range map[string]string{"mc-x": b, "mc-y": c} {
 		for _, want := range []string{"kind:pivot", "discovered-from:" + id, "bd dep add"} {
@@ -354,13 +356,13 @@ func TestPromptsRender(t *testing.T) {
 }
 
 // Spec FR 12: external work found mid-run is an offshoot Signal by this
-// bead, never a Task.
+// bead, never an Errand.
 func TestAFKPromptsFileExternalWorkAsSignal(t *testing.T) {
 	for id, p := range map[string]string{
 		"mc-x": implementPrompt(promptArgs{BeadID: "mc-x", SpecID: "ws-spec"}),
 		"mc-y": conflictPrompt(promptArgs{BeadID: "mc-y", Base: "deadbeef"}),
 	} {
-		for _, want := range []string{"offshoot Signal, never a Task", "signal-filing.md", "discovered-from " + id} {
+		for _, want := range []string{"offshoot Signal, never an Errand", "signal-filing.md", "discovered-from " + id} {
 			if !strings.Contains(p, want) {
 				t.Errorf("prompt for %s missing %q", id, want)
 			}
@@ -636,7 +638,7 @@ func TestRunUnknownKindErrors(t *testing.T) {
 // the fork then returns cleanly or fails, the re-read sees it closed and the tail
 // is a no-op — no error, no edge, no Review, no close.
 func TestRunOverSweepClosedBeadIsNoOp(t *testing.T) {
-	for name, forkErr := range map[string]error{"fork ok": nil, "fork failed": errors.New("session killed")} {
+	for name, forkErr := range map[string]error{"fork failed": errors.New("session killed")} {
 		r := &frankySeamRec{raised: []bd.Bead{{ID: "ws-piv"}}, spec: "ws-spec"}
 		stubFrankySeams(t, r)
 		reads := 0

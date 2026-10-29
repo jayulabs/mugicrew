@@ -395,7 +395,7 @@ func TestLogsDetailIsABottomDrawer(t *testing.T) {
 		ls := lines(ansi.Strip(m.View()))
 		rule, note := -1, -1
 		for i, l := range ls {
-			if strings.HasPrefix(l, strings.Repeat("─", w)) && rule < 0 {
+			if strings.HasPrefix(l, "╭"+strings.Repeat("─", w-2)+"╮") && rule < 0 {
 				rule = i
 			}
 			if strings.Contains(l, "line two") {

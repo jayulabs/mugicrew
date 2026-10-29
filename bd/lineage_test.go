@@ -67,14 +67,14 @@ func TestLineageSpine(t *testing.T) {
 	n := func(i int) string { return "2026-10-0" + string(rune('0'+i)) + " 00:00:00 +0000 UTC" }
 	rows := [][]string{
 		bead("sig", "kind:signal", n(1)), bead("dup", "kind:signal", n(1)),
-		bead("ch", "kind:chart", n(2)), bead("ch.1", "kind:task", n(2)),
+		bead("ch", "kind:chart", n(2)), bead("ch.1", "kind:errand", n(2)),
 		bead("sp1", "kind:spec", n(3)), bead("sp2", "kind:spec", n(5)),
 		bead("cp1", "kind:checkpoint", n(4)), bead("cp1.1", "kind:build", n(4)),
-		bead("pv", "kind:pivot", n(5)), bead("latch", "kind:task", n(5)),
+		bead("pv", "kind:pivot", n(5)), bead("latch", "kind:errand", n(5)),
 		bead("cp2", "kind:checkpoint", n(6)),
 		bead("rb", "kind:rollback", n(7)), bead("cp3", "kind:checkpoint", n(8)),
 		bead("land", "kind:landing", n(8)),
-		bead("off", "kind:signal", n(9)), bead("ini", "kind:initiative", n(1)), bead("free", "kind:task", n(1)),
+		bead("off", "kind:signal", n(9)), bead("ini", "kind:initiative", n(1)), bead("free", "kind:errand", n(1)),
 		edge("ch", "sig", "caused-by"), edge("ch.1", "ch", "parent-child"),
 		edge("sp1", "ch", "caused-by"), edge("sp2", "ch", "caused-by"), edge("sp1", "sp2", "supersedes"),
 		edge("cp1", "sp1", "caused-by"), edge("cp1.1", "cp1", "parent-child"),

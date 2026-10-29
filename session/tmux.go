@@ -47,7 +47,10 @@ var socket = func() (string, error) {
 }
 
 // socketIn is socket under common: its dir is created; a path too long for a unix
-// socket is a clear error, not tmux's.
+// socket is a clear error, not tmux's. The layout <common>/mugicrew/tmux.sock is
+// load-bearing: hitl-hook resolves its Workspace root from the socket through
+// CommonDirOfSocket (ADR 0356 (hitl-hook-resolves-its-workspace-root-from-the-
+// panes-socket) §3), so moving the socket must move that resolution too.
 func socketIn(common string) (string, error) {
 	sock := filepath.Join(common, "mugicrew", "tmux.sock")
 	if len(sock) > maxSock {
@@ -55,6 +58,10 @@ func socketIn(common string) (string, error) {
 	}
 	return sock, os.MkdirAll(filepath.Dir(sock), 0o755)
 }
+
+// CommonDirOfSocket is the git common dir a socket made by socketIn lives under:
+// the inverse of socketIn's layout, two levels up.
+func CommonDirOfSocket(sock string) string { return filepath.Dir(filepath.Dir(sock)) }
 
 // tmuxName is b's tmux session name: the bead id with the . and : tmux rewrites
 // already swapped for _ (ADR 0036 §3), so a target of "="+name matches exactly.
@@ -318,7 +325,7 @@ func beadSplitSide(exe string) string {
 // dead pane. Render errors stay readable: stderr rides the pipe into less until q.
 func beadSplit(exe, split string) string {
 	sh := "'" + strings.ReplaceAll(exe, "'", `'\''`) + "'"
-	sh += ` bead-detail "$(tmux display-message -p '#{@bead}')" "$(tmux display-message -p '#{pane_width}')" 2>&1 | less -R`
+	sh += ` bead-detail "$(tmux display-message -p '#{@bead}')" "$(tmux display-message -p '#{pane_width}')" 2>&1 | LESSHISTFILE=- less -R`
 	sh = strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`).Replace(sh)
 	return split + ` -c '#{?pane_current_path,#{pane_current_path},#{session_path}}' "` + sh + `" ; set-option -p @beadpane 1 ; set-option -p remain-on-exit off`
 }
@@ -641,7 +648,9 @@ func Resume(b bd.Bead, s Info, h contract.Harness) error {
 
 // deleteDrafts is bd.DeleteDrafts, a var so Start and Drop are testable without
 // a live bd.
-var deleteDrafts = bd.DeleteDrafts
+var deleteDrafts = func(creator string) ([]string, []bd.BranchOutcome, error) {
+	return bd.DeleteDrafts(creator, bd.UnderClaim(creator))
+}
 
 // DropDrafts deletes the Drafts of b's dropped or gone session (ADR 0059 §6),
 // so a relaunch's idempotency guards don't adopt the dead session's work,
@@ -815,6 +824,15 @@ func Inside() (bool, error) {
 		return false, err
 	}
 	return insideOf(os.Getenv("TMUX"), sock), nil
+}
+
+// InsideEnv reports whether tmuxEnv, a $TMUX value, names the repo's private socket.
+func InsideEnv(tmuxEnv string) (bool, error) {
+	sock, err := socket()
+	if err != nil {
+		return false, err
+	}
+	return insideOf(tmuxEnv, sock), nil
 }
 
 // insideOf reports whether $TMUX (tmuxEnv) names sock: its first comma field is
@@ -1172,19 +1190,6 @@ func Sessions() (map[string]Info, error) {
 	return parseList(out), nil
 }
 
-// TUIAlive reports whether a TUI is alive in this repo: any tui-* session on its
-// mugicrew tmux server but exclude, the caller's own (ADR 0127 §2). Sessions'
-// discipline: no tmux or no server is none, any other failure an error.
-func TUIAlive(exclude string) (bool, error) {
-	out, err := listSessions("#{session_name}")
-	for _, s := range strings.Fields(out) {
-		if strings.HasPrefix(s, "tui-") && s != exclude {
-			return true, nil
-		}
-	}
-	return false, err
-}
-
 // ownPane is $TMUX_PANE if this process runs on sock's server, else "": pane ids
 // are per server, so a foreign tmux's %N must never target the private one.
 func ownPane(sock string) string {
@@ -1192,25 +1197,6 @@ func ownPane(sock string) string {
 		return ""
 	}
 	return os.Getenv("TMUX_PANE")
-}
-
-// OwnSession is the session $TMUX_PANE sits in on the repo's mugicrew tmux server:
-// a TUI's own tui-<launcher pid>, for TUIAlive to exclude. "" outside a pane of
-// that server: pane ids are per server.
-func OwnSession() (string, error) {
-	sock, err := serverSocket()
-	if err != nil {
-		return "", err
-	}
-	pane := ownPane(sock)
-	if pane == "" {
-		return "", nil
-	}
-	out, err := tmuxCmd(sock, "display-message", "-p", "-t", pane, "#{session_name}").Output()
-	if err != nil {
-		return "", fmt.Errorf("tmux display-message: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // listSessions is list-sessions -F format on the repo's mugicrew tmux server: ""
@@ -1345,4 +1331,33 @@ func Attach(beadID string) error {
 	c := tmuxCmd(sock, "attach-session", "-t", exact(tmuxName(beadID)))
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return c.Run()
+}
+
+// SetTUIMouse sets tmux's mouse option, session-scoped, on the TUI's own session of
+// the repo's mugicrew tmux server: it targets the session by the session $TMUX_PANE
+// sits in, never -g and never another session. A process outside that server's panes
+// has no session of its own, so it does nothing.
+func SetTUIMouse(on bool) error {
+	sock, err := serverSocket()
+	if err != nil {
+		return err
+	}
+	pane := ownPane(sock)
+	if pane == "" {
+		return nil
+	}
+	return setSessionMouse(sock, pane, on)
+}
+
+// setSessionMouse is set-option -t target mouse on|off; a pane id as target names
+// its session.
+func setSessionMouse(sock, target string, on bool) error {
+	v := "off"
+	if on {
+		v = "on"
+	}
+	if out, err := tmuxCmd(sock, "set-option", "-t", target, "mouse", v).CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux set-option mouse: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

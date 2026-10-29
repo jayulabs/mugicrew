@@ -14,17 +14,17 @@ import (
 	"jayulabs.org/mugicrew/git"
 )
 
-// raiseGraph scripts what the probe reads: the Task, its held rows, and the host's
+// raiseGraph scripts what the probe reads: the Errand, its held rows, and the host's
 // children. Every write seam fails the test, since the probe writes nothing.
 type raiseGraph struct {
 	*rerouteGraph
 	up []bd.Bead
 }
 
-func stubRaiseSeams(t *testing.T, task bd.Bead) *raiseGraph {
+func stubRaiseSeams(t *testing.T, errand bd.Bead) *raiseGraph {
 	t.Helper()
 	g := &raiseGraph{rerouteGraph: stubRerouteSeams(t)}
-	g.beads[task.ID] = task
+	g.beads[errand.ID] = errand
 	swap(t, &heldUp, func(string) ([]bd.Bead, error) { return g.up, nil })
 	swap(t, &createDraft, func(string, bd.Successor, ...string) (string, error) {
 		t.Error("the probe wrote a Draft")
@@ -40,12 +40,12 @@ func stubRaiseSeams(t *testing.T, task bd.Bead) *raiseGraph {
 	return g
 }
 
-var openTask = bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "in_progress", Title: "walk"}
+var openErrand = bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "in_progress", Title: "walk"}
 
 func TestProbeRaiseNamesCheckpointSpecAndBranch(t *testing.T) {
-	stubRaiseSeams(t, openTask)
+	stubRaiseSeams(t, openErrand)
 	var out strings.Builder
-	if err := ProbeRaise(openTask.ID, &out); err != nil {
+	if err := ProbeRaise(openErrand.ID, &out); err != nil {
 		t.Fatalf("ProbeRaise: %v", err)
 	}
 	for _, want := range []string{hostID, "ws-spec-of-host", "checkpoint/" + hostID} {
@@ -56,13 +56,13 @@ func TestProbeRaiseNamesCheckpointSpecAndBranch(t *testing.T) {
 }
 
 func TestProbeRaiseNamesChildRepo(t *testing.T) {
-	g := stubRaiseSeams(t, openTask)
+	g := stubRaiseSeams(t, openErrand)
 	h := g.beads[hostID]
 	h.Labels = []string{"context:api"}
 	g.beads[hostID], g.up = h, []bd.Bead{h}
 	swap(t, &repoOf, func(bd.Bead) git.Repo { return "/ws/api" })
 	var out strings.Builder
-	if err := ProbeRaise(openTask.ID, &out); err != nil {
+	if err := ProbeRaise(openErrand.ID, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "git -C /ws/api") {
@@ -71,11 +71,11 @@ func TestProbeRaiseNamesChildRepo(t *testing.T) {
 }
 
 func TestProbeRaiseWarnsOfMRAndNotesSurgery(t *testing.T) {
-	g := stubRaiseSeams(t, openTask)
+	g := stubRaiseSeams(t, openErrand)
 	g.kids["mr-watch"] = []bd.Bead{{ID: "ws-w", Kind: contract.KindMRWatch, Status: "open"}}
 	g.kids["surgery"] = []bd.Bead{{ID: "ws-sg", Kind: contract.KindSurgery, Status: "open", Title: "by hand"}}
 	var out strings.Builder
-	if err := ProbeRaise(openTask.ID, &out); err != nil {
+	if err := ProbeRaise(openErrand.ID, &out); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"warning:", "https://gl/mr/7", "note:", "ws-sg"} {
@@ -89,25 +89,25 @@ func TestProbeRaiseWarnsOfMRAndNotesSurgery(t *testing.T) {
 // offshoot-Signal fallback.
 func TestProbeRaiseRefusals(t *testing.T) {
 	for name, c := range map[string]struct {
-		task  bd.Bead
-		setup func(*raiseGraph)
-		want  string
+		errand bd.Bead
+		setup  func(*raiseGraph)
+		want   string
 	}{
-		"not a task": {bd.Bead{ID: "ws-task", Kind: contract.KindSignal, Status: "open"}, func(*raiseGraph) {}, "not a task"},
-		"closed":     {bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "closed"}, func(*raiseGraph) {}, "not open"},
-		"none":       {openTask, func(g *raiseGraph) { g.up = nil }, "no open, unlanded Checkpoint"},
-		"several": {openTask, func(g *raiseGraph) {
+		"not an Errand": {bd.Bead{ID: "ws-errand", Kind: contract.KindSignal, Status: "open"}, func(*raiseGraph) {}, "not an Errand"},
+		"closed":        {bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "closed"}, func(*raiseGraph) {}, "not open"},
+		"none":          {openErrand, func(g *raiseGraph) { g.up = nil }, "no open, unlanded Checkpoint"},
+		"several": {openErrand, func(g *raiseGraph) {
 			g.beads["ws-cp2"] = bd.Bead{ID: "ws-cp2", Kind: contract.KindCheckpoint, Status: "open"}
 			g.up = append(g.up, g.beads["ws-cp2"])
 		}, "ws-cp, ws-cp2"},
-		"no spec": {openTask, func(g *raiseGraph) { g.hasSpec = false }, "no Spec"},
-		"landing": {openTask, func(g *raiseGraph) { g.kids["landing"] = []bd.Bead{{ID: "ws-l", Status: "open"}} }, "landing"},
-		"landed":  {openTask, func(g *raiseGraph) { g.landed = true }, "no open, unlanded Checkpoint"},
+		"no spec": {openErrand, func(g *raiseGraph) { g.hasSpec = false }, "no Spec"},
+		"landing": {openErrand, func(g *raiseGraph) { g.kids["landing"] = []bd.Bead{{ID: "ws-l", Status: "open"}} }, "landing"},
+		"landed":  {openErrand, func(g *raiseGraph) { g.landed = true }, "no open, unlanded Checkpoint"},
 	} {
-		g := stubRaiseSeams(t, c.task)
+		g := stubRaiseSeams(t, c.errand)
 		c.setup(g)
 		var out strings.Builder
-		err := ProbeRaise(c.task.ID, &out)
+		err := ProbeRaise(c.errand.ID, &out)
 		if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "offshoot Signal") {
 			t.Errorf("%s: err = %v, want %q and the offshoot Signal fallback", name, err, c.want)
 		}
@@ -121,7 +121,7 @@ func TestProbeRaiseRefusals(t *testing.T) {
 // stubs do: Drafts carry no caused-by edge, only what the verb gave.
 func stubRaiseWriteSeams(t *testing.T) *raiseGraph {
 	t.Helper()
-	g := stubRaiseSeams(t, openTask)
+	g := stubRaiseSeams(t, openErrand)
 	swap(t, &createRaiseDraft, func(s bd.Successor, deps ...string) (string, error) {
 		id := fmt.Sprintf("ws-d%d", len(g.created)+1)
 		g.created = append(g.created, s)
@@ -138,55 +138,55 @@ func stubRaiseWriteSeams(t *testing.T) *raiseGraph {
 	return g
 }
 
-func TestRaiseFromTaskLoneCritique(t *testing.T) {
+func TestRaiseFromErrandLoneCritique(t *testing.T) {
 	g := stubRaiseWriteSeams(t)
-	if err := RaiseFromTask(openTask.ID, RaiseRequest{Critiques: []string{"# fix it\nbody"}}); err != nil {
-		t.Fatalf("RaiseFromTask: %v", err)
+	if err := RaiseFromErrand(openErrand.ID, RaiseRequest{Critiques: []string{"# fix it\nbody"}}); err != nil {
+		t.Fatalf("RaiseFromErrand: %v", err)
 	}
 	if len(g.created) != 1 {
 		t.Fatalf("created %d Drafts, want 1", len(g.created))
 	}
 	c := g.created[0]
-	if c.Kind != contract.KindCritique || c.DraftedBy != openTask.ID || c.Parent != hostID || c.Title != "fix it" {
-		t.Errorf("Critique = %+v, want a Critique drafted-by the Task, parented to the host", c)
+	if c.Kind != contract.KindCritique || c.DraftedBy != openErrand.ID || c.Parent != hostID || c.Title != "fix it" {
+		t.Errorf("Critique = %+v, want a Critique drafted-by the Errand, parented to the host", c)
 	}
-	if !slices.Equal(g.deps[0], []string{"discovered-from:ws-task"}) {
-		t.Errorf("deps = %v, want only discovered-from the Task", g.deps[0])
+	if !slices.Equal(g.deps[0], []string{"discovered-from:ws-errand"}) {
+		t.Errorf("deps = %v, want only discovered-from the Errand", g.deps[0])
 	}
-	if !slices.Equal(g.cleared, []string{"ws-task/raise_merges"}) {
+	if !slices.Equal(g.cleared, []string{"ws-errand/raise_merges"}) {
 		t.Errorf("cleared = %v, want leftover merges cleared", g.cleared)
 	}
 }
 
-func TestRaiseFromTaskPivotWithAskCritique(t *testing.T) {
+func TestRaiseFromErrandPivotWithAskCritique(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	g := stubRaiseWriteSeams(t)
-	if err := RaiseFromTask(openTask.ID, RaiseRequest{Pivots: []string{"FR: 3\nwrong"}, Critiques: []string{"ask"}}); err != nil {
-		t.Fatalf("RaiseFromTask: %v", err)
+	if err := RaiseFromErrand(openErrand.ID, RaiseRequest{Pivots: []string{"FR: 3\nwrong"}, Critiques: []string{"ask"}}); err != nil {
+		t.Fatalf("RaiseFromErrand: %v", err)
 	}
 	p, c := g.created[0], g.created[1]
-	if p.Kind != contract.KindPivot || p.DraftedBy != "ws-task" || p.Metadata != `{"raise_checkpoint":"ws-cp"}` || p.Parent != "" {
+	if p.Kind != contract.KindPivot || p.DraftedBy != "ws-errand" || p.Metadata != `{"raise_checkpoint":"ws-cp"}` || p.Parent != "" {
 		t.Errorf("pivot = %+v", p)
 	}
-	if !slices.Equal(g.deps[0], []string{"discovered-from:ws-task"}) {
+	if !slices.Equal(g.deps[0], []string{"discovered-from:ws-errand"}) {
 		t.Errorf("pivot deps = %v", g.deps[0])
 	}
-	if c.Kind != contract.KindCritique || c.Parent != hostID || !slices.Equal(g.deps[1], []string{"discovered-from:ws-task", "discovered-from:ws-d1"}) {
-		t.Errorf("Ask Critique = %+v deps %v, want parented and discovered-from the Task and the pivot", c, g.deps[1])
+	if c.Kind != contract.KindCritique || c.Parent != hostID || !slices.Equal(g.deps[1], []string{"discovered-from:ws-errand", "discovered-from:ws-d1"}) {
+		t.Errorf("Ask Critique = %+v deps %v, want parented and discovered-from the Errand and the pivot", c, g.deps[1])
 	}
 	// the publish finds the raise by these Drafts alone
-	pivots, critiques := RaiseDrafts(openTask, g.drafts)
+	pivots, critiques := RaiseDrafts(openErrand, g.drafts)
 	if hosts, err := RaiseHosts(pivots, critiques); err != nil || !slices.Equal(hosts, []string{hostID}) {
 		t.Errorf("RaiseHosts = %v, %v, want the host", hosts, err)
 	}
 	var rec []eventlogtest.Event
 	for _, e := range *evs {
-		if e.Name == "task.raise" {
+		if e.Name == "errand.raise" {
 			rec = append(rec, e)
 		}
 	}
 	if len(rec) != 1 {
-		t.Fatalf("events = %+v, want one task.raise", *evs)
+		t.Fatalf("events = %+v, want one errand.raise", *evs)
 	}
 	a := rec[0].Attrs
 	if a["checkpoint"] != hostID || fmt.Sprint(a["pivots"]) != "[ws-d1]" || fmt.Sprint(a["critiques"]) != "[ws-d2]" || fmt.Sprint(a["merges"]) != "[]" {
@@ -194,30 +194,30 @@ func TestRaiseFromTaskPivotWithAskCritique(t *testing.T) {
 	}
 }
 
-func TestRaiseFromTaskMergeRecordsMergeAndAsk(t *testing.T) {
+func TestRaiseFromErrandMergeRecordsMergeAndAsk(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	g := stubRaiseWriteSeams(t)
 	old := bd.Bead{ID: "ws-old", Kind: contract.KindPivot, Status: "open"}
 	g.beads[old.ID], g.gated = old, []bd.Bead{old}
 	m := RaiseMerge{Pivot: "ws-old", Evidence: "same FR"}
-	if err := RaiseFromTask(openTask.ID, RaiseRequest{Critiques: []string{"ask"}, Merges: []RaiseMerge{m}}); err != nil {
-		t.Fatalf("RaiseFromTask: %v", err)
+	if err := RaiseFromErrand(openErrand.ID, RaiseRequest{Critiques: []string{"ask"}, Merges: []RaiseMerge{m}}); err != nil {
+		t.Fatalf("RaiseFromErrand: %v", err)
 	}
-	if len(g.created) != 1 || !slices.Equal(g.deps[0], []string{"discovered-from:ws-task", "discovered-from:ws-old"}) {
+	if len(g.created) != 1 || !slices.Equal(g.deps[0], []string{"discovered-from:ws-errand", "discovered-from:ws-old"}) {
 		t.Errorf("created %d, deps %v, want one Ask Critique discovered-from the merge target", len(g.created), g.deps)
 	}
-	if got, _ := g.meta["ws-task/raise_merges"].([]RaiseMerge); len(got) != 1 || got[0] != m {
+	if got, _ := g.meta["ws-errand/raise_merges"].([]RaiseMerge); len(got) != 1 || got[0] != m {
 		t.Errorf("raise_merges = %v, want the merge recorded", g.meta)
 	}
 	for _, e := range *evs {
-		if e.Name == "task.raise" && fmt.Sprint(e.Attrs["merges"]) == "[ws-old]" {
+		if e.Name == "errand.raise" && fmt.Sprint(e.Attrs["merges"]) == "[ws-old]" {
 			return
 		}
 	}
-	t.Errorf("events = %+v, want task.raise naming the merge", *evs)
+	t.Errorf("events = %+v, want errand.raise naming the merge", *evs)
 }
 
-func TestRaiseFromTaskRefusalsWriteNothing(t *testing.T) {
+func TestRaiseFromErrandRefusalsWriteNothing(t *testing.T) {
 	old := bd.Bead{ID: "ws-old", Kind: contract.KindPivot, Status: "open"}
 	draftPivot := bd.Bead{ID: "ws-dp", Kind: contract.KindPivot, Status: "deferred", Labels: []string{"drafted-by:ws-x"}}
 	for name, c := range map[string]struct {
@@ -242,7 +242,7 @@ func TestRaiseFromTaskRefusalsWriteNothing(t *testing.T) {
 		if c.setup != nil {
 			c.setup(g)
 		}
-		err := RaiseFromTask(openTask.ID, c.req)
+		err := RaiseFromErrand(openErrand.ID, c.req)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, c.want)
 		}
@@ -253,13 +253,13 @@ func TestRaiseFromTaskRefusalsWriteNothing(t *testing.T) {
 }
 
 func TestProbeRaiseReportsExistingDrafts(t *testing.T) {
-	g := stubRaiseSeams(t, openTask)
+	g := stubRaiseSeams(t, openErrand)
 	g.drafts = []bd.Bead{
 		{ID: "ws-dp", Kind: contract.KindPivot, Title: "FR: 3", Metadata: bd.Meta{RaiseCheckpointMeta: []byte(`"ws-cp"`)}},
 		{ID: "ws-dc", Kind: contract.KindCritique, Title: "ask", Parent: hostID},
 	}
 	var out strings.Builder
-	if err := ProbeRaise(openTask.ID, &out); err != nil {
+	if err := ProbeRaise(openErrand.ID, &out); err != nil {
 		t.Fatalf("ProbeRaise: %v", err)
 	}
 	for _, want := range []string{"ws-dp", "ws-dc", hostID} {

@@ -156,17 +156,17 @@ func TestMemberSectionUnorderedByteIdentical(t *testing.T) {
 	}
 }
 
-// An unclosed member Task is its own container (FR23): an offshoot ordered against
+// An unclosed member Errand is its own container (FR23): an offshoot ordered against
 // it still renders the Ordered: line, and the phase falls back when none names it.
-func TestMemberSectionOrderedAgainstMemberTask(t *testing.T) {
-	orderedFixture(t, "Order: follow-up of member task", func(string) ([]bd.Bead, []bd.Bead, error) {
-		return []bd.Bead{{ID: "ws-task"}}, nil, nil
+func TestMemberSectionOrderedAgainstMemberErrand(t *testing.T) {
+	orderedFixture(t, "Order: follow-up of member errand", func(string) ([]bd.Bead, []bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-errand"}}, nil, nil
 	})
 	all, _ := listAll()
-	all = append(all, bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "closed", Title: "member task", Parent: "ws-ini"})
+	all = append(all, bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "closed", Title: "member errand", Parent: "ws-ini"})
 	swap(t, &listAll, func() ([]bd.Bead, error) { return all, nil })
 	got := launchPrompt(t)
-	for _, want := range []string{"Ordered: follow-up of member task (phase: not named on Phases)", "Never park it"} {
+	for _, want := range []string{"Ordered: follow-up of member errand (phase: not named on Phases)", "Never park it"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}

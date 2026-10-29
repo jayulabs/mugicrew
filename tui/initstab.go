@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -50,6 +51,7 @@ type initsTab struct {
 	sel   string
 	open  bool // the detail drawer; only ever shown on an Initiative row
 	off   int  // the drawer's scroll offset
+	lv    listView
 	w, h  int
 }
 
@@ -141,12 +143,12 @@ func (m Model) initStatsOf() map[string]initStats {
 	g := m.gateData()
 	out := map[string]initStats{}
 	// Checkpoint id -> waiter ids, one pass: graphData.waiters per Checkpoint is O(n) each.
-	// Same rule as waiters: live Pivots/Tasks in cp.BlockedBy, live Tasks blocked by cp.
+	// Same rule as waiters: live Pivots/Errands in cp.BlockedBy, live Errands blocked by cp.
 	byID := make(map[string]*bd.Bead, len(m.beads))
 	waiters := map[string][]string{}
 	for i, b := range m.beads {
 		byID[b.ID] = &m.beads[i]
-		if b.Kind == contract.KindTask && execLive(b) {
+		if b.Kind == contract.KindErrand && execLive(b) {
 			for _, id := range b.BlockedBy {
 				waiters[id] = append(waiters[id], b.ID)
 			}
@@ -157,7 +159,7 @@ func (m Model) initStatsOf() map[string]initStats {
 			continue
 		}
 		for _, id := range cp.BlockedBy {
-			if b := byID[id]; b != nil && execLive(*b) && (b.Kind == contract.KindPivot || b.Kind == contract.KindTask) {
+			if b := byID[id]; b != nil && execLive(*b) && (b.Kind == contract.KindPivot || b.Kind == contract.KindErrand) {
 				waiters[cp.ID] = append(waiters[cp.ID], b.ID)
 			}
 		}
@@ -319,18 +321,22 @@ func (t initsTab) bindings() []key.Binding {
 		return nil
 	case rows[t.selIndex(rows)].b == nil:
 		return []key.Binding{keyFold, keySection}
-	case t.drawerOpen():
-		return []key.Binding{keyShut, keyScroll, keyTranscript, keySection}
 	}
-	return []key.Binding{verbKey("enter", "focus"), keyDetail, keyTranscript, keySection}
+	hinted, _ := beadVerbBindings(t.g, rows[t.selIndex(rows)].b, roleFull)
+	if t.drawerOpen() {
+		return slices.Concat([]key.Binding{keyShut, keyScroll, keyTranscript}, hinted, []key.Binding{keySection})
+	}
+	return slices.Concat([]key.Binding{verbKey("enter", "focus"), keyDetail, keyTranscript}, hinted, []key.Binding{keySection})
 }
 
 // extra: enter still opens the focus under the drawer, though only the bar without it hints it.
 func (t initsTab) extra() []key.Binding {
+	out := []key.Binding{keyMove}
 	if t.drawerOpen() {
-		return []key.Binding{keyMove, verbKey("enter", "focus")}
+		out = append(out, verbKey("enter", "focus"))
 	}
-	return []key.Binding{keyMove}
+	_, verbs := beadVerbBindings(t.g, t.selected(), roleFull)
+	return append(out, verbs...)
 }
 
 func (t initsTab) update(k tea.KeyMsg) (component, tea.Cmd) {
@@ -410,16 +416,10 @@ func (t initsTab) line2(b *bd.Bead) string {
 		countSt(aliveSt, st.live, "live") + dimSt.Render(" · ") + countSt(waitSt, st.waiting, "waiting")
 }
 
-func (t initsTab) view(w, h int) string {
-	rows := t.rows()
-	if len(rows) == 0 {
-		return dimSt.Render(" no Initiatives yet — n i to start one")
-	}
-	sel := t.selIndex(rows)
-	// Windowed in line space: src[k] is line k's row index, 2*i+1 for a bead row's
-	// line 2 (row i), -1 for the blank above Closed; only the drawn lines are formatted.
-	var src []int
-	at := 0 // the line the window must keep visible: the cursor row's last line
+// lines is the Initiatives list in line space, as view windows it: src[k] is line k's row
+// index, 2*i+1 for a bead row's line 2 (row i), -1 for the blank above Closed; at is the line
+// the window must keep visible, the cursor row's last.
+func (t initsTab) lines(rows []iRow, sel int) (src []int, at int) {
 	closedAt := 0
 	for i, r := range rows {
 		if r.key == initsClosed {
@@ -439,6 +439,70 @@ func (t initsTab) view(w, h int) string {
 		}
 		src = slices.Insert(src, closedAt, -1)
 	}
+	return src, at
+}
+
+// hit is the pointer's view of body line y of a w by h body (pointable): both lines of a row
+// are that row.
+func (t initsTab) hit(w, h, y int) hitTarget {
+	rows := t.rows()
+	if len(rows) == 0 {
+		return hitTarget{caret: -1}
+	}
+	return t.geom(rows, h).hit(t.lv, y)
+}
+
+// geom is what View and the pointer share about an h tall body over rows (not empty).
+func (t initsTab) geom(rows []iRow, h int) listGeom {
+	src, at := t.lines(rows, t.selIndex(rows))
+	keys := make([]string, len(src))
+	for k, c := range src {
+		if c >= 0 {
+			keys[k] = rows[c/2].key + "/" + strconv.Itoa(c%2)
+		}
+	}
+	return listGeom{n: len(src), sel: at, h: h, open: t.drawerOpen(), keys: anchorKeys(keys), at: func(k int) hitTarget {
+		if src[k] < 0 {
+			return hitTarget{}
+		}
+		r := rows[src[k]/2]
+		return stopTarget(r.key, r.b != nil)
+	}}
+}
+
+// selectKey selects a row as j/k would.
+func (t initsTab) selectKey(key string) component { t.sel, t.off = key, 0; return t }
+
+func (t initsTab) wheel(w, h, y, delta int) component {
+	rows := t.rows()
+	if len(rows) == 0 {
+		return t
+	}
+	g := t.geom(rows, h)
+	if g.hit(t.lv, y).kind == hitDrawer {
+		t.off = wheelDrawer(t.detailVP(), delta)
+		return t
+	}
+	t.lv = g.wheeled(t.lv, delta)
+	return t
+}
+
+func (t initsTab) snap(w, h int) component {
+	if rows := t.rows(); len(rows) > 0 {
+		t.lv = t.geom(rows, h).snapped(t.lv)
+	}
+	return t
+}
+
+func (t initsTab) unscroll() component { t.lv = listView{}; return t }
+
+func (t initsTab) view(w, h int) string {
+	rows := t.rows()
+	if len(rows) == 0 {
+		return dimSt.Render(" no Initiatives yet — n i to start one")
+	}
+	sel := t.selIndex(rows)
+	src, at := t.lines(rows, sel)
 	line := func(k int) string {
 		switch c := src[k]; {
 		case c < 0:
@@ -449,5 +513,5 @@ func (t initsTab) view(w, h int) string {
 			return fitRow(func(int) (string, string) { return t.line(rows[c/2]) }, w, sel, c/2)
 		}
 	}
-	return drawerWin(len(src), line, at, t.drawerOpen(), w, h, t.detailVP(), nil)
+	return drawerWin(len(src), line, at, t.drawerOpen(), w, h, t.detailVP(), nil, t.lv.offsets(t.geom(rows, h).keys))
 }

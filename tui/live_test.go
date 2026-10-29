@@ -19,6 +19,8 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
+	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/session"
 )
@@ -26,8 +28,12 @@ import (
 // TestMain keeps every test off the real bd, tmux, git and loop lock.
 func TestMain(m *testing.M) {
 	eventlogtest.Discard()
+	// Any real mode-snapshot stamp reads fixed config inputs: never the machine's auto_approve or land_strategy.
+	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{Source: "default"} }
+	git.LandStrategyName = func() (string, error) { return git.LandStrategyLocal, nil }
 	listAll = func() ([]bd.Bead, error) { return mirrorBeads, nil }
 	listOpen = func() ([]bd.Bead, error) { return nil, nil }
+	stampModes = func() {} // never the real Workspace config: snapshots change only when a test sets them
 	defaultIDs = func() ([]string, error) { return ids(mirrorBeads), nil }
 	listByID = func(want []string) ([]bd.Bead, error) { return withIDs(mirrorBeads, want), nil }
 	listComments = func(string) ([]bd.Comment, error) { return nil, nil }
@@ -44,10 +50,14 @@ func TestMain(m *testing.M) {
 	commonDir = func() (string, error) { return "", errors.New("commonDir not stubbed") }
 	dir, _ := os.MkdirTemp("", "recents")
 	recentsPath = func() string { return filepath.Join(dir, "recents.json") } // every test's acts land in one throwaway file
-	readRefs = func() (map[string]bool, map[string]string, error) { return nil, nil, nil }
+	readRefs = func() (*git.EffortSet, map[string]string, error) { return nil, nil, nil }
+	readReady = func() ([]bd.Bead, error) { return fixtureReady(mirrorBeads), nil }
+	readLanded = func([]string) (map[string]string, error) { return nil, nil }
 	recordClient = func() error { return nil }
 	setBars = func(map[string]bool, map[string]string, map[string]session.Info) error { return nil }
+	setTUIMouse = func(bool) error { return nil } // never the real tmux server
 	loopVerb = func(...string) (string, error) { return "", errors.New("loopVerb not stubbed") }
+	refuseLegacy = func() error { return nil }
 	startHost = func(*exec.Cmd) error { return errors.New("startHost not stubbed") } // no test forks tui.test
 	pauseBead = func(string, string) error { return errors.New("pauseBead not stubbed") }
 	newSignal = func(string, string) (string, error) { return "", errors.New("newSignal not stubbed") }
@@ -63,9 +73,30 @@ func TestMain(m *testing.M) {
 	addBlocker = func(string, string) error { return errors.New("addBlocker not stubbed") }
 	removeBlocker = func(string, string) error { return errors.New("removeBlocker not stubbed") }
 	startSession = func(bd.Bead, contract.AgentCommand) error { return errors.New("startSession not stubbed") }
+	fenceTmux()
+	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{} } // presses stamp the snapshot; keep it off the layered config
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// fenceTmux keeps the package off every real tmux server: the address variables a
+// crewmate inherits from the TUI's pane are dropped, and each seam bound to a
+// session function that runs tmux gets a stub that touches nothing and succeeds.
+// A test that wants a seam's behaviour (or its failure) stubs it itself; its
+// cleanup restores these.
+func fenceTmux() {
+	for _, k := range []string{"TMUX", "TMUX_PANE", "MUGICREW_HITL_PANE"} {
+		os.Unsetenv(k)
+	}
+	watchRun = func(string) error { return nil }
+	switchSession = func(string) error { return nil }
+	resumeSession = func(bd.Bead, session.Info, contract.Harness) error { return nil }
+	dropSession = func(bd.Bead, session.Info) error { return nil }
+	dropDrafts = func(bd.Bead) error { return nil }
+	finishSession = func(bd.Bead) (bool, error) { return false, nil }
+	dropOrphan = func(string) error { return nil }
+	readPrefix2 = func() (string, error) { return "None", nil }
 }
 
 var (
@@ -789,13 +820,13 @@ func TestLoopSegmentWord(t *testing.T) {
 // status-left; a discussion keeps its Robin form; a dead session gets nothing.
 func TestBarStatesLeft(t *testing.T) {
 	beads := []bd.Bead{
-		{ID: "a", Kind: contract.KindTask, Title: "Fix it", Status: "in_progress", Priority: 1},
+		{ID: "a", Kind: contract.KindErrand, Title: "Fix it", Status: "in_progress", Priority: 1},
 		{ID: "d", Kind: contract.KindDiscussion, Title: "Why?", Status: "open"},
-		{ID: "x", Kind: contract.KindTask, Title: "Dead", Status: "open"},
+		{ID: "x", Kind: contract.KindErrand, Title: "Dead", Status: "open"},
 	}
 	sess := map[string]session.Info{"a": {State: session.Alive}, "d": {State: session.Alive}}
 	_, left := barStates(beads, sess)
-	want := map[string]string{"a": "◐ TASK P1 · Fix it · a", "d": "Why? · Robin discussion"}
+	want := map[string]string{"a": "◐ ERRAND P1 · Fix it · a", "d": "Why? · Robin discussion"}
 	if !maps.Equal(left, want) {
 		t.Errorf("left = %q, want %q", left, want)
 	}
@@ -846,4 +877,66 @@ func mirrorSubtree(id string, _ map[string]bd.Bead) (bd.Subtree, bool, error) {
 	}
 	slices.Sort(in)
 	return bd.Subtree{Head: head, IDs: in}, true, nil
+}
+
+// The refresh reads the exact frontier, the open Containers' landed trailers (by Container id)
+// and the walk ancestors the snapshot lacks, the last with one ListByID.
+func TestLoadReadsFrontierLandedAndAncestors(t *testing.T) {
+	m := sized(t, 100, 30)
+	open := []bd.Bead{
+		{ID: "ch", Status: "open", Kind: contract.KindChart},
+		{ID: "cp", Status: "open", Kind: contract.KindCheckpoint, Parent: "gone"},
+		{ID: "ld", Status: "open", Kind: contract.KindBuild, Parent: "cp", Labels: []string{"paused:manual"}},
+	}
+	ready := []bd.Bead{{ID: "ld"}}
+	var lines []string
+	var byID [][]string
+	defer func(o1, o2 func() ([]bd.Bead, error), o3 func([]string) (map[string]string, error), o4 func([]string) ([]bd.Bead, error), o5 func() ([]string, error)) {
+		listOpen, readReady, readLanded, listByID, defaultIDs = o1, o2, o3, o4, o5
+	}(listOpen, readReady, readLanded, listByID, defaultIDs)
+	defaultIDs = func() ([]string, error) { return nil, nil } // the closed lineage reads nothing, so only the walk reads by id
+	listOpen = func() ([]bd.Bead, error) { return open, nil }
+	readReady = func() ([]bd.Bead, error) { return ready, nil }
+	readLanded = func(l []string) (map[string]string, error) {
+		lines = l
+		return map[string]string{"Chart: ch": "abc", "Checkpoint: cp": "def"}, nil
+	}
+	listByID = func(ids []string) ([]bd.Bead, error) {
+		if !slices.Contains(ids, "gone") { // a claimed bead earlier tests left in Recents
+			return nil, nil
+		}
+		byID = append(byID, ids)
+		return []bd.Bead{{ID: "gone", Status: "closed"}}, nil
+	}
+	msg, ok := m.loadSlow()().(loadedMsg)
+	if !ok {
+		t.Fatal("load did not return a loadedMsg")
+	}
+	if !slices.Equal(idsOf(msg.frontier), []string{"ld"}) {
+		t.Errorf("frontier = %v, want bd ready's result", idsOf(msg.frontier))
+	}
+	if want := map[string]string{"ch": "abc", "cp": "def"}; !maps.Equal(msg.landed, want) {
+		t.Errorf("landed = %v, want %v", msg.landed, want)
+	}
+	if !slices.Equal(lines, []string{"Chart: ch", "Checkpoint: cp"}) {
+		t.Errorf("trailer greps = %v, want one per open Chart and Checkpoint", lines)
+	}
+	if len(byID) != 1 || !slices.Equal(byID[0], []string{"gone"}) {
+		t.Errorf("ListByID calls = %v, want one for the missing ancestor", byID)
+	}
+	if _, ok := msg.ancestors["gone"]; !ok {
+		t.Errorf("ancestors = %v, want the missing hop resolved", msg.ancestors)
+	}
+	m, _ = send(t, m, msg)
+	if g := m.gateData(); len(g.frontier) != 1 || g.landed["ch"] != "abc" || g.ancestors["gone"].ID != "gone" {
+		t.Errorf("gateData lacks the new reads: %+v", g)
+	}
+}
+
+func idsOf(bs []bd.Bead) []string {
+	var out []string
+	for _, b := range bs {
+		out = append(out, b.ID)
+	}
+	return out
 }

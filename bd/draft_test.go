@@ -1,13 +1,12 @@
 package bd
 
 import (
-	"bytes"
 	"errors"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,34 +75,49 @@ func TestDraftCountsAsOpen(t *testing.T) {
 	}
 }
 
-// The publish batch orders edges → status=open → the finishing close (Spec D4).
-func TestPublishScript(t *testing.T) {
-	got := publishScript([]Bead{{ID: "mc-a", Title: "A"}, {ID: "mc-b", Title: "Fix Spec: wording"}},
+// The publish batch orders edges → open → the finishing close (Spec D4). A prefixed Draft's
+// title is stripped in its open op (ADR 0097); an untouched one carries none.
+func TestPublishOps(t *testing.T) {
+	got := publishOps([]Bead{{ID: "mc-a", Title: "A"}, {ID: "mc-b", Title: "Fix Spec: wording"}},
 		[]Edge{{From: "mc-b", To: "mc-a", Type: "blocks"}, {From: "ws-cp", To: "ws-pv"}},
-		&Closing{ID: "ws-spec", Reason: `sliced into "2" Builds`})
+		&Closing{ID: "ws-spec", Reason: "sliced"})
+	want := []Op{EdgeOp("mc-b", "mc-a", "blocks"), EdgeOp("ws-cp", "ws-pv", ""), OpenOp("mc-a", ""),
+		OpenOp("mc-b", ""), CloseOp("ws-spec", "sliced")}
+	if !slices.Equal(got, want) {
+		t.Errorf("ops = %+v\nwant %+v", got, want)
+	}
+	if got := publishOps([]Bead{{ID: "mc-c", Title: "Critique: say hi"}}, nil, nil); !slices.Equal(got, []Op{OpenOp("mc-c", "say hi")}) {
+		t.Errorf("stripped title ops = %+v", got)
+	}
+	if got := publishOps(nil, nil, nil); len(got) != 0 {
+		t.Errorf("nothing to publish must be no ops, got %+v", got)
+	}
+}
+
+// The cli core pipes a batch as one line per op, quoted and flattened to one line.
+func TestCliBatchScript(t *testing.T) {
+	var got string
+	t.Cleanup(swapBatch(func(script string) error { got = script; return nil }))
+	ops := []Op{EdgeOp("mc-b", "mc-a", "blocks"), OpenOp("mc-a", ""), OpenOp("mc-c", "say \"hi\" \\ there\nnow"),
+		CloseOp("ws-spec", `sliced into "2" Builds`), CloseOp("ws-x", "a\nb"), CloseOp("ws-y", "")}
+	if err := (cli{}).Batch(ops); err != nil {
+		t.Fatal(err)
+	}
 	want := "dep add mc-b mc-a blocks\n" +
-		"dep add ws-cp ws-pv\n" +
 		"update mc-a status=open\n" +
-		"update mc-b status=open\n" +
-		`close ws-spec "sliced into \"2\" Builds"` + "\n"
+		`update mc-c status=open title="say \"hi\" \\ there now"` + "\n" +
+		`close ws-spec "sliced into \"2\" Builds"` + "\n" +
+		`close ws-x "a b"` + "\n" +
+		"close ws-y\n"
 	if got != want {
 		t.Errorf("script =\n%s\nwant\n%s", got, want)
 	}
-	// Spec D2: a prefixed Draft's title is stripped in its open line,
-	// quoted like the close reason and flattened to one line.
-	if got := publishScript([]Bead{{ID: "mc-c", Title: "Critique: say \"hi\" \\ there\nnow"}}, nil, nil); got != `update mc-c status=open title="say \"hi\" \\ there now"`+"\n" {
-		t.Errorf("stripped title: %q", got)
-	}
-	if got := publishScript(nil, nil, nil); got != "" {
-		t.Errorf("nothing to publish must be an empty script, got %q", got)
-	}
-	// A reason with a newline must not split into a second batch line.
-	if got := publishScript(nil, nil, &Closing{ID: "mc-x", Reason: "a\nb"}); got != "close mc-x \"a b\"\n" {
-		t.Errorf("multi-line reason: %q", got)
-	}
-	if got := publishScript(nil, nil, &Closing{ID: "mc-x"}); got != "close mc-x\n" {
-		t.Errorf("empty reason: %q", got)
-	}
+}
+
+func swapBatch(fn func(string) error) (restore func()) {
+	old := runBatch
+	runBatch = fn
+	return func() { runBatch = old }
 }
 
 // fakeDrafts swaps run and runBatch: run answers the Drafts list and records
@@ -130,60 +144,9 @@ func fakeDrafts(t *testing.T, listJSON string, batchErr, labelErr error) (calls 
 	return calls, scripts
 }
 
-func TestPublish(t *testing.T) {
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	calls, scripts := fakeDrafts(t, `[{"id":"mc-a","title":"Spec: Foo misses bar","status":"deferred"},{"id":"mc-b","title":"Bar","status":"deferred"}]`, nil, errors.New("label gone"))
-	ids, err := Publish("ws-spec", nil, &Closing{ID: "ws-spec", Reason: "sliced"})
-	if err != nil {
-		t.Fatalf("Publish = %v (label removal is best-effort)", err)
-	}
-	if !reflect.DeepEqual(ids, []string{"mc-a", "mc-b"}) {
-		t.Errorf("published = %v", ids)
-	}
-	if want := []string{"list", "--label", "drafted-by:ws-spec", "--status", "deferred", "-n", "0", "--json"}; !reflect.DeepEqual((*calls)[0], want) {
-		t.Errorf("Drafts argv = %v, want %v", (*calls)[0], want)
-	}
-	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], "update mc-a status=open title=\"Foo misses bar\"\n") ||
-		!strings.Contains((*scripts)[0], "update mc-b status=open\n") {
-		t.Errorf("want one batch publishing the Drafts, mc-a's title stripped, got %q", *scripts)
-	}
-	if out := logs.String(); strings.Count(out, "title.stripped") != 1 || !strings.Contains(out, "id=mc-a") {
-		t.Errorf("want one title.stripped event for mc-a, log = %q", out)
-	}
-	if want := []string{"label", "remove", "mc-a", "mc-b", "drafted-by:ws-spec"}; !reflect.DeepEqual((*calls)[len(*calls)-1], want) {
-		t.Errorf("label removal = %v, want %v", (*calls)[len(*calls)-1], want)
-	}
-}
-
-func TestPublishNothingIsNoOp(t *testing.T) {
-	calls, scripts := fakeDrafts(t, `[]`, nil, nil)
-	if ids, err := Publish("mc-x", nil, nil); err != nil || len(ids) != 0 {
-		t.Fatalf("Publish = (%v,%v)", ids, err)
-	}
-	if len(*scripts) != 0 || len(*calls) != 1 {
-		t.Errorf("no Drafts, no close → no batch, no label calls; got scripts %q calls %v", *scripts, *calls)
-	}
-}
-
-// A failed batch rolls back in bd; Publish reports it and leaves labels alone.
-func TestPublishBatchFailure(t *testing.T) {
-	calls, _ := fakeDrafts(t, `[{"id":"mc-a","status":"deferred"}]`, errors.New("line 1: not found"), nil)
-	if _, err := Publish("mc-x", nil, nil); err == nil {
-		t.Fatal("a failed batch must fail Publish")
-	}
-	for _, c := range *calls {
-		if c[0] == "label" {
-			t.Errorf("no label removal after a failed batch: %v", c)
-		}
-	}
-}
-
 func TestDeleteDrafts(t *testing.T) {
 	calls, _ := fakeDrafts(t, `[{"id":"mc-a","status":"deferred"},{"id":"mc-b","status":"deferred"}]`, nil, nil)
-	ids, _, err := DeleteDrafts("mc-x")
+	ids, _, err := DeleteDrafts("mc-x", UnderClaim("mc-x"))
 	if err != nil || !reflect.DeepEqual(ids, []string{"mc-a", "mc-b"}) {
 		t.Fatalf("DeleteDrafts = (%v,%v)", ids, err)
 	}
@@ -191,7 +154,7 @@ func TestDeleteDrafts(t *testing.T) {
 		t.Errorf("delete argv = %v, want %v", (*calls)[1], want)
 	}
 	calls, _ = fakeDrafts(t, `[]`, nil, nil)
-	if _, _, err := DeleteDrafts("mc-x"); err != nil || len(*calls) != 1 {
+	if _, _, err := DeleteDrafts("mc-x", UnderClaim("mc-x")); err != nil || len(*calls) != 1 {
 		t.Errorf("no Drafts → no delete; calls %v err %v", *calls, err)
 	}
 }
@@ -223,12 +186,12 @@ func TestDeleteDraftsDeletesUnworkedContainerBranches(t *testing.T) {
 		}
 		return inner(args...)
 	}
-	if _, outs, err := DeleteDrafts("mc-x"); err == nil || outs != nil || !hasBranch("chart/ws-fresh") {
+	if _, outs, err := DeleteDrafts("mc-x", UnderClaim("mc-x")); err == nil || outs != nil || !hasBranch("chart/ws-fresh") {
 		t.Fatalf("failed delete: outs %v err %v; branch must stay", outs, err)
 	}
 
 	fakeDrafts(t, list, nil, nil)
-	ids, outs, err := DeleteDrafts("mc-x")
+	ids, outs, err := DeleteDrafts("mc-x", UnderClaim("mc-x"))
 	if err != nil || len(ids) != 5 {
 		t.Fatalf("DeleteDrafts = (%v,%v)", ids, err)
 	}
@@ -270,25 +233,15 @@ func hasBranch(b string) bool {
 	return exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/heads/"+b).Run() == nil
 }
 
-// ADR 0079 §5: a chart-conflict's escalation publishes its grilling Draft and the
-// conflict blocks→grilling gate in ONE batch, with no close — the conflict stays
-// open, blocked. In an effort the edge goes to the tail instead.
-func TestEdgesOnPublishLandsDraftAndGateInOneBatch(t *testing.T) {
-	_, scripts := fakeDrafts(t, `[{"id":"ws-grill","status":"deferred"}]`, nil, nil)
+// ADR 0079 §5: in an effort a chart-conflict's gate edge goes to the tail, and nothing closes.
+func TestEdgesOnPublishInAnEffortHandsTheGateToTheTail(t *testing.T) {
 	gate := []Edge{{From: "ws-cf", To: "ws-grill", Type: "blocks"}}
-	if err := EdgesOnPublish(nil, "ws-cf", gate); err != nil {
-		t.Fatalf("EdgesOnPublish: %v", err)
-	}
-	if want := []string{"dep add ws-cf ws-grill blocks\nupdate ws-grill status=open\n"}; !reflect.DeepEqual(*scripts, want) {
-		t.Errorf("batches = %q, want %q", *scripts, want)
-	}
-
 	ctx := &publishingCtx{}
 	if err := EdgesOnPublish(ctx, "ws-cf", gate); err != nil {
 		t.Fatalf("EdgesOnPublish in an effort: %v", err)
 	}
-	if len(*scripts) != 1 || !reflect.DeepEqual(ctx.edges, gate) || len(ctx.closes) != 0 {
-		t.Errorf("an effort must hand the gate to its tail and close nothing, got batches %q edges %v closes %v", *scripts, ctx.edges, ctx.closes)
+	if !reflect.DeepEqual(ctx.edges, gate) || len(ctx.closes) != 0 {
+		t.Errorf("an effort must hand the gate to its tail and close nothing, got edges %v closes %v", ctx.edges, ctx.closes)
 	}
 }
 
@@ -358,5 +311,44 @@ func TestDraftRepoSubtreeOnlyMakesNoGitCall(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(log); len(b) != 0 {
 		t.Fatalf("draftRepo made git calls:\n%s", b)
+	}
+}
+
+// A Robin-drafted Initiative (an unparented kind:initiative epic) rides the same
+// wrapper paths as a Signal Draft: publish opens both in one batch.
+func TestInitiativeDraftPublishesWithSignal(t *testing.T) {
+	_, scripts := fakeDrafts(t, `[{"id":"mc-sig","title":"A signal","status":"deferred","labels":["kind:signal"]},{"id":"mc-ini","title":"Big effort","status":"deferred","issue_type":"epic","labels":["kind:initiative"]}]`, nil, nil)
+	ids, err := Publish("mc-disc", nil, nil)
+	if err != nil || !reflect.DeepEqual(ids, []string{"mc-sig", "mc-ini"}) {
+		t.Fatalf("Publish = (%v,%v)", ids, err)
+	}
+	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], "update mc-sig status=open\n") ||
+		!strings.Contains((*scripts)[0], "update mc-ini status=open\n") {
+		t.Errorf("want one batch opening both, got %q", *scripts)
+	}
+}
+
+// Deleting a Robin-drafted Initiative reports no branch outcome, leaves its
+// initiative/<id> branch alone and makes no git call.
+func TestDeleteDraftsInitiativeHasNoBranchOutcome(t *testing.T) {
+	newGitRepo(t)
+	gitT(t, "branch", "initiative/mc-ini")
+	fakeDrafts(t, `[{"id":"mc-ini","status":"deferred","issue_type":"epic","labels":["kind:initiative"]}]`, nil, nil)
+	real, _ := exec.LookPath("git")
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\nexec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ids, outs, err := DeleteDrafts("mc-disc", UnderClaim("mc-disc"))
+	if err != nil || !reflect.DeepEqual(ids, []string{"mc-ini"}) || len(outs) != 0 {
+		t.Fatalf("DeleteDrafts = (%v,%v,%v)", ids, outs, err)
+	}
+	if b, _ := os.ReadFile(log); len(b) != 0 {
+		t.Fatalf("DeleteDrafts made git calls:\n%s", b)
+	}
+	if !hasBranch("initiative/mc-ini") {
+		t.Error("an Initiative Draft must touch no branch")
 	}
 }

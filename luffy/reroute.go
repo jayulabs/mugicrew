@@ -466,7 +466,7 @@ func RerouteHost(pivots, critiques []bd.Bead) (string, error) {
 }
 
 // RaiseDrafts splits a creator's Drafts into the pivots and Critiques of its raise. A
-// Signal's are those caused-by it (RerouteDrafts); a Task's, which no edge marks, are its
+// Signal's are those caused-by it (RerouteDrafts); an Errand's, which no edge marks, are its
 // pivot Drafts carrying the raise_checkpoint metadata and its Critique Drafts.
 func RaiseDrafts(creator bd.Bead, drafts []bd.Bead) (pivots, critiques []bd.Bead) {
 	if creator.Kind == contract.KindSignal {

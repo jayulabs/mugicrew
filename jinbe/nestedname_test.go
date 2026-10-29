@@ -13,14 +13,14 @@ import (
 // A nested hold names the MR by its project in title and body while the idempotency key
 // stays "Merged MR: !N"; a Workspace one is unchanged.
 func TestHoldTrailerlessNamesNestedMR(t *testing.T) {
-	o := bd.SpawnBlockingTask
-	t.Cleanup(func() { bd.SpawnBlockingTask = o })
+	o := bd.SpawnBlockingErrand
+	t.Cleanup(func() { bd.SpawnBlockingErrand = o })
 	defer git.SetGraphID("g1")()
 	oClash := postLandClashes
 	t.Cleanup(func() { postLandClashes = oClash })
 	postLandClashes = func(string, string) ([]git.PostLandClash, error) { return nil, nil }
 	var key, title, body string
-	bd.SpawnBlockingTask = func(_, k, ti, b string) (string, bool, error) { key, title, body = k, ti, b; return "t", true, nil }
+	bd.SpawnBlockingErrand = func(_, k, ti, b string) (string, bool, error) { key, title, body = k, ti, b; return "t", true, nil }
 	holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", mrNaming{noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
 	if wantTitle := "C: merge request !7 merged without its trailer"; title != wantTitle ||
 		!strings.HasPrefix(body, "MR !7 for cp was merged at abc, but no \"Spec: x\" trailer reached mainline.\n") {
@@ -34,7 +34,7 @@ func TestHoldTrailerlessNamesNestedMR(t *testing.T) {
 	}
 }
 
-// Every pipeline-failure Task and Critique names a nested MR by project in title and
+// Every pipeline-failure Errand and Critique names a nested MR by project in title and
 // body; a Workspace one reads "pipeline N failed" with no MR line (Spec FR 28).
 func TestPipelineFailureNamesNestedMR(t *testing.T) {
 	pl := forge.Pipeline{ID: 42, Status: "failed", WebURL: "https://gl/p/42"}
@@ -57,7 +57,7 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 				r := &jinbeSeamRec{head: "cafef00d", jobs: c.jobs, targetSHA: "base9"}
 				stubJinbeSeams(t, r)
 				var title, body string
-				bd.SpawnBlockingTask = func(_, _, ti, b string) (string, bool, error) { title, body = ti, b; return "t", true, nil }
+				bd.SpawnBlockingErrand = func(_, _, ti, b string) (string, bool, error) { title, body = ti, b; return "t", true, nil }
 				l := openLanding("cafef00d")
 				l.Description += "\nMR: !7\nRetried: pipeline 42\n"
 				cp := bd.Bead{ID: "ws-cp", Kind: c.kind, Title: "Ship"}
@@ -77,7 +77,7 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 				}
 				if c.name != "critique" {
 					if !strings.Contains(body, "Merge request: "+path+"!7\n") {
-						t.Errorf("Task body %q lacks its Merge request: fact", body)
+						t.Errorf("Errand body %q lacks its Merge request: fact", body)
 					}
 				} else if want == "" {
 					if strings.Contains(title, " on merge request") || strings.Contains(body, "Merge Request:") {
@@ -91,12 +91,14 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 	}
 }
 
-// A Workspace's pipeline-failure Critique body is byte-identical to the pre-Task-body
+// A Workspace's pipeline-failure Critique body is byte-identical to the pre-Errand-body
 // string for the same pipeline and two failing jobs (Spec Testing Decisions).
 func TestPipelineFailureCritiqueBodyGolden(t *testing.T) {
 	o := forgeTrace
 	t.Cleanup(func() { forgeTrace = o })
-	forgeTrace = func(_ forge.Project, job int) (string, error) { return map[int]string{1: "boom one", 2: "boom two"}[job], nil }
+	forgeTrace = func(_ forge.Project, job int) (string, error) {
+		return map[int]string{1: "boom one", 2: "boom two"}[job], nil
+	}
 	pl := forge.Pipeline{ID: 42, WebURL: "https://gl/p/42"}
 	jobs := []forge.Job{
 		{ID: 1, Name: "build", WebURL: "https://gl/j/1", FailureReason: "script_failure"},

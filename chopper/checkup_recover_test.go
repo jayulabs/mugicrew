@@ -58,6 +58,7 @@ func TestRecoverCheckupFence(t *testing.T) {
 }
 
 func TestListShowsCheckupFence(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir()) // the sandbox has no repo to resolve a graph dir from
 	live, gone := fenced(), fenced()
 	live.ID, gone.ID = "mc-live", "mc-gone"
 	beads := map[string]bd.Bead{"mc-live": live, "mc-gone": gone}
@@ -81,7 +82,6 @@ func TestListShowsCheckupFence(t *testing.T) {
 	set(t, &probe, func(string) []int { return nil })
 	set(t, &lineage, func(pid int) []int { return []int{pid} })
 	set(t, &loopState, func() (string, error) { return "off", nil })
-	set(t, &tuiAlive, func(string) (bool, error) { return false, nil })
 	var out bytes.Buffer
 	if err := List(&out); err != nil {
 		t.Fatal(err)

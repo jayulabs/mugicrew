@@ -1,6 +1,6 @@
 # ADR 0189: Under gitlab a human merges the Merge Request, and Jinbe reads need_rebase as pending
 
-Status: Accepted
+Status: Accepted (§1 becomes literal under ADR 0382 (under-gitlab-the-un-draft…))
 Date: 2026-10-15
 
 Chart mc-t72m.2 (GitLab Merge Request land strategy for a single-repo

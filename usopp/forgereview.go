@@ -132,13 +132,11 @@ func runForgeReview(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	if _, err := ctx.Harness().Run(ctx, inv); err != nil {
-		return sweptOr(bead.ID, err)
-	}
-	if bead, err = showBead(bead.ID); err != nil || !bead.Open() {
+	fresh, _, _, open, err := runSession(ctx, inv, showBead)
+	if err != nil || !open {
 		return err
 	}
-	return forgeReviewTail(ctx, bead, container, judge, mark)
+	return forgeReviewTail(ctx, fresh, container, judge, mark)
 }
 
 // forgeReviewTail checks the ledger against the JUDGE notes and the Drafts, then

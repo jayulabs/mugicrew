@@ -1,6 +1,6 @@
 # ADR 0179: v2 queue tabs share Actionable sections, two-tone badges, folded trailers, ancestor shade and one folds file
 
-Status: Accepted; §1 amended by Spec mc-qgtw (Actionable gains a paused band for own-paused ready beads); §1 amended again by Spec mc-llx8 (the paused band also lists own-paused AFK beads: on Execute every open Checkpoint member, on Defog every open Chart child); §1 amended again by Spec "Actionable's paused band lists every own-paused bead on its home tab" (mc-f22wp: the paused band lists every own-paused, otherwise-ready bead whose home tab is the tab)
+Status: Accepted; §1 amended by Spec mc-qgtw (Actionable gains a paused band for own-paused ready beads); §1 amended again by Spec mc-llx8 (the paused band also lists own-paused AFK beads: on Execute every open Checkpoint member, on Defog every open Chart child); §1 amended again by Spec "Actionable's paused band lists every own-paused bead on its home tab" (mc-f22wp: the paused band lists every own-paused, otherwise-ready bead whose home tab is the tab); §5 amended by Spec "Ancestor shade lights the open MR Watch and Landing of each container on the chain" (mc-8l7l9)
 Date: 2026-10-14
 
 Chart mc-c3es (Queue-tab parity). Settles grilling mc-c3es.4 after the
@@ -33,9 +33,11 @@ are unchanged.
 5. **Ancestor shade** (as Graph's ancRow): selecting a row shades its Parent
    chain, the group header its tree twin sits under (folded or not), and its
    twin both ways (an Actionable row shades its tree twin, a tree row its
-   Actionable twin). Execute's Task and Pivot rows shade their Parent chain
-   only, never the Checkpoint their `in → cp` hint names: shade means
-   containment, and the pink blocker marks already show blocking.
+   Actionable twin). Execute's Errand and Pivot rows shade their Parent chain
+   only, never the Checkpoint their `in → cp` hint names. Shade means
+   containment, plus the open MR Watch and Landing of each Checkpoint or Chart
+   on the chain (the selection included). The pink blocker marks already show
+   blocking.
 6. **One folds file** (amends ADR 0172 §4). Folds persist in
    `<git-common-dir>/mugicrew/folds.json`, shaped
    `{"ideate":{…},"defog":{…},"execute":{…}}`; each tab saves only its own

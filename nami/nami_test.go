@@ -31,10 +31,14 @@ type stubHarness struct {
 	runInv contract.Invocation
 	out    string // Result.Output the AFK Run path returns
 	err    error  // non-nil → the AFK Run errors
+	onRun  func() // runs during Run, e.g. to close the bead under it
 }
 
 func (h *stubHarness) Run(_ contract.Ctx, inv contract.Invocation) (contract.Result, error) {
 	h.runInv = inv
+	if h.onRun != nil {
+		h.onRun()
+	}
 	return contract.Result{Output: h.out}, h.err
 }
 func (h *stubHarness) LaunchCommand(inv contract.Invocation) (contract.LaunchCommand, error) {
@@ -83,6 +87,7 @@ func TestLaunchGrillingIsAgentSession(t *testing.T) {
 // The empty stub Result short-circuits the close, so this touches no bd (the bd
 // close/pointer legs are exercised end-to-end, not here).
 func TestRunResearchComposesAFKResearchInvocation(t *testing.T) {
+	swap(t, &showBead, func(string) (bd.Bead, error) { return bd.Bead{ID: "mc-r", Status: "open"}, nil })
 	h := &stubHarness{}
 	if err := (Nami{}).Run(stubCtx{h}, contract.Bead{ID: "mc-r", Kind: contract.KindResearch}); err != nil {
 		t.Fatalf("Run research: %v", err)
@@ -105,32 +110,70 @@ func TestRunResearchComposesAFKResearchInvocation(t *testing.T) {
 // contact, so Run returns nil without shelling out to bd (mirrors the empty-Output
 // short-circuit above: a non-pointer line reaching bd.Show would error on the fake id).
 func TestRunResearchNonPointerOutputLeavesBeadOpen(t *testing.T) {
+	swap(t, &showBead, func(string) (bd.Bead, error) { return bd.Bead{ID: "mc-nonexistent-xyz", Status: "open"}, nil })
 	h := &stubHarness{out: "Unable to find primary sources"}
 	if err := (Nami{}).Run(stubCtx{h}, contract.Bead{ID: "mc-nonexistent-xyz", Kind: contract.KindResearch}); err != nil {
 		t.Fatalf("non-pointer exit-0 Run must short-circuit before bd (leave bead open), got %v", err)
 	}
 }
 
-// Finding 1: headless claude Output carries the full assistant message,
-// so the pointer line the agent emits last sits behind any prose it printed first.
-// The close guard matches the LAST non-empty line against researchDocPointer, not the
-// whole Output — so a multi-line Output ending in the pointer still closes the bead,
-// while a non-pointer final line leaves it open.
-func TestLastNonEmptyLineDrivesCloseGuard(t *testing.T) {
-	closes := func(out string) bool {
-		return strings.HasPrefix(lastNonEmptyLine(out), researchDocPointer)
+// The research close guard matches the runner's final line against researchDocPointer:
+// a multi-line Output ending in the pointer (prose before it) closes the bead, while a
+// non-pointer final line or empty output leaves it open.
+func TestRunResearchClosesOnPointerFinalLine(t *testing.T) {
+	cases := map[string]struct {
+		out    string
+		closes bool
+	}{
+		"pointer behind prose":   {"Investigated the sources.\n\nWrote docs/research/tail-seams.md: two seams found.\n", true},
+		"non-pointer final line": {"Wrote docs/research/tail-seams.md: found it.\nUnable to verify one claim", false},
+		"empty":                  {"\n  \n", false},
 	}
-	// Multi-line output ending in the pointer (prose before it) → closes.
-	if !closes("Investigated the sources.\n\nWrote docs/research/tail-seams.md: two seams found.\n") {
-		t.Error("pointer as the last non-empty line (prose before it) must close the bead")
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := bd.Bead{ID: "mc-r", Status: "open"}
+			swap(t, &showBead, func(string) (bd.Bead, error) { return b, nil })
+			var closed []string
+			swap(t, &closeBead, func(id, reason string) error { closed = append(closed, reason); return nil })
+			err := (Nami{}).Run(stubCtx{&stubHarness{out: c.out}}, contract.Bead{ID: "mc-r", Kind: contract.KindResearch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(closed) == 1; got != c.closes {
+				t.Errorf("closes = %v (%q), want %v", got, closed, c.closes)
+			}
+		})
 	}
-	// Non-pointer final line → stays open.
-	if closes("Wrote docs/research/tail-seams.md: found it.\nUnable to verify one claim") {
-		t.Error("a non-pointer final line must leave the bead open")
-	}
-	// Empty output → stays open.
-	if closes("\n  \n") {
-		t.Error("empty output must leave the bead open")
+}
+
+// A research or chart-conflict bead closed during the run (swept, or by the agent) is
+// done, whether the Run failed or succeeded: no error, no close, no check, no integrate.
+func TestRunClosedDuringRunIsDone(t *testing.T) {
+	for _, runErr := range []error{nil, errors.New("claude killed")} {
+		t.Run(fmt.Sprintf("research err=%v", runErr), func(t *testing.T) {
+			swap(t, &showBead, func(string) (bd.Bead, error) { return bd.Bead{ID: "mc-r", Status: "closed"}, nil })
+			var closed []string
+			swap(t, &closeBead, func(id, reason string) error { closed = append(closed, reason); return nil })
+			h := &stubHarness{out: "Wrote docs/research/x.md: done", err: runErr}
+			if err := (Nami{}).Run(stubCtx{h}, contract.Bead{ID: "mc-r", Kind: contract.KindResearch}); err != nil {
+				t.Fatalf("closed research bead must be done, got %v", err)
+			}
+			if len(closed) != 0 {
+				t.Errorf("no close on a closed bead, got %q", closed)
+			}
+		})
+		t.Run(fmt.Sprintf("chart-conflict err=%v", runErr), func(t *testing.T) {
+			b := openChartConflict()
+			r := chartConflictSeams(t, &b, nil)
+			h := &stubHarness{out: "Resolved: x", err: runErr, onRun: func() { b.Status = "closed" }}
+			ctx := &publishingCtx{stubCtx: stubCtx{h}}
+			if err := (Nami{}).Run(ctx, contract.Bead{ID: "ws-cf", Kind: contract.KindChartConflict}); err != nil {
+				t.Fatalf("closed chart-conflict must be done, got %v", err)
+			}
+			if len(ctx.closes)+len(r.closes)+len(r.checks)+len(r.integrates) != 0 {
+				t.Errorf("no check, integrate or close, got %+v / %q", r, ctx.closes)
+			}
+		})
 	}
 }
 
@@ -424,6 +467,12 @@ func TestRunChartConflictResolvedClosesThroughPublish(t *testing.T) {
 	}
 }
 
+// finalLine is the last non-blank line of s, trimmed: the test's own expectation.
+func finalLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
 // Anything but a Resolved: or well-formed Escalate: final line — prose, empty
 // output, an Escalate: with no Blocks: payload, or a harness error — fails the
 // effort and leaves the bead open, running no check.
@@ -446,7 +495,7 @@ func TestRunChartConflictNonResolvedErrors(t *testing.T) {
 			if h.err != nil && !errors.Is(err, h.err) {
 				t.Errorf("harness error must be returned as-is, got %v", err)
 			}
-			if h.out != "" && !strings.Contains(err.Error(), lastNonEmptyLine(h.out)) {
+			if want := finalLine(h.out); want != "" && !strings.Contains(err.Error(), want) {
 				t.Errorf("error must name the final line, got %v", err)
 			}
 			if len(ctx.closes)+len(r.closes)+len(r.checks) != 0 {
@@ -617,7 +666,13 @@ func TestLaunchSurveyRendersChartingPromptWithBothIDs(t *testing.T) {
 		"bd supersede ws-chart --with",
 		"mugicrew chart drop ws-chart Destination",
 		"mugicrew chart append ws-chart Destination",
-		"mugicrew task new --drafted-by ws-srv --after ws-chart",
+		"mugicrew errand new --drafted-by ws-srv --after ws-chart",
+		"mugicrew chart finish ws-chart --survey ws-srv",
+		`bd update ws-srv --notes "<decisions>"`,
+		`mugicrew chart append ws-chart Decisions-so-far "<gist> (ws-srv)"`,
+		"keep the Chart with its fog seeded, finish it in place, hand it back, reject it, or mark it a duplicate",
+		"handed back",
+		"still no fog?",
 		strings.Join(strings.Fields(contract.DraftInstruction("ws-srv")), " "),
 	} {
 		if !strings.Contains(got, want) {
@@ -627,6 +682,7 @@ func TestLaunchSurveyRendersChartingPromptWithBothIDs(t *testing.T) {
 	for _, gone := range []string{
 		"bd update ws-chart --claim", "drafted-by:ws-chart", "--parent ws-srv",
 		"discovered-from:ws-srv", "discovered-from ws-chart", "--from ws-chart", "bd close ws-srv", "Signal under triage", "mugicrew reconcile", "FAST LANE",
+		"so Luffy fast-lanes the new Signal", "Spawn at least one defog bead",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("charting prompt carries %q", gone)
@@ -651,27 +707,47 @@ func TestLaunchRefusesChart(t *testing.T) {
 	}
 }
 
-// Spec mc-oeibm (FR 1–7): promote-or-stamp and speccing read only the closed
-// defog children (grilling, research, prototype) and skip every other child:
-// the Survey, Landings (obsoleted ones too) and chart-conflicts record no
-// defog decision.
-func TestJudgeAndSpeccingReadOnlyClosedDefogChildren(t *testing.T) {
+// Spec mc-oeibm (FR 1–7), mc-65hpp FR 19–20: promote-or-stamp reads only the
+// closed defog children and skips the Survey, Landings (obsoleted ones too) and
+// chart-conflicts.
+func TestJudgeReadsOnlyClosedDefogChildren(t *testing.T) {
 	k := func(kind contract.Kind) string { return "kind:" + string(kind) }
 	read := k(contract.KindGrilling) + ", " + k(contract.KindResearch) + " and " + k(contract.KindPrototype) + " children"
-	for name, p := range map[string]string{"promote-or-stamp": promoteOrStampPrompt("mc-x"), "speccing": speccingPrompt("mc-x")} {
-		flat := strings.Join(strings.Fields(p), " ")
-		for _, want := range []string{
-			"Read only the closed " + read,
-			"skip every other child",
-			k(contract.KindSurvey) + " child",
-			k(contract.KindLanding) + " children, including obsoleted ones",
-			k(contract.KindChartConflict) + " children",
-			"None of them records a defog decision",
-		} {
-			if !strings.Contains(flat, want) {
-				t.Errorf("%s prompt must contain %q:\n%s", name, want, p)
-			}
+	flat := strings.Join(strings.Fields(promoteOrStampPrompt("mc-x")), " ")
+	for _, want := range []string{
+		"Read only the closed " + read,
+		"skip every other child",
+		k(contract.KindSurvey) + " child",
+		k(contract.KindLanding) + " children, including obsoleted ones",
+		k(contract.KindChartConflict) + " children",
+		"None of them records a defog decision",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("promote-or-stamp prompt must contain %q:\n%s", want, flat)
 		}
+	}
+}
+
+// Spec mc-65hpp FR 18–19: speccing reads the closed Survey's notes as a decision
+// source beside the closed defog children, and still skips Landings and
+// chart-conflicts.
+func TestSpeccingReadsClosedSurveyNotes(t *testing.T) {
+	k := func(kind contract.Kind) string { return "kind:" + string(kind) }
+	flat := strings.Join(strings.Fields(speccingPrompt("mc-x")), " ")
+	for _, want := range []string{
+		"closed " + k(contract.KindGrilling) + ", " + k(contract.KindResearch) + " and " + k(contract.KindPrototype) + " children",
+		"closed " + k(contract.KindSurvey) + " child",
+		"notes",
+		"skip every other child",
+		k(contract.KindLanding) + " children, including obsoleted ones",
+		k(contract.KindChartConflict) + " children",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("speccing prompt must contain %q:\n%s", want, flat)
+		}
+	}
+	if strings.Contains(flat, "for example the "+k(contract.KindSurvey)+" child (the charting session)") {
+		t.Errorf("speccing prompt must not skip the Survey:\n%s", flat)
 	}
 }
 
@@ -826,11 +902,11 @@ func TestSpeccingPromptCarriesForkSpecifics(t *testing.T) {
 	assertSpecSections(t, "spec-template.md", promptguard.Docs(t)["spec-template.md"])
 }
 
-// FR 43: speccing an escalated Chart reads the evidence's held Tasks into
-// adopted ## Tasks entries.
-func TestSpeccingPromptAdoptsHeldTasks(t *testing.T) {
+// FR 43: speccing an escalated Chart reads the evidence's held Errands into
+// adopted ## Errands entries.
+func TestSpeccingPromptAdoptsHeldErrands(t *testing.T) {
 	flat := strings.Join(strings.Fields(speccingPrompt("mc-x")), " ")
-	for _, want := range []string{"held Tasks", "task: <id>", "adopted entry"} {
+	for _, want := range []string{"held Errands", "errand: <id>", "adopted entry"} {
 		if !strings.Contains(flat, want) {
 			t.Errorf("speccing prompt missing %q", want)
 		}
@@ -839,38 +915,38 @@ func TestSpeccingPromptAdoptsHeldTasks(t *testing.T) {
 
 // assertSpecSections pins all seven standard Spec template sections, in the
 // template order, somewhere in p.
-// Spec D5: the template's optional ## Tasks section follows Further
+// Spec D5: the template's optional ## Errands section follows Further
 // Notes, leaving the seven sections and their order unchanged.
-func TestSpecTemplateOptionalTasksAfterFurtherNotes(t *testing.T) {
+func TestSpecTemplateOptionalErrandsAfterFurtherNotes(t *testing.T) {
 	doc := promptguard.Docs(t)["spec-template.md"]
 	assertSpecSections(t, "spec-template.md", doc)
-	i, j := strings.Index(doc, "## Further Notes"), strings.Index(doc, "## Tasks")
+	i, j := strings.Index(doc, "## Further Notes"), strings.Index(doc, "## Errands")
 	if j < 0 || j < i {
-		t.Fatalf("spec-template.md: ## Tasks must follow ## Further Notes")
+		t.Fatalf("spec-template.md: ## Errands must follow ## Further Notes")
 	}
 	tasks := doc[j:]
-	for _, want := range []string{"optional", "task-body.md", "after: land", "before: land", "after: <Task title>", "task: <id>", "no Steps body", "files nothing"} {
+	for _, want := range []string{"optional", "errand-body.md", "after: land", "before: land", "after: <Errand title>", "errand: <id>", "no Steps body", "files nothing"} {
 		if !strings.Contains(tasks, want) {
-			t.Errorf("spec-template.md ## Tasks missing %q", want)
+			t.Errorf("spec-template.md ## Errands missing %q", want)
 		}
 	}
 }
 
 // Spec decision C (FR14–FR17): charting, grilling and promote-or-stamp file a
-// Task through mugicrew task new, ordered after the Chart, never a Chart child.
-func TestChartSessionsFileTaskThroughTaskNew(t *testing.T) {
+// Errand through mugicrew errand new, ordered after the Chart, never a Chart child.
+func TestChartSessionsFileErrandThroughErrandNew(t *testing.T) {
 	for name, c := range map[string]struct{ p, drafter, chart string }{
 		"charting":         {chartingPrompt("mc-srv", "mc-x"), "mc-srv", "mc-x"},
 		"grilling":         {grillingPrompt("mc-x"), "mc-x", "<chartID>"},
 		"promote-or-stamp": {promoteOrStampPrompt("mc-x"), "mc-x", "mc-x"},
 	} {
 		flat := strings.Join(strings.Fields(c.p), " ")
-		for _, want := range []string{"mugicrew task new --drafted-by " + c.drafter + " --after " + c.chart, "never a Chart child", "Carry copies"} {
+		for _, want := range []string{"mugicrew errand new --drafted-by " + c.drafter + " --after " + c.chart, "never a Chart child", "Carry copies"} {
 			if !strings.Contains(flat, want) {
 				t.Errorf("%s prompt missing %q", name, want)
 			}
 		}
-		for _, bad := range []string{"free-standing", "-l kind:task,", "bd dep add <task>"} {
+		for _, bad := range []string{"free-standing", "-l kind:errand,", "bd dep add <errand>"} {
 			if strings.Contains(flat, bad) {
 				t.Errorf("%s prompt still carries %q", name, bad)
 			}
@@ -998,6 +1074,17 @@ func stubChartSeams(t *testing.T, show func(id string) (bd.Bead, error)) *[]stri
 	swap(t, &commitEmpty, func(string) (bool, error) { return false, nil })
 	swap(t, &forgeProject, func(git.Repo) (forge.Project, error) { return forge.Project{}, nil })
 	swap(t, &forgeFindOpenMR, func(forge.Project, string) (*forge.MR, error) { return nil, nil })
+	swap(t, &fetchMainline, func(git.Repo) (string, error) { return "mainsha", nil })
+	swap(t, &probeBase, func(git.Repo) (string, error) { return "mainsha", nil })
+	swap(t, &isAncestor, func(string, string) bool { return true }) // nothing ahead unless a test says otherwise
+	swap(t, &chartPatchID, func(git.Repo, string, string) (string, error) { return "pid", nil })
+	swap(t, &sequenceRules, func(git.Repo) ([]git.Rule, error) { return []git.Rule{git.ADRRule}, nil })
+	swap(t, &verifyRenumber, func(git.Repo, []git.Rule, string, string, string) (git.RenumberVerdict, error) {
+		return git.RenumberVerdict{Point: git.PointCompare, File: "f"}, nil
+	})
+	swap(t, &closedChildrenOf, func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil })
+	swap(t, &openChildrenOf, func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil })
+	swap(t, &approvedAtHead, func(body, _ string) bool { pin, _ := git.ParseCommit(body); return pin == "chartsha" })
 	return closed
 }
 
@@ -1042,7 +1129,7 @@ func TestReconcileChartWaitsOnAClosedChildWithAnEffortRef(t *testing.T) {
 	h := &recordingHarness{}
 	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
 	kids := []bd.Bead{{ID: "ws-chart.1", Status: "closed"}, {ID: "ws-chart.2", Status: "closed"}}
-	efforts := map[string]bool{"ws-chart.2": true}
+	efforts := &git.EffortSet{Branches: map[string]bool{"ws-chart.2": true}}
 	openChildren = func(string) (int, error) {
 		open, held := bd.DrainBlockersOver(kids, efforts)
 		return open + len(held), nil
@@ -1198,16 +1285,16 @@ func TestReconcileChartBlockingSignalHoldsTheLanding(t *testing.T) {
 	}
 }
 
-// An open Task blocking the Chart (a human's closed-MR call) holds the next Landing
+// An open Errand blocking the Chart (a human's closed-MR call) holds the next Landing
 // until it closes (Spec FR 23).
-func TestReconcileChartBlockingTaskHoldsTheLanding(t *testing.T) {
+func TestReconcileChartBlockingErrandHoldsTheLanding(t *testing.T) {
 	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
 	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
 	openAnyBlockers = func(string) ([]bd.Bead, error) {
-		return []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open"}}, nil
+		return []bd.Bead{{ID: "ws-task", Kind: contract.KindErrand, Status: "open"}}, nil
 	}
 	spawnChildIfAbsent = func(string, bd.Successor) (string, bool, error) {
-		t.Error("an open blocking Task must hold the Landing")
+		t.Error("an open blocking Errand must hold the Landing")
 		return "", false, nil
 	}
 	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
@@ -1253,6 +1340,39 @@ func TestReconcileChartTrailerClosesLandingThenSpecs(t *testing.T) {
 	}
 	if want := []string{"close ws-landing landed: landsha", "spec"}; !slices.Equal(seq, want) {
 		t.Errorf("seq = %v, want %v", seq, want)
+	}
+}
+
+// A Chart carrying an Anchor: pin counts as landed with sha = the pin even when no
+// trailer is on mainline: its Landing closes landed: <pin>, the Spec spawns, and under
+// gitlab no stale-pin or renumber check runs (the land added no commit).
+func TestReconcileChartPinLandedClosesLandingThenSpecs(t *testing.T) {
+	for _, strat := range []string{git.LandStrategyLocal, git.LandStrategyGitlab} {
+		t.Run(strat, func(t *testing.T) {
+			stubChartSeams(t, func(string) (bd.Bead, error) {
+				return bd.Bead{ID: "ws-spec", Status: "open", Description: "authored"}, nil
+			})
+			oStrategy := git.LandStrategyName
+			t.Cleanup(func() { git.LandStrategyName = oStrategy })
+			git.LandStrategyName = func() (string, error) { return strat, nil }
+			landedBase = func(string) (string, error) { t.Fatal("trailer read for a pin-landed Chart"); return "", nil }
+			swap(t, &spawnSignal, func(string, string, string) (string, bool, error) { t.Fatal("stale-pin signal"); return "", false, nil })
+			var seq []string
+			landingsOf = func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-landing", Status: "open"}}, nil }
+			closeBead = func(id, reason string) error { seq = append(seq, "close "+id+" "+reason); return nil }
+			spawnSuccessor = func(string, bd.Successor) (string, bool, error) {
+				seq = append(seq, "spec")
+				return "ws-spec", true, nil
+			}
+			chart := defoggedChart("open")
+			chart.Description += "\nAnchor: pinsha\n"
+			if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+				t.Fatalf("reconcileChart: %v", err)
+			}
+			if want := []string{"close ws-landing landed: pinsha", "spec"}; !slices.Equal(seq, want) {
+				t.Errorf("seq = %v, want %v", seq, want)
+			}
+		})
 	}
 }
 
@@ -1467,8 +1587,14 @@ func TestNamiFocusLineByteIdentity(t *testing.T) {
 			return h.inv.Prompt
 		},
 		"research": func(label string, noShow bool) string {
-			swap(t, &showBead, ctr(label, noShow))
 			h := &stubHarness{}
+			serve := ctr(label, noShow)
+			swap(t, &showBead, func(id string) (bd.Bead, error) {
+				if id == "ws-leaf" && h.runInv.BeadID != "" { // the runner's re-read after the session
+					return bd.Bead{ID: id, Status: "closed"}, nil
+				}
+				return serve(id)
+			})
 			if err := (Nami{}).Run(stubCtx{h}, contract.Bead{ID: "ws-leaf", Kind: contract.KindResearch}); err != nil {
 				t.Fatal(err)
 			}
@@ -1737,13 +1863,13 @@ func TestReconcileChartStalePinFlagsClosedLanding(t *testing.T) {
 	}
 }
 
-// A drained Chart whose trailer another graph landed files the hold Task (FR 41).
+// A drained Chart whose trailer another graph landed files the hold Errand (FR 41).
 func TestReconcileChartForeignLandFilesHold(t *testing.T) {
 	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
 	foreign := &git.ForeignLanding{Trailer: "Chart: ws-chart", Ours: "a", Theirs: "b", Sha: "f00d"}
 	swap(t, &landedBase, func(string) (string, error) { return "", foreign })
 	var keys []string
-	swap(t, &bd.SpawnBlockingTask, func(_, key, _, _ string) (string, bool, error) { keys = append(keys, key); return "ws-t", true, nil })
+	swap(t, &bd.SpawnBlockingErrand, func(_, key, _, _ string) (string, bool, error) { keys = append(keys, key); return "ws-t", true, nil })
 	var fe *git.ForeignLanding
 	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); !errors.As(err, &fe) {
 		t.Fatalf("err = %v, want *ForeignLanding", err)
@@ -1889,7 +2015,7 @@ func TestReconcileChartEmptyLandWithoutMergeShaWarnsOnce(t *testing.T) {
 	seq, _ := stubRenumberChart(t, nil, nil)
 	got := "unset"
 	swap(t, &commitEmpty, func(string) (bool, error) { return true, nil })
-	swap(t, &mergeShaOf, func(string) (string, string, error) { return "", "no hold Task", nil })
+	swap(t, &mergeShaOf, func(string) (string, string, error) { return "", "no hold Errand", nil })
 	swap(t, &postLandClashes, func(_, merge string) ([]git.PostLandClash, error) { got = merge; return nil, nil })
 	evs := eventlogtest.Capture(t)
 	if err := reconcileChart(stubCtx{&recordingHarness{}}, defoggedChart("open")); err != nil {
@@ -2254,7 +2380,7 @@ func TestPromptsCarryIntegrateExits(t *testing.T) {
 // four verdict prefixes; the plain grilling keeps its answered: line.
 func TestFiledGrillingPromptCarriesVerdictClose(t *testing.T) {
 	got := sourceGrillingPrompt("ws-grl")
-	for _, want := range []string{`"answered: <the answer>"`, `"accepted: `, `"rejected: `, `"deferred: `} {
+	for _, want := range []string{`"answered: <the answer>"`, `"accepted: `, `"rejected: `, `"deferred: `, "signal-filing.md's Offshoot form"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("filed grilling prompt must contain %q:\n%s", want, got)
 		}
@@ -2271,5 +2397,240 @@ func TestFiledGrillingPromptCarriesVerdictClose(t *testing.T) {
 	}
 	if plain := grillingPrompt("ws-grl"); !strings.Contains(plain, `bd close ws-grl --reason "answered: <one-line summary>"`) || strings.Contains(plain, "rejected:") {
 		t.Errorf("plain grilling prompt must keep its answered: line only:\n%s", plain)
+	}
+}
+
+// gateRun drives a drained, stamped Chart that has commits ahead of mainline through
+// reconcileChart and returns what it spawned and what it closed (ids).
+func gateRun(t *testing.T, setup func()) (filed []bd.Successor, closedIDs []string) {
+	t.Helper()
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	swap(t, &landedBase, func(string) (string, error) { return "", git.ErrNotLanded })
+	swap(t, &isAncestor, func(string, string) bool { return false })
+	swap(t, &closeBead, func(id, _ string) error { closedIDs = append(closedIDs, id); return nil })
+	swap(t, &spawnChildIfAbsent, func(_ string, s bd.Successor) (string, bool, error) {
+		filed = append(filed, s)
+		return "ws-child", true, nil
+	})
+	if setup != nil {
+		setup()
+	}
+	chart := defoggedChart("open")
+	chart.Title = "a chart"
+	if err := reconcileChart(stubCtx{&recordingHarness{}}, chart); err != nil {
+		t.Fatalf("reconcileChart: %v", err)
+	}
+	return filed, closedIDs
+}
+
+func TestReconcileChartSpawnsApprovalWithBothPins(t *testing.T) {
+	filed, _ := gateRun(t, nil)
+	want := "Approval of the defogged Chart at the pinned commit.\nCommit: chartsha\nPatch-id: pid"
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval || filed[0].Title != "a chart" || filed[0].Container || filed[0].Description != want {
+		t.Fatalf("filed = %+v, want one leaf Approval with %q", filed, want)
+	}
+}
+
+func TestReconcileChartNothingAheadLandsWithoutApproval(t *testing.T) {
+	filed, _ := gateRun(t, func() { isAncestor = func(string, string) bool { return true } })
+	if len(filed) != 1 || filed[0].Kind != contract.KindLanding || filed[0].Description != git.CommitPin("chartsha") || filed[0].CausedBy != "" {
+		t.Fatalf("filed = %+v, want one plain Landing", filed)
+	}
+}
+
+func TestReconcileChartOpenBlockerSpawnsNothing(t *testing.T) {
+	filed, _ := gateRun(t, func() {
+		openAnyBlockers = func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "b", Status: "open"}}, nil }
+	})
+	if len(filed) != 0 {
+		t.Fatalf("filed = %+v, want nothing", filed)
+	}
+}
+
+func TestReconcileChartApprovedAtHeadSpawnsCausedLanding(t *testing.T) {
+	filed, _ := gateRun(t, func() {
+		closedChildrenOf = func(string, contract.Kind) ([]bd.Bead, error) {
+			return []bd.Bead{{ID: "ws-appr", Kind: contract.KindApproval, Status: "closed", CloseReason: "approved", Description: git.CommitPin("chartsha")}}, nil
+		}
+	})
+	if len(filed) != 1 || filed[0].Kind != contract.KindLanding || filed[0].CausedBy != "ws-appr" || filed[0].Description != git.CommitPin("chartsha") {
+		t.Fatalf("filed = %+v, want a Landing caused by ws-appr", filed)
+	}
+}
+
+func TestReconcileChartApprovedBehindHeadRespawnsApproval(t *testing.T) {
+	filed, _ := gateRun(t, func() {
+		closedChildrenOf = func(string, contract.Kind) ([]bd.Bead, error) {
+			return []bd.Bead{{ID: "ws-appr", Kind: contract.KindApproval, Status: "closed", CloseReason: "approved", Description: git.CommitPin("old")}}, nil
+		}
+	})
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval {
+		t.Fatalf("filed = %+v, want a fresh Approval, not a Landing", filed)
+	}
+}
+
+func TestReconcileChartObsoletesOffHeadApprovalThenRespawns(t *testing.T) {
+	filed, closedIDs := gateRun(t, func() {
+		openChildrenOf = func(string, contract.Kind) ([]bd.Bead, error) {
+			return []bd.Bead{
+				{ID: "stale", Kind: contract.KindApproval, Status: "open", Description: git.CommitPin("old")},
+				{ID: "fresh", Kind: contract.KindApproval, Status: "open", Description: git.CommitPin("chartsha")},
+			}, nil
+		}
+	})
+	if len(closedIDs) != 1 || closedIDs[0] != "stale" {
+		t.Errorf("closed %v, want only the off-head Approval", closedIDs)
+	}
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval {
+		t.Errorf("filed = %+v, want the Approval spawn (dedup reuses the at-head one)", filed)
+	}
+}
+
+func TestReconcileChartOpenLandingLandsPreChangeChart(t *testing.T) {
+	filed, _ := gateRun(t, func() {
+		landingsOf = func(string) ([]bd.Bead, error) { return []bd.Bead{{ID: "l", Status: "open"}}, nil }
+	})
+	if len(filed) != 0 {
+		t.Fatalf("filed = %+v, want nothing: the open Landing lands the Chart", filed)
+	}
+}
+
+func TestReconcileChartFetchesBeforeNothingAheadReadUnderGitlab(t *testing.T) {
+	var order []string
+	filed, _ := gateRun(t, func() {
+		swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+		fetchMainline = func(git.Repo) (string, error) { order = append(order, "fetch"); return "forgesha", nil }
+		isAncestor = func(_, b string) bool { order = append(order, "ancestor:"+b); return false }
+	})
+	if len(order) < 2 || order[0] != "fetch" || order[1] != "ancestor:forgesha" {
+		t.Errorf("order %v, want fetch then the ancestor read against the fetched mainline", order)
+	}
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval {
+		t.Errorf("filed = %+v", filed)
+	}
+}
+
+func TestReconcileChartPatchIDComputedInChildRepo(t *testing.T) {
+	var gotRepo git.Repo
+	var gotMain string
+	gateRun(t, func() {
+		swap(t, &repoDirOf, func(bd.Bead) (git.Repo, string) { return git.Repo("/child"), "apps/a" })
+		chartPatchID = func(r git.Repo, m, _ string) (string, error) { gotRepo, gotMain = r, m; return "pid", nil }
+	})
+	if gotMain != "mainsha" {
+		t.Errorf("patch-id mainline %q, want mainsha", gotMain)
+	}
+	if gotRepo != "/child" {
+		t.Errorf("patch-id repo %q, want the child repo", gotRepo)
+	}
+}
+
+// carryRun drives gateChart with one approved Approval pinned at "oldpin" behind the head,
+// the verifier answering v, and returns what was spawned and closed.
+func carryRun(t *testing.T, v git.RenumberVerdict, verr error) (filed []bd.Successor, closedIDs []string, err error) {
+	t.Helper()
+	stubChartSeams(t, func(string) (bd.Bead, error) { return bd.Bead{}, nil })
+	swap(t, &landedBase, func(string) (string, error) { return "", git.ErrNotLanded })
+	swap(t, &isAncestor, func(string, string) bool { return false })
+	swap(t, &closeBead, func(id, _ string) error { closedIDs = append(closedIDs, id); return nil })
+	swap(t, &spawnChildIfAbsent, func(_ string, s bd.Successor) (string, bool, error) {
+		filed = append(filed, s)
+		return "ws-new", true, nil
+	})
+	swap(t, &closedChildrenOf, func(string, contract.Kind) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-old", Kind: contract.KindApproval, Title: "a chart", Status: "closed", CloseReason: "approved", Description: git.CommitPin("oldpin")}}, nil
+	})
+	var gotPin, gotHead, gotMain string
+	swap(t, &verifyRenumber, func(_ git.Repo, _ []git.Rule, pin, head, main string) (git.RenumberVerdict, error) {
+		gotPin, gotHead, gotMain = pin, head, main
+		return v, verr
+	})
+	chart := defoggedChart("open")
+	chart.Title = "a chart"
+	err = gateChart(chart)
+	if err == nil && (gotPin != "oldpin" || gotHead != "chartsha" || gotMain != "mainsha") {
+		t.Errorf("verifier saw pin %q head %q mainline %q", gotPin, gotHead, gotMain)
+	}
+	return filed, closedIDs, err
+}
+
+func TestGateChartRenumberOnlyCarriesApproval(t *testing.T) {
+	filed, closedIDs, err := carryRun(t, git.RenumberVerdict{Accept: true, Renames: []git.Renamed{{Path: "docs/adr/0395-x.md", Old: "0394", New: "0395"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bd.CarriedApprovalBody("a chart", "chartsha", "pid", "oldpin", []bd.Rename{{Path: "docs/adr/0395-x.md", Old: "0394", New: "0395"}})
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval || filed[0].CausedBy != "ws-old" || filed[0].Description != want {
+		t.Fatalf("filed = %+v, want one carried Approval caused by ws-old with %q", filed, want)
+	}
+	if len(closedIDs) != 1 || closedIDs[0] != "ws-new" {
+		t.Errorf("closed = %v, want the carried Approval closed approved at birth", closedIDs)
+	}
+	if !bd.IsCarriedApproval(filed[0].Description) {
+		t.Error("carried body not recognised")
+	}
+}
+
+func TestGateChartRenumberRejectSpawnsApprovalWithNote(t *testing.T) {
+	filed, closedIDs, err := carryRun(t, git.RenumberVerdict{Point: git.PointSweep, File: "docs/adr/0395-x.md"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := chartApprovalBody("chartsha", "pid") + "\n\nnot carried: sweep (docs/adr/0395-x.md)"
+	if len(filed) != 1 || filed[0].Kind != contract.KindApproval || filed[0].CausedBy != "" || filed[0].Description != want {
+		t.Fatalf("filed = %+v, want an Approval with %q", filed, want)
+	}
+	if len(closedIDs) != 0 {
+		t.Errorf("closed = %v, want none", closedIDs)
+	}
+}
+
+func TestGateChartRenumberGitErrorSpawnsNothing(t *testing.T) {
+	filed, closedIDs, err := carryRun(t, git.RenumberVerdict{}, errors.New("boom"))
+	if err == nil {
+		t.Fatal("want the git error returned")
+	}
+	if len(filed) != 0 || len(closedIDs) != 0 {
+		t.Errorf("filed %+v closed %v, want nothing", filed, closedIDs)
+	}
+}
+
+func TestGateChartNoApprovedApprovalSpawnsPlainApprovalWithoutNote(t *testing.T) {
+	called := false
+	filed, _ := gateRun(t, func() {
+		verifyRenumber = func(git.Repo, []git.Rule, string, string, string) (git.RenumberVerdict, error) {
+			called = true
+			return git.RenumberVerdict{}, nil
+		}
+	})
+	if called {
+		t.Error("verifier ran with no approved Approval to carry")
+	}
+	if len(filed) != 1 || filed[0].Description != chartApprovalBody("chartsha", "pid") {
+		t.Fatalf("filed = %+v, want today's Approval body", filed)
+	}
+}
+
+func TestGateChartOpenCarriedApprovalAtHeadIsClosedNotRespawned(t *testing.T) {
+	filed, closedIDs := gateRun(t, func() {
+		openChildrenOf = func(string, contract.Kind) ([]bd.Bead, error) {
+			return []bd.Bead{{ID: "half", Kind: contract.KindApproval, Status: "open",
+				Description: bd.CarriedApprovalBody("a chart", "chartsha", "pid", "oldpin", nil)}}, nil
+		}
+	})
+	if len(filed) != 0 || len(closedIDs) != 1 || closedIDs[0] != "half" {
+		t.Errorf("filed %+v closed %v, want the half-written carried Approval closed", filed, closedIDs)
+	}
+}
+
+func TestGateChartCarriedApprovalLandsOnNextTick(t *testing.T) {
+	carried := bd.CarriedApprovalBody("a chart", "chartsha", "pid", "oldpin", nil)
+	filed, _ := gateRun(t, func() {
+		closedChildrenOf = func(string, contract.Kind) ([]bd.Bead, error) {
+			return []bd.Bead{{ID: "ws-carried", Kind: contract.KindApproval, Status: "closed", CloseReason: "approved", Description: carried}}, nil
+		}
+	})
+	if len(filed) != 1 || filed[0].Kind != contract.KindLanding || filed[0].CausedBy != "ws-carried" {
+		t.Fatalf("filed = %+v, want a Landing caused by the carried Approval", filed)
 	}
 }

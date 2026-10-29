@@ -16,6 +16,9 @@ import (
 	"jayulabs.org/mugicrew/chopper"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
+	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/loop"
+	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -56,8 +59,8 @@ func stubActions(t *testing.T) *[]string {
 		updateBead = func(id string, args []string) error { rec("updateBead", id, args); return nil }
 	}
 	{
-		a, b, c, d, e := abortEffort, assessRecover, recoverBead, ownSession, readyFrontier
-		save(func() { abortEffort, assessRecover, recoverBead, ownSession, readyFrontier = a, b, c, d, e })
+		a, b, c, d := abortEffort, assessRecover, recoverBead, readyFrontier
+		save(func() { abortEffort, assessRecover, recoverBead, readyFrontier = a, b, c, d })
 		abortEffort = func(id, _ string) ([]int, bool, error) { rec("abortEffort", id); return nil, false, nil }
 		assessRecover = func(id string, _ chopper.Opts) (chopper.Inventory, string, error) {
 			rec("assessRecover", id)
@@ -67,13 +70,18 @@ func stubActions(t *testing.T) *[]string {
 			rec("recoverBead", id, o.Discard)
 			return chopper.Report{Verdict: "dead"}, nil
 		}
-		ownSession = func() (string, error) { return "", nil }
 		readyFrontier = func() ([]bd.Bead, error) { rec("readyFrontier"); return nil, errors.New("stop here") }
 	}
 	{
 		a := readSessions
 		save(func() { readSessions = a })
 		readSessions = func() (map[string]session.Info, error) { return actionSessions(), nil }
+	}
+	{ // StampModeSnapshots runs before each action: it must not read the repo's own config, nor leave its snapshot on
+		a := loop.ReadAutoApprove
+		save(func() { loop.ReadAutoApprove = a })
+		loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{Source: "default"} }
+		save(registry.ResetModeSnapshots)
 	}
 	t.Cleanup(func() {
 		for _, f := range saved {
@@ -377,12 +385,12 @@ func TestGraphHintsListApplicableVerbs(t *testing.T) {
 	const edit = "e edit"
 	const find = "/ search · s status · f kind · "
 	for _, c := range []struct{ id, want string }{
-		{"sig", "enter launch · b bg · d detail · " + find + "p pause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
-		{"pz", "enter launch · b bg · d detail · " + find + "p unpause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
+		{"sig", "enter launch · b bg · d detail · " + find + "p pause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
+		{"pz", "enter launch · b bg · d detail · " + find + "p unpause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"done", "d detail · " + find + "t transcript · " + edit + " · c checkup"},
-		{"ini", "enter launch · b bg · d detail · " + find + "p pause · X cancel · t transcript · " + edit + " · +/- prio · c checkup · B add blocker · r retrospective"},
+		{"ini", "enter launch · b bg · d detail · " + find + "p pause · X cancel · t transcript · " + edit + " · +/- prio · c checkup · B add blocker"},
 		{"res", "enter run · d detail · " + find + "p pause · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
-		{"sess", "enter attach · d detail · " + find + "p pause · x drop · X withdraw · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker · r retrospective"},
+		{"sess", "enter attach · d detail · " + find + "p pause · x drop · X withdraw · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"live", "d detail · " + find + "p pause · x abort · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"dead", "d detail · " + find + "p pause · x recover · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 	} {
@@ -584,8 +592,9 @@ func TestBelowFloorKeysDoNothingButQuit(t *testing.T) {
 }
 
 // There is no l key: the HITL refusal must point at enter (FR34, ADR 0144 §7).
-func TestRunNowHintHITLNamesEnterNotL(t *testing.T) {
-	got := runNowHint(bd.Bead{ID: "x-1", Status: "open", Kind: contract.KindSignal}, nil, "", nil)
+func TestCauseHintHITLNamesEnterNotL(t *testing.T) {
+	b := bd.Bead{ID: "x-1", Status: "open", Kind: contract.KindSignal}
+	got := causeHint(b, loop.Verdict{Cause: loop.CauseNotCandidate})
 	if !strings.Contains(got, "press enter") || strings.Contains(got, "press l") || strings.Contains(got, ", not t") {
 		t.Fatalf("hint = %q, want enter and neither l nor t", got)
 	}
@@ -726,18 +735,19 @@ func TestRunNowRefusesBeforeDialog(t *testing.T) {
 		bd.Bead{ID: "chart", Kind: contract.KindChart, Container: true, Status: "open", Title: "A chart", Created: epoch},
 		bd.Bead{ID: "kid", Kind: contract.KindResearch, Parent: "chart", Status: "open", Title: "Kid", Created: epoch},
 		bd.Bead{ID: "hcp", Kind: contract.KindCheckpoint, Container: true, Status: "open", Title: "Held checkpoint", BlockedBy: []string{"dep"}, Created: epoch},
-		bd.Bead{ID: "happr", Kind: contract.KindApproval, Parent: "hcp", Status: "closed", CloseReason: bd.ApprovedReason, Title: "Approved", Created: epoch},
+		bd.Bead{ID: "happr", Kind: contract.KindApproval, Parent: "hcp", Status: "closed", CloseReason: bd.ApprovedReason, Title: "Approved", Description: "Commit: abc", Created: epoch},
 	)
 	for _, c := range []struct{ id, say string }{
 		{"hcp", "land held by open blocker: Dependency"},
 		{"dead", "dead's effort is not running — x recovers it"},
 		{"done", "done is closed — nothing to launch or run"},
 		{"pblk", "pblk is paused by hand"},
-		{"chart", "chart: Chart not drained — 0/1 children closed"},
+		{"chart", "chart: Chart not drained"},
 	} {
 		t.Run(c.id, func(t *testing.T) {
+			seam(t, &readRefs, func() (*git.EffortSet, map[string]string, error) { return nil, map[string]string{"hcp": "abc"}, nil })
 			m, calls := actModel(t)
-			m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"live": true}, sessions: actionSessions()})
+			m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"live": true}, sessions: actionSessions(), slowTier: true, cpTips: map[string]string{"hcp": "abc"}})
 			m = pick(t, m, "s", "any") // done is closed
 			m, cmd := at(t, m, c.id, enterKey())
 			if cmd != nil || len(m.modals) != 0 || !strings.Contains(statusOf(m), c.say) || has(*calls, "readyFrontier") {
@@ -761,11 +771,11 @@ func TestEnterRunsAFKRows(t *testing.T) {
 		bd.Bead{ID: "fail", Kind: contract.KindResearch, Status: "open", Title: "Failing research", Labels: []string{"paused:failing"}, Created: epoch},
 		bd.Bead{ID: "chart", Kind: contract.KindChart, Container: true, Status: "open", Title: "A chart", Created: epoch},
 		bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Container: true, Status: "open", Title: "A checkpoint", Created: epoch},
-		bd.Bead{ID: "appr", Kind: contract.KindApproval, Parent: "cp", Status: "closed", CloseReason: bd.ApprovedReason, Title: "Approved", Created: epoch},
+		bd.Bead{ID: "appr", Kind: contract.KindApproval, Parent: "cp", Status: "closed", CloseReason: bd.ApprovedReason, Title: "Approved", Description: "Commit: abc", Created: epoch},
 	)
 	load := func(t *testing.T) Model {
 		m, _ := actModel(t)
-		m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"live": true}, sessions: actionSessions()})
+		m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"live": true}, sessions: actionSessions(), slowTier: true, cpTips: map[string]string{"cp": "abc"}})
 		return m
 	}
 	for _, c := range []struct{ id, verb string }{{"fail", "retry"}, {"chart", "spec"}, {"cp", "land"}} {

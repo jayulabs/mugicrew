@@ -29,16 +29,15 @@ import (
 	"jayulabs.org/mugicrew/session"
 )
 
-// The verdicts that license a repair (ADR 0127 §10): a dead holder, an ambiguous
-// one the loop lock and the TUI-alive read resolved, or one the human forced.
+// The verdicts that license a repair (ADR 0127 §10): a dead holder, or one the
+// human forced.
 const (
-	Dead              = "dead"
-	AmbiguousResolved = "ambiguous-resolved"
-	Forced            = "forced"
+	Dead   = "dead"
+	Forced = "forced"
 )
 
-// The verdicts of a refused holder: one seen running, or one only the loop off,
-// no other TUI, or --force resolves (the TUI points it at mugicrew recover --force).
+// The verdicts of a refused holder: one seen running, or one only --force
+// resolves (the TUI points it at mugicrew recover --force).
 const (
 	Alive     = "alive"
 	Ambiguous = "ambiguous"
@@ -56,9 +55,8 @@ type Holder struct {
 	Cwd        []int        // pids whose cwd lies in the bead's tree (own lineage excluded)
 	CwdErr     error        // cwds can't be read: never read as no holder
 	Held       bool         // a dispatcher holds its per-effort lock (ADR 0155)
-	LockFree   bool         // the loop lock reads off
-	TUIAlive   bool         // a tui-* session but the caller's own is on the repo's server
-	TUIErr     error        // the TUI-alive read failed
+	HeldErr    error        // the graph dir the lock lives under is unresolvable: never read as not held
+	LockFree   bool         // the loop lock reads off; only a HITL verdict reads it (ADR 0391)
 	Force      bool         // --force
 }
 
@@ -93,15 +91,14 @@ func afk(b bd.Bead) bool {
 	return registry.IsMode(b.Kind, b.Labels, registry.AFK)
 }
 
-// Judge is the verdict (ADR 0127 §2 as amended on mc-yr7o.6), pure: a verdict
-// licensing the repair, else a *Refused. An AFK holder the probe or the cwd scan
-// sees, or whose per-effort lock is held (ADR 0155), is alive, even forced. --force is refused unless the loop lock is free.
-// An AFK bead on a tree route the probe reads dead and that is paused abandoned is
-// dead. An abandoned in-process one is ambiguous and only --force resolves it; a
-// not-abandoned one is ambiguous and resolves when the loop lock is free and no
-// TUI is alive, or with --force. paused:recovering stands in for abandoned: only
-// a licensed verdict fences, and a repair that failed partway may already have
-// lifted abandoned. A HITL bead is judged by its session: Alive (closing or
+// Judge is the verdict (ADR 0127 §2 as amended by ADR 0155 and ADR 0391), pure: a
+// verdict licensing the repair, else a *Refused. An AFK holder the probe or the
+// cwd scan sees, or whose per-effort lock is held (ADR 0155), is alive, even
+// forced. An AFK bead past those checks is an Orphaned claim: on a worktree or
+// detached route it is dead, paused abandoned or not; on a repo-root route it is
+// forced with --force and else ambiguous, whatever the loop lock or any TUI
+// says. For a HITL bead only, --force is refused while the loop lock is held.
+// A HITL bead is judged by its session: Alive (closing or
 // not) is alive, Exited is resumable (ADR 0037), and gone after a table read
 // that succeeded is dead. A bead whose kind the registry does not know is not
 // a mugicrew bead and is refused first. Every other shape refuses.
@@ -121,11 +118,15 @@ func Judge(h Holder) (string, error) {
 		return verdict(Alive, "alive: pids %s run inside its tree; stop it with mugicrew abort %s, or kill them", dispatch.FormatPids(h.Cwd), id)
 	case h.CwdErr != nil: // alive: refuse (ADR 0127 §2) in effect, but the verdict stays unclassified, like SessionErr
 		return refuse("can't read process cwds, so a live process may still hold its tree: %v", h.CwdErr)
+	case h.HeldErr != nil:
+		return refuse("can't resolve the graph dir, so a dispatcher may still hold its lock: %v", h.HeldErr)
 	case h.Held:
 		return verdict(Alive, "held by its dispatcher (the loop or a run-now host); stop it with mugicrew abort %s", id)
-	case h.Force && !h.LockFree:
+	case h.Force && !h.LockFree && !afk(h.Bead): // an AFK bead's flock, read above, stands in for the loop lock
 		return "", forceRefused(id)
-	case h.SessionErr != nil:
+	// An AFK bead is not judged by its session, so a tmux failure must not block its
+	// Orphaned-claim verdict, unless the Checkup fence below needs the table.
+	case h.SessionErr != nil && (!afk(h.Bead) || bd.PausedBy(h.Bead, bd.PausedCheckup)):
 		return refuse("can't read the session table: %v", h.SessionErr)
 	case h.Checkup.State == session.Alive || h.Checkup.State == session.Exited:
 		return refuse("a Checkup is open on %s", h.Bead.Title)
@@ -139,23 +140,15 @@ func Judge(h Holder) (string, error) {
 		return Dead, nil // a HITL bead whose session is gone
 	case h.RouteErr != nil:
 		return refuse("can't route it: %v", h.RouteErr)
-	case abandoned(h.Bead) && h.Placement != route.RepoRoot:
-		return Dead, nil
+	case h.Placement != route.RepoRoot:
+		return Dead, nil // an Orphaned claim: no probe, cwd or flock holds it (ADR 0391)
 	case h.Force:
 		return Forced, nil
-	case abandoned(h.Bead):
-		return verdict(Ambiguous, "runs in-process: a hostless claude or its tools may still be writing; check pgrep -a claude and your own shells, then re-run with --force")
-	case !h.LockFree:
-		return verdict(Ambiguous, "not paused abandoned and the loop is on, so its host may still be live; stop the loop or re-run with --force once it is off")
-	case h.TUIErr != nil:
-		return refuse("not paused abandoned and can't read whether a TUI is alive: %v", h.TUIErr)
-	case h.TUIAlive:
-		return verdict(Ambiguous, "not paused abandoned and a TUI is alive, so its host may still be live; quit it or re-run with --force")
 	}
-	return AmbiguousResolved, nil
+	return verdict(Ambiguous, "runs in-process: a hostless claude or its tools may still be writing; check pgrep -a claude and your own shells, then re-run with --force")
 }
 
-// forceRefused is --force while the loop lock is held: forcing never races a loop.
+// forceRefused is --force on a HITL bead while the loop lock is held.
 func forceRefused(id string) error {
 	return &Refused{Reason: id + ": --force needs the loop off; stop it with mugicrew loop stop, then re-run once the loop is off"}
 }
@@ -250,11 +243,9 @@ func abandoned(b bd.Bead) bool {
 }
 
 // Opts are recover's flags: Discard drops a dirty tree's uncommitted files, Force
-// overrides an ambiguous verdict, and ExcludeTUISession is the calling TUI's own
-// session, which never counts as a TUI alive.
+// overrides an ambiguous verdict.
 type Opts struct {
-	Discard, Force    bool
-	ExcludeTUISession string
+	Discard, Force bool
 }
 
 // Report is what a repair did: its verdict ("" when there was nothing to
@@ -265,26 +256,16 @@ type Report struct {
 	Remaining []string
 }
 
-// Recover repairs bead id (ADR 0127 §1): --force with the loop on refuses before
-// the bead is read; then check, fence with paused:recovering, re-check, abort a
-// stopped rebase, drop the tree, delete the Drafts, unclaim, lift abandoned,
-// foreign-hold and recovering, and failing iff it aborted a rebase. Each step is
-// a no-op when its leftover is absent, so a re-run rolls forward. A refusal is a
-// *Refused (one recover.refused; the fence stays if the re-check refused), a step
-// error, a failed read included, a *Failed (one recover.failed; the fence stays
-// past the fence), success one recover.done. No leftover at all is nothing to
-// recover: no write, no event.
+// Recover repairs bead id (ADR 0127 §1): check, fence with paused:recovering,
+// re-check, abort a stopped rebase, drop the tree, delete the Drafts, unclaim,
+// lift abandoned, foreign-hold and recovering, and failing iff it aborted a
+// rebase. Each step is a no-op when its leftover is absent, so a re-run rolls
+// forward. A refusal is a *Refused (one recover.refused; the fence stays if the
+// re-check refused), a step error, a failed read included, a *Failed (one
+// recover.failed; the fence stays past the fence), success one recover.done. No
+// leftover at all is nothing to recover: no write, no event.
 func Recover(id string, o Opts) (Report, error) {
 	var r Report
-	if o.Force { // before the bead is read, so these events carry only its ID (no parent or crewmate)
-		st, err := loopState()
-		if err != nil {
-			return r, failed(bd.Bead{ID: id}, stepCheck, err)
-		}
-		if st != looplock.Off {
-			return r, refused(bd.Bead{ID: id}, forceRefused(id))
-		}
-	}
 	inv, err := Take(id) // on a show failure inv.Bead is only {ID}: that event carries no parent or crewmate
 	if err != nil {
 		return r, failed(inv.Bead, stepCheck, err)
@@ -432,41 +413,37 @@ func check(inv Inventory, o Opts, self []int, fenced bool) (string, error) {
 // and judges it. A fence set by this run (fenced) is no stand-in for abandoned:
 // the re-check judges the bead as the first check did.
 func judge(inv Inventory, o Opts, self []int, fenced bool) (string, error) {
-	hs, err := look(o)
-	if err != nil {
-		return "", err
-	}
-	return judgeIn(hs, inv, o, self, fenced)
+	return judgeIn(look(), inv, o, self, fenced)
 }
 
 // hostState is the host state a verdict reads besides the bead's own holder: the loop
-// lock, the tmux session table and whether a TUI is alive. List reads it once.
+// lock and the tmux session table. List reads it once.
 type hostState struct {
-	lockFree           bool
-	sessions           map[string]session.Info
-	sessionErr, tuiErr error
-	tuiAlive           bool
+	lockFree   bool
+	lockErr    error // the loop lock unreadable: only a HITL verdict reads it, and refuses on it
+	sessions   map[string]session.Info
+	sessionErr error
 }
 
-// look reads the host state once; o's excluded TUI session is left out of tuiAlive.
-func look(o Opts) (hostState, error) {
+// look reads the host state once.
+func look() hostState {
 	st, err := loopState()
-	if err != nil {
-		return hostState{}, err
-	}
-	hs := hostState{lockFree: st == looplock.Off}
+	hs := hostState{lockFree: st == looplock.Off, lockErr: err}
 	hs.sessions, hs.sessionErr = sessions()
-	hs.tuiAlive, hs.tuiErr = tuiAlive(o.ExcludeTUISession)
-	return hs, nil
+	return hs
 }
 
 // judgeIn judges inv against the host state hs already read.
 func judgeIn(hs hostState, inv Inventory, o Opts, self []int, fenced bool) (string, error) {
 	b := inv.Bead
+	if hs.lockErr != nil && !afk(b) {
+		return "", hs.lockErr
+	}
 	if fenced {
 		b.Labels = slices.DeleteFunc(slices.Clone(b.Labels), func(l string) bool { return l == "paused:"+bd.PausedRecovering })
 	}
-	h := Holder{Bead: b, LockFree: hs.lockFree, Force: o.Force, Held: held(b.ID), Probe: slices.DeleteFunc(probe(b.ID), func(p int) bool { return slices.Contains(self, p) })}
+	h := Holder{Bead: b, LockFree: hs.lockFree, Force: o.Force, Probe: slices.DeleteFunc(probe(b.ID), func(p int) bool { return slices.Contains(self, p) })}
+	h.Held, h.HeldErr = held(b.ID)
 	var d route.Destination
 	d, h.RouteErr = route.Route(b)
 	h.Placement = d.Placement
@@ -475,7 +452,6 @@ func judgeIn(hs hostState, inv Inventory, o Opts, self []int, fenced bool) (stri
 	if inv.Tree != "" {
 		h.Cwd, h.CwdErr = inTree(inv.Tree, self)
 	}
-	h.TUIAlive, h.TUIErr = hs.tuiAlive, hs.tuiErr
 	return Judge(h)
 }
 
@@ -524,7 +500,6 @@ var (
 		return bd.IDs(ds), err
 	}
 	sessions = session.Sessions
-	tuiAlive = session.TUIAlive
 	// loopState is the loop lock's state through looplock.Read: off is free; on and
 	// draining both hold it.
 	loopState = func() (string, error) {
@@ -544,9 +519,12 @@ var (
 		return st.State, err
 	}
 	// held reads id's per-effort lock under the same graph dir as loopState.
-	held = func(id string) bool {
+	held = func(id string) (bool, error) {
 		dir, err := beadsDir()
-		return err == nil && liveness.HeldIn(dir, id)
+		if err != nil {
+			return false, err
+		}
+		return liveness.HeldIn(dir, id), nil
 	}
 	probe    = liveness.Pids
 	inTree   = liveness.InTree
@@ -557,7 +535,7 @@ var (
 	// ponytail: a kept Draft branch's outcome goes unrecorded (no per-step events,
 	// ADR 0127 §10); it's still there for git branch -D.
 	deleteDrafts = func(creator string) ([]string, error) {
-		ids, _, err := bd.DeleteDrafts(creator)
+		ids, _, err := bd.DeleteDrafts(creator, bd.UnderClaim(creator))
 		return ids, err
 	}
 	unclaim = bd.Unclaim

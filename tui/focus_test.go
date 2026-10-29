@@ -14,13 +14,14 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/session"
 )
 
 func titled(s string) func(*bd.Bead) { return func(b *bd.Bead) { b.Title = s } }
 
 // focusFixture is Initiative ini (Billing revamp) with Signals in every state, a
-// Chart and a Checkpoint, a Task that holds the Checkpoint's land, and beads in no
+// Chart and a Checkpoint, an Errand that holds the Checkpoint's land, and beads in no
 // Initiative.
 func focusFixture() []bd.Bead {
 	bs := []bd.Bead{
@@ -33,9 +34,9 @@ func focusFixture() []bd.Bead {
 		dbead("s6", contract.KindSignal, "deferred", "ini", 2), // a Draft
 		dbead("c", contract.KindChart, "open", "ini", 1),
 		dbead("g", contract.KindGrilling, "open", "c", 1),
-		dbead("cp", contract.KindCheckpoint, "open", "ini", 1, isContainer, blockedBy("task")),
+		dbead("cp", contract.KindCheckpoint, "open", "ini", 1, isContainer, blockedBy("errand")),
 		dbead("mem", contract.KindBuild, "open", "cp", 1),
-		dbead("task", contract.KindTask, "open", "", 2),
+		dbead("errand", contract.KindErrand, "open", "", 2),
 		dbead("loose", contract.KindSignal, "open", "", 1),
 		dbead("lc", contract.KindChart, "open", "", 2),
 		dbead("lg", contract.KindGrilling, "open", "lc", 1),
@@ -57,7 +58,7 @@ func focusModel(t *testing.T, w, h int, beads []bd.Bead, sess map[string]session
 	calls := stubActions(t)
 	m := sized(t, w, h)
 	m.crew = map[string]contract.Crewmate{"luffy": fakeCrew{}, "nami": fakeCrew{}, "franky": fakeCrew{}}
-	m, _ = send(t, m, loadedMsg{slowTier: true, beads: beads, live: live, sessions: sess, efforts: map[string]bool{}})
+	m, _ = send(t, m, loadedMsg{slowTier: true, beads: beads, live: live, sessions: sess, efforts: git.NewEffortSet()})
 	m = treesOpen(m)
 	return m, calls
 }
@@ -107,7 +108,7 @@ func focusAt(t *testing.T, m Model, want string) Model {
 var oldBackBarKey = regexp.MustCompile(`from \d `)
 
 // i opens the Initiative's focus from the header, a member, a leaf, a Checkpoint member
-// and a side Task, on each tab; the back bar names it and where esc returns.
+// and a side Errand, on each tab; the back bar names it and where esc returns.
 func TestFocusEntry(t *testing.T) {
 	m, _ := defaultFocus(t)
 	exec := func(m Model) Model { // unfold cp so its member has a row
@@ -127,7 +128,7 @@ func TestFocusEntry(t *testing.T) {
 		{"Execute header", "from Execute", func(m Model) Model { return execAt(t, press(t, m, runeKey("3")), "i:ini") }},
 		{"Execute Checkpoint member", "from Execute", func(m Model) Model { return execAt(t, exec(m), "mem") }},
 		{"Initiatives row", "from Initiatives", func(m Model) Model { return press(t, press(t, m, runeKey("5")), runeKey("j")) }},
-		{"Execute side Task", "from Execute", func(m Model) Model { return execAt(t, press(t, m, runeKey("3")), "side:task") }},
+		{"Execute side Errand", "from Execute", func(m Model) Model { return execAt(t, press(t, m, runeKey("3")), "side:errand") }},
 	} {
 		n := gotoFocus(t, c.go_(m))
 		if bar := backBarOf(n); !strings.Contains(bar, "Billing revamp") || !strings.Contains(bar, c.from) {
@@ -209,11 +210,11 @@ func TestFocusLeaving(t *testing.T) {
 // header drops its counts while focused and no tab badge changes.
 func TestFocusChrome(t *testing.T) {
 	sess := map[string]session.Info{
-		"s1":    {State: session.Alive, Waiting: session.WaitTurn},
-		"g":     {State: session.Alive},
-		"task":  {State: session.Alive, Waiting: session.WaitAsk}, // waits on the Checkpoint: in scope
-		"loose": {State: session.Alive, Waiting: session.WaitTurn},
-		"lg":    {State: session.Alive},
+		"s1":     {State: session.Alive, Waiting: session.WaitTurn},
+		"g":      {State: session.Alive},
+		"errand": {State: session.Alive, Waiting: session.WaitAsk}, // waits on the Checkpoint: in scope
+		"loose":  {State: session.Alive, Waiting: session.WaitTurn},
+		"lg":     {State: session.Alive},
 	}
 	m, _ := focusModel(t, 160, 40, focusFixture(), sess, map[string]bool{"mem": true, "other": true})
 	if h := lines(m.View())[0]; !strings.Contains(h, "5 HITL") || !strings.Contains(h, "2 AFK") {
@@ -287,7 +288,7 @@ func TestFocusRows(t *testing.T) {
 	f := ideaFocus(t, m)
 	v := ansi.Strip(f.View())
 	at := func(s string) int { return strings.Index(v, s) }
-	order := []string{"Billing revamp", "Ideate  4 open", "t s1", "t s3", "t s4", "t s2", "▸ 1 closed", "Defog  1 open", "Execute  2 open", "t cp", "t task"}
+	order := []string{"Billing revamp", "Ideate  4 open", "t s1", "t s3", "t s4", "t s2", "▸ 1 closed", "Defog  1 open", "Execute  2 open", "t cp", "t errand"}
 	last := -1
 	for _, s := range order {
 		if i := at(s); i <= last {
@@ -327,14 +328,14 @@ func TestFocusCursorSkipsGaps(t *testing.T) {
 }
 
 // An Ideate row routes as on Ideate: a blocked Signal gets the y/n, b on an alive
-// session refuses. The header's enter launches Luffy's cut session; n, a, A and p do
+// session refuses. The header's enter launches Luffy's cut session; i does
 // nothing; every hints bar ends esc back · ? keys.
 func TestFocusKeys(t *testing.T) {
 	sess := map[string]session.Info{"s1": {State: session.Alive}}
 	m, calls := focusModel(t, 160, 40, focusFixture(), sess, map[string]bool{})
 	f := ideaFocus(t, m)
 
-	if h := hintsOf(f); h != "enter launch · b bg · d detail · X cancel · c checkup · t transcript · r retrospective · esc back" {
+	if h := hintsOf(f); h != "enter launch · b bg · d detail · p pause · t transcript · X cancel · e edit · +/- prio · c checkup · B add blocker · esc back" {
 		t.Errorf("header hints = %q", h)
 	}
 	n, cmd := send(t, f, enterKey())
@@ -356,7 +357,7 @@ func TestFocusKeys(t *testing.T) {
 		if id != "head" {
 			at = s1
 		}
-		for _, k := range []string{"a", "A", "i"} {
+		for _, k := range []string{"i"} {
 			if n, cmd := send(t, at, runeKey(k)); cmd != nil || n.View() != at.View() {
 				t.Errorf("%s: %s did something:\n%s", id, k, ansi.Strip(n.View()))
 			}
@@ -371,7 +372,7 @@ func TestFocusKeys(t *testing.T) {
 			t.Errorf("bar %q does not end esc back | ? keys", bar)
 		}
 	}
-	if h := hintsOf(s1); h != "enter triage · d detail · z reject · p pause · x drop · t transcript · e edit · +/- prio · X withdraw · c checkup · r retrospective · esc back" {
+	if h := hintsOf(s1); h != "enter triage · d detail · p pause · x drop · t transcript · X withdraw · z reject · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · esc back" {
 		t.Errorf("Signal hints = %q", h)
 	}
 	for k, want := range map[string]string{"e": "Edit", "z": "Reject"} {
@@ -447,7 +448,7 @@ func TestFocusBindingCoverage(t *testing.T) {
 	m, _ := defaultFocus(t)
 	f := ideaFocus(t, m)
 	jumps := []string{"J", "K", "ctrl+down", "ctrl+up"} // a no-op where no section lies that way
-	for _, row := range []string{"Billing revamp", "Ideate", "t s1", "t s4", "1 closed", "t cp ", "t task"} {
+	for _, row := range []string{"Billing revamp", "Ideate", "t s1", "t s4", "1 closed", "t cp ", "t errand"} {
 		at := focusAt(t, f, row)
 		checkCoverage(t, "focus "+row, at, true, jumps...)
 		open := press(t, press(t, at, runeKey("d")), tea.KeyMsg{Type: tea.KeyCtrlD}) // mid-scroll, so up and down both move
@@ -542,7 +543,7 @@ func TestFocusExecuteRows(t *testing.T) {
 	f := ideaFocus(t, m)
 	v := ansi.Strip(f.View())
 	last := -1
-	for _, s := range []string{"Execute  3 open", "t cp ", "t sp ", "t task", "holds land of → t cp"} {
+	for _, s := range []string{"Execute  3 open", "t cp ", "t sp ", "t errand", "holds land of → t cp"} {
 		if i := strings.Index(v, s); i <= last {
 			t.Errorf("%q at %d, want after %d:\n%s", s, i, last, v)
 		} else {
@@ -565,14 +566,14 @@ func TestFocusExecuteRows(t *testing.T) {
 	}
 }
 
-// A Task in X that holds Y's Checkpoint is in X's focus with the hint naming it, not in
+// An Errand in X that holds Y's Checkpoint is in X's focus with the hint naming it, not in
 // Y's, where the Checkpoint shows blocked and its detail names the blocker.
 func TestFocusExecuteCrossInitiative(t *testing.T) {
 	bs := []bd.Bead{
 		dbead("x", contract.KindInitiative, "open", "", 1, titled("X side")),
 		dbead("y", contract.KindInitiative, "open", "", 2, titled("Y side")),
 		dbead("cpy", contract.KindCheckpoint, "open", "y", 1, isContainer, blockedBy("tx")),
-		dbead("tx", contract.KindTask, "open", "x", 1),
+		dbead("tx", contract.KindErrand, "open", "x", 1),
 	}
 	m, _ := focusModel(t, 160, 40, bs, nil, map[string]bool{})
 	open := func(id string) Model {
@@ -580,7 +581,7 @@ func TestFocusExecuteCrossInitiative(t *testing.T) {
 	}
 	xv := ansi.Strip(open("x").View())
 	if !strings.Contains(xv, "t tx") || !strings.Contains(xv, "holds land of → t cpy") {
-		t.Errorf("X's focus lacks the Task with its hint:\n%s", xv)
+		t.Errorf("X's focus lacks the Errand with its hint:\n%s", xv)
 	}
 	y := open("y")
 	if yv := ansi.Strip(y.View()); strings.Contains(yv, "t tx") || !strings.Contains(yv, "t cpy") {
@@ -590,14 +591,14 @@ func TestFocusExecuteCrossInitiative(t *testing.T) {
 	if v := ansi.Strip(y.View()); !strings.Contains(v, "blocked by") || !strings.Contains(v, "tx") {
 		t.Errorf("Checkpoint detail does not name its blocker:\n%s", v)
 	}
-	// g f on the side Task in Execute opens its own Initiative's focus
+	// g f on the side Errand in Execute opens its own Initiative's focus
 	e := execAt(t, press(t, m, runeKey("3")), "side:tx")
 	if bar := backBarOf(gotoFocus(t, e)); !strings.Contains(bar, "X side") {
-		t.Errorf("g f on the side Task: %q", bar)
+		t.Errorf("g f on the side Errand: %q", bar)
 	}
 }
 
-// A blocked Execute leaf's enter is refused, naming its blocker; n and a do nothing;
+// A blocked Execute leaf's enter is refused, naming its blocker; i does nothing;
 // hints end esc back.
 func TestFocusExecuteKeys(t *testing.T) {
 	bs := append(focusFixture(),
@@ -610,7 +611,7 @@ func TestFocusExecuteKeys(t *testing.T) {
 	if cmd != nil || len(n.modals) != 0 || !strings.Contains(statusOf(n), "is blocked by") {
 		t.Errorf("enter on a blocked leaf: status %q modals %v", statusOf(n), n.modals)
 	}
-	for _, k := range []string{"a", "A", "i"} {
+	for _, k := range []string{"i"} {
 		if n, cmd := send(t, f, runeKey(k)); cmd != nil || n.View() != f.View() {
 			t.Errorf("%s did something:\n%s", k, ansi.Strip(n.View()))
 		}
@@ -624,7 +625,7 @@ func TestFocusExecuteKeys(t *testing.T) {
 }
 
 // The focus inherits the blocker highlight: a drawn blocker gets the ! gutter, also
-// cp's Task drawn as a side row though it is in no Initiative.
+// cp's Errand drawn as a side row though it is in no Initiative.
 func TestFocusBlockerHighlight(t *testing.T) {
 	m, _ := defaultFocus(t)
 	m = focusAt(t, ideaFocus(t, m), "s4") // blocked by s1, drawn
@@ -641,20 +642,20 @@ func TestFocusBlockerHighlight(t *testing.T) {
 	}
 	m = focusAt(t, m, "CHECKPOINT")
 	for _, l := range lines(m.View()) {
-		if l = ansi.Strip(l); strings.Contains(l, "t task") && !strings.HasPrefix(l, "!") {
-			t.Errorf("side Task not marked: %q", l)
+		if l = ansi.Strip(l); strings.Contains(l, "t errand") && !strings.HasPrefix(l, "!") {
+			t.Errorf("side Errand not marked: %q", l)
 		}
 	}
 }
 
-// p on a focus-view Ideate Signal toggles paused:manual as Graph's p does; the header ignores it.
+// p on a focus-view Ideate Signal toggles paused:manual as Graph's p does; so does the header's, on its Initiative.
 func TestFocusIdeatePause(t *testing.T) {
 	bs := focusFixture()
 	bs[1].Labels = []string{"paused:manual"} // s1
 	m, calls := focusModel(t, 160, 40, bs, nil, map[string]bool{})
 	f := ideaFocus(t, m)
 	s1 := focusAt(t, f, "t s1")
-	if h := hintsOf(s1); !strings.Contains(h, "z reject · p unpause · t transcript · e edit") {
+	if h := hintsOf(s1); !strings.Contains(h, "p unpause") {
 		t.Errorf("hints %q lack p unpause", h)
 	}
 	n, cmd := send(t, s1, runeKey("p"))
@@ -667,9 +668,10 @@ func TestFocusIdeatePause(t *testing.T) {
 	if !has(*calls, "pauseBead s2") || !strings.Contains(statusOf(n), "paused s2") {
 		t.Errorf("pause: calls %v status %q", *calls, statusOf(n))
 	}
-	k := len(*calls)
-	if _, cmd := send(t, f, runeKey("p")); cmd != nil || len(*calls) != k {
-		t.Error("p on the focus header did something")
+	n, cmd = send(t, f, runeKey("p"))
+	n = settle(t, n, cmd)
+	if !has(*calls, "pauseBead ini") {
+		t.Errorf("p on the focus header: calls %v", *calls)
 	}
 }
 

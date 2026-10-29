@@ -136,6 +136,7 @@ type histData struct {
 type histTab struct {
 	histData
 	sel string
+	lv  listView
 }
 
 func newHistory() histTab { return histTab{} }
@@ -285,6 +286,56 @@ func histLine(r histRow, ctxW int) string {
 	return dimSt.Render(head) + name
 }
 
+// notice is how many lines above the rows say why there are none or git failed: 0 or 1.
+func (t histTab) notice(rows []histRow) int {
+	if t.err != nil || len(rows) == 0 {
+		return 1
+	}
+	return 0
+}
+
+// geom is the commit window under the header line, shared by View and the pointer: the list
+// is the notice line (if any) then the rows, h-1 lines tall, each keyed for the anchor.
+func (t histTab) geom(rows []histRow, h int) listGeom {
+	notice := t.notice(rows)
+	keys := make([]string, notice+len(rows))
+	if notice > 0 {
+		keys[0] = "~notice"
+	}
+	for i, r := range rows {
+		keys[notice+i] = r.sha
+	}
+	return listGeom{n: len(keys), sel: notice + max(t.selIndex(rows), 0), h: h - 1, keys: keys, at: func(k int) hitTarget {
+		if k < notice {
+			return hitTarget{}
+		}
+		return hitTarget{kind: hitRow, key: rows[k-notice].sha}
+	}}
+}
+
+// hit is the pointer's view of body line y: line 0 and a notice line are inert, and a
+// commit line is that commit, a stop but never a bead row.
+func (t histTab) hit(_, h, y int) hitTarget {
+	res := t.geom(t.rows(), h).hit(t.lv, y-1)
+	res.line = y
+	return res
+}
+
+// selectKey selects commit key as j/k would.
+func (t histTab) selectKey(key string) component { t.sel = key; return t }
+
+func (t histTab) wheel(_, h, y, delta int) component {
+	t.lv = t.geom(t.rows(), h).wheeled(t.lv, delta)
+	return t
+}
+
+func (t histTab) snap(_, h int) component {
+	t.lv = t.geom(t.rows(), h).snapped(t.lv)
+	return t
+}
+
+func (t histTab) unscroll() component { t.lv = listView{}; return t }
+
 // view is a header naming the cap, then the rows full width.
 func (t histTab) view(w, h int) string {
 	head := dimSt.Render(fmt.Sprintf("main · newest %d first-parent commits", historyCap))
@@ -297,7 +348,7 @@ func (t histTab) view(w, h int) string {
 	case len(rows) == 0:
 		lines = append(lines, dimSt.Render("no commits on main"))
 	}
-	at := len(lines) + max(sel, 0) // past any error line
+	off := t.geom(rows, h).geometry(t.lv).off
 	ctxW := histCtxWidth(rows)
 	for i, r := range rows {
 		line := ansi.Truncate("  "+histLine(r, ctxW), w, "…")
@@ -306,7 +357,6 @@ func (t histTab) view(w, h int) string {
 		}
 		lines = append(lines, line)
 	}
-	off := followOffset(len(lines), h-1, at)
 	return " " + ansi.Truncate(head, w-1, "") + "\n" + strings.Join(lines[off:min(off+h-1, len(lines))], "\n")
 }
 

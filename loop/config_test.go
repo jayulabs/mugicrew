@@ -199,6 +199,45 @@ func TestAutoExitSetting(t *testing.T) {
 	}
 }
 
+func TestAutoApproveSetting(t *testing.T) {
+	const none = "\x00"
+	on, off := "[approvals]\nauto_approve = true\n", "[approvals]\nauto_approve = false\n"
+	for _, tc := range []struct {
+		name, local, shared string
+		want                AutoApprove
+	}{
+		{"neither", none, none, AutoApprove{Source: "default"}},
+		{"absent key", "concurrency = 2\n", "gate = \"x\"\n", AutoApprove{Source: "default"}},
+		{"empty table falls through", "[approvals]\n", "[approvals]\n", AutoApprove{Source: "default"}},
+		{"shared on", none, on, AutoApprove{On: true, Source: "config.toml"}},
+		{"shared off", none, off, AutoApprove{Source: "config.toml"}},
+		{"local only on", on, none, AutoApprove{On: true, Source: "local"}},
+		{"local on over shared off", on, off, AutoApprove{On: true, Source: "local", SharedSet: true}},
+		{"local off over shared on", off, on, AutoApprove{Source: "local", Shared: true, SharedSet: true}},
+		{"empty local table follows shared", "[approvals]\n", on, AutoApprove{On: true, Source: "config.toml"}},
+		{"local malformed falls to shared", "[approvals\nauto_approve = true\n", on, AutoApprove{On: true, Source: "config.toml", Unusable: "local"}},
+		{"local mistyped falls to shared", "[approvals]\nauto_approve = \"yes\"\n", on, AutoApprove{On: true, Source: "config.toml", Unusable: "local"}},
+		{"local mistyped, no shared, off", "[approvals]\nauto_approve = \"yes\"\n", none, AutoApprove{Source: "default", Unusable: "local"}},
+		{"shared malformed reads off", none, "[approvals\nauto_approve = true\n", AutoApprove{Source: "default", Unusable: "config.toml"}},
+		{"shared mistyped reads off", none, "[approvals]\nauto_approve = \"yes\"\n", AutoApprove{Source: "default", Unusable: "config.toml"}},
+		{"shared non-table reads off", none, "approvals = true\n", AutoApprove{Source: "default", Unusable: "config.toml"}},
+		{"both unusable reads off", "[approvals]\nauto_approve = 1\n", "[approvals]\nauto_approve = \"yes\"\n", AutoApprove{Source: "default", Unusable: "local"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := gitRepo(t)
+			if tc.local != none {
+				writeLocal(t, root, tc.local)
+			}
+			if tc.shared != none {
+				writeConfig(t, root, tc.shared)
+			}
+			if got := AutoApproveSetting(root); got != tc.want {
+				t.Errorf("AutoApproveSetting = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // Saving one local setting rewrites only its own key (Spec D9, ADR 0112
 // §6): the pool save keeps a local auto_exit and unknown keys, the auto_exit save
 // keeps a local concurrency, a negative auto_exit is refused, and the write still
@@ -501,5 +540,185 @@ func TestSetLocalKindProfileKeepsProfileTables(t *testing.T) {
 	}
 	if got.Profiles["good"]["model"] != "opus" || got.Profiles["bad"]["modle"] != "x" || got.KindProfiles["build"] != "good" {
 		t.Errorf("after save: %+v\n%s", got, b)
+	}
+}
+
+func TestSetLocalAutoApprove(t *testing.T) {
+	root := gitRepo(t)
+	path := filepath.Join(root, ".git", "mugicrew", "config.toml")
+	read := func() string { b, _ := os.ReadFile(path); return string(b) }
+	on, off := true, false
+	writeLocal(t, root, "concurrency = 4\nauto_exit = \"90s\"\nkind_profiles = { review = \"haiku\" }\n")
+	if err := SetLocalAutoApprove(root, &on); err != nil {
+		t.Fatal(err)
+	}
+	if got := AutoApproveSetting(root); !got.On || got.Source != "local" {
+		t.Errorf("after on = %+v", got)
+	}
+	if err := SetLocalAutoApprove(root, &off); err != nil {
+		t.Fatal(err)
+	}
+	if got := AutoApproveSetting(root); got.On || got.Source != "local" {
+		t.Errorf("after off = %+v", got)
+	}
+	for _, want := range []string{"concurrency = 4", "auto_exit = \"90s\"", "[kind_profiles]", "review = \"haiku\"", "[approvals]", "auto_approve = false"} {
+		if !strings.Contains(read(), want) {
+			t.Errorf("override %q lacks %q", read(), want)
+		}
+	}
+	if err := SetLocalAutoApprove(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b := read(); strings.Contains(b, "approvals") || !strings.Contains(b, "concurrency = 4") || !strings.Contains(b, "review") {
+		t.Errorf("after unset override = %q, want no table, others kept", b)
+	}
+}
+
+func TestSetLocalAutoApproveMalformedRefuses(t *testing.T) {
+	root := gitRepo(t)
+	const bad = "concurrency = 4\n[approvals\n"
+	writeLocal(t, root, bad)
+	on := true
+	path := filepath.Join(root, ".git", "mugicrew", "config.toml")
+	if err := SetLocalAutoApprove(root, &on); err == nil || !strings.Contains(err.Error(), path) {
+		t.Errorf("err = %v, want one naming %s", err, path)
+	}
+	if b, _ := os.ReadFile(path); string(b) != bad {
+		t.Errorf("malformed file rewritten to %q", b)
+	}
+}
+
+func TestMouseSetting(t *testing.T) {
+	const none = "\x00"
+	on, off := "[tui]\nmouse = true\n", "[tui]\nmouse = false\n"
+	for _, tc := range []struct {
+		name, local, shared string
+		want                Mouse
+	}{
+		{"neither", none, none, Mouse{Source: "default"}},
+		{"absent key", "concurrency = 2\n", "[tui]\nother = 1\n", Mouse{Source: "default"}},
+		{"empty table falls through", "[tui]\n", "[tui]\n", Mouse{Source: "default"}},
+		{"shared on", none, on, Mouse{On: true, Source: "config.toml"}},
+		{"shared off", none, off, Mouse{Source: "config.toml"}},
+		{"local only on", on, none, Mouse{On: true, Source: "local"}},
+		{"local on over shared off", on, off, Mouse{On: true, Source: "local", SharedSet: true}},
+		{"local off over shared on", off, on, Mouse{Source: "local", Shared: true, SharedSet: true}},
+		{"empty local table follows shared", "[tui]\n", on, Mouse{On: true, Source: "config.toml"}},
+		{"local malformed falls to shared", "[tui\nmouse = true\n", on, Mouse{On: true, Source: "config.toml", Unusable: "local"}},
+		{"local mistyped falls to shared", "[tui]\nmouse = \"yes\"\n", on, Mouse{On: true, Source: "config.toml", Unusable: "local"}},
+		{"shared mistyped reads off", none, "[tui]\nmouse = \"yes\"\n", Mouse{Source: "default", Unusable: "config.toml"}},
+		{"shared non-table reads off", none, "tui = true\n", Mouse{Source: "default", Unusable: "config.toml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := gitRepo(t)
+			if tc.local != none {
+				writeLocal(t, root, tc.local)
+			}
+			if tc.shared != none {
+				writeConfig(t, root, tc.shared)
+			}
+			if got := MouseSetting(root); got != tc.want {
+				t.Errorf("MouseSetting = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetLocalMouse(t *testing.T) {
+	root := gitRepo(t)
+	writeLocal(t, root, "concurrency = 2\n")
+	yes, no := true, false
+	if err := SetLocalMouse(root, &yes); err != nil {
+		t.Fatal(err)
+	}
+	if got := MouseSetting(root); !got.On || got.Source != "local" {
+		t.Errorf("after on: %+v", got)
+	}
+	if err := SetLocalMouse(root, &no); err != nil {
+		t.Fatal(err)
+	}
+	if got := MouseSetting(root); got.On || got.Source != "local" {
+		t.Errorf("after off: %+v", got)
+	}
+	if err := SetLocalMouse(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := MouseSetting(root); got != (Mouse{Source: "default"}) {
+		t.Errorf("after unset: %+v", got)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".git", "mugicrew", "config.toml"))
+	if err != nil || strings.Contains(string(b), "tui") || !strings.Contains(string(b), "concurrency") {
+		t.Errorf("emptied [tui] not dropped or rest lost: %q %v", b, err)
+	}
+	writeLocal(t, root, "[tui\nmouse = true\n")
+	if err := SetLocalMouse(root, &yes); err == nil || !strings.Contains(err.Error(), "config.toml") {
+		t.Errorf("malformed local must be refused naming the file: %v", err)
+	}
+}
+
+func TestThemeSetting(t *testing.T) {
+	const none = "\x00"
+	lt, hc, odd := "[tui]\ntheme = \"light\"\n", "[tui]\ntheme = \"high-contrast\"\n", "[tui]\ntheme = \"solarized\"\n"
+	for _, tc := range []struct {
+		name, local, shared string
+		want                Theme
+	}{
+		{"neither", none, none, Theme{Name: "dark", Source: "default"}},
+		{"absent key", "concurrency = 2\n", "[tui]\nmouse = true\n", Theme{Name: "dark", Source: "default"}},
+		{"shared light", none, lt, Theme{Name: "light", Source: "config.toml"}},
+		{"local only", hc, none, Theme{Name: "high-contrast", Source: "local"}},
+		{"local over shared", hc, lt, Theme{Name: "high-contrast", Source: "local", Shared: "light", SharedSet: true}},
+		{"unknown shared reads dark", none, odd, Theme{Name: "dark", Source: "config.toml", Unknown: "solarized"}},
+		{"unknown local wins over shared", odd, lt, Theme{Name: "dark", Source: "local", Unknown: "solarized", Shared: "light", SharedSet: true}},
+		{"non-string local falls through", "[tui]\ntheme = 3\n", lt, Theme{Name: "light", Source: "config.toml", Unusable: "local"}},
+		{"unparsable local falls through", "[tui\ntheme = 'light'\n", lt, Theme{Name: "light", Source: "config.toml", Unusable: "local"}},
+		{"non-string shared reads dark", none, "[tui]\ntheme = true\n", Theme{Name: "dark", Source: "default", Unusable: "config.toml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := gitRepo(t)
+			if tc.local != none {
+				writeLocal(t, root, tc.local)
+			}
+			if tc.shared != none {
+				writeConfig(t, root, tc.shared)
+			}
+			if got := ThemeSetting(root); got != tc.want {
+				t.Errorf("ThemeSetting = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetLocalTheme(t *testing.T) {
+	root := gitRepo(t)
+	writeLocal(t, root, "concurrency = 2\n[tui]\nmouse = true\n")
+	light := "light"
+	if err := SetLocalTheme(root, &light); err != nil {
+		t.Fatal(err)
+	}
+	if got := ThemeSetting(root); got.Name != "light" || got.Source != "local" {
+		t.Errorf("after light: %+v", got)
+	}
+	if err := SetLocalTheme(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ThemeSetting(root); got != (Theme{Name: "dark", Source: "default"}) {
+		t.Errorf("after unset: %+v", got)
+	}
+	if got := MouseSetting(root); !got.On {
+		t.Errorf("deleting theme must keep the other [tui] keys: %+v", got)
+	}
+	if err := SetLocalMouse(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetLocalTheme(root, &light); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetLocalTheme(root, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".git", "mugicrew", "config.toml"))
+	if err != nil || strings.Contains(string(b), "tui") || !strings.Contains(string(b), "concurrency") {
+		t.Errorf("emptied [tui] not dropped or rest lost: %q %v", b, err)
 	}
 }

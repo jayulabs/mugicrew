@@ -34,6 +34,34 @@ func argvTable() []procArgv {
 	return out
 }
 
+// procTable is every readable process's pid and argv, plus its cwd when wantCwd,
+// off one /proc walk (one glob, argv and cwd read per pid in the same pass): the
+// orphan reading's table. A vanished pid, an unreadable cmdline (a kernel thread
+// has none) or an unreadable cwd (EACCES: another uid's, never an effort's) leaves
+// that field empty, as argvTable and InTree skip it; the error is always nil here.
+// A var so tests make a platform that can't read cwds.
+var procTable = func(wantCwd bool) ([]procRow, error) {
+	paths, _ := filepath.Glob(filepath.Join(procDir, "[0-9]*"))
+	out := make([]procRow, 0, len(paths))
+	for _, p := range paths {
+		pid, err := strconv.Atoi(filepath.Base(p))
+		if err != nil {
+			continue
+		}
+		row := procRow{pid: pid}
+		if raw, err := os.ReadFile(filepath.Join(p, "cmdline")); err == nil && len(raw) > 0 {
+			row.argv = strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		}
+		if wantCwd {
+			if cwd, err := os.Readlink(filepath.Join(p, "cwd")); err == nil {
+				row.cwd, row.hasCwd = cwd, true
+			}
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // InTree is the pid of every process, whatever its argv, whose /proc/<pid>/cwd
 // lies in tree (ADR 0127 §2): an orphaned tool grandchild or a reconcile child the
 // argv scan can't see still holds the bead. tree is resolved through symlinks

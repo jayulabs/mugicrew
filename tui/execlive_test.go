@@ -109,7 +109,7 @@ func TestExecLiveShadeAndFallbackAndKeys(t *testing.T) {
 		rows := tab.rows()
 		sel := tab.selIndex(rows)
 		full := tab.g.execList(tab.expanded())
-		return shadeSet(tab.g.parentOf, rows, sel, full, eRow.shadeIn)[execIndexOfKey(rows, k)]
+		return shadeSet(tab.g.beadByID, rows, sel, full, eRow.shadeIn)[execIndexOfKey(rows, k)]
 	}
 	if !shaded(m, "bl") || !shaded(m, "cpA") {
 		t.Errorf("live:bl should shade its tree twin and Parent chain")
@@ -233,7 +233,7 @@ func TestExecInitiativesCursorAndShade(t *testing.T) {
 	tab := m.tabAt(tabExecute).(execTab)
 	shaded := func(tab execTab) bool {
 		rows := tab.rows()
-		return shadeSet(tab.g.parentOf, rows, tab.selIndex(rows), tab.g.execList(tab.expanded()), eRow.shadeIn)[execIndexOfKey(rows, treeKey)]
+		return shadeSet(tab.g.beadByID, rows, tab.selIndex(rows), tab.g.execList(tab.expanded()), eRow.shadeIn)[execIndexOfKey(rows, treeKey)]
 	}
 	if shaded(tab) {
 		t.Errorf("a selected tree row shades the Initiatives header")

@@ -9,6 +9,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/session"
 )
@@ -19,6 +20,7 @@ import (
 // the detached temp trees no bead links to under their own heading. It logs
 // nothing and writes nothing.
 func TestListShowsStrandedBeads(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir()) // the sandbox has no repo to resolve a graph dir from
 	evs := eventlogtest.Capture(t)
 	beads := map[string]bd.Bead{
 		"mc-dead":  {ID: "mc-dead", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress", Labels: []string{"paused:abandoned"}},
@@ -95,8 +97,12 @@ func TestListShowsStrandedBeads(t *testing.T) {
 		}
 		return nil, nil
 	})
-	set(t, &loopState, func() (string, error) { return looplock.Off, nil })
-	set(t, &tuiAlive, func(string) (bool, error) { return false, nil })
+	var asked []liveness.Effort
+	set(t, &orphans, func(_ string, es []liveness.Effort, _ []int) map[string]bool { // the shared reading, one call for the listing
+		asked = es
+		return map[string]bool{"mc-dead": true, "mc-nest": true}
+	})
+	set(t, &loopState, func() (string, error) { return looplock.On, nil }) // the loop being on decides no AFK verdict
 	set(t, &lineage, func(pid int) []int { return []int{pid} })
 	set(t, &pause, func(string, string) error { write("pause"); return nil })
 	set(t, &unpause, func(string, string) error { write("unpause"); return nil })
@@ -120,11 +126,11 @@ func TestListShowsStrandedBeads(t *testing.T) {
 		return ""
 	}
 	for id, want := range map[string][]string{
-		"mc-dead": {"dead", "claimed", "/tmp/mugicrew-wt-1/wt (3 dirty)", "2 Drafts", "paused abandoned", "mugicrew recover mc-dead --discard"},
+		"mc-dead": {"dead", "orphaned claim", "/tmp/mugicrew-wt-1/wt (3 dirty)", "2 Drafts", "paused abandoned", "mugicrew recover mc-dead --discard"},
 		"mc-live": {"alive", "claimed", "mugicrew abort mc-live"},
 		"mc-amb":  {"ambiguous", "--force"},
 		"mc-hitl": {"refused", "drop it from the TUI"},
-		"mc-nest": {"ambiguous", "/tmp/mugicrew-wt-4/wt"},
+		"mc-nest": {"dead", "orphaned claim", "/tmp/mugicrew-wt-4/wt"},
 		"mc-reb":  {"dead", "/tmp/mugicrew-wt-2/wt", "mid-rebase", "re-run mugicrew recover mc-reb"},
 	} {
 		r := row(id)
@@ -133,6 +139,15 @@ func TestListShowsStrandedBeads(t *testing.T) {
 				t.Errorf("%s row missing %q: %q", id, w, r)
 			}
 		}
+	}
+	if r := row("mc-live"); strings.Contains(r, "orphaned") {
+		t.Errorf("a claim the reading finds alive is marked orphaned: %q", r)
+	}
+	if r := row("mc-amb"); strings.Contains(r, "orphaned") {
+		t.Errorf("a bead that is not claimed is marked orphaned: %q", r)
+	}
+	if len(asked) != 3 { // mc-dead, mc-live and mc-nest: the in_progress AFK candidates, not the HITL one
+		t.Errorf("the reading was asked about %v, want the 3 in_progress AFK claims", asked)
 	}
 	for _, not := range []string{"mc-busy", "mc-man", "mc-human", "/repo\n"} {
 		if strings.Contains(s, not) {
@@ -157,5 +172,27 @@ func TestListEmpty(t *testing.T) {
 	var out bytes.Buffer
 	if err := List(&out); err != nil || out.String() != "nothing stranded\n" {
 		t.Errorf("List = %q, %v; want nothing stranded", out.String(), err)
+	}
+}
+
+// From a bare shell (no BEADS_DIR) the listing reads the per-effort flock under the
+// graph dir recover's own held resolves, so a claim whose dispatcher holds it but
+// whose child has not spawned reads "claimed", never "orphaned claim".
+func TestListBareShellReadsHeldFlock(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BEADS_DIR", dir)
+	h, err := liveness.Acquire("mc-held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Release() })
+	t.Setenv("BEADS_DIR", "")
+	set(t, &git.RepoRoot, func() (string, error) { return "/repo", nil })
+	set(t, &graphDir, func(string) (string, error) { return dir, nil })
+
+	bead := bd.Bead{ID: "mc-held", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress"}
+	got := orphanedClaims([]Inventory{{Bead: bead}}, nil)
+	if got["mc-held"] {
+		t.Errorf("a claim with a held flock reads orphaned from a bare shell: %v", got)
 	}
 }

@@ -8,13 +8,14 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/registry"
 )
 
 func autoApproveOn(t *testing.T) {
 	t.Helper()
 	registry.SetAutoApprove(true)
-	t.Cleanup(registry.ResetAutoApprove)
+	t.Cleanup(registry.ResetModeSnapshots)
 }
 
 func actionableIDs(g graphData) []string {
@@ -44,23 +45,6 @@ func TestActionableDropsAFKApprovalButKeepsMarkedOne(t *testing.T) {
 	}
 	if !slices.Contains(ids, "sg") { // Surgery is unchanged
 		t.Errorf("setting on: Surgery sg missing from actionable %v", ids)
-	}
-}
-
-func TestRunNowAdmitsAFKApprovalAndRefusesMarkedOne(t *testing.T) {
-	plain := dbead("ap", contract.KindApproval, "open", "cp", 1)
-	marked := dbead("mk", contract.KindApproval, "open", "cp", 1, labeled(registry.AutoApproveFailedLabel))
-	ready := []bd.Bead{plain, marked}
-
-	if ok, _, _ := runNowEligible(plain, ready, ""); ok {
-		t.Error("setting off: run-now admitted an Approval as AFK")
-	}
-	autoApproveOn(t)
-	if ok, _, err := runNowEligible(plain, ready, ""); !ok || err != nil {
-		t.Errorf("setting on: run-now refused an AFK Approval: ok=%v err=%v", ok, err)
-	}
-	if ok, _, _ := runNowEligible(marked, ready, ""); ok {
-		t.Error("setting on: run-now admitted a marked Approval as AFK")
 	}
 }
 
@@ -110,5 +94,30 @@ func TestKindlessBeadIsNotHITL(t *testing.T) {
 	}
 	if (graphData{}).launches(&kindless) {
 		t.Error("kindless bead is a launchable leaf")
+	}
+}
+
+// A refresh stamps the mode snapshots through a seam TestMain stubs, so a
+// machine-local auto_approve never leaks into the tests that follow.
+func TestRefreshDoesNotStampTheRealAutoApprove(t *testing.T) {
+	o := loop.ReadAutoApprove
+	t.Cleanup(func() { loop.ReadAutoApprove = o; registry.ResetModeSnapshots() })
+	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{On: true} }
+	registry.ResetModeSnapshots()
+
+	New(nil, nil).load()()
+
+	if !isHITL(&bd.Bead{Kind: contract.KindApproval}) {
+		t.Fatal("a refresh stamped the real auto_approve: an Approval reads AFK")
+	}
+}
+
+// The test binary's stamp reads fixed modes, never the machine's auto_approve or
+// land_strategy: a plain Approval stays HITL after a stamp.
+func TestStampReadsFixedModesNotTheMachinesConfig(t *testing.T) {
+	t.Cleanup(registry.ResetModeSnapshots)
+	loop.StampModeSnapshots()
+	if got := registry.ModeOf(contract.KindApproval, nil); got != registry.HITL {
+		t.Errorf("plain Approval after a stamp = %v, want HITL", got)
 	}
 }

@@ -65,7 +65,7 @@ func WithdrawSet(head string, all []Bead) []Bead {
 // expanded (as a withdraw set when it is a chain head, else its unclosed subtree),
 // then the Initiative itself. A chain whose head is named in released is kept out
 // whole (its caused-by predecessors too): it is released, not closed. A released
-// member Task is kept out alone (ADR 0349).
+// member Errand is kept out alone (ADR 0349).
 func CancelSet(initiative string, all []Bead, released ...string) []Bead {
 	in, kids := index(all)
 	var out []Bead
@@ -80,7 +80,7 @@ func CancelSet(initiative string, all []Bead, released ...string) []Bead {
 	}
 	kept := map[string]bool{}
 	for _, h := range released {
-		if t, ok := in[h]; ok && t.Kind == contract.KindTask {
+		if t, ok := in[h]; ok && t.Kind == contract.KindErrand {
 			kept[h] = true
 			continue
 		}

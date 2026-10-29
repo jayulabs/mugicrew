@@ -15,7 +15,9 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/registry"
+	"jayulabs.org/mugicrew/route"
 )
 
 // List is `mugicrew recover` with no bead, a pure view (ADR 0033): no write, no
@@ -75,27 +77,31 @@ func List(w io.Writer) error {
 		rows++
 	}
 	self := lineage(os.Getpid())
-	var hs hostState // one snapshot of the host per listing, read when a first row needs it
-	var wErr error
-	seen := false
+	var invs []Inventory // the strand candidates, in id order
 	for _, id := range slices.Sorted(maps.Keys(ids)) {
 		inv, err := Take(id)
 		if err != nil {
 			row(id, "refused", "?", "can't take its inventory: "+err.Error())
 			continue
 		}
-		if !inv.stranded() {
-			continue
+		if inv.stranded() {
+			invs = append(invs, inv)
 		}
+	}
+	orphan := orphanedClaims(invs, self) // the shared reading (ADR 0391), one pass for the listing
+	var hs hostState                     // one snapshot of the host per listing, read when a first row needs it
+	seen := false
+	for _, inv := range invs {
+		id := inv.Bead.ID
 		if !seen {
-			hs, wErr = look(Opts{})
+			hs = look()
 			seen = true
 		}
-		verdict, out := listVerdict(hs, wErr, inv, self)
+		verdict, out := listVerdict(hs, inv, self)
 		if verdict == Alive && !ids[id] {
 			continue
 		}
-		row(id, verdict, Leftovers(inv), out)
+		row(id, verdict, Leftovers(inv, orphan[id]), out)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -118,12 +124,9 @@ func List(w io.Writer) error {
 
 // listVerdict is inv's row verdict (alive, dead, ambiguous or refused) and its
 // way out: the recover to run when licensed, else the refusal's reason.
-func listVerdict(hs hostState, werr error, inv Inventory, self []int) (string, string) {
+func listVerdict(hs hostState, inv Inventory, self []int) (string, string) {
 	id := inv.Bead.ID
-	v, err := "", werr
-	if err == nil {
-		v, err = judgeIn(hs, inv, Opts{}, self, false)
-	}
+	v, err := judgeIn(hs, inv, Opts{}, self, false)
 	if err != nil {
 		var rf *Refused
 		if errors.As(err, &rf) && rf.Verdict != "" {
@@ -132,9 +135,6 @@ func listVerdict(hs hostState, werr error, inv Inventory, self []int) (string, s
 			v = "refused"
 		}
 		return v, strings.TrimPrefix(err.Error(), id+": ")
-	}
-	if v == AmbiguousResolved { // the loop lock is free and no TUI is alive
-		v = Ambiguous
 	}
 	out := "mugicrew recover " + id
 	if inv.Files > 0 {
@@ -146,11 +146,46 @@ func listVerdict(hs hostState, werr error, inv Inventory, self []int) (string, s
 	return v, out
 }
 
-// Leftovers is inv's claim, tree (dirty count, mid-rebase), Draft count and pauses.
-func Leftovers(inv Inventory) string {
+// orphanedClaims is the shared Orphaned-claim reading (ADR 0391) over the
+// in_progress AFK beads among invs: id to true when orphaned. A repo-root bead
+// has no tree to scan (route.HasTree, as loop.Orphans places it). It repeats
+// loop.Orphans' filter-and-place shape rather than calling it: this package's
+// trees come from the Inventory, not a worktree listing, and the inventory-based
+// callers here already hold them.
+func orphanedClaims(invs []Inventory, self []int) map[string]bool {
+	var efforts []liveness.Effort
+	for _, inv := range invs {
+		b := inv.Bead
+		if b.Status != "in_progress" || !afk(b) {
+			continue
+		}
+		e := liveness.Effort{ID: b.ID}
+		if route.HasTree(b) {
+			e.Tree = inv.Tree
+		}
+		efforts = append(efforts, e)
+	}
+	if len(efforts) == 0 {
+		return nil
+	}
+	dir, err := beadsDir()
+	if err != nil {
+		// No graph dir known, so no flock can be read: never read that as no holder.
+		return nil
+	}
+	return orphans(dir, efforts, self)
+}
+
+// Leftovers is inv's claim, tree (dirty count, mid-rebase), Draft count and
+// pauses; the claim cell reads "orphaned claim" when orphan.
+func Leftovers(inv Inventory, orphan bool) string {
 	var l []string
 	if inv.Bead.Status == "in_progress" {
-		l = append(l, "claimed")
+		if orphan {
+			l = append(l, "orphaned claim")
+		} else {
+			l = append(l, "claimed")
+		}
 	}
 	if inv.Tree != "" {
 		t := "tree " + inv.Tree
@@ -177,6 +212,7 @@ func Leftovers(inv Inventory) string {
 // List's reads, vars so its tests run with no bd and no git.
 var (
 	inProgress = bd.InProgress
+	orphans    = liveness.OrphansIn
 	pausedList = bd.PausedList
 	worktrees  = git.Worktrees
 	rebasing   = git.Rebasing

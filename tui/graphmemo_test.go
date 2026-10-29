@@ -4,28 +4,26 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/session"
 )
 
-// The deferred status facet reveals Drafts in the counts the moment rebuild runs,
-// and leaving it hides them again (Spec FR4, FR5, FR6).
+// A folded header's total counts its Drafts at the default facet and under draft
+// (Spec FR9).
 func TestGraphCountsFollowStatusFacet(t *testing.T) {
 	m := sized(t, 120, 40)
 	m, _ = send(t, m, loadedMsg{beads: draftBeads(), live: map[string]bool{}, sessions: map[string]session.Info{}})
 	g := gr(m)
-	if _, tot := g.childCounts("ch"); tot != 3 {
-		t.Fatalf("default childCounts(ch) total = %d; want 3", tot)
+	if _, tot := g.childCounts("ch"); tot != 4 {
+		t.Fatalf("default childCounts(ch) total = %d; want 4", tot)
 	}
-	g.q.status = "deferred"
+	g.q.status = "draft"
 	g = g.rebuild()
 	if _, tot := g.childCounts("ch"); tot != 4 {
-		t.Errorf("deferred facet childCounts(ch) total = %d; want 4", tot)
-	}
-	g.q.status = baseline.status
-	if _, tot := g.rebuild().childCounts("ch"); tot != 3 {
-		t.Errorf("back off deferred childCounts(ch) total = %d; want 3", tot)
+		t.Errorf("draft facet childCounts(ch) total = %d; want 4", tot)
 	}
 }
 
@@ -81,5 +79,24 @@ func BenchmarkIdeaView(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// A Draft row reads draft in its status slot, even when blocked, and its title styles
+// dim; a published child under a Draft is not dimmed (Spec FR3, FR4, FR6).
+func TestDraftRowIsDim(t *testing.T) {
+	g := graphData{beads: draftBeads()}
+	d := g.beadByID("dbuild")
+	if got := ansi.Strip(g.stateGlyph(d)); got != "draft" {
+		t.Errorf("Draft status slot = %q; want draft", got)
+	}
+	if st, plain := leafTitleStyle(d, true); plain || st.GetForeground() != dim {
+		t.Error("Draft leaf title not dim")
+	}
+	if st, plain := containerTitleStyle(g.beadByID("dch"), true); plain || st.GetForeground() != dim {
+		t.Error("Draft container title not dim")
+	}
+	if st, _ := leafTitleStyle(&bd.Bead{ID: "kid", Kind: contract.KindBuild, Status: "open", Parent: "dch"}, false); st.GetForeground() == dim {
+		t.Error("published child under a Draft is dimmed")
 	}
 }

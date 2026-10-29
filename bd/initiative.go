@@ -115,10 +115,10 @@ func RequireInitiativesOn() bool {
 }
 
 // ReleaseRequiredWhy is release's refusal under Require Initiatives (ADR 0224): a
-// chain may move between Initiatives but never drop out of one. A member Task is
+// chain may move between Initiatives but never drop out of one. A member Errand is
 // exempt (ADR 0349), so its reason is empty. The TUI's A shows it too.
 func ReleaseRequiredWhy(member Bead) string {
-	if member.Kind == contract.KindTask {
+	if member.Kind == contract.KindErrand {
 		return ""
 	}
 	return "Require Initiatives is on: move it with mugicrew initiative adopt " + member.ID + " <other>"
@@ -182,6 +182,18 @@ const (
 func HasDoneWhen(body string) bool {
 	_, _, ok := strings.Cut(body, "## Done when")
 	return ok
+}
+
+// DoneWhen is the text under the body's "## Done when" heading, else the whole body.
+func DoneWhen(body string) string {
+	_, rest, ok := strings.Cut(body, "## Done when")
+	if !ok {
+		return strings.TrimSpace(body)
+	}
+	if i := strings.Index(rest, "\n## "); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // StateOf derives ini's state over the snapshot all, first match wins: closed;

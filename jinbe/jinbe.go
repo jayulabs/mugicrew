@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,14 +95,16 @@ var (
 	landStrategy         = resolveLandStrategy
 	composeLanding       = git.Compose
 	openCritiques        = func(id string) ([]bd.Bead, error) { return bd.OpenChildrenOfKindBeads(id, contract.KindCritique) }
-	gateAttr             = func() string {
+	gateSpec             = func() cfglayer.GateSpec {
 		root, err := git.RepoRoot()
 		if err != nil {
-			return ""
+			return cfglayer.GateSpec{}
 		}
-		return cfglayer.Gate(root)
+		return cfglayer.ResolveGate(root)
 	}
-	gateBuild = func(landingID, rev, attr string) (string, error) {
+	gateCommand   = func(dir, cmd string) error { return looplock.RunGateCommand(context.Background(), dir, cmd) }
+	resetLandTree = func(dir string) error { return git.Repo(dir).ResetTree() }
+	gateBuild     = func(landingID, rev, attr string) (string, error) {
 		common, err := git.CommonDir()
 		if err != nil {
 			return "", &looplock.InfraError{Err: err}
@@ -109,7 +112,7 @@ var (
 		return looplock.GateBuild(context.Background(), common, landingID, rev, attr)
 	}
 	gateBuildAt     = looplock.GateBuild
-	contextGate     = cfglayer.ContextGate
+	contextGateSpec = cfglayer.ResolveContextGate
 	repoDirOf       = contexts.RepoDirOf
 	liveRepos       = contexts.Repos
 	strategyFor     = git.LandStrategyFor
@@ -149,10 +152,13 @@ var (
 	buildChildren   = bd.BuildChildren
 	probeBase       = git.Repo.ResolveProbeBase
 	probeConflict   = git.Repo.ProbeConflict
+	verifyRenumber  = git.Repo.VerifyRenumber
+	sequenceRules   = git.SequenceRules
 	repoHead        = func(r git.Repo) func(string) (string, error) { return r.Head }
 	reviewDue       = func(id string, atHead func(string, string) bool) (bool, error) { return bd.ReviewDue(id, nil, atHead) }
 	membersDrained  = func(id string) (bool, error) { return bd.MembersDrained(id, nil) }
 	openBlockers    = bd.OpenBlockers
+	openPivots      = bd.OpenPivots
 	initiativeOf    = bd.InitiativeOf
 	postLandClashes = git.PostLandClashesAt
 	commitEmpty     = git.IsEmptyCommit
@@ -165,6 +171,7 @@ var (
 var (
 	forgeDiscussions = forge.Discussions
 	forgeReply       = forge.Reply
+	forgeNote        = forge.CommentMR
 	forgeResolve     = forge.Resolve
 	forgeAward       = forge.AwardEmoji
 	forgeUser        = func() (string, error) {
@@ -204,7 +211,7 @@ func checkpointTrailer(id string) string { return git.TrailerFor(string(contract
 //     (spawnReviewIfDue), else leave the Checkpoint open and visible. Approved but
 //     members not drained (one still open or holding effort/<id>, e.g. a Conflict
 //     whose integrate didn't publish) ⇒ wait silently (Spec FR 28, FR 47). So does an
-//     open incoming blocker, e.g. a before-land Task (the land hold, Spec FR 15).
+//     open incoming blocker, e.g. a before-land Errand (the land hold, Spec FR 15).
 //  3. Spawn the Landing (SpawnChildIfAbsent: one open at a time), in succession to
 //     the at-head Approval and carrying its pin, and leave the Checkpoint open. The
 //     Landing lands it (reconcileLanding) and the next pass closes it (step 1).
@@ -283,6 +290,9 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 		}
 	}
 	if err := bd.CloseLandings(landings, sha, closeBead); err != nil {
+		return err
+	}
+	if err := closeWaitingApprovals(container.ID); err != nil {
 		return err
 	}
 	if err := closeMRWatches(container.ID, "container closed"); err != nil {
@@ -422,6 +432,9 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 			return nested, err
 		}
 	}
+	if sha, ok := git.ParseAnchor(cp.Description); ok && cp.Kind == contract.KindChart { // landed as a pin (ADR 0358)
+		return nested, pinLandedClose(l, branch, sha, name, lg)
+	}
 	if sha, err := lg.landedBase(trailer); err == nil {
 		return nested, landedClose(l, cp, branch, sha, name, lg) // before step 2: a stale pin merged is landed, not obsolete
 	} else if foreign := (*git.ForeignLanding)(nil); errors.As(err, &foreign) {
@@ -435,23 +448,36 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 	if pin != head {
 		return nested, closeIfOpen(l, "obsolete: branch advanced without landing")
 	}
+	if cp.Kind == contract.KindChart {
+		// A Chart with nothing ahead lands as an Anchor: pin on its bead, never an empty
+		// squash or a Land MR GitLab cannot merge (ADR 0358); one with any commit ahead
+		// lands through the trailer squash / its MR below. The pin is written first, then
+		// the stale MR closes, then the Landing, so a partial failure retries cleanly.
+		tip := base // the fetched Forge mainline under gitlab
+		if name == git.LandStrategyLocal {
+			if tip, err = probeBase(lg.repo); err != nil {
+				return nested, err
+			}
+		}
+		if contexts.AncestorIn(lg.repo, isAncestor)(pin, tip) {
+			if err := setLine(&cp, "Anchor:", git.AnchorPin(tip)); err != nil {
+				return nested, err
+			}
+			if name == git.LandStrategyLocal {
+				eventlog.RecordLand(l, branch, tip, nil, lg.attrs...)
+			}
+			return nested, pinLandedClose(l, branch, tip, name, lg)
+		}
+	}
 	key, err := jiraKey(cp) // computed per Landing, never stored
 	if err != nil {
 		return nested, err
 	}
 	subject := git.LandSubject(string(cp.Kind), cp.Title, bd.ContextOf(cp), key, branch)
-	if name == git.LandStrategyLocal { // gitlab overwrites strategy with pinnedGitlab below
-		if strategy, err = strategyFor(name, lg.tree, subject); err != nil {
-			return nested, err
-		}
-	}
-	if name == git.LandStrategyGitlab {
-		if done, err := mirrorMR(l, cp, branch, trailer, lg, base); done || err != nil {
-			return nested, err
-		}
-	}
 	// A Checkpoint's Decision Packet is the at-head Approval's body (empty for a pin-only
-	// or pre-packet Approval); a Chart's Land MR body is its summary, and a local Chart land has none.
+	// or pre-packet Approval); a Chart's Chart Packet is its approved Approval's body at the
+	// Landing's pin. A Chart Landing with no such Approval is pre-change: ChartSummary under
+	// gitlab and no body under local.
 	var body string
 	if cp.Kind == contract.KindCheckpoint {
 		approval, err := checkpointApproval(cp)
@@ -461,11 +487,29 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 		if approval != nil {
 			body = git.DecisionPacket(approval.Description)
 		}
-		if name == git.LandStrategyLocal {
-			return nested, gatedLand(l, cp, branch, trailer, pin, body, subject, lg)
+	} else {
+		approval, err := ChartApproval(cp)
+		if err != nil {
+			return nested, err
 		}
-	} else if name == git.LandStrategyGitlab {
-		body = contract.ChartSummary(cp.Description)
+		if approval != nil {
+			body = git.DecisionPacket(approval.Description)
+		} else if name == git.LandStrategyGitlab {
+			body = contract.ChartSummary(cp.Description)
+		}
+	}
+	if name == git.LandStrategyLocal { // gitlab overwrites strategy with pinnedGitlab below
+		if strategy, err = strategyFor(name, lg.tree, subject, body); err != nil {
+			return nested, err
+		}
+	}
+	if name == git.LandStrategyGitlab {
+		if done, err := mirrorMR(l, cp, branch, trailer, lg, base); done || err != nil {
+			return nested, err
+		}
+	}
+	if cp.Kind == contract.KindCheckpoint && name == git.LandStrategyLocal {
+		return nested, gatedLand(l, cp, branch, trailer, pin, body, subject, lg)
 	}
 	if name == git.LandStrategyGitlab {
 		// push and stamp the Landing's pin, not whatever the branch is by the lock (FR 9)
@@ -507,12 +551,37 @@ func landedClose(l, cp bd.Bead, branch, sha, strategy string, lg legs) error {
 	return closeIfOpen(l, landedReason+" "+sha)
 }
 
+// pinLandedClose closes a Landing whose Chart carries an Anchor: pin at sha: the Chart
+// landed as a pin and added no commit, so under gitlab only a stale open MR needs closing.
+func pinLandedClose(l bd.Bead, branch, sha, strategy string, lg legs) error {
+	if strategy == git.LandStrategyGitlab {
+		note := "Closed by mugicrew: this Chart landed as a pin at " + sha + " (nothing ahead of main), so no merge is needed."
+		if err := closeLandedMRNoted(l, branch, lg, note); err != nil {
+			return err
+		}
+		landOutcome(lg, l, eventlog.LandLanded, git.RecordedMR(l.Description), "sha", sha)
+	}
+	return closeIfOpen(l, landedReason+" "+sha)
+}
+
 // closeLandedMR closes whatever MR is still open on a landed container's branch: GitLab
 // allows one open MR per source branch and the merged one is no longer open, so any
 // open one is stale (a fetch/push race's orphan, ADR 0185 §6). No iid comparison. It
 // runs before the bead closes, so a failure leaves the bead open and the next tick retries.
 func closeLandedMR(b bd.Bead, branch string, lg legs) error {
-	iid, err := forge.CloseOpenMR(lg.proj, branch, forgeFindOpenMR, forgeCloseMR)
+	return closeLandedMRNoted(b, branch, lg, "")
+}
+
+// closeLandedMRNoted is closeLandedMR that first posts note on the MR it is about to close.
+func closeLandedMRNoted(b bd.Bead, branch string, lg legs, note string) error {
+	iid, err := forge.CloseOpenMR(lg.proj, branch, forgeFindOpenMR, func(p forge.Project, iid int) error {
+		if note != "" {
+			if err := forgeNote(p, iid, note); err != nil {
+				return err
+			}
+		}
+		return forgeCloseMR(p, iid)
+	})
 	if err != nil || iid == 0 {
 		return err
 	}
@@ -546,6 +615,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 		return true, err // a 429 is held by reconcileLanding
 	}
 	backfillMRLink(&l, cp, iid, mr)
+	lg.disc = &discussionsRead{}
 	if mr.State == forge.StateMerged {
 		// LandedBase missed at the tick's fetch, but the merge may have landed since: fetch
 		// again, and only a second miss is trailerless
@@ -572,6 +642,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 			return done, err
 		}
 		recordMRStatus(&l, mr.DetailedMergeStatus)
+		recordMRFactsOnWatches(l, cp, iid, lg, mr)
 		if mr.HeadPipeline != nil && mr.HeadPipeline.Status == forge.StatusFailed {
 			// a head pipeline that ran on an older head (a force-push whose new pipeline is
 			// not created yet, or skipped) is a previous attempt's failure: pending
@@ -598,22 +669,32 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 	if err != nil {
 		return true, err
 	}
-	body := bd.TaskBody(
-		fmt.Sprintf("MR %s for %s was closed on the Forge, so its Landing was closed obsolete.", ref, cp.ID),
-		[]string{fmt.Sprintf("Closed MR: !%d", iid), git.MRLinkLine(mr.WebURL)},
-		[]bd.TaskStep{{
-			Title:   fmt.Sprintf("Reopen or merge MR %s, or withdraw %s.", ref, cp.ID),
-			Markers: []string{"irreversible"},
-			Do: fmt.Sprintf("reopen or merge MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. "+
-				"If it was already merged and the Check fails, stamp the trailer: %s "+
-				"The next Landing reuses a reopened MR or opens a fresh one.", ref, cp.ID, stamp),
-			Check: fmt.Sprintf("`mugicrew probe mr '%s'` prints `opened`, or `mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", ref, cp.ID, cp.ID),
-		}}, "")
-	if _, err := holdTask(cp, fmt.Sprintf("Closed MR: !%d\n", iid), "merge request "+ref+" was closed", body); err != nil {
+	lead := fmt.Sprintf("MR %s for %s was closed on the Forge, so its Landing was closed obsolete.", ref, cp.ID)
+	do := fmt.Sprintf("reopen or merge MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. "+
+		"If it was already merged and the Check fails, stamp the trailer: %s "+
+		"The next Landing reuses a reopened MR or opens a fresh one.", ref, cp.ID, stamp)
+	if err := holdClosedMR(cp, lg, mr, lead, do); err != nil {
 		return true, err
 	}
 	landOutcome(lg, l, eventlog.LandClosed, iid)
 	return true, closeIfOpen(l, "obsolete: merge request closed")
+}
+
+// holdClosedMR is the closed-MR arm's Hold (ADR 0185 §4): one Brook Task, idempotent on
+// (container, MR iid), blocking cp until a human reopens the closed MR mr or withdraws cp.
+// lead opens the Errand body and do is its step's instruction.
+func holdClosedMR(cp bd.Bead, lg legs, mr *forge.MR, lead, do string) error {
+	ref := git.MRRef(lg.mrPath, mr.IID)
+	body := bd.ErrandBody(lead,
+		[]string{fmt.Sprintf("Closed MR: !%d", mr.IID), git.MRLinkLine(mr.WebURL)},
+		[]bd.ErrandStep{{
+			Title:   fmt.Sprintf("Reopen or merge MR %s, or withdraw %s.", ref, cp.ID),
+			Markers: []string{"irreversible"},
+			Do:      do,
+			Check:   fmt.Sprintf("`mugicrew probe mr '%s'` prints `opened`, or `mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", ref, cp.ID, cp.ID),
+		}}, "")
+	_, _, err := holdErrand(cp, fmt.Sprintf("Closed MR: !%d\n", mr.IID), "merge request "+ref+" was closed", body)
+	return err
 }
 
 // conflictArm keys conflict on facts, never detailed_merge_status (Spec FR 24–26): the
@@ -711,7 +792,7 @@ func recordChecked(l *bd.Bead, base string) error {
 	return nil
 }
 
-// traceLines is how much of a failed job's trace a Critique or Task carries (ADR 0188 §6).
+// traceLines is how much of a failed job's trace a Critique or Errand carries (ADR 0188 §6).
 const traceLines = 80
 
 // retriedLine and pipelineLine are the body lines naming a pipeline by id.
@@ -751,7 +832,7 @@ func heldLine(pl forge.Pipeline) string {
 }
 
 // heldPipeline is whether the Landing's body records this run of the pipeline as held: the
-// failure's Task is filed, so a closed Task must not re-file it for the same run.
+// failure's Errand is filed, so a closed Errand must not re-file it for the same run.
 func heldPipeline(body string, pl forge.Pipeline) bool {
 	return hasBodyLine(body, heldLine(pl))
 }
@@ -776,8 +857,8 @@ func infraReason(reason string) bool {
 	return strings.HasPrefix(reason, "stuck_")
 }
 
-// infraTaskLead opens the body of the Task a retried pipeline's infra failure files.
-const infraTaskLead = "The retried pipeline failed again for an infra reason;"
+// infraErrandLead opens the body of the Errand a retried pipeline's infra failure files.
+const infraErrandLead = "The retried pipeline failed again for an infra reason;"
 
 // ranOnHead is whether the MR's head pipeline ran on the MR's current head: its sha for
 // a branch pipeline, the merge commit's second parent for a merged-results one.
@@ -792,8 +873,8 @@ func ranOnHead(p forge.Project, mr *forge.MR) (bool, error) {
 
 // pipelineFailed is the head-pipeline arm of mirrorMR (ADR 0188): the first failure
 // is retried once and recorded (the Landing stays pending); a retried pipeline that
-// fails again for an infra reason files a Task and stays pending; a real failure files
-// a Critique (Checkpoint) or a Task (Chart) and closes the Landing obsolete, the MR
+// fails again for an infra reason files an Errand and stays pending; a real failure files
+// a Critique (Checkpoint) or an Errand (Chart) and closes the Landing obsolete, the MR
 // left open. The retry POST precedes the record, so a crash between them retries twice
 // at worst, never silently zero times.
 func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
@@ -803,15 +884,15 @@ func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
 		})
 	}
 	if heldPipeline(l.Description, pl) {
-		return true, nil // its Task was filed; a Forge retry moves updated_at and resumes the arm
+		return true, nil // its Errand was filed; a Forge retry moves updated_at and resumes the arm
 	}
 	pipelineKey := pipelineLine(pl.ID) + "\n"
-	held, err := openBlockers(cp.ID) // an infra Task already filed for this pipeline: skip the jobs and traces
+	held, err := openBlockers(cp.ID) // an infra Errand already filed for this pipeline: skip the jobs and traces
 	if err != nil {
 		return true, err
 	}
 	if slices.ContainsFunc(held, func(b bd.Bead) bool {
-		return b.Kind == contract.KindTask && strings.Contains(b.Description, infraTaskLead) && strings.Contains(b.Description+"\n", pipelineKey)
+		return b.Kind == contract.KindErrand && strings.Contains(b.Description, infraErrandLead) && strings.Contains(b.Description+"\n", pipelineKey)
 	}) {
 		return true, nil
 	}
@@ -825,21 +906,21 @@ func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
 		return true, err
 	}
 	iid := git.RecordedMR(l.Description)
-	title := failedTitle(pl.ID, lg.mrPath, iid) // holdTask prefixes the container
+	title := failedTitle(pl.ID, lg.mrPath, iid) // holdErrand prefixes the container
 	ref := git.MRRef(lg.mrPath, iid)
-	taskFacts := pipelineTaskFacts(ref, git.RecordedMRLink(l.Description), facts)
+	errandFacts := pipelineErrandFacts(ref, git.RecordedMRLink(l.Description), facts)
 	if infra {
-		if _, err := holdTask(cp, pipelineKey, title, bd.TaskBody(
-			infraTaskLead+" the runner, not the code, failed.", taskFacts,
-			[]bd.TaskStep{infraRetryStep(ref, pl.ID, cp.ID, false)}, tails)); err != nil {
+		if _, _, err := holdErrand(cp, pipelineKey, title, bd.ErrandBody(
+			infraErrandLead+" the runner, not the code, failed.", errandFacts,
+			[]bd.ErrandStep{infraRetryStep(ref, pl.ID, cp.ID, false)}, tails)); err != nil {
 			return true, err
 		}
 		landOutcome(lg, l, eventlog.LandPipelineFailed, git.RecordedMR(l.Description), "pipeline", pl.ID, "infra", true)
 		return true, holdPipeline(l, pl)
 	}
 	if cp.Kind == contract.KindChart {
-		if _, err := holdTask(cp, pipelineKey, title, bd.TaskBody(
-			"The retried pipeline failed on this Chart's branch; main or the CI config is likely broken.", taskFacts,
+		if _, _, err := holdErrand(cp, pipelineKey, title, bd.ErrandBody(
+			"The retried pipeline failed on this Chart's branch; main or the CI config is likely broken.", errandFacts,
 			chartPipelineSteps(ref, pl), tails)); err != nil {
 			return true, err
 		}
@@ -876,21 +957,21 @@ func joinPipelineParts(facts []string, diagnostics string) string {
 	return details
 }
 
-// pipelineTaskFacts is a pipeline-failure Task's fact lines: the always-present Merge
+// pipelineErrandFacts is a pipeline-failure Errand's fact lines: the always-present Merge
 // request: <ref>, the MR link, then the pipeline's own.
-func pipelineTaskFacts(ref, link string, pipeline []string) []string {
+func pipelineErrandFacts(ref, link string, pipeline []string) []string {
 	return append([]string{"Merge request: " + ref, git.MRLinkLine(link)}, pipeline...)
 }
 
 // infraRetryStep is the one step an infra pipeline failure asks of Brook: fix the runner
 // named under Diagnostics, then retry. A revert MR's Check also accepts the MR merged or
 // closed.
-func infraRetryStep(ref string, id int, container string, revert bool) bd.TaskStep {
+func infraRetryStep(ref string, id int, container string, revert bool) bd.ErrandStep {
 	check := fmt.Sprintf("`mugicrew probe pipeline '%s' %d` prints `success`, or `mugicrew probe landed %s` prints `landed`.", ref, id, container)
 	if revert {
 		check = fmt.Sprintf("`mugicrew probe pipeline '%s' %d` prints `success`, or `mugicrew probe landed %s` prints `landed`, or `mugicrew probe mr '%s'` prints `merged` or `closed`.", ref, id, container, ref)
 	}
-	return bd.TaskStep{
+	return bd.ErrandStep{
 		Title: "Fix the runner, then retry the pipeline.",
 		Do:    "fix the runner named under Diagnostics, then Retry the pipeline at the Pipeline URL.",
 		Check: check,
@@ -899,14 +980,14 @@ func infraRetryStep(ref string, id int, container string, revert bool) bd.TaskSt
 
 // chartPipelineSteps are a Chart's real pipeline failure: land a fix for the breakage,
 // and, for a branch pipeline (not merged-results), rebase the Chart onto the green main.
-func chartPipelineSteps(ref string, pl forge.Pipeline) []bd.TaskStep {
-	steps := []bd.TaskStep{{
+func chartPipelineSteps(ref string, pl forge.Pipeline) []bd.ErrandStep {
+	steps := []bd.ErrandStep{{
 		Title: "Fix the breakage on main.",
 		Do:    "file a Signal for the breakage and land its fix.",
 		Check: fmt.Sprintf("`mugicrew probe pipeline '%s' --main` prints `success`.", ref),
 	}}
 	if !strings.HasSuffix(pl.Ref, "/merge") {
-		steps = append(steps, bd.TaskStep{
+		steps = append(steps, bd.ErrandStep{
 			Title: "Rebase the Chart onto the green main.",
 			Do:    "press r on the Chart's row in the TUI.",
 			Ask:   "is the Chart rebased onto a green main?",
@@ -915,7 +996,7 @@ func chartPipelineSteps(ref string, pl forge.Pipeline) []bd.TaskStep {
 	return steps
 }
 
-// mrLead names a nested MR at the head of a pipeline-failure Task or Critique body; a
+// mrLead names a nested MR at the head of a pipeline-failure Errand or Critique body; a
 // Workspace's is "" (ADR 0230).
 func mrLead(path string, iid int) string {
 	if path == "" {
@@ -964,11 +1045,10 @@ func fileCritique(l, cp bd.Bead, p forge.Project, pl forge.Pipeline, title, deta
 	return err
 }
 
-// holdTask files the Brook-owned Task blocking cp, idempotent on key, titled
-// "<container>: <what>".
-func holdTask(cp bd.Bead, key, what, body string) (string, error) {
-	id, _, err := bd.SpawnBlockingTask(cp.ID, key, cp.Title+": "+what, body)
-	return id, err
+// holdErrand files the Brook-owned Errand blocking cp, idempotent on key, titled
+// "<container>: <what>". created is false when the hold was already filed.
+func holdErrand(cp bd.Bead, key, what, body string) (id string, created bool, err error) {
+	return bd.SpawnBlockingErrand(cp.ID, key, cp.Title+": "+what, body)
 }
 
 // mrNaming is how holdTrailerless names and links the MR it holds on: its nested project
@@ -977,10 +1057,11 @@ type mrNaming struct{ path, webURL, noun, label string }
 
 // holdTrailerless is the merged arm's miss: the MR is merged and fetched, yet no
 // trailer is on mainline (a hand-edited squash message dropped it). The Landing stays
-// open; one Brook-owned Task blocks the container, idempotent on (container, MR iid)
+// open; one Brook-owned Errand blocks the container, idempotent on (container, MR iid)
 // (Spec FR 19, ADR 0185 §5). noun and label name the MR in running text and at a sentence
 // start: "merge request"/"MR" for a land's, "revert merge request"/"Revert MR" for a
-// Rollback's. Returns the error that keeps the tick failing.
+// Rollback's. Returns the error that fails the tick once, on the call that files the hold; an
+// already-filed hold returns nil.
 func holdTrailerless(cp bd.Bead, repo git.Repo, mr mrNaming, trailer string, iid int, sha string) error {
 	path, webURL, noun, label := mr.path, mr.webURL, mr.noun, mr.label
 	ref := git.MRRef(path, iid)
@@ -1011,10 +1092,14 @@ func holdTrailerless(cp bd.Bead, repo git.Repo, mr mrNaming, trailer string, iid
 		do += " Push before anything else lands on " + main + "."
 		check = fmt.Sprintf("`mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", cp.ID, cp.ID)
 	}
-	steps := []bd.TaskStep{{Title: "Stamp the trailer on the Forge's " + main + ".", Markers: []string{"irreversible"}, Do: do, Check: check}}
-	body := bd.TaskBody(fmt.Sprintf("%s %s for %s was merged at %s, but no %q trailer reached mainline.", label, ref, cp.ID, sha, trailer), facts, steps, "")
-	if _, err := holdTask(cp, fmt.Sprintf("Merged MR: !%d\n", iid), fmt.Sprintf("%s %s merged without its trailer", noun, ref), body); err != nil {
+	steps := []bd.ErrandStep{{Title: "Stamp the trailer on the Forge's " + main + ".", Markers: []string{"irreversible"}, Do: do, Check: check}}
+	body := bd.ErrandBody(fmt.Sprintf("%s %s for %s was merged at %s, but no %q trailer reached mainline.", label, ref, cp.ID, sha, trailer), facts, steps, "")
+	_, created, err := holdErrand(cp, fmt.Sprintf("Merged MR: !%d\n", iid), fmt.Sprintf("%s %s merged without its trailer", noun, ref), body)
+	if err != nil {
 		return err
+	}
+	if !created {
+		return nil // already filed: the bead stays pending under its hold (Spec D2)
 	}
 	return fmt.Errorf("jinbe: %s %s for %s is merged but its trailer is not on mainline (merge sha %s)", noun, ref, cp.ID, sha)
 }
@@ -1094,6 +1179,62 @@ func setMRLines(b *bd.Bead, path string, iid int, webURL string) error {
 	return setLine(b, git.MRLinkKey, git.MRLinkLine(webURL))
 }
 
+// OpenApprovalMR opens container's MR for its Approval under gitlab (Spec FR 7, 31): it
+// pushes the Approval's Commit: pin, opens or reuses the branch's MR with the container's
+// Packet (a Checkpoint's Decision Packet, a Chart's Chart Packet) as body and the trailer block, records MR:/MR link: on the Approval and spawns
+// the container's MR Watch. draft opens it as a GitLab Draft; otherwise a reused Draft MR
+// is un-drafted. Idempotent: a re-run reuses the same MR and the same MR: line.
+func OpenApprovalMR(container, approval bd.Bead, draft bool) error {
+	pin, ok := git.ParseCommit(approval.Description)
+	if !ok {
+		return fmt.Errorf("jinbe.OpenApprovalMR: approval %s carries no Commit: pin", approval.ID)
+	}
+	lg, ok, err := legsFor(container, true)
+	if err != nil {
+		return err
+	}
+	if !ok { // a nil here reads as success: the Approval would publish with no MR: line and be re-run every tick
+		return fmt.Errorf("jinbe.OpenApprovalMR: %s's repo stamp has drifted from the live repos (ADR 0157): no MR opened", container.ID)
+	}
+	key, err := jiraKey(container)
+	if err != nil {
+		return err
+	}
+	branch, trailer := git.BranchName(string(container.Kind), container.ID), git.TrailerFor(string(container.Kind), container.ID)
+	subject := git.LandSubject(string(container.Kind), container.Title, bd.ContextOf(container), key, branch)
+	pres := git.MRPresentation{Title: subject, Body: git.DecisionPacket(approval.Description), Draft: draft, Undraft: !draft}
+	_, err = lg.land(branch, trailer, pinnedGitlab(lg.repo, pin, pres))
+	var pending *git.LandPending
+	if !errors.As(err, &pending) {
+		if err == nil {
+			err = fmt.Errorf("jinbe.OpenApprovalMR: %s's MR open reported no pending MR", container.ID)
+		}
+		return err
+	}
+	// The Watch first: the MR: line fences the Approval from re-dispatch (bd.AwaitingUndraft), so an
+	// Approval carrying it must already have a Watch to see the un-draft. A Watch with no waiting
+	// Approval yet does nothing. Residual window: a failure between the MR: line and the publish
+	// still deletes the session's offshoot Drafts, and no re-run recreates them.
+	if err := spawnMRWatch(container, lg, pending.MR, pending.WebURL); err != nil {
+		return err
+	}
+	return setMRLines(&approval, lg.mrPath, pending.MR, pending.WebURL)
+}
+
+// ApprovalMRDraft reads container's open MR for the re-approval rule (Spec FR 19–24): open is
+// whether the branch has one, draft its GitLab draft flag.
+func ApprovalMRDraft(container bd.Bead) (open, draft bool, err error) {
+	lg, ok, err := legsFor(container, true)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	mr, err := forgeFindOpenMR(lg.proj, git.BranchName(string(container.Kind), container.ID))
+	if err != nil || mr == nil {
+		return false, false, err
+	}
+	return true, mr.Draft, nil
+}
+
 // landOutcome is eventlog.RecordLandOutcome with the legs' nested attrs (context=/repo=/into=), none for a Workspace land.
 func landOutcome(lg legs, b bd.Bead, outcome eventlog.LandOutcome, mr int, extra ...any) {
 	eventlog.RecordLandOutcome(b, outcome, mr, append(extra, lg.attrs...)...)
@@ -1109,12 +1250,36 @@ type legs struct {
 	compose    func(branch, trailer, packet, subject string) (composed, base, pin string, err error)
 	sameBase   func(composed, base, pin string) git.LandStrategy
 	land       func(branch, trailer string, st git.LandStrategy) (string, error)
-	gateAttr   func() string // read only on the gated path
+	gate       func() cfglayer.GateSpec // read only on the gated path
 	gateBuild  func(landingID, rev, attr string) (string, error)
-	dir        string        // the child's dir from the Workspace root; "" for a Workspace land
-	attrs      []any         // context=/repo=/into= on a nested land's events
-	proj       forge.Project // the GitLab project of repo's Forge remote; zero unless legsFor ran under gitlab
-	mrPath     string        // the project path an MR line names: "" for the Workspace's, else proj's path (ADR 0230)
+	gateCmd    func(cmd string) error // runs a command gate at the landed repo's root
+	resetTree  func() error           // clears a command gate's leftovers from the landed repo's root
+	dir        string                 // the child's dir from the Workspace root; "" for a Workspace land
+	attrs      []any                  // context=/repo=/into= on a nested land's events
+	proj       forge.Project          // the GitLab project of repo's Forge remote; zero unless legsFor ran under gitlab
+	mrPath     string                 // the project path an MR line names: "" for the Workspace's, else proj's path (ADR 0230)
+	disc       *discussionsRead       // the tick's one shared discussions read; nil reads afresh every call
+}
+
+// discussionsRead is a tick's lazily-filled read of one MR's discussions, shared by the
+// Forge Review arm, the close-out arm and the open-thread recorder so a tick never GETs
+// them twice (Spec D4). A failed read is remembered too, and so returned to each caller.
+type discussionsRead struct {
+	done bool
+	list []forge.Discussion
+	err  error
+}
+
+// discussions is the MR's discussions: read once through lg.disc when it is set.
+func (lg legs) discussions(iid int) ([]forge.Discussion, error) {
+	if lg.disc == nil {
+		return forgeDiscussions(lg.proj, iid)
+	}
+	if !lg.disc.done {
+		lg.disc.list, lg.disc.err = forgeDiscussions(lg.proj, iid)
+		lg.disc.done = true
+	}
+	return lg.disc.list, lg.disc.err
 }
 
 // legsFor resolves cp's land legs. ok is false when cp's repo: stamp disagrees with
@@ -1135,7 +1300,21 @@ func legsFor(cp bd.Bead, gitlab bool) (lg legs, ok bool, err error) {
 	}
 	if r == "" {
 		return legs{landedBase: landedBase, head: branchHead, compose: composeLanding, sameBase: sameBaseLand,
-			land: landBranch, gateAttr: gateAttr, gateBuild: gateBuild, proj: proj}, true, nil
+			land: landBranch, gate: gateSpec, gateBuild: gateBuild, proj: proj,
+			gateCmd: func(cmd string) error {
+				top, err := git.TopLevelOf(".")
+				if err != nil {
+					return &looplock.InfraError{Err: err}
+				}
+				return gateCommand(top, cmd)
+			},
+			resetTree: func() error {
+				top, err := git.TopLevelOf(".")
+				if err != nil {
+					return err
+				}
+				return resetLandTree(top)
+			}}, true, nil
 	}
 	root, err := git.TopLevelOf(".")
 	if err != nil {
@@ -1145,7 +1324,9 @@ func legsFor(cp bd.Bead, gitlab bool) (lg legs, ok bool, err error) {
 	return legs{proj: proj, mrPath: proj.Path(),
 		repo: r, dir: dir, tree: tree, landedBase: r.LandedBase, head: r.Head,
 		compose: tree.Compose, sameBase: tree.LandSameBase, land: r.Land,
-		gateAttr: func() string { return contextGate(root, bd.ContextOf(cp)) },
+		gate:      func() cfglayer.GateSpec { return contextGateSpec(root, bd.ContextOf(cp)) },
+		gateCmd:   func(cmd string) error { return gateCommand(string(tree), cmd) },
+		resetTree: func() error { return resetLandTree(string(tree)) },
 		gateBuild: func(landingID, rev, attr string) (string, error) {
 			common, err := git.CommonDirOf(string(r))
 			if err != nil {
@@ -1193,8 +1374,16 @@ const maxGateAttempts = 3
 // with the Landing open. Nothing is remembered across ticks.
 func gatedLand(l, cp bd.Bead, branch, trailer, pin, packet, subject string, lg legs) error {
 	var lastBase, lastComposed string
-	attr := lg.gateAttr()
+	spec := lg.gate()
+	ranCmd := false
 	for attempt := 1; attempt <= maxGateAttempts; attempt++ {
+		if ranCmd { // a command gate may have dirtied the tree; the nix gate never writes it
+			if err := lg.resetTree(); err != nil {
+				eventlog.RecordGate("gate.infra", l, pin, lastBase, lastComposed, attempt,
+					"dur_ms", int64(0), "err", "cannot prepare the land tree: "+err.Error(), "timeout", false)
+				return &looplock.InfraError{Err: err}
+			}
+		}
 		composed, base, composedPin, err := lg.compose(branch, trailer, packet, subject)
 		lastBase, lastComposed = base, composed
 		if err != nil {
@@ -1207,21 +1396,40 @@ func gatedLand(l, cp bd.Bead, branch, trailer, pin, packet, subject string, lg l
 		gate := func(event string, extra ...any) {
 			eventlog.RecordGate(event, l, pin, base, composed, attempt, extra...)
 		}
+		if spec.Err != nil { // a land that can't tell what to enforce refuses rather than skips
+			gate("gate.infra", "dur_ms", int64(0), "err", spec.Err.Error(), "timeout", false)
+			return spec.Err
+		}
 		if dup, err := gateCritiqueOpen(cp.ID, base, pin); err != nil {
 			return err
 		} else if dup {
-			gate("gate.failed", "dur_ms", int64(0), "drv", "", "critique", "deduped")
+			if spec.Kind == cfglayer.GateCommand {
+				gate("gate.failed", "dur_ms", int64(0), "critique", "deduped")
+			} else {
+				gate("gate.failed", "dur_ms", int64(0), "drv", "", "critique", "deduped")
+			}
 			return closeIfOpen(l, "obsolete: build failed")
 		}
-		if attr == "" { // no gate key: this Workspace lands ungated, visibly
+		switch spec.Kind {
+		case cfglayer.GateNone: // no gate key: this Workspace lands ungated, visibly
 			gate("gate.skipped")
-		} else {
-			gate("gate.started", "ref", "refs/mugicrew/gate/"+l.ID)
+		case cfglayer.GateCommand:
+			gate("gate.started", "cmd", spec.Value)
+			ranCmd = true
 			start := time.Now()
-			out, err := lg.gateBuild(l.ID, composed, attr)
+			err := lg.gateCmd(spec.Value)
 			ms := time.Since(start).Milliseconds()
 			if err != nil {
-				return gateOutcome(l, cp, err, base, pin, lg, ms, gate)
+				return gateOutcome(l, cp, err, base, pin, spec, lg, ms, gate)
+			}
+			gate("gate.passed", "dur_ms", ms)
+		default:
+			gate("gate.started", "ref", "refs/mugicrew/gate/"+l.ID)
+			start := time.Now()
+			out, err := lg.gateBuild(l.ID, composed, spec.Value)
+			ms := time.Since(start).Milliseconds()
+			if err != nil {
+				return gateOutcome(l, cp, err, base, pin, spec, lg, ms, gate)
 			}
 			gate("gate.passed", "dur_ms", ms, "out", out)
 		}
@@ -1245,7 +1453,7 @@ func gatedLand(l, cp bd.Bead, branch, trailer, pin, packet, subject string, lg l
 // gateOutcome handles a failed gate build: an infra failure is logged and
 // returned (the Landing stays open); a builder failure spawns a Critique and
 // closes the Landing obsolete.
-func gateOutcome(l, cp bd.Bead, err error, base, pin string, lg legs, ms int64, gate func(string, ...any)) error {
+func gateOutcome(l, cp bd.Bead, err error, base, pin string, spec cfglayer.GateSpec, lg legs, ms int64, gate func(string, ...any)) error {
 	var infra *looplock.InfraError
 	if errors.As(err, &infra) {
 		why := infra.Tail // already capped by looplock
@@ -1260,18 +1468,27 @@ func gateOutcome(l, cp bd.Bead, err error, base, pin string, lg legs, ms int64, 
 	}
 	// ponytail: spawnChild dedupes on ANY open Critique, so one pinned to another
 	// base absorbs this failure and no base-pinned Critique is filed. Accepted: a
-	// held Checkpoint (CheckpointLandHold) is not re-gated while Critiques are open;
+	// held Checkpoint (the verdict's land-held cause) is not re-gated while Critiques are open;
 	// spawn with a pin match if that proves reachable.
+	cmdGate := spec.Kind == cfglayer.GateCommand
+	title := "Checkpoint " + cp.ID + " fails the pinned nix build"
+	if cmdGate {
+		title = "Checkpoint " + cp.ID + " fails the pinned gate command"
+	}
 	id, _, cerr := spawnChild(cp.ID, bd.Successor{
 		Kind:           contract.KindCritique,
-		Title:          "Checkpoint " + cp.ID + " fails the pinned nix build",
-		Description:    gateCritiqueBody(builder, base, pin, lg),
+		Title:          title,
+		Description:    gateCritiqueBody(builder, base, pin, spec, lg),
 		DiscoveredFrom: l.ID,
 	})
 	if cerr != nil {
 		return cerr
 	}
-	gate("gate.failed", "dur_ms", ms, "drv", builder.Drv, "critique", id)
+	if cmdGate {
+		gate("gate.failed", "dur_ms", ms, "exit", builder.Exit, "critique", id)
+	} else {
+		gate("gate.failed", "dur_ms", ms, "drv", builder.Drv, "critique", id)
+	}
 	return closeIfOpen(l, "obsolete: build failed")
 }
 
@@ -1294,14 +1511,20 @@ func gateCritiqueOpen(cpID, base, tip string) (bool, error) {
 
 // gateCritiqueBody is the Critique a failed gate build files (ADR 0152): the
 // Base:/Tip: pins Franky rebases onto and cuts from, the failing derivation, the
-// log tail and a repro. lg names the flake attr that was built and, for a nested
-// land, the child's dir.
-func gateCritiqueBody(e *looplock.BuilderError, base, tip string, lg legs) string {
-	attr := lg.gateAttr()
+// log tail and a repro. spec is the gate that ran; lg names, for a nested land,
+// the child's dir.
+func gateCritiqueBody(e *looplock.BuilderError, base, tip string, spec cfglayer.GateSpec, lg legs) string {
 	where := "the repo root"
 	if lg.dir != "" {
 		where = "the root of the nested repo `" + lg.dir + "` (git -C " + lg.dir + ")"
 	}
+	if spec.Kind == cfglayer.GateCommand {
+		return "The gate command `" + spec.Value + "` exited " + strconv.Itoa(e.Exit) + " on the composed squash of this Checkpoint. Franky rebases onto the pinned base, then fixes test-first.\n" +
+			git.BasePin(base) + "\n" + git.TipPin(tip) + "\n" +
+			"Exit: " + strconv.Itoa(e.Exit) + "\n```\n" + strings.TrimRight(e.Log, "\n") + "\n```\n" +
+			"Repro: rebase the tip onto the base in a scratch tree, then run `sh -c '" + spec.Value + "'` at " + where + ", in the loop's environment.\n"
+	}
+	attr := spec.Value
 	return "The gate build of #" + attr + " failed on the composed squash of this Checkpoint. Franky rebases onto the pinned base, then fixes test-first.\n" +
 		git.BasePin(base) + "\n" + git.TipPin(tip) + "\n" +
 		"Drv: " + e.Drv + "\n```\n" + strings.TrimRight(e.Log, "\n") + "\n```\n" +
@@ -1521,9 +1744,9 @@ func reconcileGitlabRollback(rb, cp bd.Bead, lg rbLeg, squash, base string) erro
 }
 
 // revertMRArms is a recorded revert MR's tick (ADR 0208, 0209): merged without its trailer
-// holds on a Task; a human close abandons (or, with a successor already spawned, resumes
+// holds on an Errand; a human close abandons (or, with a successor already spawned, resumes
 // the fix-forward); an open MR rebuilds on a conflict, retries a red pipeline once and
-// holds on a Task for a real failure. The Landing-shaped mirrorMR arms are not reused.
+// holds on an Errand for a real failure. The Landing-shaped mirrorMR arms are not reused.
 func revertMRArms(rb, cp bd.Bead, lg rbLeg, squash, base, reverts string, iid int, pin string) error {
 	mr, err := forgeMR(lg.proj, iid)
 	if err != nil {
@@ -1664,8 +1887,8 @@ func fixForwardRevert(rb, cp bd.Bead, lg rbLeg, squash string, iid int, conflict
 }
 
 // revertPipelineFailed is ADR 0188 for a revert MR (ADR 0208 §4): retry once and record
-// it; a failure after the retry, infra or real, files a HITL Task blocking the Rollback
-// with the pipeline URL and failing jobs' tails, and records Held: so a closed Task does
+// it; a failure after the retry, infra or real, files a HITL Errand blocking the Rollback
+// with the pipeline URL and failing jobs' tails, and records Held: so a closed Errand does
 // not re-file for the same run.
 func revertPipelineFailed(rb *bd.Bead, lg rbLeg, iid int, pl forge.Pipeline) error {
 	if !retriedPipeline(rb.Description, pl.ID) {
@@ -1684,22 +1907,22 @@ func revertPipelineFailed(rb *bd.Bead, lg rbLeg, iid int, pl forge.Pipeline) err
 	link := git.RecordedMRLink(rb.Description)
 	var body string
 	if infra {
-		body = bd.TaskBody(infraTaskLead+" the runner, not the code, failed on the revert MR.", pipelineTaskFacts(ref, link, facts),
-			[]bd.TaskStep{infraRetryStep(ref, pl.ID, rb.ID, true)}, tails)
+		body = bd.ErrandBody(infraErrandLead+" the runner, not the code, failed on the revert MR.", pipelineErrandFacts(ref, link, facts),
+			[]bd.ErrandStep{infraRetryStep(ref, pl.ID, rb.ID, true)}, tails)
 	} else {
-		body = bd.TaskBody("The retried pipeline failed on the revert MR; main may be red for the very breakage being rolled back.",
-			pipelineTaskFacts(ref, link, facts), []bd.TaskStep{{
+		body = bd.ErrandBody("The retried pipeline failed on the revert MR; main may be red for the very breakage being rolled back.",
+			pipelineErrandFacts(ref, link, facts), []bd.ErrandStep{{
 				Title:   "Merge the revert MR to hand off, or close it to abandon this Rollback.",
 				Markers: []string{"irreversible"},
-				Do:      fmt.Sprintf("merge or close the revert MR %s on the Forge at the MR link (a closed MR makes this Task moot).", ref),
+				Do:      fmt.Sprintf("merge or close the revert MR %s on the Forge at the MR link (a closed MR makes this Errand moot).", ref),
 				Check:   fmt.Sprintf("`mugicrew probe mr '%s'` prints `merged` or `closed`.", ref),
 			}}, tails)
 	}
-	task, err := holdTask(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), body)
+	errand, _, err := holdErrand(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), body)
 	if err != nil {
 		return err
 	}
-	eventlog.RecordRevertPipelineFailed(*rb, iid, pl.ID, infra, task, lg.attrs...)
+	eventlog.RecordRevertPipelineFailed(*rb, iid, pl.ID, infra, errand, lg.attrs...)
 	return holdPipeline(*rb, pl)
 }
 
@@ -1910,8 +2133,11 @@ func pinnedFixForward(rbID string) (*git.RevertConflict, error) {
 // whose pass obsoletes it.
 func spawnReviewIfDue(cp bd.Bead) error {
 	due, err := reviewDue(cp.ID, contexts.AtHead(cp, approvedAtHead))
-	if err != nil || !due {
+	if err != nil {
 		return err
+	}
+	if !due {
+		return healCarried(cp)
 	}
 	// the probe runs where a Landing would: the child for a repo = context (ADR 0166)
 	repo, _ := repoDirOf(cp)
@@ -1933,8 +2159,94 @@ func spawnReviewIfDue(cp bd.Bead) error {
 	case err != nil:
 		return err
 	}
-	_, _, err = spawnChild(cp.ID, reviewSuccessor(cp.ID))
+	carried, note, err := carryRenumber(cp, repo, base, head)
+	if err != nil || carried {
+		return err
+	}
+	rev := reviewSuccessor(cp.ID)
+	if note != "" {
+		rev.Description += "\n" + note
+	}
+	_, _, err = spawnChild(cp.ID, rev)
 	return err
+}
+
+// carryRenumber is the renumber-only check (ADR 0398 §1) between the clean probe and the
+// bare Review: when the head is the newest approved Approval's squash replayed modulo a
+// renumber (git.VerifyRenumber, ADR 0397), it writes the carried Approval closed approved
+// at birth, caused-by the one it carries, and reports carried, so the at-head gate spawns
+// the Landing next tick. A reject returns the not-carried note for the Review instead,
+// never a partial carry; no prior approved Approval, or an open Approval still pinned
+// elsewhere (the Review's pass obsoletes it), is today's Review with no note. A git
+// failure is an error with nothing spawned: the check keeps no memo, and the next tick
+// retries.
+func carryRenumber(cp bd.Bead, repo git.Repo, base string, head func(string) (string, error)) (carried bool, note string, err error) {
+	kids, err := childrenOfKind(cp.ID, contract.KindApproval)
+	if err != nil {
+		return false, "", err
+	}
+	var last *bd.Bead
+	for i, k := range kids {
+		if k.Open() {
+			return false, "", nil
+		}
+		if _, ok := git.ParseCommit(k.Description); k.ApprovedClosed() && ok && (last == nil || !k.Closed.Before(last.Closed)) {
+			last = &kids[i]
+		}
+	}
+	if last == nil {
+		return false, "", nil
+	}
+	oldPin, _ := git.ParseCommit(last.Description)
+	newHead, err := head("refs/heads/" + checkpointBranch(cp.ID))
+	if err != nil {
+		return false, "", err
+	}
+	rules, err := sequenceRules(repo)
+	if err != nil {
+		return false, "", err
+	}
+	v, err := verifyRenumber(repo, rules, oldPin, newHead, base)
+	if err != nil {
+		return false, "", err
+	}
+	if !v.Accept {
+		return false, bd.NotCarriedNote(v.Point, v.File), nil
+	}
+	renames := make([]bd.Rename, len(v.Renames))
+	for i, r := range v.Renames {
+		renames[i] = bd.Rename{Path: r.Path, Old: r.Old, New: r.New}
+	}
+	id, _, err := spawnChild(cp.ID, bd.Successor{
+		Kind:        contract.KindApproval,
+		Title:       cp.Title,
+		Description: bd.CarriedApprovalBody(last.Title, newHead, "", oldPin, renames),
+		CausedBy:    last.ID,
+	})
+	if err != nil {
+		return false, "", err
+	}
+	return true, "", closeBead(id, bd.ApprovedReason)
+}
+
+// healCarried closes a carried Approval left open at head by a crash between its spawn and
+// its close: it is born carried, so no human is ever asked for it, and an open Approval at
+// head would otherwise make the Review not due and wait forever.
+// ponytail: reads the Approval children each tick a Checkpoint is not due.
+func healCarried(cp bd.Bead) error {
+	kids, err := childrenOfKind(cp.ID, contract.KindApproval)
+	if err != nil {
+		return err
+	}
+	atHead := contexts.AtHead(cp, approvedAtHead)
+	for _, k := range kids {
+		if k.Open() && bd.IsCarriedApproval(k.Description) && atHead(k.Description, checkpointBranch(cp.ID)) {
+			if err := closeBead(k.ID, bd.ApprovedReason); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // reviewSuccessor is the one Review member a drained Checkpoint spawns: a bare
@@ -1970,11 +2282,23 @@ func checkpointApproval(cp bd.Bead) (*bd.Bead, error) {
 	return nil, nil
 }
 
+// ChartApproval is the Chart's twin of checkpointApproval: the closed Approval whose close is
+// approved and whose Commit: pin is chart/<id>'s live tip, or nil. It scans ALL closed Approvals
+// (an obsoleted stale one carries an old pin) and reads the tip in the Chart's repo through
+// contexts.AtHead. A Landing lands only at its pin, so at the land this is the Landing's Approval.
+func ChartApproval(chart bd.Bead) (*bd.Bead, error) {
+	approvals, err := closedChildrenOfKind(chart.ID, contract.KindApproval)
+	if err != nil {
+		return nil, err
+	}
+	return contexts.ApprovedAtHead(chart, approvals, approvedAtHead, git.BranchName(string(chart.Kind), chart.ID)), nil
+}
+
 // fileConflict raises the one open kind:conflict member that undrains the Checkpoint
 // on a rebase collision (mirrors fileChartConflict — but Franky-owned AFK, unlike the
 // HITL chart-conflict): idempotent via SpawnChildIfAbsent's open-child guard, so a
 // re-run with the conflict still open files no second bead. The undrain is what keeps
-// the loop off it: loop.CheckpointReady excludes a Checkpoint with an open conflict/
+// the loop off it: the eligibility verdict refuses a Checkpoint (defect-open) with an open conflict/
 // critique child, so this bead being open drops it from land-candidacy until
 // Franky resolves it. The member carries the Base: pin (git.BasePin) Franky's runConflict
 // greps back to rebase onto, and the Tip: pin (git.TipPin) of the Checkpoint tip the

@@ -37,14 +37,14 @@ func eventNamed(evs []eventlogtest.Event, name string) eventlogtest.Event {
 	return eventlogtest.Event{}
 }
 
-func TestRevertMergedWithoutTrailerHoldsOnATask(t *testing.T) {
+func TestRevertMergedWithoutTrailerHoldsOnAErrand(t *testing.T) {
 	r := pendingRevert(forge.MR{State: "merged", MergeCommitSHA: "m1"})
 	stubRollbackSeams(t, r)
 	if err := reconcileRollback(r.rollback()); err == nil {
 		t.Fatal("want the tick to fail while the trailer is missing")
 	}
-	if !slices.Equal(r.tasks, []string{"ws-rb|Merged MR: !9\n"}) || !strings.Contains(r.taskBody, "Reverts-Checkpoint: ws-cp") {
-		t.Errorf("tasks %q body %q, want one Task blocking the Rollback naming the trailer", r.tasks, r.taskBody)
+	if !slices.Equal(r.errands, []string{"ws-rb|Merged MR: !9\n"}) || !strings.Contains(r.errandBody, "Reverts-Checkpoint: ws-cp") {
+		t.Errorf("errands %q body %q, want one Errand blocking the Rollback naming the trailer", r.errands, r.errandBody)
 	}
 	if len(r.closed) != 0 || r.fetches != 2 {
 		t.Errorf("closed %v fetches %d, want an open Rollback after a second fetch", r.closed, r.fetches)
@@ -185,18 +185,18 @@ func TestRevertRedPipelineRetriesOnceThenHolds(t *testing.T) {
 		stubRollbackSeams(t, r)
 		evs := eventlogtest.Capture(t)
 		tick(t, r) // retry
-		if !slices.Equal(r.retries, []int{42}) || !strings.Contains(r.body, "Retried: pipeline 42") || len(r.tasks) != 0 {
-			t.Fatalf("retries %v body %q tasks %v, want one retry recorded", r.retries, r.body, r.tasks)
+		if !slices.Equal(r.retries, []int{42}) || !strings.Contains(r.body, "Retried: pipeline 42") || len(r.errands) != 0 {
+			t.Fatalf("retries %v body %q errands %v, want one retry recorded", r.retries, r.body, r.errands)
 		}
 		tick(t, r) // failed again: hold
 		tick(t, r) // held: nothing new
-		if !slices.Equal(r.retries, []int{42}) || !slices.Equal(r.tasks, []string{"ws-rb|Pipeline: 42\n"}) {
-			t.Errorf("infra=%v retries %v tasks %v, want one retry and one Task", infra, r.retries, r.tasks)
+		if !slices.Equal(r.retries, []int{42}) || !slices.Equal(r.errands, []string{"ws-rb|Pipeline: 42\n"}) {
+			t.Errorf("infra=%v retries %v errands %v, want one retry and one Errand", infra, r.retries, r.errands)
 		}
-		if !strings.Contains(r.taskBody, "https://gl/p/42") || !strings.Contains(r.taskBody, "tail of job 5") {
-			t.Errorf("task body = %q, want the URL and the job tail", r.taskBody)
+		if !strings.Contains(r.errandBody, "https://gl/p/42") || !strings.Contains(r.errandBody, "tail of job 5") {
+			t.Errorf("errand body = %q, want the URL and the job tail", r.errandBody)
 		}
-		if e := eventNamed(*evs, "revert.pipeline_failed"); e.Attrs["infra"] != infra || e.Attrs["pipeline"] != 42 || e.Attrs["mr"] != 9 || e.Attrs["task"] != "ws-task" {
+		if e := eventNamed(*evs, "revert.pipeline_failed"); e.Attrs["infra"] != infra || e.Attrs["pipeline"] != 42 || e.Attrs["mr"] != 9 || e.Attrs["errand"] != "ws-errand" {
 			t.Errorf("revert.pipeline_failed = %v", e)
 		}
 		if e := eventNamed(*evs, "revert.retried"); e.Attrs["pipeline"] != 42 || e.Attrs["mr"] != 9 {

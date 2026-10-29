@@ -4,7 +4,7 @@ How to stand up a throwaway client-shaped Workspace, drive one cross-repo item
 from Signal to Land under `land_strategy = "gitlab"` with a Jira Latch, hand off
 to a second human, file what blocks, and tear it all down. The blockers filed are
 the deliverable; fixing them is out of scope. Each section matches a step of the
-Task "Run the client-shaped dry run and file its blockers" (step numbers in
+Errand "Run the client-shaped dry run and file its blockers" (step numbers in
 brackets).
 
 Placeholders: `<group>` (GitLab group path), `<site>` (Jira site host, e.g.
@@ -30,7 +30,7 @@ a commit; token steps happen in your own terminal.
 
 ## Provision
 
-[Task steps 1-4]
+[Errand steps 1-4]
 
 1. **Group** [irreversible]: logged in to gitlab.com as `shawnlee_toptal`, create
    the private group `<group>`. Check: `glab api groups/<group>` returns it,
@@ -49,7 +49,7 @@ a commit; token steps happen in your own terminal.
 3. **Land settings, on every project**: Settings > Merge requests, **Squash
    commits** = Require, **Squash commit message template** = `%{title}`, a blank
    line, then `%{description}`. Other squash settings are refused; see
-   [GitLab land strategy](../README.md#gitlab-land-strategy). Check:
+   [GitLab land strategy](gitlab.md). Check:
    `glab api projects/<id>` shows `squash_option` = `always` and
    `squash_commit_template` = `%{title}\n\n%{description}`, for each project.
 4. **Second member**: invite `shawnlee_minerva` to `<group>` as Developer or
@@ -57,7 +57,7 @@ a commit; token steps happen in your own terminal.
 
 ## Jira
 
-[Task step 5, secret]
+[Errand step 5, secret]
 
 Create a free Jira Cloud site `<site>`, one project, and one ticket `<KEY-1>`.
 Install `acli` and log in with `acli jira auth login` **in your own terminal**
@@ -70,12 +70,12 @@ sets it once the Workspace is cloned.
 `mugicrew latch jira` and intake read the ticket through `acli`, and a mismatch
 between `acli`'s active site and `[jira] site` is diagnosed with a fix. Latches
 are re-polled on the interval in
-[Latch poll intervals](../README.md#latch-poll-intervals). Check: the ticket is
+[Poll intervals](configuration.md#poll-intervals). Check: the ticket is
 visible in Jira and `acli jira workitem view <KEY-1>` succeeds.
 
 ## Workspace config
 
-[Task step 6]
+[Errand step 6]
 
 For each account, in its own clone and `BEADS_DIR` (install and prerequisites:
 [install.md](install.md)):
@@ -89,7 +89,7 @@ For each account, in its own clone and `BEADS_DIR` (install and prerequisites:
    on clone or pull (see [First human in a Workspace](install.md#first-human-in-a-workspace)).
    The file is the shared one, not the machine-local
    `<git-common-dir>/mugicrew/config.toml`; for hand edits see
-   [Declaring contexts](../README.md#declaring-contexts). Check the whole file
+   [Declaring contexts](configuration.md#declaring-contexts). Check the whole file
    reads:
 
    ```toml
@@ -111,7 +111,7 @@ For each account, in its own clone and `BEADS_DIR` (install and prerequisites:
 
 3. `mugicrew init --prefix <p>` with a **distinct** prefix per human (e.g.
    `tpl` and `mnv`); see [ADR 0187](adr/0187-mugicrew-a-land-trailer-carries-its-graph-and-landedbase-refuses-a-foreign-one.md) and
-   [GitLab land strategy](../README.md#gitlab-land-strategy).
+   [GitLab land strategy](gitlab.md).
 4. GitLab auth: follow [install.md's GitLab section](install.md#gitlab) as that
    account. For the second account, which cannot share the machine's glab
    login, put its token in a mode-600 file and export `GITLAB_TOKEN` from it in
@@ -125,7 +125,7 @@ differs between the two.
 
 ## The cycle
 
-[Task step 7]
+[Errand step 7]
 
 As `shawnlee_toptal`, file one Signal whose change touches both nested repos:
 "Add a shared greeting constant in `proj-a` and use it from `proj-b`". Take it
@@ -142,12 +142,12 @@ Handoff between users isn't supported by design.
 
 ## Filing blockers
 
-[Task step 8]
+[Errand step 8]
 
 File each blocker as an offshoot Signal (crew doc `signal-filing.md`):
 
 ```
-bd create --type task -s deferred --no-inherit-labels -l kind:signal,drafted-by:<Task id> \
+bd create --type task -s deferred --no-inherit-labels -l kind:signal,drafted-by:<Errand id> \
   --deps discovered-from:<dry-run Signal> \
   --title "<the blocker>" --description "<what happened>
 Blocks client: yes|no
@@ -155,7 +155,7 @@ Runbook step: <section name from this doc>"
 ```
 
 `<dry-run Signal>` is 'Dry run of mugicrew on a client-shaped GitLab multirepo
-Workspace'. `<Task id>` is the Task walking this step ('Run the
+Workspace'. `<Errand id>` is the Errand walking this step ('Run the
 client-shaped dry run and file its blockers'); its publish makes the Signals
 visible. Filed by hand outside a session, omit `-s deferred` and the
 `drafted-by` label so the Signal is open at once.
@@ -170,7 +170,7 @@ Signal lists one discovered-from offshoot per blocker.
 
 ## Teardown
 
-[Task step 9, irreversible]
+[Errand step 9, irreversible]
 
 Delete the GitLab group `<group>` (Settings > General > Advanced > Delete group)
 and the Jira site `<site>` (Atlassian admin > Billing/Manage subscriptions >

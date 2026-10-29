@@ -44,13 +44,11 @@ type world struct {
 	cwdErr error            // the cwd scan fails
 	sess   session.Info     // the bead's session; zero is gone
 	fail   map[string]error // a write's name → its error
+	bare   bool             // a shell with no graph dir: stub leaves BEADS_DIR unset
 	calls  []string
 	probes int
-	excl   []int                // the exclude set the cwd scan was handed
-	loop   string               // the loop lock's state; "" reads off
-	tuis   func(n int) []string // the n-th TUI read's tui-* sessions, n from 1
-	reads  int
-	tuiErr error // the TUI-alive read's error
+	excl   []int  // the exclude set the cwd scan was handed
+	loop   string // the loop lock's state; "" reads off
 }
 
 // set points seam p at v until the test ends.
@@ -62,6 +60,11 @@ func set[T any](t *testing.T, p *T, v T) {
 
 func stub(t *testing.T, w *world) {
 	t.Helper()
+	if w.bare {
+		t.Setenv("BEADS_DIR", "")
+	} else {
+		t.Setenv("BEADS_DIR", t.TempDir()) // the sandbox has no repo to resolve a graph dir from
+	}
 	write := func(name string, apply func()) error {
 		w.calls = append(w.calls, name)
 		if err := w.fail[name]; err != nil {
@@ -110,13 +113,6 @@ func stub(t *testing.T, w *world) {
 		}
 		return w.loop, nil
 	})
-	set(t, &tuiAlive, func(exclude string) (bool, error) {
-		w.reads++
-		if w.tuis == nil {
-			return false, w.tuiErr
-		}
-		return slices.ContainsFunc(w.tuis(w.reads), func(s string) bool { return s != exclude }), nil
-	})
 	set(t, &lineage, func(pid int) []int { return []int{pid, 1} })
 	set(t, &pause, func(_, c string) error {
 		return write("pause "+c, func() { w.bead.Labels = append(w.bead.Labels, "paused:"+c) })
@@ -134,12 +130,12 @@ func stub(t *testing.T, w *world) {
 	set(t, &unclaim, func(string) error { return write("unclaim", func() { w.bead.Status = "open" }) })
 }
 
-// Judge encodes the AFK rows of ADR 0127 §2 (as amended on mc-yr7o.6): a live
-// probe or any cwd in the tree reads alive and names mugicrew abort; an AFK bead
-// on a tree route the probe reads dead, paused abandoned (or fenced by an earlier
-// recover), reads dead; a not-abandoned one is ambiguous, resolved only with the
-// loop lock free and no TUI alive; an abandoned in-process one always needs
-// --force; --force overrides ambiguous, never with the loop lock held.
+// Judge encodes the AFK rows of ADR 0127 §2 as amended by ADR 0391: a live
+// probe or any cwd in the tree, or a held dispatcher lock, reads alive and names
+// mugicrew abort, even forced. An AFK bead past those is an Orphaned claim: dead
+// on a worktree or detached route, paused abandoned or not; on a repo-root route
+// ambiguous without --force (never naming the loop) and forced with it. The loop
+// lock and the TUI-alive read decide no AFK verdict; HITL rows are unchanged.
 func TestJudge(t *testing.T) {
 	ab := []string{"paused:abandoned"}
 	spec := bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Labels: ab}
@@ -157,23 +153,23 @@ func TestJudge(t *testing.T) {
 		{"cwd names abort", Holder{Bead: stranded(), Placement: route.Worktree, LockFree: true, Cwd: []int{8}}, "mugicrew abort mc-a"},
 		{"forced, still alive", Holder{Bead: stranded(), Placement: route.Worktree, LockFree: true, Force: true, Probe: []int{7}}, "mugicrew abort mc-a"},
 		{"dispatcher lock held, dead", Holder{Bead: stranded(), Placement: route.Worktree, Held: true}, heldBy},
+		{"graph dir unresolvable, worktree orphan", Holder{Bead: stranded(), Placement: route.Worktree, HeldErr: errors.New("no graph")}, "can't resolve the graph dir"},
 		{"dispatcher lock held, forced", Holder{Bead: stranded(), Placement: route.Worktree, LockFree: true, Held: true, Force: true}, heldBy},
 		{"dispatcher lock held, forced with the loop on", Holder{Bead: stranded(), Placement: route.Worktree, Held: true, Force: true}, heldBy},
-		{"dispatcher lock held, ambiguous resolved", Holder{Bead: held, Placement: route.Worktree, LockFree: true, Held: true}, "mugicrew abort mc-a"},
+		{"dispatcher lock held, not abandoned", Holder{Bead: held, Placement: route.Worktree, LockFree: true, Held: true}, "mugicrew abort mc-a"},
+		{"dispatcher lock held, in-process, forced, loop off", Holder{Bead: held, Placement: route.RepoRoot, LockFree: true, Held: true, Force: true}, "mugicrew abort mc-a"},
 		{"worktree, abandoned", Holder{Bead: stranded(), Placement: route.Worktree}, Dead},
 		{"detached, abandoned", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindCheckpoint, Labels: ab}, Placement: route.Detached}, Dead},
 		{"fenced by an earlier recover", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Labels: []string{"paused:recovering"}}, Placement: route.Worktree}, Dead},
 		{"in-process, abandoned", Holder{Bead: spec, Placement: route.RepoRoot}, "pgrep -a claude"},
 		{"in-process, abandoned, lock free, no TUI", Holder{Bead: spec, Placement: route.RepoRoot, LockFree: true}, "--force"},
 		{"in-process, abandoned, forced", Holder{Bead: spec, Placement: route.RepoRoot, LockFree: true, Force: true}, Forced},
-		{"not abandoned, lock free, no TUI", Holder{Bead: held, Placement: route.Worktree, LockFree: true}, AmbiguousResolved},
-		{"not abandoned in-process, lock free, no TUI", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Status: "in_progress"}, Placement: route.RepoRoot, LockFree: true}, AmbiguousResolved},
-		{"not abandoned, loop on", Holder{Bead: held, Placement: route.Worktree}, "the loop is on"},
-		{"not abandoned, a TUI alive", Holder{Bead: held, Placement: route.Worktree, LockFree: true, TUIAlive: true}, "a TUI is alive"},
-		{"not abandoned, TUI read fails", Holder{Bead: held, Placement: route.Worktree, LockFree: true, TUIErr: errors.New("tmux: EACCES")}, "tmux: EACCES"},
-		{"not abandoned, loop on, forced", Holder{Bead: held, Placement: route.Worktree, Force: true}, "loop is off"},
-		{"not abandoned, a TUI alive, forced", Holder{Bead: held, Placement: route.Worktree, LockFree: true, TUIAlive: true, Force: true}, Forced},
-		{"dead, forced with the loop on", Holder{Bead: stranded(), Placement: route.Worktree, Force: true}, "loop is off"},
+		{"in-process, forced with the loop on", Holder{Bead: spec, Placement: route.RepoRoot, Force: true}, Forced},
+		{"in-process orphan, loop on", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Status: "in_progress"}, Placement: route.RepoRoot}, "pgrep -a claude"},
+		{"worktree orphan, not abandoned, loop on", Holder{Bead: held, Placement: route.Worktree}, Dead},
+		{"worktree orphan, not abandoned, loop free", Holder{Bead: held, Placement: route.Worktree, LockFree: true}, Dead},
+		{"worktree orphan, abandoned, loop on", Holder{Bead: stranded(), Placement: route.Worktree}, Dead},
+		{"worktree orphan, forced with the loop on", Holder{Bead: held, Placement: route.Worktree, Force: true}, Dead},
 		{"dead, forced, lock free", Holder{Bead: stranded(), Placement: route.Worktree, LockFree: true, Force: true}, Dead},
 		{"HITL session alive", Holder{Bead: hitl(), Session: session.Info{State: session.Alive}}, "alive"},
 		{"HITL session alive and closing", Holder{Bead: hitl(), Session: session.Info{State: session.Alive, Closing: true}}, "alive"},
@@ -181,8 +177,13 @@ func TestJudge(t *testing.T) {
 		{"HITL session gone", Holder{Bead: hitl()}, Dead},
 		{"HITL session gone, not abandoned", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindSurgery, Status: "in_progress"}}, Dead},
 		{"HITL session table unreadable", Holder{Bead: hitl(), SessionErr: errors.New("tmux: EACCES")}, "tmux: EACCES"},
+		{"HITL, forced with the loop on", Holder{Bead: hitl(), Force: true}, "loop is off"},
+		{"HITL, forced with the loop off", Holder{Bead: hitl(), LockFree: true, Force: true}, Dead},
 		{"HITL session gone, probe alive", Holder{Bead: hitl(), Probe: []int{7}}, "mugicrew abort mc-a"},
-		{"session table unreadable", Holder{Bead: stranded(), Placement: route.Worktree, SessionErr: errors.New("tmux: EACCES")}, "tmux: EACCES"},
+		{"worktree AFK orphan, session table unreadable", Holder{Bead: stranded(), Placement: route.Worktree, SessionErr: errors.New("tmux: EACCES")}, Dead},
+		{"worktree AFK paused:checkup, session table unreadable", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress", Labels: []string{"paused:checkup"}}, Placement: route.Worktree, SessionErr: errors.New("tmux: EACCES")}, "tmux: EACCES"},
+		{"open AFK paused:checkup, session table unreadable", Holder{Bead: bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Parent: "mc-cp", Status: "open", Labels: []string{"paused:checkup"}}, Placement: route.Worktree, SessionErr: errors.New("tmux: EACCES")}, "tmux: EACCES"},
+		{"in-process AFK, session table unreadable", Holder{Bead: spec, Placement: route.RepoRoot, SessionErr: errors.New("tmux: EACCES")}, "pgrep -a claude"},
 		{"kindless bead", Holder{Bead: bd.Bead{ID: "mc-a", Status: "in_progress"}}, "not a mugicrew bead"},
 		{"unroutable", Holder{Bead: stranded(), RouteErr: errors.New("no parent")}, "no parent"},
 	}
@@ -190,7 +191,7 @@ func TestJudge(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			v, err := Judge(c.h)
 			switch c.want {
-			case Dead, AmbiguousResolved, Forced:
+			case Dead, Forced:
 				if err != nil || v != c.want {
 					t.Errorf("Judge = %q, %v; want %s", v, err, c.want)
 				}
@@ -389,59 +390,56 @@ func TestRecoverExcludesItsOwnLineage(t *testing.T) {
 	}
 }
 
-// An AFK bead the probe reads dead but not paused abandoned is ambiguous: it
-// repairs as ambiguous-resolved once the loop lock is free and no TUI but the
-// caller's own is alive, and that is judged again after the fence (the fence
-// itself never stands in for abandoned in the run that set it).
-func TestRecoverAmbiguous(t *testing.T) {
+// An Orphaned claim on a worktree route (in_progress, not paused abandoned) is
+// dead whether the loop is on or off and whatever TUIs are alive, and is judged
+// again after the fence: a dispatcher that takes the flock in between refuses.
+func TestRecoverOrphanWithLoopOn(t *testing.T) {
 	evs := eventlogtest.Capture(t)
 	claimed := bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress"}
-	w := &world{bead: claimed, tuis: func(int) []string { return []string{"tui-9"} }}
+	w := &world{bead: claimed, loop: looplock.On}
 	stub(t, w)
-	r, err := Recover("mc-a", Opts{ExcludeTUISession: "tui-9"})
-	if err != nil || r.Verdict != AmbiguousResolved {
-		t.Fatalf("Recover = %+v, %v; want ambiguous-resolved with its own TUI excluded", r, err)
+	r, err := Recover("mc-a", Opts{})
+	if err != nil || r.Verdict != Dead || (*evs)[len(*evs)-1].Attrs["verdict"] != Dead {
+		t.Fatalf("Recover = %+v, %v; want dead with the loop on", r, err)
 	}
-	if v := (*evs)[len(*evs)-1].Attrs["verdict"]; v != AmbiguousResolved {
-		t.Errorf("recover.done verdict = %v", v)
+	if w.bead.Status == "in_progress" {
+		t.Errorf("bead %+v still claimed", w.bead)
 	}
 
-	// A TUI that appears between check and fence refuses at the re-check; the fence stays.
-	*evs, w.calls, w.reads = nil, nil, 0
+	// A dispatcher that takes the flock between check and fence refuses at the re-check; the fence stays.
+	*evs, w.calls = nil, nil
 	w.bead = claimed
-	w.tuis = func(n int) []string { return [][]string{nil, {"tui-3"}}[n-1] }
+	holds := 0
+	set(t, &held, func(string) (bool, error) { holds++; return holds > 1, nil })
 	_, err = Recover("mc-a", Opts{})
 	var rf *Refused
-	if !errors.As(err, &rf) || !strings.Contains(err.Error(), "a TUI is alive") || !bd.PausedBy(w.bead, bd.PausedRecovering) || w.bead.Status != "in_progress" {
-		t.Fatalf("err = %v, bead %+v; want refused at the re-check with the fence left", err, w.bead)
-	}
-
-	// A loop that is on refuses before the fence.
-	*evs, w.calls, w.reads = nil, nil, 0
-	w.bead, w.tuis, w.loop = claimed, nil, looplock.Draining
-	if _, err = Recover("mc-a", Opts{}); !errors.As(err, &rf) || !strings.Contains(err.Error(), "the loop is on") || len(w.bead.Labels) != 0 {
-		t.Errorf("err = %v, labels %q; want refused naming the loop, unfenced", err, w.bead.Labels)
+	if !errors.As(err, &rf) || !strings.Contains(err.Error(), "held by its dispatcher") || !bd.PausedBy(w.bead, bd.PausedRecovering) || w.bead.Status != "in_progress" {
+		t.Fatalf("err = %v, bead %+v; want alive at the re-check with the fence left", err, w.bead)
 	}
 }
 
-// --force overrides an ambiguous verdict, recording forced, but is refused while
-// the loop lock is held, before anything is read or written.
+// A repo-root Orphaned claim needs --force, with the loop on or off, and the
+// refusal never tells the human to stop the loop. A HITL bead's --force is still
+// refused while the loop lock is held.
 func TestRecoverForce(t *testing.T) {
 	evs := eventlogtest.Capture(t)
-	w := &world{bead: bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Status: "in_progress", Labels: []string{"paused:abandoned"}}, loop: looplock.On}
+	w := &world{bead: bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Status: "in_progress"}, loop: looplock.On}
 	stub(t, w)
-	_, err := Recover("mc-a", Opts{Force: true})
+	_, err := Recover("mc-a", Opts{})
 	var rf *Refused
-	if !errors.As(err, &rf) || !strings.Contains(err.Error(), "loop is off") || !slices.Equal(w.calls, []string{"lock"}) {
-		t.Fatalf("err = %v, calls %q; want refused on the lock alone", err, w.calls)
+	if !errors.As(err, &rf) || rf.Verdict != Ambiguous || strings.Contains(err.Error(), "loop") || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v; want ambiguous naming --force and not the loop", err)
 	}
-	if names := eventlogtest.Names(*evs); !slices.Equal(names, []string{"recover.refused"}) {
-		t.Errorf("events = %v, want one recover.refused", names)
-	}
-	*evs, w.loop = nil, ""
+	*evs = nil
 	r, err := Recover("mc-a", Opts{Force: true})
 	if err != nil || r.Verdict != Forced || (*evs)[len(*evs)-1].Attrs["verdict"] != Forced {
-		t.Fatalf("Recover = %+v, %v, events %v; want forced", r, err, *evs)
+		t.Fatalf("Recover = %+v, %v, events %v; want forced with the loop on", r, err, *evs)
+	}
+
+	h := &world{bead: hitl(), loop: looplock.On}
+	stub(t, h)
+	if _, err = Recover("mc-a", Opts{Force: true}); !errors.As(err, &rf) || !strings.Contains(err.Error(), "loop is off") {
+		t.Fatalf("HITL err = %v; want --force refused with the loop on", err)
 	}
 }
 
@@ -540,17 +538,20 @@ func TestAssess(t *testing.T) {
 	}
 
 	w.bead, w.tree, w.files = bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress"}, "", 0
-	w.loop = looplock.On
+	w.loop = looplock.On // the loop being on decides no AFK verdict
+	if _, v, err = Assess("mc-a", Opts{}); err != nil || v != Dead {
+		t.Errorf("loop on: %q, %v; want dead", v, err)
+	}
+	w.loop = ""
+	spec := bd.Bead{ID: "mc-a", Kind: contract.KindSpec, Status: "in_progress"}
+	w.bead = spec
 	_, _, err = Assess("mc-a", Opts{})
 	var rf *Refused
 	if !errors.As(err, &rf) || rf.Verdict != Ambiguous {
-		t.Errorf("loop on: err = %v; want an ambiguous refusal", err)
+		t.Errorf("repo-root orphan: err = %v; want an ambiguous refusal", err)
 	}
-	w.loop, w.tuiErr = "", errors.New("tmux: EACCES")
-	if _, _, err = Assess("mc-a", Opts{}); !errors.As(err, &rf) || rf.Verdict == Ambiguous {
-		t.Errorf("TUI read fails: err = %v; want a refusal that is not ambiguous", err)
-	}
-	w.tuiErr, w.probe = nil, func(int) []int { return []int{7} }
+	w.bead = bd.Bead{ID: "mc-a", Kind: contract.KindBuild, Parent: "mc-cp", Status: "in_progress"}
+	w.probe = func(int) []int { return []int{7} }
 	if _, _, err = Assess("mc-a", Opts{}); !errors.As(err, &rf) || rf.Verdict == Ambiguous {
 		t.Errorf("probe alive: err = %v; want a refusal that is not ambiguous", err)
 	}
@@ -583,6 +584,9 @@ func TestRecoverForceResolvesGraphWithoutBeadsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lock.Close() })
+	realState := loopState
+	stub(t, &world{bead: bd.Bead{ID: "mc-x", Kind: contract.KindSurgery, Status: "in_progress"}, bare: true}) // HITL: --force still needs the loop off
+	set(t, &loopState, realState)                                                                             // the real lock read is what this test is for; stub scripted its own
 	_, err = Recover("mc-x", Opts{Force: true})
 	var r *Refused
 	if !errors.As(err, &r) {
@@ -590,9 +594,10 @@ func TestRecoverForceResolvesGraphWithoutBeadsDir(t *testing.T) {
 	}
 }
 
-// A lock read error before the fence is a failed check, as on the --force pre-check.
+// A lock read error before the fence is a failed check for a HITL bead, as on the
+// --force pre-check; an AFK verdict reads no loop lock and goes past it.
 func TestRecoverLockReadErrorFailsCheck(t *testing.T) {
-	w := &world{bead: stranded(), tree: "/tmp/mugicrew-wt-1/wt"}
+	w := &world{bead: hitl(), tree: "/tmp/mugicrew-wt-1/wt"}
 	stub(t, w)
 	set(t, &loopState, func() (string, error) { return "", errors.New("boom") })
 	_, err := Recover("mc-a", Opts{})
@@ -615,7 +620,7 @@ func TestRecoverBareShellReadsDispatcherHold(t *testing.T) {
 	set(t, &graphDir, func(string) (string, error) { return graph, nil })
 	set(t, &git.RepoRoot, func() (string, error) { return t.TempDir(), nil })
 	set(t, &git.CommonDir, func() (string, error) { return t.TempDir(), nil })
-	w := &world{bead: stranded(), tree: "/tmp/mugicrew-wt-1/wt"}
+	w := &world{bead: stranded(), tree: "/tmp/mugicrew-wt-1/wt", bare: true}
 	stub(t, w)
 	set(t, &loopState, func() (string, error) { return looplock.Off, nil })
 	_, err = Recover("mc-a", Opts{Force: true})
@@ -770,7 +775,7 @@ func TestJudgeApprovalFollowsAutoApprove(t *testing.T) {
 	marked := ap
 	marked.Labels = []string{"paused:abandoned", registry.AutoApproveFailedLabel}
 	registry.SetAutoApprove(true)
-	t.Cleanup(registry.ResetAutoApprove)
+	t.Cleanup(registry.ResetModeSnapshots)
 
 	if _, err := Judge(Holder{Bead: ap, Placement: route.RepoRoot, Held: true}); err == nil || !strings.Contains(err.Error(), "held by its dispatcher") {
 		t.Errorf("held AFK Approval: err = %v, want the held-flock refusal", err)

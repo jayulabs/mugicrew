@@ -127,7 +127,7 @@ func TestEmptyLandedCommitPassesTheResolvedMergeSha(t *testing.T) {
 // Checkpoint still closes.
 func TestEmptyLandedCommitWithoutMergeShaWarnsOnceAndCloses(t *testing.T) {
 	r := &renumberRec{}
-	r.landedEmpty, r.mergeWhy = true, "no hold Task"
+	r.landedEmpty, r.mergeWhy = true, "no hold Errand"
 	stubRenumber(t, r)
 	evs := eventlogtest.Capture(t)
 	if err := landedCheckpoint(t, r); err != nil {

@@ -156,7 +156,7 @@ func TestDefogActionablePausedChart(t *testing.T) {
 	}
 	tab = a.tabAt(tabDefog).(defogTab)
 	rows, full := tab.rows(), tab.g.defogList(tab.expanded())
-	shaded := shadeSet(tab.g.parentOf, rows, tab.selIndex(rows), full, dRow.shadeIn)
+	shaded := shadeSet(tab.g.beadByID, rows, tab.selIndex(rows), full, dRow.shadeIn)
 	for i, r := range rows {
 		if (r.key == chartsPrefix+"pc" || r.key == "pc") && !shaded[i] {
 			t.Errorf("%s not shaded", r.key)
@@ -261,7 +261,7 @@ func TestExecActionablePausedBuilds(t *testing.T) {
 		dbead("fl", contract.KindBuild, "open", "cp", 10, labeled("paused:failing")),
 		dbead("ab", contract.KindBuild, "open", "cp", 11, labeled("paused:abandoned")),
 		dbead("ic", contract.KindLanding, "open", "cp", 12, labeled("paused:integrate-conflict")),
-		dbead("tk", contract.KindTask, "open", "cp", 13, own), // a member that is also a Task: one row
+		dbead("tk", contract.KindErrand, "open", "cp", 13, own), // a member that is also an Errand: one row
 	}
 	beads[0].BlockedBy = []string{"tk"}
 	g := graphData{

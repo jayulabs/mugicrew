@@ -1,10 +1,10 @@
-<!-- hand-kept · summarises ADR 0035 (a fast-laned Spec takes the standard template), ADR 0088 (one Spec template), ADR 0113 (a Spec's Tasks section) -->
+<!-- hand-kept · summarises ADR 0035 (a fast-laned Spec takes the standard template), ADR 0088 (one Spec template), ADR 0113 (a Spec's Errands section) -->
 
 # The Spec template
 
 A Spec is a decision record naming WHAT to build and what's in and out. Its
 body carries these seven sections, in exactly this order, so it slices into
-Builds like any other Spec, then an optional Tasks section last:
+Builds like any other Spec, then an optional Errands section last:
 
 ## Problem Statement
 
@@ -56,31 +56,31 @@ The things ruled beyond this Spec, each with the gist plus why it is out.
 
 Any further notes about the feature.
 
-## Tasks (optional)
+## Errands (optional)
 
 Omit it when the Spec needs no step in the external world (anything outside the
-bead graph and the code). Otherwise list each Task the slicing files beside the
+bead graph and the code). Otherwise list each Errand the slicing files beside the
 Builds:
 
-### <Task title>
+### <Errand title>
 
 after: land
 
-<its ## Steps body, in crew doc task-body.md's format>
+<its ## Steps body, in crew doc errand-body.md's format>
 
-Each entry carries one or more ordering lines: `after: land` (the Task waits
+Each entry carries one or more ordering lines: `after: land` (the Errand waits
 for this Spec's Checkpoint to land), `before: land` (the land waits for the
-Task) or `after: <Task title>` (another Task in this section). The ordering
-lines become blocks edges; the Task's own body never carries them.
+Errand) or `after: <Errand title>` (another Errand in this section). The ordering
+lines become blocks edges; the Errand's own body never carries them.
 
-An entry may instead adopt an existing open Task by id, so a corrected Spec holds
-a Task rather than filing a duplicate:
+An entry may instead adopt an existing open Errand by id, so a corrected Spec holds
+an Errand rather than filing a duplicate:
 
-### <Task title>
+### <Errand title>
 
-task: <id>
+errand: <id>
 before: land
 
-An adopted entry has a `task: <id>` line, its ordering lines and no Steps body.
-Slicing files nothing for it and only adds its missing ordering edges; the Task
+An adopted entry has an `errand: <id>` line, its ordering lines and no Steps body.
+Slicing files nothing for it and only adds its missing ordering edges; the Errand
 keeps its own body and origin.

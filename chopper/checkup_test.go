@@ -6,7 +6,6 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
-	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/promptguard"
 	"jayulabs.org/mugicrew/session"
 )
@@ -98,8 +97,8 @@ func TestCheckupPromptSkillFree(t *testing.T) {
 // CheckupRefusal (ADR 0274 §4) over the host recover reads: one table, each row a
 // target's state and the refusal it earns, "" for a launch that goes.
 func TestCheckupRefusal(t *testing.T) {
-	task := func(status string, labels ...string) bd.Bead {
-		return bd.Bead{ID: "mc-a", Title: "Odd", Kind: contract.KindTask, Status: status, Labels: labels}
+	errand := func(status string, labels ...string) bd.Bead {
+		return bd.Bead{ID: "mc-a", Title: "Odd", Kind: contract.KindErrand, Status: status, Labels: labels}
 	}
 	titled := func(b bd.Bead) bd.Bead { b.Title = "Odd"; return b }
 	live := titled(stranded())
@@ -111,18 +110,18 @@ func TestCheckupRefusal(t *testing.T) {
 	}{
 		{"live AFK effort", world{bead: live, probe: func(int) []int { return []int{42} }},
 			"an effort is running on Odd: abort it (x) first"},
-		{"open HITL session", world{bead: task("in_progress"), sess: session.Info{Session: "mc-a", State: session.Alive}},
+		{"open HITL session", world{bead: errand("in_progress"), sess: session.Info{Session: "mc-a", State: session.Alive}},
 			"a session is open on Odd"},
-		{"exited HITL session", world{bead: task("in_progress"), sess: session.Info{Session: "mc-a", State: session.Exited}},
+		{"exited HITL session", world{bead: errand("in_progress"), sess: session.Info{Session: "mc-a", State: session.Exited}},
 			"a session is open on Odd"},
 		{"dead claim, clean verdict", world{bead: titled(stranded()), tree: "/t"},
 			"stranded by a dead effort: recover it (x)"},
-		{"dead claim, ambiguous verdict", world{bead: live, loop: looplock.On, tree: "/t"}, ""},
+		{"dead claim, repo-root orphan", world{bead: bd.Bead{ID: "mc-a", Title: "Odd", Kind: contract.KindSpec, Status: "in_progress"}}, ""},
 		{"dead claim, refused verdict", world{bead: bd.Bead{ID: "mc-a", Title: "Odd", Kind: "bogus", Status: "in_progress"}}, ""},
 		{"a Checkup", world{bead: bd.Bead{ID: "mc-a", Title: "Odd", Kind: contract.KindCheckup, Status: "open"}},
 			"mc-a is a Checkup: it has nothing to check up"},
-		{"already fenced by an open Checkup", world{bead: task("open", "paused:checkup")}, ""},
-		{"closed", world{bead: task("closed")}, ""},
+		{"already fenced by an open Checkup", world{bead: errand("open", "paused:checkup")}, ""},
+		{"closed", world{bead: errand("closed")}, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

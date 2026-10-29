@@ -139,7 +139,7 @@ var (
 	closeOnPublish = bd.CloseOnPublish
 	branchOutcome  = deleteCheckpointBranch
 	buildChildren  = bd.BuildChildren
-	taskChildren   = bd.TaskChildren
+	errandChildren = bd.ErrandChildren
 	carry          = bd.Carry
 	initiativeOf   = bd.InitiativeOf
 
@@ -166,7 +166,8 @@ func baseTrailer(kind contract.Kind, id string) string {
 
 // checkpointBase derives the commit checkpoint/<id> is cut from (§8.4, ADR
 // 0012/0014): walk the Spec —caused-by→ its Chart; a Chart-backed Spec cuts from
-// the Chart's landed base ("Chart: <chartID>"), a direct Spec from its own
+// the Chart's landed base (its Anchor: pin, else the legacy "Chart: <chartID>"
+// trailer; neither is a hard error), a direct Spec from its own
 // anchor. A direct Spec reads its Anchor: pin first, under local and gitlab alike;
 // with no pin it falls back to the legacy LandedBase "Spec: <specID>" trailer
 // under both strategies (pre-change Specs, Specs anchored before a strategy
@@ -179,6 +180,15 @@ func checkpointBase(spec bd.Bead) (string, error) {
 	kind, id := contract.KindSpec, spec.ID
 	if found {
 		kind, id = contract.KindChart, chartID
+	}
+	if found { // a pin-landed Chart (ADR 0358) records its base on the bead; a trailer-landed one has none
+		chart, err := showBead(chartID)
+		if err != nil {
+			return "", err
+		}
+		if pin, ok := git.ParseAnchor(chart.Description); ok {
+			return pin, nil
+		}
 	}
 	r := repoOf(spec)
 	if found && r == "" { // a Workspace Chart child skips the land-strategy read (ADR 0157)
@@ -243,7 +253,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	// Re-entry: a Task-only Spec's Checkpoint already closed nothing-to-land on a
+	// Re-entry: an Errand-only Spec's Checkpoint already closed nothing-to-land on a
 	// prior pass skips the cut and the fork and goes straight to the Spec's close.
 	cp, err := showBead(checkpointID)
 	if err != nil {
@@ -254,13 +264,13 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			return nil
 		}
 		// A failed publish (effort.fail / Chopper recover) may have deleted the
-		// Draft Tasks: re-count, and re-slice when none remain (FR19). The fork's
+		// Draft Errands: re-count, and re-slice when none remain (FR19). The fork's
 		// after: land edges target the closed Checkpoint and release at once.
-		tasks, err := taskChildren(spec.ID)
+		errands, err := errandChildren(spec.ID)
 		if err != nil {
 			return err
 		}
-		if tasks == 0 {
+		if errands == 0 {
 			inv, err := contract.NewInvocation(spec.ID, contexts.Focus(slicingPrompt(spec.ID), spec))
 			if err != nil {
 				return err
@@ -268,7 +278,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			if _, err := ctx.Harness().Run(ctx, inv); err != nil {
 				return err
 			}
-			if tasks, err = taskChildren(spec.ID); err != nil {
+			if errands, err = errandChildren(spec.ID); err != nil {
 				return err
 			}
 			builds, err := buildChildren(checkpointID)
@@ -278,8 +288,8 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			if builds > 0 {
 				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — the slicing fork must lay Builds only, not close the Checkpoint; leaving Spec open", checkpointID, spec.ID)
 			}
-			if tasks == 0 {
-				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor a Task for spec %s; leaving it open", spec.ID)
+			if errands == 0 {
+				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor an Errand for spec %s; leaving it open", spec.ID)
 			}
 		}
 		return closeOnPublish(ctx, spec.ID, "", nil)
@@ -296,19 +306,19 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 	}
 	if spec.Open() {
 		// Gate the fork on no artifact existing yet: no kind:build member on the
-		// Checkpoint and no kind:task dependent of the Spec (Nami-parity with
+		// Checkpoint and no kind:errand dependent of the Spec (Nami-parity with
 		// reconcileChart's placeholder-body gate). A re-fork is safe for Builds
-		// (FR21) but republishes Tasks, whose drafted-by label publishing strips, so
-		// a Spec holding Tasks is never re-forked.
+		// (FR21) but republishes Errands, whose drafted-by label publishing strips, so
+		// a Spec holding Errands is never re-forked.
 		builds, err := buildChildren(checkpointID)
 		if err != nil {
 			return err
 		}
-		tasks, err := taskChildren(spec.ID)
+		errands, err := errandChildren(spec.ID)
 		if err != nil {
 			return err
 		}
-		if builds+tasks == 0 {
+		if builds+errands == 0 {
 			inv, err := contract.NewInvocation(spec.ID, contexts.Focus(slicingPrompt(spec.ID), spec))
 			if err != nil {
 				return err
@@ -321,12 +331,12 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			if builds, err = buildChildren(checkpointID); err != nil {
 				return err
 			}
-			if tasks, err = taskChildren(spec.ID); err != nil {
+			if errands, err = errandChildren(spec.ID); err != nil {
 				return err
 			}
-			if builds+tasks == 0 {
+			if builds+errands == 0 {
 				// Fail loud, leave the Spec open: the loop's failing tally pauses it.
-				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor a Task for spec %s; leaving it open", spec.ID)
+				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor an Errand for spec %s; leaving it open", spec.ID)
 			}
 		}
 		if builds > 0 {
@@ -351,8 +361,8 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			}
 			return closeOnPublish(ctx, spec.ID, "", nil)
 		}
-		if tasks > 0 {
-			// Task-only: nothing lands, so the Checkpoint closes empty and its branch
+		if errands > 0 {
+			// Errand-only: nothing lands, so the Checkpoint closes empty and its branch
 			// goes (ADR 0015 close gate, amended). Carry first, as the Builds arm does:
 			// a carry error closes nothing and leaves both beads open for the retry.
 			cp, err := showBead(checkpointID)
@@ -360,13 +370,13 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 				return err
 			}
 			if !cp.Open() {
-				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — a Task-only Spec closes it itself; leaving Spec open", checkpointID, spec.ID)
+				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — an Errand-only Spec closes it itself; leaving Spec open", checkpointID, spec.ID)
 			}
 			moved, skipped, err := carry(spec.ID, checkpointID)
 			if err := eventlog.RecordCarry(spec, checkpointID, moved, skipped, err); err != nil {
 				return err
 			}
-			if err := closeBead(checkpointID, bd.NothingToLandReason+" Task-only Spec "+spec.ID); err != nil {
+			if err := closeBead(checkpointID, bd.NothingToLandReason+" Errand-only Spec "+spec.ID); err != nil {
 				return err
 			}
 			// A branch outcome never fails the pass, and no land lock is taken.

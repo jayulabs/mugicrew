@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,8 +143,10 @@ func TestTranscriptPager(t *testing.T) {
 	t.Cleanup(func() { isTerminal, startPager = oldTTY, oldPager })
 	var cmds []string
 	var piped bytes.Buffer
-	startPager = func(cmd string, out *os.File) (io.Writer, func() error, error) {
+	var envs [][]string
+	startPager = func(cmd string, env []string, out *os.File) (io.Writer, func() error, error) {
 		cmds = append(cmds, cmd)
+		envs = append(envs, env)
 		return &piped, func() error { return nil }, nil
 	}
 	isTerminal = func(*os.File) bool { return true }
@@ -167,6 +170,25 @@ func TestTranscriptPager(t *testing.T) {
 	isTerminal = func(*os.File) bool { return false }
 	if err := runTranscript([]string{"mc-t"}, tty); err != nil || len(cmds) != 0 {
 		t.Errorf("not a tty: cmds %q, %v", cmds, err)
+	}
+	for _, e := range envs {
+		if len(e) != 0 {
+			t.Errorf("outside the Watch pane the pager env gains %q", e)
+		}
+	}
+
+	// In the Watch pane the pager runs without a history file, whatever the command.
+	isTerminal = func(*os.File) bool { return true }
+	t.Setenv(watchPaneEnv, "1")
+	for _, pager := range []string{"", "less"} {
+		t.Setenv("PAGER", pager)
+		cmds, envs = nil, nil
+		if err := runTranscript([]string{"mc-t"}, tty); err != nil || len(cmds) != 1 {
+			t.Fatalf("pane pager %q: cmds %q, %v", pager, cmds, err)
+		}
+		if !slices.Contains(envs[0], "LESSHISTFILE=-") {
+			t.Errorf("pane pager %q env = %q, want LESSHISTFILE=-", pager, envs[0])
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 # ADR 0348: mugicrew a filing with no plain member to climb resolves through its container, or is born outside
 
 Status: Accepted
+Amended by ADR 0375 (an-offshoot-whose-cause-is-in-an-initiative-is-born-as-its-member…) (§6: the climb is not gated on an edge; §7: the abandoned MR Watch Signal stays outside).
 Date: 2026-10-22
 Amends: ADR 0267 (an-offshoot-signal-is-filed-through-signal-offshoot…), its container rule; ADR 0222 (a-jira-latch-is-one-per-key…), a Latch's "any bead" target.
 

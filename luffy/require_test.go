@@ -35,7 +35,7 @@ func TestTriagePromptRequireInitiatives(t *testing.T) {
 
 	stubRequire(t, false, "")
 	off := launchPrompt(t)
-	if !strings.HasSuffix(off, triagePrompt("ws-sig", "", "", declaredContexts(), nil)) || strings.Contains(off, "Require Initiatives") {
+	if !strings.HasSuffix(off, triagePrompt("ws-sig", "", "", "", declaredContexts(), nil)) || strings.Contains(off, "Require Initiatives") {
 		t.Error("setting off must render today's prompt")
 	}
 
@@ -64,7 +64,7 @@ func TestTriagePromptRequireInitiatives(t *testing.T) {
 }
 
 func TestTriagePromptRequireComposesWithAdoptionAndJira(t *testing.T) {
-	p := triagePrompt("ws-sig", "jira-X-1", "", nil, []bd.Bead{{ID: "ws-o"}}, requireSection("ws-sig", nil, false))
+	p := triagePrompt("ws-sig", "jira-X-1", "", "", nil, []bd.Bead{{ID: "ws-o"}}, requireSection("ws-sig", nil, false))
 	a, r, j := strings.Index(p, "## Adoption offer"), strings.Index(p, "## Require Initiatives"), strings.Index(p, "## A Jira Signal")
 	if a < 0 || r < a || j < r {
 		t.Errorf("want adoption < require < jira, got %d %d %d", a, r, j)

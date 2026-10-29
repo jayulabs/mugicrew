@@ -8,6 +8,7 @@ Amended by ADR 0228 (§2, §3, §4 and §7: G and L go into the goto menu; g got
 Amended by ADR 0241 (§2 and §7: n and u leave Graph; n new is a second bar exception beside g goto).
 Amended by ADR 0258 (§7: E raw is removed; E is a shell key opening $EXPLORER).
 Amended 2026-10-17 (mc-4ryp): History's rollback moved from `r` to `u` undo (§3, §7 and the History hint row), refusal texts unchanged; `r` is now retrospective.
+Amended by Spec Bead verbs offered wherever a bead row appears (mc-w2a8c): the per-tab bead-verb keys (z e a A c B U +/- p x X w) are no longer per tab — one shared router offers each on every bead row of Ideate, Defog, Execute, Graph, the Initiatives list and the focus view, gated by the bead's state alone (ADR 0359, ADR 0360); History, Stats and Logs keep their own keys.
 Date: 2026-10-12
 
 Chart mc-lu2x.1 (V2 TUI shell beside v1). Settles grilling mc-lu2x.1.6, the
@@ -79,3 +80,5 @@ on Graph). Used ADR 0142 §6's free `r` on History for rollback; that moved to `
   should always do something on the selected row.
 
 Amended 2026-10-17: `r retrospective` is bound on Ideate, Defog, Execute, Graph, Initiatives and the focus view. It is hinted on a Signal, Chart, Spec, Checkpoint or Initiative row and answers with a status line on any other bead row. History and Logs do not bind it, and on Graph it stays text while the `/` filter is typing. Rebase moved to the `n` New menu. History's `u` undo opens the same rollback form with the same refusal texts (the `r` rollback wording in §3, §7 and the History hint row is superseded).
+
+Amended 2026-10-29 (Spec Retrospective starts from the New menu's t row, mc-6giio): supersedes the 2026-10-17 `r retrospective` amendment above. `r` is unbound on Ideate, Defog, Execute, Graph, Initiatives and the focus view, with no alias; a retrospective starts from the `n` New menu's `t` row. `r retrospective` leaves the hints bar and the `?` reference, and `r` on a bead row does nothing.

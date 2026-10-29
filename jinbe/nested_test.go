@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/cfglayer"
+	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
@@ -223,7 +225,7 @@ func TestNestedRollbackRefusesOnStampDrift(t *testing.T) {
 // never the Workspace's #mugicrew.
 func TestGateCritiqueBodyNamesAttrAndChild(t *testing.T) {
 	b := &looplock.BuilderError{Drv: "x.drv", Log: "boom\n"}
-	got := gateCritiqueBody(b, "base1", "tip1", legs{gateAttr: func() string { return "lib" }, dir: "child"})
+	got := gateCritiqueBody(b, "base1", "tip1", cfglayer.GateSpec{Kind: cfglayer.GateNix, Value: "lib"}, legs{dir: "child"})
 	for _, want := range []string{"#lib", "nix build .#lib -L", "child"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("body missing %q:\n%s", want, got)
@@ -451,7 +453,7 @@ func nestedGitlab(t *testing.T, r *jinbeSeamRec) (tip string, child git.Repo, g 
 	landStrategy = func() (string, git.LandStrategy, error) { return "gitlab", git.LandLocal, nil }
 	oStrategy := strategyFor
 	t.Cleanup(func() { strategyFor = oStrategy })
-	strategyFor = func(string, git.Repo, string) (git.LandStrategy, error) { return git.LandLocal, nil }
+	strategyFor = func(string, git.Repo, string, string) (git.LandStrategy, error) { return git.LandLocal, nil }
 	oPinned := pinnedGitlab
 	t.Cleanup(func() { pinnedGitlab = oPinned })
 	pinnedGitlab = func(repo git.Repo, _ string, p git.MRPresentation) git.LandStrategy {
@@ -528,9 +530,9 @@ func TestGitlabNestedLandingRefusesAChildOnAnotherHost(t *testing.T) {
 	}
 }
 
-// A foreign Graph: trailer on the child's mainline holds the container on a Task instead
+// A foreign Graph: trailer on the child's mainline holds the container on an Errand instead
 // of landing or closing it (ADR 0187, FR 8, 9).
-func TestGitlabNestedForeignLandHoldsOnATask(t *testing.T) {
+func TestGitlabNestedForeignLandHoldsOnAErrand(t *testing.T) {
 	r := &jinbeSeamRec{}
 	tip, child, g := nestedGitlab(t, r)
 	r.head = tip
@@ -542,8 +544,8 @@ func TestGitlabNestedForeignLandHoldsOnATask(t *testing.T) {
 	if err := reconcileLanding(openLanding(tip)); !errors.As(err, &foreign) || foreign.Theirs != "g99" {
 		t.Fatalf("err = %v, want *git.ForeignLanding g99", err)
 	}
-	if len(r.tasks) != 1 || len(r.closed) != 0 || len(r.landed) != 0 {
-		t.Errorf("tasks %v closed %v landed %v, want one hold Task and nothing closed", r.tasks, r.closed, r.landed)
+	if len(r.errands) != 1 || len(r.closed) != 0 || len(r.landed) != 0 {
+		t.Errorf("errands %v closed %v landed %v, want one hold Errand and nothing closed", r.errands, r.closed, r.landed)
 	}
 }
 
@@ -618,5 +620,28 @@ func TestNestedGitlabInvalidRollbackRefusesAChildOnAnotherHost(t *testing.T) {
 	}
 	if r.mrReads != 0 || len(r.mrClosed) != 0 {
 		t.Errorf("mrReads %d closed %v, want no MR call", r.mrReads, r.mrClosed)
+	}
+}
+
+// A drifted repo: stamp makes OpenApprovalMR fail naming the drift, so the Approval's run
+// neither publishes nor reads as success; no MR: line is written.
+func TestOpenApprovalMRRefusesOnStampDriftWithAnError(t *testing.T) {
+	r := &jinbeSeamRec{landErr: &git.LandPending{MR: 5, WebURL: "https://gl/ns/p/-/merge_requests/5", Opened: true}}
+	nestedSeams(t, r, "repo:elsewhere")
+	o := pinnedGitlab
+	t.Cleanup(func() { pinnedGitlab = o })
+	pinnedGitlab = func(git.Repo, string, git.MRPresentation) git.LandStrategy {
+		t.Error("MR opened under drift")
+		return func(string, string) (string, error) { return "", nil }
+	}
+	approval := bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp",
+		Description: git.CommitPin("cafef00d") + "\n\n### Decision Packet\nWhy it ships.\n"}
+	cp, _ := showBead("ws-cp")
+	err := OpenApprovalMR(cp, approval, true)
+	if err == nil || !strings.Contains(err.Error(), "drift") {
+		t.Errorf("err = %v, want one naming the drift", err)
+	}
+	if len(r.bodies) != 0 || len(r.spawned) != 0 {
+		t.Errorf("acted under drift: bodies %q spawned %v", r.bodies, r.spawned)
 	}
 }

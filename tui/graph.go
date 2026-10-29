@@ -13,6 +13,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/session"
 )
@@ -360,10 +361,15 @@ func jumpTo[R any](rows []R, i, d int, head func(R) bool) int {
 type graphData struct {
 	beads     []bd.Bead
 	live      map[string]bool
+	orphans   map[string]bool // the Orphaned-claim reading: in_progress AFK id → orphaned
 	sessions  map[string]session.Info
-	efforts   map[string]bool
-	cpTips    map[string]string // Checkpoint id → checkpoint/<id> tip; unknown counts as not at the tip
-	landEv    map[string]string // bead id → msg of its latest land.*, gate.*, effort.failed or effort.paused event
+	sessErr   error // why the session table couldn't be read: a HITL Draft creator then reads unknown, never gone
+	efforts   *git.EffortSet
+	cpTips    map[string]string  // Checkpoint id → checkpoint/<id> tip; unknown counts as not at the tip
+	frontier  []bd.Bead          // bd ready -n 0 as of the last refresh; the row widens it with loop.Readmit over beads
+	landed    map[string]string  // open Chart/Checkpoint id → its landed trailer's sha (own Graph only); slow tier
+	ancestors map[string]bd.Bead // inherited-pause walk ancestors beads lacks, read by id
+	landEv    map[string]string  // bead id → msg of its latest land.*, gate.*, effort.failed or effort.paused event
 	launching map[string]bool
 	launched  map[string]time.Time // launches that succeeded, held in Live until a later snapshot shows it alive, or one launchHoldMax on
 	pending   map[string]string
@@ -445,6 +451,7 @@ type graphTab struct {
 	sel       string          // the selected row's key; follows its bead across refreshes
 	open      bool            // d: the detail pane is open
 	off       int             // the detail viewport's scroll offset
+	lv        listView        // the list's viewport: following the selection or scrolled by the wheel
 	q         query           // the kept filter
 	scopedTo  query           // the query a scoped reveal set; while q still equals it, esc returns to the baseline (zero: none)
 	typing    bool            // the / input is open
@@ -613,30 +620,16 @@ func (g graphTab) setFolds(f map[string]bool) graphTab {
 	return g
 }
 
-// visible is the beads the Graph shows: Drafts (status deferred, ADR 0059 §2) and
-// their subtrees are hidden unless the status facet is deferred. Display-only:
-// gates read g.beads and keep counting a Draft as open.
+// visible is the beads the Graph shows: the scope filter's subtree, Drafts (status
+// deferred, ADR 0059 §2) and their subtrees included; the status facet decides what
+// shows. Display-only: gates read g.beads and keep counting a Draft as open.
 func (g graphTab) visible() []bd.Bead {
 	beads := g.beads
 	if sc := g.q.scope; sc != "" {
 		in := scopeSubtree(beads, sc)
 		beads = slices.DeleteFunc(slices.Clone(beads), func(b bd.Bead) bool { return !in[b.ID] })
 	}
-	if g.query().status == "deferred" {
-		return beads
-	}
-	parent, draft := make(map[string]string, len(beads)), map[string]bool{}
-	for _, b := range beads {
-		parent[b.ID], draft[b.ID] = b.Parent, b.Status == "deferred"
-	}
-	return slices.DeleteFunc(slices.Clone(beads), func(b bd.Bead) bool {
-		for id, n := b.ID, 0; id != "" && n <= len(parent); id, n = parent[id], n+1 {
-			if draft[id] {
-				return true
-			}
-		}
-		return false
-	})
+	return beads
 }
 
 // selected is the selected row's bead, nil for the Unparented header or no rows.

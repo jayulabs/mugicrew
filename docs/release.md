@@ -6,6 +6,8 @@ which publishes the five `@jayulabs` packages: the four platform packages
 (`mugicrew-linux-x64`, `mugicrew-linux-arm64`, `mugicrew-darwin-arm64`,
 `mugicrew-darwin-x64`) and the launcher (`mugicrew`).
 
+A publish that changes only `site/**` doesn't run the release; the Pages workflow deploys it.
+
 ## Procedure
 
 1. Bump `version` in all five npm package manifests: `npm/mugicrew/package.json`

@@ -3,6 +3,7 @@ package withdraw
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -93,12 +94,12 @@ func TestWithdrawClosesChain(t *testing.T) {
 func TestCancelClosesMembersThenInitiative(t *testing.T) {
 	calls := graph(t, fixture()...)
 	evs := eventlogtest.Capture(t)
-	if _, err := Cancel("in", Opts{}); err != nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err != nil {
 		t.Fatal(err)
 	}
-	c := (*calls)[0]
-	if !slices.Equal(c.ids, []string{"spec", "b1", "b2", "cp", "s2", "in"}) || c.reason != "cancelled: in" {
-		t.Errorf("close = %v", c)
+	want := []closeCall{{[]string{"spec", "b1", "b2", "cp", "s2"}, "cancelled: in"}, {[]string{"in"}, "cancelled: why"}}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("close = %v, want %v", *calls, want)
 	}
 	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"cancel.done"}) {
 		t.Errorf("events = %v", got)
@@ -111,12 +112,12 @@ func TestCancelReleasesChosenChain(t *testing.T) {
 	calls := graph(t, fixture()...)
 	rel := stubRelease(t)
 	evs := eventlogtest.Capture(t)
-	res, err := Cancel("in", Opts{Release: []string{"cp"}})
+	res, err := Cancel("in", Opts{Why: "why", Release: []string{"cp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"s2", "in"}
-	if !slices.Equal((*calls)[0].ids, want) || !slices.Equal(*rel, []string{"cp"}) || !slices.Equal(res.Released, []string{"cp"}) {
+	want := []string{"s2"}
+	if len(*calls) != 2 || !slices.Equal((*calls)[0].ids, want) || !slices.Equal((*calls)[1].ids, []string{"in"}) || !slices.Equal(*rel, []string{"cp"}) || !slices.Equal(res.Released, []string{"cp"}) {
 		t.Errorf("closed %v released %v res %v", *calls, *rel, res)
 	}
 	if got := (*evs)[len(*evs)-1]; got.Name != "cancel.done" || !slices.Equal(got.Attrs["released"].([]string), []string{"cp"}) {
@@ -129,7 +130,7 @@ func TestCancelRefusesReleasedChainOrderedAfterClosing(t *testing.T) {
 	g := append(fixture(), b("s3", contract.KindSignal, "in", "s2"))
 	calls := graph(t, g...)
 	rel := stubRelease(t)
-	_, err := Cancel("in", Opts{Release: []string{"s3"}})
+	_, err := Cancel("in", Opts{Why: "why", Release: []string{"s3"}})
 	var re *RefusedError
 	if !errors.As(err, &re) || re.Refusals[0].Kind != OrderedAfter || !slices.Equal(re.Refusals[0].Beads, []string{"s3"}) {
 		t.Fatalf("err = %v", err)
@@ -154,7 +155,7 @@ func TestCancelLockedUnderRequire(t *testing.T) {
 	if len(p.Locked) != 3 || p.Locked[0].Why != bd.ReleaseRequiredWhy(bd.Bead{ID: p.Locked[0].Head}) {
 		t.Errorf("locked = %v", p.Locked)
 	}
-	_, err = Cancel("in", Opts{Release: []string{"cp"}})
+	_, err = Cancel("in", Opts{Why: "why", Release: []string{"cp"}})
 	var re *RefusedError
 	if !errors.As(err, &re) || re.Refusals[0].Kind != ReleaseLocked || re.Refusals[0].Fix != bd.ReleaseRequiredWhy(bd.Bead{ID: "cp"}) {
 		t.Fatalf("err = %v", err)
@@ -169,7 +170,7 @@ func TestReleaseRejectsNonMember(t *testing.T) {
 	graph(t, fixture()...)
 	stubRelease(t)
 	for _, h := range []string{"b1", "nope", "in"} {
-		if _, err := Cancel("in", Opts{Release: []string{h}}); err == nil || errors.As(err, new(*RefusedError)) {
+		if _, err := Cancel("in", Opts{Why: "why", Release: []string{h}}); err == nil || errors.As(err, new(*RefusedError)) {
 			t.Errorf("release %s: err = %v, want a plain error", h, err)
 		}
 	}
@@ -237,7 +238,7 @@ func TestRejectsNonHead(t *testing.T) {
 			t.Errorf("withdraw %s = %v, want a plain error", id, err)
 		}
 	}
-	if _, err := Cancel("cp", Opts{}); err == nil {
+	if _, err := Cancel("cp", Opts{Why: "why"}); err == nil {
 		t.Error("cancel on a Checkpoint: want an error")
 	}
 	if len(*calls) != 0 || len(*evs) != 0 {
@@ -276,7 +277,7 @@ func TestReadFailure(t *testing.T) {
 	graph(t)
 	listAll = func() ([]bd.Bead, error) { return nil, errors.New("down") }
 	evs := eventlogtest.Capture(t)
-	if _, err := Cancel("in", Opts{}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err == nil {
 		t.Fatal("want an error")
 	}
 	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"cancel.failed"}) || (*evs)[0].Attrs["step"] != "read" {
@@ -341,7 +342,7 @@ func TestFenceHoldsDuringClose(t *testing.T) {
 func TestCASMismatchReverts(t *testing.T) {
 	calls := graph(t, fixture()...)
 	casErr["in"] = fmt.Errorf("status mismatch: %w", bd.ErrClaimedSince)
-	_, err := Cancel("in", Opts{})
+	_, err := Cancel("in", Opts{Why: "why"})
 	var re *RefusedError
 	if !errors.As(err, &re) || re.Refusals[0].Kind != InFlight || !slices.Equal(re.Refusals[0].Beads, []string{"in"}) {
 		t.Fatalf("err = %v", err)
@@ -361,7 +362,7 @@ func TestCASFaultFailsFence(t *testing.T) {
 	calls := graph(t, fixture()...)
 	evs := eventlogtest.Capture(t)
 	casErr["in"] = errors.New("dolt down")
-	_, err := Cancel("in", Opts{})
+	_, err := Cancel("in", Opts{Why: "why"})
 	if err == nil || errors.As(err, new(*RefusedError)) {
 		t.Fatalf("err = %v", err)
 	}
@@ -392,7 +393,7 @@ func TestCloseFailureSparesClosedHITL(t *testing.T) {
 		return g, nil
 	}
 	forceClose = func([]string, string) error { return errors.New("boom") }
-	if _, err := Cancel("in", Opts{}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err == nil {
 		t.Fatal("want an error")
 	}
 	if got := strings.Join(cas, ","); got != "claim s2,claim in,unclaim in" {
@@ -404,7 +405,7 @@ func TestCloseFailureSparesClosedHITL(t *testing.T) {
 func TestCloseFailureReverts(t *testing.T) {
 	graph(t, fixture()...)
 	forceClose = func([]string, string) error { return errors.New("boom") }
-	if _, err := Cancel("in", Opts{}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err == nil {
 		t.Fatal("want an error")
 	}
 	if got := strings.Join(cas, ","); got != "claim s2,claim in,unclaim s2,unclaim in" {
@@ -426,7 +427,7 @@ func TestRefusalUnderFence(t *testing.T) {
 		}
 		return g, nil
 	}
-	if _, err := Cancel("in", Opts{}); !errors.As(err, new(*RefusedError)) {
+	if _, err := Cancel("in", Opts{Why: "why"}); !errors.As(err, new(*RefusedError)) {
 		t.Fatalf("err = %v", err)
 	}
 	if len(*calls) != 0 || !strings.Contains(strings.Join(cas, ","), "unclaim s2") {
@@ -454,7 +455,7 @@ func TestDiscardGate(t *testing.T) {
 		t.Errorf("with Discard: err = %v, calls %v", err, *calls)
 	}
 	takeInventory = func([]bd.Bead, Opts) (Inventory, error) { return Inventory{}, nil }
-	if _, err := Cancel("in", Opts{}); err != nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err != nil {
 		t.Errorf("lossless cancel: %v", err)
 	}
 }
@@ -576,7 +577,7 @@ func TestFencesApprovalByAutoApproveMode(t *testing.T) {
 			ap.Labels = tc.labels
 			graph(t, append(fixture(), ap)...)
 			registry.SetAutoApprove(tc.on)
-			t.Cleanup(registry.ResetAutoApprove)
+			t.Cleanup(registry.ResetModeSnapshots)
 			if _, err := Withdraw("cp", Opts{}); err != nil {
 				t.Fatal(err)
 			}
@@ -595,7 +596,7 @@ func TestInFlightRefusalsFollowApprovalMode(t *testing.T) {
 		fix string
 	}{{true, inFlightFix}, {false, sessionFix}} {
 		registry.SetAutoApprove(tc.on)
-		t.Cleanup(registry.ResetAutoApprove)
+		t.Cleanup(registry.ResetModeSnapshots)
 		got := inFlightRefusals([]bd.Bead{b("ap", contract.KindApproval, "cp")})
 		if len(got) != 1 || got[0].Kind != InFlight || got[0].Fix != tc.fix || !slices.Equal(got[0].Beads, []string{"ap"}) {
 			t.Errorf("auto-approve %v: got %+v, want one InFlight with fix %q", tc.on, got, tc.fix)
@@ -603,32 +604,32 @@ func TestInFlightRefusalsFollowApprovalMode(t *testing.T) {
 	}
 }
 
-// ADR 0349: a member Task closes first, withdrawn: <initiative>; a released one is
+// ADR 0349: a member Errand closes first, withdrawn: <initiative>; a released one is
 // kept out of the set and the ordered-after refusal, its edges untouched.
-func TestCancelWithdrawsMemberTaskAndReleasesOne(t *testing.T) {
+func TestCancelWithdrawsMemberErrandAndReleasesOne(t *testing.T) {
 	g := append(fixture(),
-		b("tk", contract.KindTask, "in"),
-		b("keep", contract.KindTask, "in", "b2"),
+		b("tk", contract.KindErrand, "in"),
+		b("keep", contract.KindErrand, "in", "b2"),
 	)
 	calls := graph(t, g...)
 	rel := stubRelease(t)
 	p, err := plan("in", g, Opts{Release: []string{"keep"}})
-	if err != nil || len(p.Refusals) != 0 || len(p.Tasks) != 2 || len(p.Locked) != 0 {
+	if err != nil || len(p.Refusals) != 0 || len(p.Errands) != 2 || len(p.Locked) != 0 {
 		t.Fatalf("plan = %+v, %v", p, err)
 	}
-	if _, err := Cancel("in", Opts{Release: []string{"keep"}}); err != nil {
+	if _, err := Cancel("in", Opts{Why: "why", Release: []string{"keep"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(*calls) != 2 || !slices.Equal((*calls)[0].ids, []string{"tk"}) || (*calls)[0].reason != "withdrawn: in" || (*calls)[1].reason != "cancelled: in" ||
-		slices.Contains((*calls)[1].ids, "keep") || !slices.Equal(*rel, []string{"keep"}) {
+	if len(*calls) != 3 || !slices.Equal((*calls)[0].ids, []string{"tk"}) || (*calls)[0].reason != "withdrawn: in" || (*calls)[1].reason != "cancelled: in" ||
+		(*calls)[2].reason != "cancelled: why" || !slices.Equal((*calls)[2].ids, []string{"in"}) || slices.Contains((*calls)[1].ids, "keep") || !slices.Equal(*rel, []string{"keep"}) {
 		t.Errorf("calls = %v released %v", *calls, *rel)
 	}
 }
 
-// Under Require Initiatives a Task is not locked and --release accepts it; a
+// Under Require Initiatives an Errand is not locked and --release accepts it; a
 // Checkpoint stays locked.
-func TestCancelTaskNotLockedUnderRequire(t *testing.T) {
-	g := append(fixture(), b("tk", contract.KindTask, "in"))
+func TestCancelErrandNotLockedUnderRequire(t *testing.T) {
+	g := append(fixture(), b("tk", contract.KindErrand, "in"))
 	graph(t, g...)
 	required = func() bool { return true }
 	p, err := plan("in", g, Opts{Release: []string{"tk"}})
@@ -637,22 +638,35 @@ func TestCancelTaskNotLockedUnderRequire(t *testing.T) {
 	}
 	for _, l := range p.Locked {
 		if l.Head == "tk" {
-			t.Errorf("task locked: %v", p.Locked)
+			t.Errorf("errand locked: %v", p.Locked)
 		}
 	}
-	if _, err := plan("in", g, Opts{Release: []string{"b1"}}); err == nil || !strings.Contains(err.Error(), "member chain head or member Task") {
+	if _, err := plan("in", g, Opts{Release: []string{"b1"}}); err == nil || !strings.Contains(err.Error(), "member chain head or member Errand") {
 		t.Errorf("err = %v", err)
 	}
 }
 
-// A kept-outside Task ordered after a member is not in the set: the cancel refuses.
-func TestCancelRefusesKeptOutsideTask(t *testing.T) {
-	g := append(fixture(), b("out", contract.KindTask, "", "b2"))
+// A kept-outside Errand ordered after a member is not in the set: the cancel refuses.
+func TestCancelRefusesKeptOutsideErrand(t *testing.T) {
+	g := append(fixture(), b("out", contract.KindErrand, "", "b2"))
 	graph(t, g...)
 	stubRelease(t)
-	_, err := Cancel("in", Opts{})
+	_, err := Cancel("in", Opts{Why: "why"})
 	var re *RefusedError
 	if !errors.As(err, &re) || re.Refusals[0].Kind != OrderedAfter || !slices.Equal(re.Refusals[0].Beads, []string{"out"}) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A cancel with a blank or whitespace-only why is refused and closes nothing.
+func TestCancelRefusesBlankWhy(t *testing.T) {
+	calls := graph(t, fixture()...)
+	for _, why := range []string{"", "  \t\n"} {
+		if _, err := Cancel("in", Opts{Why: why}); err == nil || !strings.Contains(err.Error(), "why") {
+			t.Errorf("Cancel why %q = %v, want a why error", why, err)
+		}
+	}
+	if len(*calls) != 0 {
+		t.Errorf("closed %v", *calls)
 	}
 }

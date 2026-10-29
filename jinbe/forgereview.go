@@ -66,7 +66,7 @@ func forgeReviewArm(cp bd.Bead, landing *bd.Bead, lg legs, mr *forge.MR) error {
 		}
 		mark, _ = strconv.Atoi(forgeReviewLine(last, "Read through note:"))
 	}
-	discussions, err := forgeDiscussions(lg.proj, mr.IID)
+	discussions, err := lg.discussions(mr.IID)
 	if err != nil {
 		return err
 	}

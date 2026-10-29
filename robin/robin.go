@@ -1,5 +1,6 @@
 // Package robin holds Robin, the crewmate who explains the Workspace read-only
-// and drafts Signals from what a conversation finds (ADR 0193, ADR 0194). She
+// and drafts Signals and bodyless Initiatives from what a conversation finds
+// (ADR 0193, ADR 0194, ADR 0381 (robin-may-draft-a-bodyless-initiative…)). She
 // owns the one kind `discussion`, a free-standing HITL bead: the loop never
 // dispatches it, a human launches it, and Run is a loud error. Her session runs
 // at RepoRoot (route's default): no worktree, commits or integrate. Launch marks

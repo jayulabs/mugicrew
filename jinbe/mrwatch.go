@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,11 +84,25 @@ func reconcileMRWatch(w bd.Bead) error {
 		}
 		return nil
 	}
+	lg.disc = &discussionsRead{}
 	mr, err := forgeMR(lg.proj, iid)
 	if err == nil {
+		var waiting bool
+		if cp.Unclosed() && mr.State == forge.StateClosed {
+			if _, waiting, err = waitingApprovalOn(cp, mr.IID); err != nil {
+				return holdRateLimited(w, "mrwatch.rate_limited", err, lg.attrs)
+			}
+		}
 		switch {
+		case waiting:
+			err = holdClosedDraft(cp, lg, mr)
 		case !cp.Unclosed() || mr.State == forge.StateMerged || mr.State == forge.StateClosed:
-			err = lateMRWatch(w, cp, landings, lg, mr)
+			if mr.State == forge.StateMerged { // a merge implies an un-draft: end the Approval before the late pass
+				err = undraftArm(cp, mr)
+			}
+			if err == nil {
+				err = lateMRWatch(w, cp, landings, lg, mr)
+			}
 		case mr.State == forge.StateOpened:
 			if mr.WebURL != "" {
 				if err := setLine(&w, git.MRLinkKey, git.MRLinkLine(mr.WebURL)); err != nil {
@@ -97,9 +112,109 @@ func reconcileMRWatch(w bd.Bead) error {
 			if err = forgeReviewArm(cp, nil, lg, mr); err == nil {
 				err = closeOutArm(cp, lg, mr, git.BranchName(string(cp.Kind), cp.ID), closeOutTarget{head: mr.SHA})
 			}
+			if err == nil {
+				err = undraftArm(cp, mr)
+			}
+			recordMRFacts(lg, &w, mr) // after the arms, so it reuses the discussions read they made
 		}
 	}
 	return holdRateLimited(w, "mrwatch.rate_limited", err, lg.attrs)
+}
+
+// undraftedLine ends the Approval History of an Approval the human approved by un-drafting
+// its Merge Request (Spec FR 12).
+const undraftedLine = "approved (un-drafted on GitLab)"
+
+// undraftArm is the MR Watch's approval arm (Spec FR 11, 13): the container's open Approval
+// waiting on mr (its MR: line names the iid) is closed approved once the MR's draft flag, read
+// with the MR the Watch already holds, is false. An open pivot holds the close to a later
+// tick, so an un-draft cannot approve a Checkpoint the pivot has frozen (ADR 0043 §1). A merged
+// MR is the exception: the merge is done and the pivot cannot hold it, so the Approval closes
+// anyway, its History recording that it was merged past the pivot, and never stays stranded.
+func undraftArm(cp bd.Bead, mr *forge.MR) error {
+	merged := mr.State == forge.StateMerged
+	if mr.Draft && !merged {
+		return nil
+	}
+	a, ok, err := waitingApprovalOn(cp, mr.IID)
+	if err != nil || !ok {
+		return err
+	}
+	pivots, err := openPivots(cp.ID)
+	if err != nil || len(pivots) > 0 && !merged {
+		return err
+	}
+	line := undraftedLine
+	if len(pivots) > 0 {
+		line = mergedPastPivotLine
+	}
+	return closeApprovalApproved(a, line)
+}
+
+// mergedPastPivotLine ends the History of an Approval whose MR was merged while a pivot was open.
+const mergedPastPivotLine = "approved (un-drafted on GitLab; merged past an open pivot)"
+
+// landedPastLine ends the History of a waiting Approval its Checkpoint landed over by trailer
+// before the MR Watch read the un-draft.
+const landedPastLine = "approved (un-drafted on GitLab; landed before the Watch read it)"
+
+// closeApprovalApproved ends a's Approval History with line and closes it approved.
+func closeApprovalApproved(a bd.Bead, line string) error {
+	if err := bd.EditBody(showBead, updateBody, a.ID, func(body string) string {
+		// An auto-approved Approval whose close failed after its MR was opened ready is not
+		// the human's un-draft to claim.
+		if last, _ := bd.ApprovalHistoryLast(body); strings.HasPrefix(last, bd.AutoApprovedPrefix) {
+			return body
+		}
+		return bd.EndApprovalHistory(body, line)
+	}); err != nil {
+		return err
+	}
+	return closeIfOpen(a, bd.ApprovedReason)
+}
+
+// closeWaitingApprovals closes every Approval of a landed container still waiting on its
+// un-draft, before the container closes, so none is stranded open under a closed Checkpoint.
+func closeWaitingApprovals(containerID string) error {
+	approvals, err := childrenOfKind(containerID, contract.KindApproval)
+	if err != nil {
+		return err
+	}
+	for _, a := range approvals {
+		if bd.AwaitingUndraft(a) {
+			if err := closeApprovalApproved(a, landedPastLine); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// waitingApprovalOn is cp's open Approval waiting on MR iid, if it has one.
+func waitingApprovalOn(cp bd.Bead, iid int) (bd.Bead, bool, error) {
+	approvals, err := childrenOfKind(cp.ID, contract.KindApproval)
+	if err != nil {
+		return bd.Bead{}, false, err
+	}
+	i := slices.IndexFunc(approvals, func(a bd.Bead) bool { return bd.AwaitingUndraft(a) && git.RecordedMR(a.Description) == iid })
+	if i < 0 {
+		return bd.Bead{}, false, nil
+	}
+	return approvals[i], true, nil
+}
+
+// holdClosedDraft is the MR Watch's closed-MR arm (Spec FR 15, 16): a human closed the Draft MR
+// a waiting Approval names, so the container takes the ADR 0185 §4 path, a Brook Task to
+// reopen or abandon. The Approval and the Watch stay open, so a reopen is read on the next tick.
+func holdClosedDraft(cp bd.Bead, lg legs, mr *forge.MR) error {
+	ref := git.MRRef(lg.mrPath, mr.IID)
+	noun := "Checkpoint"
+	if cp.Kind == contract.KindChart {
+		noun = "Chart"
+	}
+	lead := fmt.Sprintf("MR %s for %s was closed on the Forge while its Approval waited for the un-draft: the waiting Approval resumes on a reopened MR, or the %s is abandoned.", ref, cp.ID, noun)
+	do := fmt.Sprintf("reopen MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. The waiting Approval resumes on a reopened MR.", ref, cp.ID)
+	return holdClosedMR(cp, lg, mr, lead, do)
 }
 
 // abandonAfter is how long a closed container's Watch keeps closing out before a human is told.
@@ -212,4 +327,113 @@ func mrWatchOwes(cp bd.Bead, iid int, res closeOutResult) ([]string, error) {
 		}
 	}
 	return owed, nil
+}
+
+// recordMRFactsOnWatches is mirrorMR's route to the facts: the container's open MR Watches on
+// iid get them, as backfillMRLink finds them for MR link:. A failed lookup only warns.
+func recordMRFactsOnWatches(l, cp bd.Bead, iid int, lg legs, mr *forge.MR) {
+	watches, err := childrenOfKind(cp.ID, contract.KindMRWatch)
+	if err != nil {
+		slog.Warn("land.mr_facts_write_failed", append(eventlog.BeadAttrs(l), "err", err)...)
+		return
+	}
+	for _, w := range watches {
+		if w.Open() && git.RecordedMR(w.Description) == iid {
+			recordMRFacts(lg, &w, mr)
+		}
+	}
+}
+
+// recordMRFacts sets the Watch's display-only "MR head:", "MR pipeline:" and "MR merge
+// status:" lines from the open MR just read (ADR 0385), in one write of the lines whose value
+// changed. A failed write only warns: the next tick sees the body unchanged and retries, and
+// a failed reconcile would read as retrying.
+func recordMRFacts(lg legs, w *bd.Bead, mr *forge.MR) {
+	pipeline, err := mrPipelineValue(lg.proj, w.Description, mr.HeadPipeline)
+	if err != nil {
+		slog.Warn("mrwatch.mr_ran_on_lookup_failed", append(eventlog.BeadAttrs(*w), "err", err)...)
+	}
+	want := []struct{ key, value string }{
+		{git.MRHeadKey, mr.SHA},
+		{git.MRPipelineKey, pipeline}, // "" on a failed lookup: the line stays as it is
+		{git.MRMergeStatusKey, mr.MergeStatus},
+	}
+	if threads := openThreads(lg, mr, pipeline); threads != "" {
+		want = append(want, struct{ key, value string }{git.MRThreadsKey, threads})
+	}
+	body := w.Description
+	for _, f := range want {
+		if old, _ := git.ParseLine(body, f.key); f.value != "" && old != f.value {
+			body = setBodyLine(body, f.key+" ", git.MRFactLine(f.key, f.value))
+		}
+	}
+	if body == w.Description {
+		return
+	}
+	if err := updateBody(w.ID, []string{"--description", body}); err != nil {
+		slog.Warn("mrwatch.mr_facts_write_failed", append(eventlog.BeadAttrs(*w), "err", err)...)
+		return
+	}
+	w.Description = body
+}
+
+// mrPipelineValue is "none" without a head pipeline, else "<status> <id> <ran-on>": a branch
+// pipeline ran on its sha, a merged-results one on its merge commit's second parent (Spec D5),
+// and "-" stands for a merge-train pipeline, which never counts as on head. The parent is
+// looked up only when body's MR pipeline: line names another pipeline id, since a commit's
+// parents never change and a retry keeps both id and sha; a failed lookup returns "".
+func mrPipelineValue(p forge.Project, body string, pl *forge.Pipeline) (string, error) {
+	if pl == nil {
+		return "none", nil
+	}
+	ranOn := pl.SHA
+	switch {
+	case strings.HasSuffix(pl.Ref, "/train"):
+		ranOn = "-"
+	case pl.MergedResults():
+		ranOn = "-"
+		old, _ := git.ParseLine(body, git.MRPipelineKey)
+		if f := strings.Fields(old); len(f) == 3 && f[1] == strconv.Itoa(pl.ID) && f[2] != "-" {
+			ranOn = f[2]
+		} else if src, err := forgeSource(p, pl.SHA); err != nil {
+			return "", err
+		} else if src != "" {
+			ranOn = src
+		}
+	case ranOn == "":
+		ranOn = "-"
+	}
+	return fmt.Sprintf("%s %d %s", pl.Status, pl.ID, ranOn), nil
+}
+
+// openThreads is the "MR threads:" value "<open>/<resolvable>", counted from the tick's
+// discussions read; "" leaves the line as it is. The read is whatever the Forge Review or
+// close-out arm already made this tick (the user_notes_count gate opened), else one made
+// only when the tick is candidate green: head pipeline success and on head, and a settled
+// can_be_merged. Any other tick makes no read (Spec D4).
+func openThreads(lg legs, mr *forge.MR, pipeline string) string {
+	if lg.disc == nil || (!lg.disc.done && !candidateGreen(mr, pipeline)) {
+		return ""
+	}
+	ds, err := lg.discussions(mr.IID)
+	if err != nil {
+		return ""
+	}
+	open, resolvable := 0, 0
+	for _, d := range ds {
+		if d.Resolvable {
+			resolvable++
+			if !d.Resolved {
+				open++
+			}
+		}
+	}
+	return fmt.Sprintf("%d/%d", open, resolvable)
+}
+
+// candidateGreen is whether the MR's other facts are already green: pipeline is the
+// "<status> <id> <ran-on>" value just computed.
+func candidateGreen(mr *forge.MR, pipeline string) bool {
+	f := strings.Fields(pipeline)
+	return len(f) == 3 && f[0] == "success" && f[2] == mr.SHA && mr.MergeStatus == "can_be_merged"
 }

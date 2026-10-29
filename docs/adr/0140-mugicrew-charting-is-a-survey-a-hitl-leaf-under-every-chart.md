@@ -1,6 +1,7 @@
 # ADR 0140: mugicrew charting is a Survey: a HITL leaf under every Chart
 
 Status: Accepted
+Amended by: ADR 0357 (mugicrew-a-survey-with-no-fog-finishes…) (§1: speccing reads a closed Survey; §2 and the ADR 0129 §7 amendment: finished in place)
 Date: 2026-10-12
 
 Amends: ADR 0129 §5-7 (the Unmapped gate becomes a Survey), ADR 0130 §6

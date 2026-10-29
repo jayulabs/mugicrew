@@ -9,17 +9,16 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
-	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/route"
 	"jayulabs.org/mugicrew/tui"
 )
 
-// inProgress and probe are the ps verb's bd read and process-table probe, vars so
-// the verb is testable with no bd and no live processes.
+// inProgress and orphans are the ps verb's bd read and the shared Orphaned-claim
+// reading (ADR 0391), vars so the verb is testable with no bd and no live processes.
 var (
 	inProgress = bd.InProgress
-	probe      = liveness.Alive
+	orphans    = loop.Orphans
 )
 
 // psRow is one active AFK effort in the effort liveness view (ADR 0032 §2).
@@ -43,29 +42,27 @@ func runPs(argv []string, w io.Writer) error {
 		return errors.New("usage: mugicrew ps [--json]")
 	}
 	inheritGraph()
-	loop.StampAutoApprove()
+	loop.StampModeSnapshots()
 	all, err := inProgress()
 	if err != nil {
 		return err
 	}
 	var efforts []bd.Bead
-	var ids []string
 	for _, b := range all {
 		if loop.IsActiveAFKEffort(b) {
 			efforts = append(efforts, b)
-			ids = append(ids, b.ID)
 		}
 	}
-	alive := probe(ids)
+	orphaned := orphans(efforts)
 	rows := []psRow{}
 	for _, b := range efforts {
 		r := psRow{ID: b.ID, Title: b.Title, Kind: string(b.Kind), Assignee: b.Assignee,
-			Command: effortCommand(b), Age: tui.HumanAge(b.Started), Liveness: "dead"}
+			Command: effortCommand(b), Age: tui.HumanAge(b.Started), Liveness: "alive"}
 		if !b.Started.IsZero() {
 			r.StartedAt = b.Started.UTC().Format(time.RFC3339)
 		}
-		if alive[b.ID] {
-			r.Liveness = "alive"
+		if orphaned[b.ID] {
+			r.Liveness = "dead"
 		}
 		rows = append(rows, r)
 	}

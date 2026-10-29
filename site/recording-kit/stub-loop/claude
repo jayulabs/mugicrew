@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Scripted stand-in for the claude CLI, used only by the loop-start-ps tape: a
+# live session needs a signed-in account and real plan usage, and the real one
+# exits at once in the recording container, which would leave every effort the
+# loop dispatches dead in `mugicrew ps`. This one prints nothing and stays up, so
+# the dispatched effort reads alive. The tape puts this directory first on PATH;
+# no other tape does. Arguments are ignored.
+exec sleep 600

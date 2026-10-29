@@ -22,11 +22,12 @@ func InPane() bool { return os.Getenv(paneVar) != "" }
 // HitlHook is the hidden `mugicrew hitl-hook` a Claude Code hook runs (ADR 0099):
 // it reads the hook event from stdin and the pane address from paneVar, and sets or
 // unsets the waiting bit on the pane's session per waitEdge, and arms or disarms its
-// Auto-exit per autoExitEdge (ADR 0111), autoExit being the auto_exit setting of a
-// cwd. It never fails and writes nothing to stdout, so it never blocks Stop or a
-// prompt and never adds to Claude's context: a missing var, bad JSON or a failed
+// Auto-exit per autoExitEdge (ADR 0111), autoExit being the Workspace's auto_exit
+// setting resolved from the pane's socket, never from the event's cwd (ADR 0356
+// (hitl-hook-resolves-its-workspace-root-from-the-panes-socket)). It never fails
+// and writes nothing to stdout, so it never blocks Stop or a prompt and never adds to Claude's context: a missing var, bad JSON or a failed
 // tmux call is a no-op (a failed read just makes its write a failing one too).
-func HitlHook(stdin io.Reader, autoExit func(cwd string) time.Duration) {
+func HitlHook(stdin io.Reader, autoExit func(sock string) time.Duration) {
 	sock, pane, ok := strings.Cut(os.Getenv(paneVar), ",")
 	if !ok || sock == "" || pane == "" {
 		return
@@ -45,7 +46,7 @@ func HitlHook(stdin io.Reader, autoExit func(cwd string) time.Duration) {
 	} else if next != cur {
 		args = append(args, ";", "set-option", "-t", pane, "@waiting", string(next))
 	}
-	if d, change := autoExitEdge(event, autoExit); change && d > 0 {
+	if d, change := autoExitEdge(event, func() time.Duration { return autoExit(sock) }); change && d > 0 {
 		// Re-arming restarts the full duration (FR6), even over a running countdown.
 		args = append(args, ";", "set-option", "-t", pane, "@autofinish", strconv.FormatInt(time.Now().Add(d).Unix(), 10))
 	} else if change && !armed.IsZero() {
@@ -58,16 +59,17 @@ func HitlHook(stdin io.Reader, autoExit func(cwd string) time.Duration) {
 
 // autoExitEdge is the Auto-exit edge of hook event (its JSON) (Spec D2,
 // ADR 0111): a Stop whose last_assistant_message shows contract.ClosingPhrase and
-// left no background_tasks or session_crons arms for setting(the event's cwd),
-// read only then, so an off (0) setting disarms; every other hooked edge
+// left no background_tasks or session_crons arms for setting(), read only then, so
+// an off (0) setting disarms. setting is closed over the pane's socket, which
+// anchors the Workspace root; the event's cwd takes no part (ADR 0356
+// (hitl-hook-resolves-its-workspace-root-from-the-panes-socket)); every other hooked edge
 // (UserPromptSubmit, PermissionRequest, an elicitation Notification, StopFailure, a
 // non-arming Stop, a tool run) disarms (d = 0). Anything else, bad JSON included,
 // keeps (change false).
-func autoExitEdge(event []byte, setting func(cwd string) time.Duration) (d time.Duration, change bool) {
+func autoExitEdge(event []byte, setting func() time.Duration) (d time.Duration, change bool) {
 	var e struct {
 		Name    string            `json:"hook_event_name"`
 		Type    string            `json:"notification_type"`
-		Cwd     string            `json:"cwd"`
 		Message string            `json:"last_assistant_message"`
 		Tasks   []json.RawMessage `json:"background_tasks"`
 		Crons   []json.RawMessage `json:"session_crons"`
@@ -78,7 +80,7 @@ func autoExitEdge(event []byte, setting func(cwd string) time.Duration) (d time.
 	switch e.Name {
 	case "Stop":
 		if strings.Contains(e.Message, contract.ClosingPhrase) && len(e.Tasks) == 0 && len(e.Crons) == 0 {
-			return setting(e.Cwd), true
+			return setting(), true
 		}
 		return 0, true
 	case "Notification":

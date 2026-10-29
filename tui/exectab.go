@@ -1,7 +1,7 @@
 package tui
 
 // The Execute tab (Spec mc-lu2x.21, ADR 0170): an Actionable queue over every open
-// Checkpoint and Spec grouped by Initiative, plus the Tasks and Pivots that wait on,
+// Checkpoint and Spec grouped by Initiative, plus the Errands and Pivots that wait on,
 // hold or gate a Checkpoint. Modelled on Defog: a thin client over the shell's
 // snapshot (graphData), routing enter and b through the shared queue-tab gates.
 
@@ -30,7 +30,7 @@ const (
 	eCP            // a Checkpoint
 	eSpec          // a Spec
 	eMem           // an open member of a Checkpoint
-	eSide          // a Task or Pivot waiting on a Checkpoint, not a member
+	eSide          // an Errand or Pivot waiting on a Checkpoint, not a member
 	eSum           // '▸ N closed'
 	eClosed        // a closed member inside an expanded '▸ N closed'
 	eLive          // a Live effort in the Live section
@@ -143,7 +143,7 @@ func (r eRow) id() string {
 }
 
 // shadeIn reduces the row for the ancestor shade: a bead row stands for its bead, an
-// Initiative header for its Initiative. A Task or Pivot's cp is only a hint, not an ancestor.
+// Initiative header for its Initiative. An Errand or Pivot's cp is only a hint, not an ancestor.
 func (r eRow) shadeIn() shadeIn {
 	switch r.kind {
 	case eSec:
@@ -167,7 +167,7 @@ func (r eRow) cpAct() bool { return r.kind == eAct && r.b.Container }
 
 // leaf is whether enter routes the row as an open HITL leaf (blocked and paused refuse).
 func (r eRow) leaf() bool {
-	return r.b != nil && r.kind != eClosed && isHITL(r.b) && !r.b.Container
+	return r.b != nil && r.kind != eClosed && isHITL(r.b) && !bd.AwaitingUndraft(*r.b) && !r.b.Container // a waiting fallback Approval's next step is the un-draft, not a session (Spec FR 28)
 }
 
 // selectable is whether the cursor may rest on the row: not on a placeholder.
@@ -212,7 +212,7 @@ func execListed(beads []bd.Bead) (cps, specs []*bd.Bead) {
 }
 
 // waiters are cp's non-member related beads with their relation: gating Pivots and
-// before-land Tasks (in cp.BlockedBy), and after-land Tasks (blocked by cp).
+// before-land Errands (in cp.BlockedBy), and after-land Errands (blocked by cp).
 func (g graphData) waiters(cp *bd.Bead) (out []*bd.Bead, rel []string) {
 	pos := func(yield func(int) bool) { // every bead position, or only the candidates through the index
 		if g.idx == nil {
@@ -245,9 +245,9 @@ func (g graphData) waiters(cp *bd.Bead) (out []*bd.Bead, rel []string) {
 		switch {
 		case b.Kind == contract.KindPivot && slices.Contains(cp.BlockedBy, b.ID):
 			out, rel = append(out, &g.beads[i]), append(rel, "gates")
-		case b.Kind == contract.KindTask && slices.Contains(cp.BlockedBy, b.ID):
+		case b.Kind == contract.KindErrand && slices.Contains(cp.BlockedBy, b.ID):
 			out, rel = append(out, &g.beads[i]), append(rel, "before land")
-		case b.Kind == contract.KindTask && slices.Contains(b.BlockedBy, cp.ID):
+		case b.Kind == contract.KindErrand && slices.Contains(b.BlockedBy, cp.ID):
 			out, rel = append(out, &g.beads[i]), append(rel, "after land")
 		}
 	}
@@ -275,7 +275,7 @@ func (g graphData) cpKids(cp *bd.Bead) (open, closed []*bd.Bead) {
 }
 
 // actionable is the human's queue: each listed Checkpoint's open Approval and Surgery
-// members plus its waiters and Tasks, deduped by id and banded (waiting, ready, then
+// members plus its waiters and Errands, deduped by id and banded (waiting, ready, then
 // own-paused, where every other own-paused ready member joins too).
 func (g graphData) actionable() []eRow {
 	wait, front, paused := g.actionBands()
@@ -287,19 +287,27 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 	var rows, memberPaused []eRow
 	cps, _ := execListed(g.beads)
 	seen := map[string]bool{}
-	for _, cp := range cps {
+	ctrs := slices.Clone(cps)
+	for i, b := range g.beads { // a Chart's Approval is the human's like a Checkpoint's
+		if b.Kind == contract.KindChart && execLive(b) {
+			ctrs = append(ctrs, &g.beads[i])
+		}
+	}
+	for _, cp := range ctrs {
 		open, _ := g.cpKids(cp)
 		var cand []*bd.Bead
 		var rel []string
 		for _, m := range open {
-			if (m.Kind == contract.KindSurgery || m.Kind == contract.KindApproval && isHITL(m)) && !m.Container { // a waiting AFK Approval is the loop's, not Actionable's (Spec D5)
+			if (m.Kind == contract.KindSurgery && cp.Kind == contract.KindCheckpoint || m.Kind == contract.KindApproval && (isHITL(m) || bd.AwaitingUndraft(*m))) && !m.Container { // an AFK Approval is the loop's, not Actionable's (Spec D5), unless it awaits the human's un-draft
 				cand, rel = append(cand, m), append(rel, "member")
-			} else if !m.Container && g.ownPausedReady(m) { // paused band only (Spec mc-llx8 FR 1-2, 9)
+			} else if cp.Kind == contract.KindCheckpoint && !m.Container && g.ownPausedReady(m) { // paused band only (Spec mc-llx8 FR 1-2, 9)
 				memberPaused = append(memberPaused, eRow{kind: eAct, key: "act:" + m.ID, b: m, cp: cp, rel: "member", depth: 1})
 			}
 		}
-		w, wr := g.waiters(cp)
-		cand, rel = append(cand, w...), append(rel, wr...)
+		if cp.Kind == contract.KindCheckpoint {
+			w, wr := g.waiters(cp)
+			cand, rel = append(cand, w...), append(rel, wr...)
+		}
 		for i, b := range cand {
 			if seen[b.ID] {
 				continue
@@ -308,9 +316,9 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 			rows = append(rows, eRow{kind: eAct, key: "act:" + b.ID, b: b, cp: cp, rel: rel[i], depth: 1})
 		}
 	}
-	rows = append(rows, g.taskRows(cps, seen)...)
+	rows = append(rows, g.errandRows(cps, seen)...)
 	wait, front, paused = band(g, rows, func(r eRow) *bd.Bead { return r.b })
-	for _, r := range memberPaused { // after the Task pass, so a waiter or Task member stays one row
+	for _, r := range memberPaused { // after the Errand pass, so a waiter or Errand member stays one row
 		if !seen[r.b.ID] {
 			seen[r.b.ID] = true
 			paused = append(paused, r)
@@ -332,9 +340,9 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 	return
 }
 
-// taskAt is the hint relation of Task b: "before land" with the first listed Checkpoint
+// errandAt is the hint relation of Errand b: "before land" with the first listed Checkpoint
 // holding it in BlockedBy, else none (nil, "").
-func taskAt(b *bd.Bead, cps []*bd.Bead) (*bd.Bead, string) {
+func errandAt(b *bd.Bead, cps []*bd.Bead) (*bd.Bead, string) {
 	for _, cp := range cps {
 		if slices.Contains(cp.BlockedBy, b.ID) {
 			return cp, "before land"
@@ -343,15 +351,15 @@ func taskAt(b *bd.Bead, cps []*bd.Bead) (*bd.Bead, string) {
 	return nil, ""
 }
 
-// taskRows is an Actionable row for every live Task not yet seen, wherever it sits; banding
+// errandRows is an Actionable row for every live Errand not yet seen, wherever it sits; banding
 // drops the blocked, Live and exited ones.
-func (g graphData) taskRows(cps []*bd.Bead, seen map[string]bool) (rows []eRow) {
+func (g graphData) errandRows(cps []*bd.Bead, seen map[string]bool) (rows []eRow) {
 	for i, b := range g.beads {
-		if b.Kind != contract.KindTask || !execLive(b) || seen[b.ID] {
+		if b.Kind != contract.KindErrand || !execLive(b) || seen[b.ID] {
 			continue
 		}
 		seen[b.ID] = true
-		cp, rel := taskAt(&g.beads[i], cps)
+		cp, rel := errandAt(&g.beads[i], cps)
 		rows = append(rows, eRow{kind: eAct, key: "act:" + b.ID, b: &g.beads[i], cp: cp, rel: rel, depth: 1})
 	}
 	return
@@ -374,9 +382,9 @@ func (g graphData) liveRows(actRows []eRow) []eRow {
 			cands = append(cands, b)
 		}
 	}
-	for i, b := range g.beads { // every live Task, hinted only by a listed Checkpoint it holds
-		if b.Kind == contract.KindTask && execLive(b) {
-			cp, rel := taskAt(&g.beads[i], cps)
+	for i, b := range g.beads { // every live Errand, hinted only by a listed Checkpoint it holds
+		if b.Kind == contract.KindErrand && execLive(b) {
+			cp, rel := errandAt(&g.beads[i], cps)
 			add(&g.beads[i], cp, rel)
 		}
 	}
@@ -458,7 +466,9 @@ func (g graphData) mrRows(cont contract.Kind) (rows []eRow, shown bool) {
 
 // mrLine is an MR row's text: the ref (the context named only for the nested body form, as
 // the rollup qualifier does), the Watch's container title, and the status word of the
-// container's open unpaused Landing, left out when it has none or the status is unmapped.
+// container's open unpaused Landing, left out when it has none or the status is unmapped;
+// stabilizing (graph-derived, g.stabilizing) takes its place while the crew still owes the MR work,
+// and all green (the Watch's own Forge lines) outranks the Landing's word but not stabilizing.
 // A closed container instead reads closing out · N due · M failing from the Watch's own lines.
 func (g graphData) mrLine(w, cp *bd.Bead) string {
 	var parts []string
@@ -481,18 +491,64 @@ func (g graphData) mrLine(w, cp *bd.Bead) string {
 		}
 		return strings.Join(parts, " · ")
 	}
-	for _, j := range g.children(cp.ID) {
-		l := g.beads[j]
-		if l.Kind != contract.KindLanding || !l.Unclosed() || len(bd.PausedCauses(l)) > 0 {
-			continue
-		}
+	if len(g.stabilizing(cp)) > 0 {
+		parts = append(parts, "stabilizing")
+		return strings.Join(parts, " · ")
+	}
+	if parseMRFacts(w.Description).allGreen() {
+		parts = append(parts, "all green")
+		return strings.Join(parts, " · ")
+	}
+	if l := g.openLanding(cp); l != nil {
 		raw, _ := git.ParseLine(l.Description, "MR status:")
 		if word := mrStatusWord[raw]; word != "" {
 			parts = append(parts, word)
 		}
-		break
 	}
 	return strings.Join(parts, " · ")
+}
+
+// openLanding is cp's first open, unpaused Landing, nil when it has none.
+func (g graphData) openLanding(cp *bd.Bead) *bd.Bead {
+	for _, j := range g.children(cp.ID) {
+		l := &g.beads[j]
+		if l.Kind == contract.KindLanding && l.Unclosed() && len(bd.PausedCauses(*l)) == 0 {
+			return l
+		}
+	}
+	return nil
+}
+
+// stabilizing is why an open container's MR reads stabilizing (Spec D7): one line per cause,
+// none when the crew owes it nothing. The causes are its unclosed, unpaused children other than
+// Landings and MR Watches (an unpublished Draft or an event isn't one), a non-zero Close-outs
+// due: or Close-outs failing: line, and an open Landing that is retrying. It reads the graph
+// snapshot only, never the Watch's Forge lines.
+func (g graphData) stabilizing(cp *bd.Bead) []string {
+	if !cp.Unclosed() {
+		return nil
+	}
+	var out []string
+	for _, j := range g.children(cp.ID) {
+		b := g.beads[j]
+		switch {
+		case b.Event, !b.Unclosed(), bd.IsDraft(b), len(bd.PausedCauses(b)) > 0,
+			b.Kind == contract.KindLanding, b.Kind == contract.KindMRWatch:
+		default:
+			out = append(out, b.ID+" "+b.Title)
+		}
+	}
+	for _, c := range []struct{ prefix, word string }{{contract.CloseOutsDuePrefix, "due"}, {contract.CloseOutsFailingPrefix, "failing"}} {
+		raw, _ := git.ParseLine(cp.Description, strings.TrimSpace(c.prefix))
+		n, _, _ := strings.Cut(raw, ":")
+		if k, err := strconv.Atoi(strings.TrimSpace(n)); err == nil && k > 0 {
+			out = append(out, fmt.Sprintf("close-outs %s: %d", c.word, k))
+		}
+	}
+	if l := g.openLanding(cp); l != nil && landRetrying(g.landEv[l.ID]) {
+		out = append(out, "Landing "+l.ID+" retrying")
+	}
+	return out
 }
 
 // landingOf is the index of the Landing that landed Checkpoint cp: a child of it, looked up
@@ -542,7 +598,7 @@ func ecollapsed(flip map[string]bool, r eRow) bool {
 }
 
 // initiativeOf is the id of the Initiative b belongs to: its own (Parent is an
-// Initiative), else the one of cp, the Checkpoint a Task or Pivot waits on or gates
+// Initiative), else the one of cp, the Checkpoint an Errand or Pivot waits on or gates
 // (nil for none); "" for no Initiative.
 func (g graphData) initiativeOf(b, cp *bd.Bead) string {
 	own := func(b *bd.Bead) string {
@@ -632,7 +688,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 	for _, b := range append(slices.Clone(cps), specs...) {
 		members[initOf(b)] = append(members[initOf(b)], b)
 	}
-	// Tasks and Pivots are never under a Checkpoint: they sit in their own Initiative,
+	// Errands and Pivots are never under a Checkpoint: they sit in their own Initiative,
 	// else the one of the Checkpoint they wait on.
 	sides, seen := map[string][]eRow{}, map[string]bool{}
 	for _, cp := range cps {
@@ -646,8 +702,8 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			sides[p] = append(sides[p], eRow{kind: eSide, key: "side:" + x.ID, b: x, cp: cp, rel: rel[i], depth: 1})
 		}
 	}
-	for i, b := range g.beads { // every other live Task: no cp, no hint
-		if b.Kind == contract.KindTask && execLive(b) && !seen[b.ID] {
+	for i, b := range g.beads { // every other live Errand: no cp, no hint
+		if b.Kind == contract.KindErrand && execLive(b) && !seen[b.ID] {
 			seen[b.ID] = true
 			p := g.initiativeOf(&g.beads[i], nil)
 			sides[p] = append(sides[p], eRow{kind: eSide, key: "side:" + b.ID, b: &g.beads[i], depth: 1})
@@ -667,7 +723,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 	slices.SortStableFunc(ids, func(a, b string) int { return beadCmp(*inits[a], *inits[b]) })
 
 	// group emits the rows of the Initiative group (or No Initiative section) id at
-	// depth d: its Checkpoints, Specs, then Tasks and Pivots.
+	// depth d: its Checkpoints, Specs, then Errands and Pivots.
 	group := func(id string, d int) (out []eRow) {
 		ms := members[id]
 		slices.SortStableFunc(ms, func(a, b *bd.Bead) int { // Checkpoints first, then Specs
@@ -760,6 +816,7 @@ type execTab struct {
 	sel  string
 	open bool // d: the detail pane is open
 	off  int  // the detail viewport's scroll offset
+	lv   listView
 	w, h int
 }
 
@@ -889,34 +946,40 @@ func (t execTab) bindings() []key.Binding {
 	if r.kind == eSec || r.kind == eSum || r.kind == eCP {
 		bs = append(bs, keyFold)
 	}
-	if r.kind == eMR {
-		bs = append(bs, keyOpenMR)
-	}
 	if t.open {
 		bs = append(bs, keyShut, keyScroll)
 	} else {
 		bs = append(bs, keyDetail)
 	}
-	if r.b == nil {
-		if r.kind == eSec && isOpenInitiative(r.init) {
-			bs = append(bs, keyCancelKey)
-		}
+	b := r.verbBead()
+	if b == nil {
 		return append(bs, keySection)
 	}
-	if r.b.Unclosed() {
-		bs = append(bs, verbKey("p", pauseLabel(r.b)))
+	hinted, _ := beadVerbBindings(t.g, b, r.role())
+	if r.kind == eSec { // an Initiative header has no transcript of its own
+		return append(append(bs, hinted...), keySection)
 	}
-	if l := t.g.xHint(r.b); l != "" {
-		bs = append(bs, verbKey("x", l))
+	return append(spliceVerbs(bs, hinted), keySection)
+}
+
+// verbBead is the bead the bead verbs act on: the row's, else the Initiative a header names.
+func (r eRow) verbBead() *bd.Bead {
+	if r.kind == eSec {
+		return r.init
 	}
-	if t.g.xOffers(r.b) {
-		bs = append(bs, xBinding(r.b))
+	return r.b
+}
+
+// role is how much of the verb set the row hints (ADR 0360): an MR row keeps w, a landed or
+// closed row keeps c, the rest hint what their bead's state offers.
+func (r eRow) role() rowRole {
+	switch r.kind {
+	case eMR:
+		return roleMR
+	case eLanded, eClosed:
+		return roleClosed
 	}
-	bs = append(bs, keyTranscript)
-	if r.b.Unclosed() {
-		bs = append(bs, keyPrio)
-	}
-	return append(bs, keySection)
+	return roleFull
 }
 
 // extra is moving, then the keys the row handles but does not hint: shown in ? alone.
@@ -930,16 +993,13 @@ func (t execTab) extra() []key.Binding {
 	for _, b := range t.bindings() {
 		shown[b.Keys()[0]] = true
 	}
-	cand := []key.Binding{keyLaunch, keyBg}
-	if r.b != nil {
-		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
-	}
-	for _, b := range cand {
+	for _, b := range []key.Binding{keyLaunch, keyBg} {
 		if !shown[b.Keys()[0]] {
 			out = append(out, b)
 		}
 	}
-	return out
+	_, verbs := beadVerbBindings(t.g, r.verbBead(), r.role())
+	return append(out, verbs...)
 }
 
 // execKey routes the Execute tab's action keys through the shared paths, as defogKey
@@ -956,10 +1016,6 @@ func (m Model) execKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			nm.setStatus("folds won't survive a restart: " + err.Error())
 		}
 		return nm, cmd, true
-	}
-	if r.kind == eMR && key.Matches(k, keyOpenMR) {
-		next, cmd := m.openMRRow(r.b, r.cp)
-		return next, cmd, true
 	}
 	if r.kind == eLanded && (key.Matches(k, keyLaunch) || key.Matches(k, keyBg)) {
 		m.setStatus(landedRefuse)
@@ -1013,7 +1069,7 @@ func (t execTab) update(k tea.KeyMsg) (component, tea.Cmd) {
 	return t, nil
 }
 
-// relText is the context hint after a Task, Pivot or Actionable row's title and id.
+// relText is the context hint after an Errand, Pivot or Actionable row's title and id.
 func relText(rel string) string {
 	switch rel {
 	case "gates":
@@ -1109,6 +1165,38 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 	return s, suffix
 }
 
+// gapped is the Execute rows as drawRows takes them: each line's row number as text ("" for a
+// gap), its bead id for the blocker footer, and the selected row's line. View and hit share it.
+func (t execTab) gapped(rows []eRow, sel int) (lines, ids []string, at int) {
+	lines, at = make([]string, len(rows)), sel
+	ids = make([]string, len(rows))
+	liveAt, mrsAt, specsAt, cpsAt, treeAt, noInitAt := 0, 0, 0, 0, 0, 0 // the section headers that get a blank line above
+	for i, r := range rows {
+		ids[i], lines[i] = r.id(), strconv.Itoa(i)
+		switch r.key {
+		case liveKey:
+			liveAt = i
+		case mrsKey:
+			mrsAt = i
+		case specsKey:
+			specsAt = i
+		case cpsKey:
+			cpsAt = i
+		case treeKey:
+			treeAt = i
+		case noInitKey:
+			noInitAt = i
+		}
+	}
+	lines, ids, at = gapAt(lines, ids, at, noInitAt) // a blank line above each section header after Actionable
+	lines, ids, at = gapAt(lines, ids, at, treeAt)
+	lines, ids, at = gapAt(lines, ids, at, cpsAt)
+	lines, ids, at = gapAt(lines, ids, at, specsAt)
+	lines, ids, at = gapAt(lines, ids, at, mrsAt)
+	lines, ids, at = gapAt(lines, ids, at, liveAt)
+	return lines, ids, at
+}
+
 func (t execTab) view(w, h int) string {
 	rows := t.rows()
 	tagW := 0 // bead rows share one kind-badge column
@@ -1128,38 +1216,56 @@ func (t execTab) view(w, h int) string {
 		}
 		return t.line(r, tagW, blockers, trail)
 	}
-	shade := shadeSet(t.g.parentOf, rows, sel, full, eRow.shadeIn)
-	lines, selRow := make([]string, len(rows)), sel
-	ids := make([]string, len(rows))
-	liveAt, mrsAt, specsAt, cpsAt, treeAt, noInitAt := 0, 0, 0, 0, 0, 0 // the section headers that get a blank line above
-	for i, r := range rows {
-		ids[i], lines[i] = r.id(), strconv.Itoa(i)
-		switch r.key {
-		case liveKey:
-			liveAt = i
-		case mrsKey:
-			mrsAt = i
-		case specsKey:
-			specsAt = i
-		case cpsKey:
-			cpsAt = i
-		case treeKey:
-			treeAt = i
-		case noInitKey:
-			noInitAt = i
-		}
-	}
-	lines, ids, sel = gapAt(lines, ids, sel, noInitAt) // a blank line above each section header after Actionable
-	lines, ids, sel = gapAt(lines, ids, sel, treeAt)
-	lines, ids, sel = gapAt(lines, ids, sel, cpsAt)
-	lines, ids, sel = gapAt(lines, ids, sel, specsAt)
-	lines, ids, sel = gapAt(lines, ids, sel, mrsAt)
-	lines, ids, sel = gapAt(lines, ids, sel, liveAt)
+	shade := shadeSet(t.g.beadByID, rows, sel, full, eRow.shadeIn)
+	lines, ids, at := t.gapped(rows, sel)
 	var footer func(off, lh int) []string
 	if b != nil {
 		footer = blockerFooter(t.g, t.g.openBlockers(b), ids, w)
 	}
-	return drawRows(lines, row, shade, sel, selRow, t.open, w, h, t.detailVP(), footer)
+	return drawRows(lines, row, shade, at, sel, t.open, w, h, t.detailVP(), footer, t.lv.offsets(t.geom(rows, w, h).keys))
 }
 
 func (t execTab) drawerOpen() bool { return t.open }
+
+// geom is what View and the pointer share about a w by h body over rows.
+func (t execTab) geom(rows []eRow, w, h int) listGeom {
+	sel := t.selIndex(rows)
+	lines, ids, at := t.gapped(rows, sel)
+	var footer, links func(off, lh int) []string
+	if b := t.selected(); b != nil {
+		bl := t.g.openBlockers(b)
+		footer, links = blockerFooter(t.g, bl, ids, w), blockerLinks(bl, ids)
+	}
+	return queueGeom(lines, at, t.open, h, footer, links, func(i int) string { return rows[i].key }, func(i int) (string, bool, bool) {
+		return rows[i].key, rows[i].b != nil, rows[i].selectable()
+	})
+}
+
+// hit is the pointer's view of body line y of a w by h body (pointable).
+func (t execTab) hit(w, h, y int) hitTarget { return t.geom(t.rows(), w, h).hit(t.lv, y) }
+
+// selectKey selects the row key as j/k would.
+func (t execTab) selectKey(key string) component { t.sel, t.off = key, 0; return t }
+
+func (t execTab) wheel(w, h, y, delta int) component {
+	g := t.geom(t.rows(), w, h)
+	if g.hit(t.lv, y).kind == hitDrawer {
+		t.off = wheelDrawer(t.detailVP(), delta)
+		return t
+	}
+	t.lv = g.wheeled(t.lv, delta)
+	return t
+}
+
+func (t execTab) snap(w, h int) component {
+	t.lv = t.geom(t.rows(), w, h).snapped(t.lv)
+	return t
+}
+
+func (t execTab) unscroll() component { t.lv = listView{}; return t }
+
+// stabilizingField is the d field value naming each cause one per line (continuation lines
+// aligned under the first), "" when the container's MR is not stabilizing.
+func (g graphData) stabilizingField(cp *bd.Bead) string {
+	return strings.Join(g.stabilizing(cp), "\n"+strings.Repeat(" ", 12))
+}

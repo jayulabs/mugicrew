@@ -17,6 +17,7 @@ import (
 var planReleases [][]string
 
 type cancelCall struct {
+	why     string
 	release []string
 	discard bool
 }
@@ -34,8 +35,8 @@ func stubCancel(t *testing.T, plan func() withdraw.Plan, run func() (withdraw.Re
 		p.Released = release
 		return p, nil
 	}
-	runCancel = func(_ string, release []string, discard bool) (withdraw.Result, error) {
-		calls = append(calls, cancelCall{release, discard})
+	runCancel = func(_, why string, release []string, discard bool) (withdraw.Result, error) {
+		calls = append(calls, cancelCall{why, release, discard})
 		return run()
 	}
 	return &calls
@@ -69,6 +70,16 @@ func cancelOpenAt(t *testing.T, w int, plan func() withdraw.Plan) (Model, *[]can
 	m.beads = append(m.beads, cancelMembers()...)
 	m, _ = send(t, m, tea.WindowSizeMsg{Width: w, Height: 40})
 	return press(t, selectBead(t, m, "ini"), runeKey("X")), calls
+}
+
+// review gives the why "because" and opens the review page.
+func review(t *testing.T, m Model) Model {
+	t.Helper()
+	m = press(t, m, tabKey())
+	for _, r := range "because" {
+		m = press(t, m, runeKey(string(r)))
+	}
+	return press(t, press(t, m, tabKey()), enterKey())
 }
 
 func viewOf(m Model) string { return ansi.Strip(m.View()) }
@@ -162,7 +173,7 @@ func TestCancelChoiceMovesToItsOwnLineUnder70(t *testing.T) {
 func TestCancelReviewEscKeepsChoicesAndYRunsCancelWithTheReleases(t *testing.T) {
 	m, calls := cancelOpenAt(t, 160, cancelPlan())
 	m = press(t, press(t, m, runeKey("j")), runeKey("r")) // release cb
-	m = press(t, m, enterKey())
+	m = review(t, m)
 	v := viewOf(m)
 	for _, want := range []string{"Closes 1 chain:", "T-ca", "↑ 3 commits", "Releases 1 chain:", "T-cb", "Discards ✎ 4 files · ↑ 3 commits"} {
 		if !strings.Contains(v, want) {
@@ -177,7 +188,7 @@ func TestCancelReviewEscKeepsChoicesAndYRunsCancelWithTheReleases(t *testing.T) 
 		t.Fatalf("esc did not return to the rows with the choice kept:\n%s", v)
 	}
 	m = press(t, press(t, m, enterKey()), runeKey("y"))
-	if want := fmt.Sprint([]cancelCall{{[]string{"cb"}, true}}); fmt.Sprint(*calls) != want {
+	if want := fmt.Sprint([]cancelCall{{"because", []string{"cb"}, true}}); fmt.Sprint(*calls) != want {
 		t.Errorf("cancel calls = %v, want %s", *calls, want)
 	}
 	if len(m.modals) != 0 || !strings.Contains(statusOf(m), "cancelled ini") {
@@ -188,8 +199,8 @@ func TestCancelReviewEscKeepsChoicesAndYRunsCancelWithTheReleases(t *testing.T) 
 func TestCancelWithoutDiscardRunsWithoutIt(t *testing.T) {
 	m, calls := cancelOpenAt(t, 160, cancelPlan())
 	m = press(t, m, runeKey("r")) // ca held the discard
-	m = press(t, press(t, m, enterKey()), enterKey())
-	if want := fmt.Sprint([]cancelCall{{[]string{"ca"}, false}}); fmt.Sprint(*calls) != want {
+	m = press(t, review(t, m), enterKey())
+	if want := fmt.Sprint([]cancelCall{{"because", []string{"ca"}, false}}); fmt.Sprint(*calls) != want {
 		t.Errorf("cancel calls = %v, want %s", *calls, want)
 	}
 }
@@ -216,10 +227,10 @@ func TestCancelBarredMakesYInertAndReopensBarredOnConfirmRefusal(t *testing.T) {
 
 	// A refusal at confirm time reopens the dialog barred.
 	clean, _ := cancelOpenAt(t, 160, cancelPlan())
-	runCancel = func(string, []string, bool) (withdraw.Result, error) {
+	runCancel = func(string, string, []string, bool) (withdraw.Result, error) {
 		return withdraw.Result{}, &withdraw.RefusedError{Verb: "cancel", Target: "ini", Refusals: refused().Refusals}
 	}
-	clean = press(t, press(t, clean, enterKey()), runeKey("y"))
+	clean = press(t, review(t, clean), runeKey("y"))
 	if len(clean.modals) != 1 || !clean.modals[0].xs.barred || !strings.Contains(viewOf(clean), "Refused") {
 		t.Errorf("a confirm-time refusal did not reopen barred:\n%s", viewOf(clean))
 	}
@@ -252,12 +263,12 @@ func TestCancelRowsComeFromThePlan(t *testing.T) {
 // releases, with those chains still shown released.
 func TestCancelReopenKeepsReleaseChoices(t *testing.T) {
 	m, calls := cancelOpenAt(t, 160, cancelPlan())
-	runCancel = func(_ string, release []string, discard bool) (withdraw.Result, error) {
-		*calls = append(*calls, cancelCall{release, discard})
+	runCancel = func(_, why string, release []string, discard bool) (withdraw.Result, error) {
+		*calls = append(*calls, cancelCall{why, release, discard})
 		return withdraw.Result{}, &withdraw.DiscardRequiredError{Verb: "cancel", Target: "ini"}
 	}
 	m = press(t, m, runeKey("r")) // release ca
-	m = press(t, m, enterKey())
+	m = review(t, m)
 	m, cmd := send(t, m, runeKey("y"))
 	m = settle(t, m, cmd)
 	if last := planReleases[len(planReleases)-1]; fmt.Sprint(last) != "[ca]" {
@@ -268,51 +279,105 @@ func TestCancelReopenKeepsReleaseChoices(t *testing.T) {
 	}
 }
 
-// cancelPlanWithTask is cancelPlan plus an unclosed member Task, tk, leading the Set as
+// cancelPlanWithErrand is cancelPlan plus an unclosed member Errand, tk, leading the Set as
 // the verb orders it; locked chains are all of them (Require Initiatives) but never tk.
-func cancelPlanWithTask(locked ...withdraw.Lock) func() withdraw.Plan {
+func cancelPlanWithErrand(locked ...withdraw.Lock) func() withdraw.Plan {
 	return func() withdraw.Plan {
 		p := cancelPlan(locked...)()
-		tk := bd.Bead{ID: "tk", Kind: contract.KindTask, Status: "open", Title: "T-tk", Parent: "ini", Created: epoch}
-		p.Tasks = []bd.Bead{tk}
+		tk := bd.Bead{ID: "tk", Kind: contract.KindErrand, Status: "open", Title: "T-tk", Parent: "ini", Created: epoch}
+		p.Errands = []bd.Bead{tk}
 		p.Set = append([]bd.Bead{tk}, p.Set...)
 		p.Withdrawn = []string{"tk"}
 		return p
 	}
 }
 
-func TestCancelDialogGivesEachMemberTaskACloseReleaseRow(t *testing.T) {
-	m, calls := cancelOpenAt(t, 160, cancelPlanWithTask())
+func TestCancelDialogGivesEachMemberErrandACloseReleaseRow(t *testing.T) {
+	m, calls := cancelOpenAt(t, 160, cancelPlanWithErrand())
 	v := viewOf(m)
-	for _, want := range []string{"T-tk", "Closes 2 chains (4 beads) · releases 0 chains.", "Withdraws 1 Task"} {
+	for _, want := range []string{"T-tk", "Closes 2 chains (4 beads) · releases 0 chains.", "Withdraws 1 Errand"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("view lacks %q:\n%s", want, v)
 		}
 	}
 	m = press(t, press(t, press(t, m, runeKey("j")), runeKey("j")), runeKey("r")) // release tk
 	v = viewOf(m)
-	for _, want := range []string{"Closes 2 chains (3 beads) · releases 0 chains.", "Withdraws 0 Tasks", "releases 1 Task"} {
+	for _, want := range []string{"Closes 2 chains (3 beads) · releases 0 chains.", "Withdraws 0 Errands", "releases 1 Errand"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("after r the view lacks %q:\n%s", want, v)
 		}
 	}
-	m = press(t, m, enterKey())
+	m = review(t, m)
 	v = viewOf(m)
-	for _, want := range []string{"Withdraws 0 Tasks:", "Releases 1 Task:", "T-tk"} {
+	for _, want := range []string{"Withdraws 0 Errands:", "Releases 1 Errand:", "T-tk"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("review lacks %q:\n%s", want, v)
 		}
 	}
 	press(t, m, runeKey("y"))
-	if want := fmt.Sprint([]cancelCall{{[]string{"tk"}, true}}); fmt.Sprint(*calls) != want {
+	if want := fmt.Sprint([]cancelCall{{"because", []string{"tk"}, true}}); fmt.Sprint(*calls) != want {
 		t.Errorf("cancel calls = %v, want %s", *calls, want)
 	}
 }
 
-func TestCancelTaskRowStaysToggleableWhileChainsAreLocked(t *testing.T) {
-	m, _ := cancelOpenAt(t, 160, cancelPlanWithTask(withdraw.Lock{Head: "ca", Why: "Require Initiatives: adopt"}, withdraw.Lock{Head: "cb", Why: "Require Initiatives: adopt"}))
+func TestCancelErrandRowStaysToggleableWhileChainsAreLocked(t *testing.T) {
+	m, _ := cancelOpenAt(t, 160, cancelPlanWithErrand(withdraw.Lock{Head: "ca", Why: "Require Initiatives: adopt"}, withdraw.Lock{Head: "cb", Why: "Require Initiatives: adopt"}))
 	m = press(t, press(t, press(t, m, runeKey("j")), runeKey("j")), runeKey("r"))
-	if v := viewOf(m); !strings.Contains(v, "releases 1 Task") || strings.Contains(v, "stays closed") {
-		t.Errorf("Task release was locked:\n%s", v)
+	if v := viewOf(m); !strings.Contains(v, "releases 1 Errand") || strings.Contains(v, "stays closed") {
+		t.Errorf("Errand release was locked:\n%s", v)
+	}
+}
+
+func TestCancelDialogRendersAWhyLine(t *testing.T) {
+	m, _ := cancelOpenAt(t, 160, cancelPlan())
+	if v := viewOf(m); !strings.Contains(v, "Why:") {
+		t.Fatalf("no why line:\n%s", v)
+	}
+}
+
+func TestCancelRefusesAnEmptyOrBlankWhyWithAFlash(t *testing.T) {
+	for _, typed := range []string{"", "   "} {
+		m, calls := cancelOpenAt(t, 160, cancelPlan())
+		m = press(t, m, tabKey())
+		for _, r := range typed {
+			m = press(t, m, runeKey(string(r)))
+		}
+		m = press(t, press(t, m, tabKey()), enterKey())
+		if v := viewOf(m); !strings.Contains(v, "needs a why") || m.modals[0].xs.cancel.review {
+			t.Errorf("typed %q: no flash or reached review:\n%s", typed, v)
+		}
+		m = press(t, m, runeKey("y"))
+		if len(*calls) != 0 || len(m.modals) != 1 {
+			t.Errorf("typed %q: ran the cancel: %v", typed, *calls)
+		}
+	}
+}
+
+func TestCancelTypingInTheWhyLineLeavesChainBindingsAlone(t *testing.T) {
+	m, calls := cancelOpenAt(t, 160, cancelPlan())
+	m = press(t, m, tabKey())
+	for _, r := range "rcyj " {
+		m = press(t, m, runeKey(string(r)))
+	}
+	cs := m.modals[0].xs.cancel
+	if cs.why.text != "rcyj " || cs.release[0] || cs.review || len(*calls) != 0 {
+		t.Fatalf("why %q release %v review %v calls %v", cs.why.text, cs.release, cs.review, *calls)
+	}
+	m = press(t, press(t, m, tabKey()), runeKey("r")) // focus back: r releases again
+	if !m.modals[0].xs.cancel.release[0] {
+		t.Error("r did not release after focus returned to the chains")
+	}
+}
+
+func TestCancelReopenKeepsTheWhy(t *testing.T) {
+	m, calls := cancelOpenAt(t, 160, cancelPlan())
+	runCancel = func(_, why string, release []string, discard bool) (withdraw.Result, error) {
+		*calls = append(*calls, cancelCall{why, release, discard})
+		return withdraw.Result{}, &withdraw.DiscardRequiredError{Verb: "cancel", Target: "ini"}
+	}
+	m, cmd := send(t, review(t, m), runeKey("y"))
+	m = settle(t, m, cmd)
+	if len(m.modals) != 1 || m.modals[0].xs.cancel.why.text != "because" {
+		t.Errorf("reopened dialog lost the why: %+v", m.modals)
 	}
 }

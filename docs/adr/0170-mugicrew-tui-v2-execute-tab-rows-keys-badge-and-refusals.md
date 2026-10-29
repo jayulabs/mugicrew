@@ -3,6 +3,7 @@
 Status: Accepted; §3 amended by Spec mc-qgtw (Actionable gains a paused band for own-paused ready beads); §7 hint order superseded by ADR 0229 (…hints-bar-and-key-reference…) (membership kept)
 
 Amended by ADR 0171 (§4: no hitl label; §8: ●N counts waiting sessions, not the Actionable set) and ADR 0198 (§4: Checkpoint rows gain a bracketed Rollup word).
+Amended by Spec mc-w2a8c (Bead verbs offered wherever a bead row appears): the per-row key lists now hint and route the shared bead verbs by the row's role (ADR 0360) — a Merge Requests row hints w (and x while a session runs), a Landed or closed member row hints c (and x likewise), every other row, the status-only Checkpoints and Specs lists and an Initiative section included, what its bead's state offers; the rest is ?-only. Enter, b, d and space keep their refusals.
 Date: 2026-10-13
 
 Chart mc-lu2x.20 (Execute tab for the v2 TUI). Settles grilling mc-lu2x.20.4,

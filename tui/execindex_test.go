@@ -66,7 +66,7 @@ func execAllKeys(rows []eRow) []string {
 
 // BenchmarkExecView renders the Execute tab over ~2,600 beads of closed history: 170 closed
 // Checkpoints with a closed Landing (some inside the 24h window), live Checkpoints with open and
-// closed members, and gating Pivot, before-land and after-land Task waiters.
+// closed members, and gating Pivot, before-land and after-land Errand waiters.
 // Baseline (before the index-backed lookups, ns/frame): beads=1300 idx=true 71ms, idx=false 119ms;
 // beads=2600 idx=true 261ms, idx=false 427ms. Both grow ~x3.7 per doubling (quadratic), since the
 // tab scans every bead per closed Checkpoint whether or not the index is present.
@@ -108,8 +108,8 @@ func BenchmarkExecView(b *testing.B) {
 			pv, tb := c+"pv", c+"tb"
 			add(c, cp, "open", "", isContainer, func(bd *bd.Bead) { bd.BlockedBy = []string{pv, tb} })
 			add(pv, contract.KindPivot, "open", "")
-			add(tb, contract.KindTask, "open", "")
-			add(c+"ta", contract.KindTask, "open", "", blockedBy(c))
+			add(tb, contract.KindErrand, "open", "")
+			add(c+"ta", contract.KindErrand, "open", "", blockedBy(c))
 			add(c+"ap", contract.KindApproval, "open", c)
 			for k := range 5 {
 				add(fmt.Sprintf("%sm%d", c, k), contract.KindBuild, "closed", c, closed)
@@ -136,16 +136,16 @@ func BenchmarkExecView(b *testing.B) {
 	clock = time.Now
 }
 
-// Waiters match with and without the index for a Task in both cp.BlockedBy and blocked by cp
+// Waiters match with and without the index for an Errand in both cp.BlockedBy and blocked by cp
 // (first case wins), a missing blocked-by id, a duplicated bead id, and a repeated blocked-by id.
 func TestWaitersIndexEquivalence(t *testing.T) {
 	cp := contract.KindCheckpoint
 	beads := []bd.Bead{
-		dbead("both", contract.KindTask, "open", "", 1, blockedBy("c")),
+		dbead("both", contract.KindErrand, "open", "", 1, blockedBy("c")),
 		dbead("c", cp, "open", "", 1, isContainer, func(b *bd.Bead) { b.BlockedBy = []string{"both", "gone", "dup", "both"} }),
 		dbead("dup", contract.KindPivot, "open", "", 1),
-		dbead("x", contract.KindTask, "open", "", 1, func(b *bd.Bead) { b.BlockedBy = []string{"c", "c"} }),
-		dbead("dup", contract.KindTask, "open", "", 1),
+		dbead("x", contract.KindErrand, "open", "", 1, func(b *bd.Bead) { b.BlockedBy = []string{"c", "c"} }),
+		dbead("dup", contract.KindErrand, "open", "", 1),
 	}
 	g := graphData{beads: beads}
 	wantB, wantR := g.waiters(&beads[1])

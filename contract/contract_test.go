@@ -44,6 +44,8 @@ func TestDraftInstruction(t *testing.T) {
 		"before you close your own bead",
 		"Never publish",
 		"mugicrew latch jira <KEY> --blocks <bead> --drafted-by ws-spec",
+			"mugicrew latch mr <ref> --blocks <bead> --drafted-by ws-spec",
+			"GitLab-landing Workspaces only",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("DraftInstruction missing %q:\n%s", want, got)

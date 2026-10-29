@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Scripted stand-in for the claude CLI, used only by the grilling tape: a live
+# session needs a signed-in account and real plan usage, and a fresh claude
+# stops at its first-run theme picker. It shows one grilling question, reads
+# the typed answer, and acknowledges it. The tape puts this directory first on
+# PATH; no other tape does. Arguments (prompt, --session-id, ...) are ignored.
+printf '\n  \033[1mGrilling\033[0m  Invoice export\n\n'
+printf '  Which columns does finance need?\n\n'
+printf '  \033[2mYour answer, then Enter:\033[0m\n\n> '
+IFS= read -r answer
+printf '\n  Noted: %s\n' "$answer"
+printf '  That clears this question; the Chart moves one step closer to a Spec.\n\n'
+sleep 600

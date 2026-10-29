@@ -241,10 +241,11 @@ func TestHasDoneWhen(t *testing.T) {
 		body string
 		want bool
 	}{
-		"heading present": {"## Done when\n\nShip it.", true},
-		"heading absent":  {"Just a paragraph.", false},
-		"empty body":      {"", false},
-		"loose h3 match":  {"### Done when\n", true},
+		"heading present":     {"## Done when\n\nShip it.", true},
+		"heading absent":      {"Just a paragraph.", false},
+		"empty body":          {"", false},
+		"loose h3 match":      {"### Done when\n", true},
+		"labelled prose seed": {"Done when: it ships.\nPhases: one, two.\nNotes: none.", false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := HasDoneWhen(tc.body); got != tc.want {
@@ -272,7 +273,7 @@ func TestIsChainHead(t *testing.T) {
 		{id: "drspec", kind: "spec", status: "deferred", parent: "ch", draft: true},
 		{id: "drsig", kind: "signal", status: "deferred", draft: true},
 		{id: "gone", kind: "signal", status: "closed"},
-		{id: "task", kind: "task", status: "open"},
+		{id: "errand", kind: "errand", status: "open"},
 		{id: "pred", kind: "spec", status: "open"},
 		{id: "succ", kind: "checkpoint", status: "open", causedBy: "pred"},
 		{id: "pred2", kind: "spec", status: "open"},
@@ -284,7 +285,7 @@ func TestIsChainHead(t *testing.T) {
 			t.Errorf("%s: want a chain head", id)
 		}
 	}
-	for _, id := range []string{"in", "survey", "build", "land", "drspec", "drsig", "gone", "task", "pred"} {
+	for _, id := range []string{"in", "survey", "build", "land", "drspec", "drsig", "gone", "errand", "pred"} {
 		if isHead(id) {
 			t.Errorf("%s: want not a chain head", id)
 		}
@@ -329,20 +330,20 @@ func TestOrderedAfter(t *testing.T) {
 	}
 }
 
-// FR40: a Task filed as a direct Initiative child is a member like any other: an open
+// FR40: an Errand filed as a direct Initiative child is a member like any other: an open
 // one and a Draft one each hold the Initiative under way, and it drains only when both
 // are closed.
-func TestStateOfInitiativeCountsMemberTasks(t *testing.T) {
+func TestStateOfInitiativeCountsMemberErrands(t *testing.T) {
 	ini := Bead{ID: "ini", Kind: "initiative", Status: "open"}
-	task := func(id, status string) Bead { return Bead{ID: id, Kind: "task", Parent: "ini", Status: status} }
+	errand := func(id, status string) Bead { return Bead{ID: id, Kind: "errand", Parent: "ini", Status: status} }
 	for _, c := range []struct {
 		name string
 		all  []Bead
 		want InitiativeState
 	}{
-		{"open member Task", []Bead{ini, task("t", "open")}, InitiativeUnderWay},
-		{"member Task Draft", []Bead{ini, task("t", "deferred")}, InitiativeUnderWay},
-		{"every member Task closed", []Bead{ini, task("t", "closed"), task("d", "closed")}, InitiativeDrained},
+		{"open member Errand", []Bead{ini, errand("t", "open")}, InitiativeUnderWay},
+		{"member Errand Draft", []Bead{ini, errand("t", "deferred")}, InitiativeUnderWay},
+		{"every member Errand closed", []Bead{ini, errand("t", "closed"), errand("d", "closed")}, InitiativeDrained},
 	} {
 		if got := StateOf(ini, c.all); got != c.want {
 			t.Errorf("%s: StateOf = %q, want %q", c.name, got, c.want)
@@ -350,8 +351,8 @@ func TestStateOfInitiativeCountsMemberTasks(t *testing.T) {
 	}
 }
 
-// ADR 0349: under Require Initiatives a member Task releases while a Checkpoint refuses.
-func TestReleaseChainTaskExemptFromRequired(t *testing.T) {
+// ADR 0349: under Require Initiatives a member Errand releases while a Checkpoint refuses.
+func TestReleaseChainErrandExemptFromRequired(t *testing.T) {
 	old := git.RepoRoot
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, ".mugicrew"), 0o755); err != nil {
@@ -362,7 +363,7 @@ func TestReleaseChainTaskExemptFromRequired(t *testing.T) {
 	}
 	git.RepoRoot = func() (string, error) { return ws, nil }
 	t.Cleanup(func() { git.RepoRoot = old })
-	g := append(adoptGraph(), node{id: "tk", kind: "task", status: "open", parent: "in"})
+	g := append(adoptGraph(), node{id: "tk", kind: "errand", status: "open", parent: "in"})
 	writes := fakeSnapshot(t, g...)
 	if err := ReleaseChain("tk"); err != nil {
 		t.Fatal(err)
@@ -372,5 +373,17 @@ func TestReleaseChainTaskExemptFromRequired(t *testing.T) {
 	}
 	if err := ReleaseChain("cp2"); !errors.As(err, new(*RefusedError)) {
 		t.Errorf("checkpoint release: %v", err)
+	}
+}
+
+func TestDoneWhen(t *testing.T) {
+	for _, c := range []struct{ body, want string }{
+		{"## Done when\n\nUsers can ship.\n\n## Phases\n- one", "Users can ship."},
+		{"## Done when\nlast", "last"},
+		{"  no heading  ", "no heading"},
+	} {
+		if got := DoneWhen(c.body); got != c.want {
+			t.Errorf("DoneWhen(%q) = %q, want %q", c.body, got, c.want)
+		}
 	}
 }

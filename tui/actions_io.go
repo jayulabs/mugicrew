@@ -124,7 +124,7 @@ const runTailLines = 12
 // and the claim, in that order. It returns the crewmate and the minted Inflight
 // once b is claimed, else a nil crewmate and the refusal or error status.
 func claimRunNow(ctx contract.Ctx, b bd.Bead, crews map[string]contract.Crewmate, force bool) (string, contract.Crewmate, dispatch.Inflight) {
-	loop.StampAutoApprove() // before each press: IsAFKLeaf and CountInflight read this moment's mode (Spec D4)
+	stampModes() // before each press: IsAFKLeaf and CountInflight read this moment's mode (Spec D4)
 	fail := func(err error) (string, contract.Crewmate, dispatch.Inflight) {
 		return "run-now: " + err.Error(), nil, dispatch.Inflight{}
 	}
@@ -135,7 +135,7 @@ func claimRunNow(ctx contract.Ctx, b bd.Bead, crews map[string]contract.Crewmate
 	if err != nil {
 		return fail(err)
 	}
-	// Widened as the loop's is (Spec D6): bd ready hides a Task-held Checkpoint.
+	// Widened as the loop's is (Spec D6): bd ready hides an Errand-held Checkpoint.
 	open, err := openBeads()
 	if err != nil {
 		return fail(err)
@@ -153,24 +153,24 @@ func claimRunNow(ctx contract.Ctx, b bd.Bead, crews map[string]contract.Crewmate
 	if err != nil {
 		return fail(err)
 	}
-	// Inherited pause off the loop's own reads — the paused list plus in-progress
-	// rows (ADR 0081 §7) — through the loop's own check, for parity with candidates().
+	// The paused list plus in-progress rows seed the view, so the inherited-pause walk
+	// (ADR 0081 §7) answers them without a bd show; any other hop is read through the view.
 	paused, err := pausedBeads()
 	if err != nil {
 		return fail(err)
 	}
-	// A hop outside those reads goes to bd show, as the loop's does (Spec F:
-	// parity); a failed show refuses the press, never a silent "not paused".
-	anc, err := loop.InheritedPause(ready, slices.Concat(paused, inProgress), showBead)(b)
+	view := newPressView(memoEfforts(bd.EffortRefsAcross), slices.Concat(paused, inProgress), ready)
+	v, err := loop.Judge(b, loop.ModeRunNow, ready, loop.Inputs{Force: force}, view)
 	if err != nil {
 		return fail(err)
 	}
-	ok, held, err := runNowEligible(b, ready, anc)
-	if err != nil {
-		return fail(err)
+	if v.Cause == loop.CauseForeignLanding {
+		if err := holdForeign(b, v.Foreign); err != nil && err != error(v.Foreign) { // HoldForeign returns the refusal itself on the call that files the Errand
+			return fail(err)
+		}
 	}
-	if !ok {
-		return refuse(runNowHint(b, ready, anc, held))
+	if !v.Runnable {
+		return refuse(causeHint(b, v))
 	}
 	e, err := registry.Lookup(b.Kind)
 	if err != nil {
@@ -192,7 +192,7 @@ func claimRunNow(ctx contract.Ctx, b bd.Bead, crews map[string]contract.Crewmate
 	// pool only a throughput/cost budget the next tick re-reads (Spec FR34); NO
 	// cross-process lock is added (Spec FR22, ADR 0070 §4).
 	root, _ := git.RepoRoot() // unresolved ⇒ "" ⇒ the layers read relative to cwd, never a refusal
-	if n, pool := loop.CountInflight(inProgress), loop.Pool(root); n >= pool {
+	if n, pool := loop.CountInflight(inProgress, readOrphans(inProgress)), loop.Pool(root); n >= pool {
 		return refuse(fmt.Sprintf("AFK pool full (%d/%d) — %s will run once an AFK effort finishes", n, pool, b.ID))
 	}
 	if refused, err := dispatch.Admit(ctx, b, pauseBead); err != nil {
@@ -267,41 +267,6 @@ func dropKeptTree(b bd.Bead) string {
 	return ""
 }
 
-// runNowEligible is the strict-parity predicate (Spec FR5): a bead is
-// run-now-eligible iff the loop would dispatch it this tick — it is in the bd
-// ready frontier AND a loop-dispatched AFK kind. It reuses the loop's own
-// classifiers (never re-spelled — they ARE the parity contract): a research leaf
-// via loop.IsAFKLeaf, a drained defogged Chart via
-// loop.IsDrainedChartCandidate + 0 open children, or a land-ready
-// Checkpoint via loop.IsCheckpointCandidate + loop.CheckpointReady,
-// mirroring the loop's candidates() three-arm classify. A Chart's closed children
-// still holding effort/<id> count as open (Spec D7) and come back as held
-// for the refusal to name. The child/git reads are
-// I/O, so this press-time check is the authoritative gate — the row affordance may
-// be one refresh stale.
-// The AFK pool refusal is runNow's, after eligibility.
-// A bead with paused:manual or paused:abandoned (ADR 0082), or under a manual-
-// paused ancestor anc (inherited pause, ADR 0081/0084), is never eligible, whatever
-// else it carries; one with only paused:foreign-hold is (run-now overrides it, ADR
-// 0055 §6).
-func runNowEligible(b bd.Bead, ready []bd.Bead, anc string) (ok bool, held []bd.Bead, err error) {
-	if pauseRefusesRunNow(b, anc) || !inFrontier(b.ID, ready) {
-		return false, nil, nil
-	}
-	switch {
-	case loop.IsAFKLeaf(b):
-		held, err := surgeryHold(b) // an open Surgery holds its Checkpoint's Critiques (ADR 0160)
-		return len(held) == 0 && err == nil, held, err
-	case loop.IsDrainedChartCandidate(b):
-		open, held, err := drainBlockers(b.ID)
-		return err == nil && open == 0 && len(held) == 0, held, err
-	case loop.IsCheckpointCandidate(b):
-		return checkpointLandHold(b)
-	default:
-		return false, nil, nil
-	}
-}
-
 func inFrontier(id string, ready []bd.Bead) bool {
 	for _, r := range ready {
 		if r.ID == id {
@@ -311,56 +276,14 @@ func inFrontier(id string, ready []bd.Bead) bool {
 	return false
 }
 
-// runNowHint explains why enter is a no-op on an ineligible row (Spec FR4),
-// one message per row class — mirroring launch's non-HITL guard so a refused
-// press says what the row IS and what to do instead, never a bare "not eligible".
-// Reached only after the press-time gate (runNowEligible) has refused, so it
-// classifies from the loop's own predicates: a closed bead, an open HITL bead
-// (launch it), a not-drained Chart, or a blocked/not-ready bead. held is the
-// Chart's closed children still holding effort/<id>, named with both ways out, or
-// the open blockers holding an approved Checkpoint's land (Spec FR 45).
-func runNowHint(b bd.Bead, ready []bd.Bead, anc string, held []bd.Bead) string {
-	switch {
-	case b.Status == "closed":
-		return b.ID + " is closed — kept for lineage, nothing to run"
-	case pauseHint(b) != "":
-		return pauseHint(b)
-	case anc != "":
-		return inheritedPauseHint(b.ID, anc)
-	case isHITL(&b):
-		return b.ID + " is an open HITL bead — press enter to launch it (b in the background)"
-	case !inFrontier(b.ID, ready):
-		// Frontier first: a drained, defogged Chart that is merely blocked (not in
-		// bd ready) is NOT un-drained — reporting the drain/defog state here would
-		// lie. The Chart arms below only speak to a Chart that IS in the frontier.
-		return b.ID + " is blocked / not ready — run-now only drives a bead already in the bd ready frontier"
-	case loop.IsDrainedChartCandidate(b) && len(held) > 0:
-		return chartHeldHint(b.ID, held)
-	case loop.IsDrainedChartCandidate(b):
-		return b.ID + ": Chart not drained — its defog frontier hasn't cleared; run-now drives it once every child closes"
-	case b.Kind == contract.KindCritique && len(held) > 0:
-		return b.ID + ": held by open Surgery " + held[0].ID + " — ending the Surgery releases it"
-	case loop.IsCheckpointCandidate(b) && len(held) > 0:
-		return b.ID + ": " + landHeldNote(bd.Titles(held))
-	case loop.IsCheckpointCandidate(b):
-		return checkpointNotReadyHint(b.ID)
-	default:
-		return b.ID + " is not run-now eligible (only a ready AFK leaf — e.g. research or a Rollback — a drained Chart, or a land-ready Checkpoint runs via enter)"
-	}
-}
-
-// inheritedPauseHint, chartHeldHint and checkpointNotReadyHint are the refusal words
-// runNowHint and runNowWhy share, so the press-time and up-front gates can't drift.
+// inheritedPauseHint and chartHeldHint are refusal words causeHint
+// and the row hint (runNowWhy) share, so the press-time and up-front gates can't drift.
 func inheritedPauseHint(id, anc string) string {
 	return id + " is paused via " + anc + " — select it and press p, or run 'bd label remove " + anc + " paused:manual'"
 }
 
 func chartHeldHint(id string, held []bd.Bead) string {
 	return id + ": Chart not drained — " + bd.HeldHint(held)
-}
-
-func checkpointNotReadyHint(id string) string {
-	return id + ": Checkpoint not ready to land — needs a closed Approval pinning the branch HEAD and no open conflict/critique children"
 }
 
 // landHeldNote is the held-land words the preview and t's refusal share (Spec

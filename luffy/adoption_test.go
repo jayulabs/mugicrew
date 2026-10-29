@@ -11,12 +11,12 @@ import (
 )
 
 func TestTriagePromptAdoptionOffer(t *testing.T) {
-	base := triagePrompt("ws-sig", "", "", nil, nil)
-	if got := triagePrompt("ws-sig", "", "", nil, []bd.Bead{}); got != base {
+	base := triagePrompt("ws-sig", "", "", "", nil, nil)
+	if got := triagePrompt("ws-sig", "", "", "", nil, []bd.Bead{}); got != base {
 		t.Error("no offers must leave the prompt byte-identical")
 	}
 	ini := bd.Bead{ID: "ws-ini", Title: "Ship it", Description: "## Done when\n\nUsers can ship.\n\n## Phases\n- one"}
-	rest, ok := strings.CutPrefix(triagePrompt("ws-sig", "", "", nil, []bd.Bead{ini}), base)
+	rest, ok := strings.CutPrefix(triagePrompt("ws-sig", "", "", "", nil, []bd.Bead{ini}), base)
 	if !ok {
 		t.Fatal("the offer must be appended")
 	}
@@ -24,6 +24,13 @@ func TestTriagePromptAdoptionOffer(t *testing.T) {
 		if !strings.Contains(rest, want) {
 			t.Errorf("offer missing %q:\n%s", want, rest)
 		}
+	}
+	if !strings.Contains(rest, "it is outside it.") || strings.Contains(rest, "starts outside it") {
+		t.Errorf("no Initiative: line must say outside without a reason:\n%s", rest)
+	}
+	with := triagePrompt("ws-sig", "", "", "Order: none\nInitiative: outside (filer: unrelated)\n", nil, []bd.Bead{ini})
+	if !strings.Contains(with, `its body says "Initiative: outside (filer: unrelated)".`) {
+		t.Errorf("the Initiative: line must be quoted:\n%s", with)
 	}
 	if strings.Contains(rest, "- one") {
 		t.Error("Done when must stop at the next section")
@@ -123,7 +130,7 @@ func TestLaunchSurvivesFailingOfferSeam(t *testing.T) {
 	if _, err := (Luffy{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-sig", Kind: contract.KindSignal}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if !strings.HasSuffix(h.inv.Prompt, triagePrompt("ws-sig", "", "", declaredContexts(), nil)) {
+	if !strings.HasSuffix(h.inv.Prompt, triagePrompt("ws-sig", "", "", "", declaredContexts(), nil)) {
 		t.Error("a failing offer read must yield the base triage prompt")
 	}
 }

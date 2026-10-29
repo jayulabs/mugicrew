@@ -2,6 +2,8 @@ package git
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -198,4 +200,78 @@ func TestCheckResolvedSequenceRules(t *testing.T) {
 		commitFile(t, m+"V9__stray.sql", "x\n")
 		wantCheckFailure(t, CheckResolved(base, tip), 3, m+"V9__stray.sql")
 	})
+}
+
+func TestSeqNext(t *testing.T) {
+	rules := []Rule{ADRRule, mustRule(t, "db/migration/V{n}__*.sql")}
+	main := []string{"docs/adr/0394-a.md", "docs/adr/0395-b.md", "apps/x/docs/adr/0900-z.md", "db/migration/V7__x.sql", "README"}
+	for _, tc := range []struct {
+		name, path string
+		head       []string
+		others     []branchAdds
+		want, err  string
+	}{
+		{"mainline max only", "docs/adr/0381-me.md", nil, nil, "0396", ""},
+		{"nested dir has its own space", "apps/x/docs/adr/0001-me.md", nil, nil, "0901", ""},
+		{"open branches of each kind reach above", "docs/adr/0381-me.md", nil, []branchAdds{
+			{"refs/heads/checkpoint/a", []string{"docs/adr/0397-c.md"}},
+			{"refs/heads/chart/b", []string{"docs/adr/0399-d.md"}},
+			{"refs/heads/effort/c", []string{"docs/adr/0398-e.md", "apps/x/docs/adr/0950-o.md"}},
+		}, "0400", ""},
+		{"same slug on another lap is skipped", "docs/adr/0381-me.md", []string{"docs/adr/0381-me.md"}, []branchAdds{
+			{"refs/heads/effort/c", []string{"docs/adr/0420-me.md"}},
+			{"refs/heads/chart/b", []string{"docs/adr/0397-other.md"}},
+		}, "0398", ""},
+		{"same slug in another directory is not the same file", "docs/adr/0381-me.md", []string{"docs/adr/0381-me.md"}, []branchAdds{
+			{"refs/heads/effort/c", []string{"apps/x/docs/adr/0420-me.md"}},
+		}, "0396", ""},
+		{"configured V{n} rule keeps own width", "db/migration/V03__me.sql", nil, []branchAdds{
+			{"refs/heads/chart/b", []string{"db/migration/V12__o.sql", "docs/adr/0999-q.md"}},
+		}, "13", ""},
+		{"no rule", "docs/notes.md", nil, nil, "", "matches no sequence rule"},
+		{"width overflow", "docs/adr/0381-me.md", nil, []branchAdds{
+			{"refs/heads/chart/b", []string{"docs/adr/9999-big.md"}},
+		}, "", "outgrows"},
+	} {
+		got, err := seqNext(rules, tc.path, main, tc.head, tc.others)
+		if tc.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%s: err = %v, want %q", tc.name, err, tc.err)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("%s: = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
+func TestSeqNextTwoRulesIsAnError(t *testing.T) {
+	rules := []Rule{ADRRule, mustRule(t, "docs/adr/{n:4}-*.md")}
+	if _, err := seqNext(rules, "docs/adr/0001-x.md", nil, nil, nil); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Errorf("err = %v, want an overlap error", err)
+	}
+}
+
+// End to end in a real repo: mainline holds 0002, an open checkpoint branch adds
+// 0005, the current effort branch adds 0003 (its own, ignored); the verb prints 0006.
+func TestSequenceNextRealGit(t *testing.T) {
+	newRepo(t)
+	add := func(name string) {
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, name, "x\n")
+		mustGit(t, "add", ".")
+		mustGit(t, "commit", "-m", name)
+	}
+	add("docs/adr/0002-main.md")
+	mustGit(t, "checkout", "-b", "checkpoint/mc-a")
+	add("docs/adr/0005-theirs.md")
+	mustGit(t, "checkout", "-b", "effort/mc-a.1", "main")
+	add("docs/adr/0003-mine.md")
+	got, err := Repo("").SequenceNext("docs/adr/0003-mine.md")
+	if err != nil || got != "0006" {
+		t.Errorf("SequenceNext = %q, %v; want 0006", got, err)
+	}
 }

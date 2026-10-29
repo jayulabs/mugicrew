@@ -7,11 +7,11 @@ import (
 	"jayulabs.org/mugicrew/contract"
 )
 
-// ErrNoHeldCheckpoint is HeldCheckpoint's refusal when the Task holds no open,
+// ErrNoHeldCheckpoint is HeldCheckpoint's refusal when the Errand holds no open,
 // unlanded Checkpoint.
 var ErrNoHeldCheckpoint = errors.New("holds no open, unlanded Checkpoint")
 
-// SeveralHeldError is HeldCheckpoint's refusal when the Task holds more than one.
+// SeveralHeldError is HeldCheckpoint's refusal when the Errand holds more than one.
 type SeveralHeldError struct{ IDs []string }
 
 func (e *SeveralHeldError) Error() string {
@@ -26,8 +26,8 @@ func (e *NoSpecError) Error() string { return "its held Checkpoint " + e.ID + " 
 // HeldReads are the reads HeldCheckpoint makes, so the verb's probe and the publish
 // re-check share one resolver and fake only their own seams.
 type HeldReads struct {
-	// Up lists the beads the Task blocks (its up blocks edges).
-	Up     func(task string) ([]Bead, error)
+	// Up lists the beads the Errand blocks (its up blocks edges).
+	Up     func(errand string) ([]Bead, error)
 	Show   func(id string) (Bead, error)
 	SpecOf func(checkpoint string) (string, bool, error)
 	// Landed reports whether the Checkpoint's trailer is on its repo's mainline.
@@ -38,20 +38,20 @@ type HeldReads struct {
 // Checkpoint's repo).
 func LiveHeldReads(landed func(Bead) (bool, error)) HeldReads {
 	return HeldReads{
-		Up:     func(task string) ([]Bead, error) { return depTargets(task, "up", "blocks") },
+		Up:     func(errand string) ([]Bead, error) { return depTargets(errand, "up", "blocks") },
 		Show:   Show,
 		SpecOf: SpecOf,
 		Landed: landed,
 	}
 }
 
-// HeldCheckpoint is the Task's one open, unlanded Checkpoint and its Spec: the Task's
+// HeldCheckpoint is the Errand's one open, unlanded Checkpoint and its Spec: the Errand's
 // up blocks targets kept to kind:checkpoint, kept open, dropped when their land
-// trailer is on mainline. Other held kinds (Chart, Rollback, another Task) are
+// trailer is on mainline. Other held kinds (Chart, Rollback, another Errand) are
 // ignored. It returns ErrNoHeldCheckpoint, *SeveralHeldError or *NoSpecError rather
 // than pick a first match.
-func HeldCheckpoint(task string, r HeldReads) (cp Bead, spec string, err error) {
-	up, err := r.Up(task)
+func HeldCheckpoint(errand string, r HeldReads) (cp Bead, spec string, err error) {
+	up, err := r.Up(errand)
 	if err != nil {
 		return Bead{}, "", err
 	}

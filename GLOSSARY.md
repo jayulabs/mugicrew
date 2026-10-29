@@ -98,6 +98,16 @@ Workspace. It may live inside the Workspace or elsewhere (a planning repo);
 one loop drives exactly one Bead Graph and one Workspace (ADR 0089).
 _Avoid_: tracker, beads dir, planning repo
 
+**Device**:
+One machine a user runs mugicrew on, named by a stable **Device name** that the
+user chooses, not the raw hostname.
+_Avoid_: host, machine, box
+
+**Bead actor**:
+The name bd writes as "you" on a claim, `<user>@<device>`: the person and the
+Device they hold the claim from (ADR 0376).
+_Avoid_: whoami, claimer, bare user name
+
 **Graph id**:
 A Bead Graph's identity: its Dolt root commit hash, 32 lowercase base32
 characters. Two graphs that share an `issue_prefix` still differ by it
@@ -151,6 +161,17 @@ Landing re-pushes its pin into the same open Merge Request and re-arms it
 (ADR 0147, ADR 0185). Jinbe records its GitLab web URL as an `MR link:` line
 beside every `MR:` line it writes (Landing, MR Watch, Rollback).
 _Avoid_: PR, pull request
+
+**Bead verb**:
+One of the twelve TUI keys that act on a bead: `z` reject, `e` edit, `a` adopt,
+`A` release, `c` checkup, `B` add blocker, `U` unblock, `+`/`-` priority, `p` pause,
+`x` drop, abort or recover, `X` withdraw or cancel, and `w` open Merge Request. A
+bead verb is offered wherever its bead's row appears, on every tab up to
+Initiatives and in the Initiative focus view, and is gated only by the bead's state,
+never by the tab. One shared router routes them; a row with no bead behind it
+offers none. The exempt keys are `enter`, `b`, `d`, `space` and `i`, and the shell
+keys `t` and `y` (ADR 0359, ADR 0360).
+_Avoid_: tab action, per-tab key
 
 **Land strategy**:
 The Workspace's choice of how a Landing puts a commit on mainline, set by the
@@ -248,8 +269,8 @@ waits. _Avoid:_ the term, except as history.
 
 **Hand-back:** Nami's Survey session returning a wrong Destination to Luffy:
 the Chart closes unspecced and a fresh Signal, discovered from it, carries the
-case back to intake. A Chart with nothing to defog is handed back too, for the
-fast lane (ADR 0130). _Avoid:_ re-triage, reopening the Signal.
+case back to intake. A Chart with nothing to defog is finished in place instead, never
+handed back (ADR 0357). _Avoid:_ re-triage, reopening the Signal.
 
 **Crew docs:** the shared crewmate reference (procedures, templates, bead-graph
 conventions, skills vendored whole or distilled) that ships with mugicrew itself and is read by a
@@ -258,7 +279,7 @@ session on demand, never fetched from the Workspace or an installed skill
 
 **Actionable:** the section that opens the Ideate, Defog and Execute tabs: the
 tab's HITL sessions waiting on you, then its takeable frontier (the items you could
-start from that tab now; on Execute that includes every open, unblocked Task, wherever
+start from that tab now; on Execute that includes every open, unblocked Errand, wherever
 it sits), then its paused band: leaves carrying their own paused:* label that are
 otherwise ready (not blocked, Live, waiting, launching or exited), HITL and AFK alike
 (on Execute, every open Checkpoint member; AFK beads join only this band); on every tab it lists every
@@ -285,6 +306,16 @@ whose container is the tab's own kind (Checkpoint on Execute, Chart on Defog), s
 no MR is on both tabs. `w` opens the MR and `d` shows its link (ADR 0333). Unfolded
 by default. _Avoid:_ MRs tab.
 
+**All green:** a Merge Request with nothing left for the crew or the Forge to
+clear: its pipeline passed on its current head, every resolvable thread is
+resolved, and it has no conflict, so only a human's approve, rebase or merge
+remains. _Avoid:_ mergeable, ready to merge, awaiting merge (GitLab's own
+first-blocker status).
+
+**Stabilizing:** a Merge Request the crew still owes work that will change it:
+a Forge Review, a fix, its Review or Approval, a re-Land, or a close-out of a
+comment. It outranks all green. _Avoid:_ working, active, running.
+
 **Initiatives:** the section below Live on the Ideate and Defog tabs, and below
 Checkpoints on the Execute tab: the
 tab's Initiative groups only, headed `Initiatives (N)` for N groups (on Defog, a stamped
@@ -293,7 +324,7 @@ P4 Initiative's whole group sits in Backlog instead while ADR 0314 puts it there
 
 **No Initiative:** the top-level section below Initiatives on the Ideate, Defog and
 Execute tabs: the Checkpoints and Specs with no Initiative parent, and the
-outside Tasks and Pivots (on Defog, stamped Charts with an open child
+outside Errands and Pivots (on Defog, stamped Charts with an open child
 included), headed `No Initiative (N)`. Always shown, folded by default.
 _Avoid:_ loose group.
 
@@ -345,11 +376,11 @@ keeps for other senders).
   `initiative` (creates an Initiative at triage or writes the body of one a human started;
   in its cut session cuts the next phase or, on the human's "done", closes it; ADR 0128)
 - **Brook** — deal with the external world (outside the bead graph and the code); walk a
-  human through a Task; owns `task` and `latch` (a Latch blocks work until something in
+  human through an Errand; owns `errand` and `latch` (a Latch blocks work until something in
   the world is true). A land's own Forge state is Jinbe's, not Brook's (ADR 0188). Not
   the out-of-band channel ADR 0003 ruled out. See ADR 0115, ADR 0222.
 - **Robin** — explain the Workspace read-only from cited sources and, with a
-  human's yes, draft Signals from what a conversation finds; owns `discussion`.
+  human's yes, draft Signals and Initiatives from what a conversation finds; owns `discussion`.
   Never writes a repo file. See ADR 0191, ADR 0193, ADR 0194.
 - **Chopper** — the crew's doctor (not `mugicrew doctor`, see **doctor**): keep the bead graph healthy and valid; recovers a
   bead stranded by a dead effort, only on a human's command (deterministic code, no
@@ -357,9 +388,10 @@ keeps for other senders).
   See ADR 0126, ADR 0127, ADR 0272.
 - **doctor** — `mugicrew doctor`: the read-only verb that checks whether the environment
   and Workspace are ready to run mugicrew (tools, git repo, bead graph, profiles, preview
-  renderer). It reports each warn or FAIL row's precondition and fix, classed **safe fix**
-  or **manual fix**, and repairs nothing itself. Not **Chopper**, who repairs stranded
-  beads in the graph. See ADR 0302.
+  renderer, and the warn-only **off-machine backup** and backup freshness rows). It
+  reports each warn or FAIL row's precondition and fix, classed **safe fix** or **manual
+  fix**, and repairs nothing itself. Not **Chopper**, who repairs stranded beads in the
+  graph. See ADR 0302.
 - **doctor fix** — `mugicrew doctor fix`: applies every safe fix without asking, lists the
   manual ones it left, re-checks, and exits 1 if any FAIL remains. It changes only this
   machine or clone, never the bead graph. See ADR 0302.
@@ -367,6 +399,18 @@ keeps for other senders).
   machine or clone, needs no prompt, credential or sudo, is idempotent, and takes only
   values doctor can derive. Every other fix is manual.
   _Avoid:_ "hint" for a fix.
+- **off-machine backup** — the copy of a user's Bead Graph on a Dolt destination they name
+  (a `file://` path on an off-machine mount or a credentialed remotesapi), kept current by a
+  push, not by `bd backup` or `bd sync`. Doctor warns when none is configured or the oldest
+  unpushed commit is over 24 h old. Setup, recurrence and the restore drill are in
+  install.md's Backup section. See ADR 0367, ADR 0368, ADR 0369, ADR 0370, ADR 0384.
+  _Avoid:_ bd backup (a different, local copy), sync.
+- **backup remote** — the Dolt remote with the fixed name `backup` on the graph's database,
+  added once per clone; its absence means no off-machine backup is configured. See ADR 0367.
+- **mugicrew backup push** — the verb that performs one push of the graph's `main` to the
+  backup remote. Never forces, never starts the sql-server, lock-guarded, a no-op with
+  nothing unpushed; records `backup.pushed` or `backup.failed`. The loop runs it hourly.
+  See ADR 0370.
 
 ## Bead kinds
 
@@ -417,12 +461,13 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   Signal into a Spec. Born at triage (or by a pivot escalate) with its
   Destination written, and with a **Survey** as its first child; the open
   Survey keeps it from draining until Nami's charting session seeds its fog
-  (ADR 0129, ADR 0140).
+  or finishes it in place (ADR 0129, ADR 0140, ADR 0357).
   - _Owner:_ Nami (steward; also handler once drained)
   - _Structure:_ container (parents its Survey and its defog beads)
-  - _Operations:_ closes ("is defogged") when all defog beads resolve and is stamped as defogged → **authors and spawns**
+  - _Operations:_ closes ("is defogged") when all defog beads resolve and is stamped as defogged
+    (by promote-or-stamp, or by its Survey's `mugicrew chart finish` when it had no fog) → **authors and spawns**
     **exactly one Spec** in succession (a speccing session writes the Spec body
-    by synthesizing the Chart + its closed defog beads — charting's terminal act;
+    by synthesizing the Chart + its closed defog beads and closed Survey — charting's terminal act;
     see the Spec entry). Lands via a **Landing** (Jinbe's, spawned by Nami once
     the Chart is drained and stamped) by **rebase + squash** onto
     mainline (the local land strategy, as for a Checkpoint), so its **landed base**
@@ -430,8 +475,9 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Notes:_ Charting and its knowledge-bearing defog sessions (grilling →
     ADRs/CONTEXT, research → `docs/research/*`), plus prototype and chart-conflict
     sessions, **operate in a worktree of `chart/<id>`** (ADR 0071), so their artifacts (ADRs, CONTEXT edits, research docs) accrue
-    on the branch and **land on mainline once the Chart is defogged** — no review gate; charting is
-    gated by defog + Spec acceptance. Prototype output does **not** land here (side
+    on the branch and **land on mainline once the Chart is defogged and its Approval is approved**
+    (ADR 0388 (a-chart-lands-through-an-approval-carrying-a-chart-packet)): defog is the review, and
+    the Approval gate, with no Usopp Review, is the human's yes. Prototype output does **not** land here (side
     ref; ADR 0009 §2). Separable work found mid-defog splits as an offshoot-Signal
     (ADR 0006), not a second Spec. See ADR 0008, 0009, 0010.
 - **Survey** — a Chart's HITL charting leaf: the bead of the human-started
@@ -441,10 +487,14 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Operations:_ the session claims the Survey and drafts as it, but parents,
     appends to and pushes back on the Chart: it seeds fog, narrows the
     Destination, splits off offshoots, or hands back, rejects or supersedes
-    the Chart. mugicrew closes the Survey on clean exit once fog is published
-    or the Chart is closed; otherwise it returns to the Inbox.
-  - _Notes:_ Not a defog bead: it holds no content (its body points at the
-    Chart), and speccing and promote-or-stamp skip it. Charting is work, not a
+    the Chart, or, with no fog and the human's assent, finishes it in place
+    (`mugicrew chart finish` stamps it defogged). mugicrew closes the Survey on
+    clean exit once fog is published, the Chart is closed or the Chart is
+    stamped; otherwise it returns to the Inbox.
+  - _Notes:_ Not a defog bead: its body points at the Chart, and its notes
+    carry the decisions it settled when it finished its Chart in place. Speccing
+    reads a closed Survey; promote-or-stamp skips it, and it never counts as fog
+    (ADR 0357). Charting is work, not a
     state, so it is a kind, as Approval is (ADR 0140). _Avoid:_ charting
     Grilling, Unmapped Chart.
 - **Grilling** — a defog bead resolved by interviewing a human.
@@ -557,10 +607,14 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     `Close-outs failing:` lines.
   - _Notes:_ See ADR 0185 §8, ADR 0343 (an-mr-watch-closes-once-nothing-is-owed…)
     and ADR 0345 (an-outliving-mr-watch-carries-its-close-out-lines…).
+  - _Under gitlab:_ it reads the Draft MR's draft flag and closes the container's
+    waiting Approval `approved` once the MR is un-drafted and no pivot is open. It stays
+    open while a waiting Approval names a closed MR, so a reopen is read (ADR 0382).
 - **Approval** — the stamp that gates the land.
   - _Owner:_ Luffy
-  - _Structure:_ leaf (one per Checkpoint)
-  - _Operations:_ Luffy _writes_ the **Decision Packet** to the Approval,
+  - _Structure:_ leaf (one per Checkpoint or Chart; for a Chart, spawned by Nami at the
+    `chart/<id>` head with no Review, ADR 0388)
+  - _Operations:_ Luffy _writes_ the **Decision Packet** (a **Chart Packet** on a Chart) to the Approval,
     presents it, revises it on request, and offers the approve action that closes
     the bead. Open = merge pending; closed approved is the sole
     trigger for the Checkpoint's derived `approved` state; an Approval closed
@@ -568,19 +622,52 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     edge**; a **Landing** succeeds it).
   - _Notes:_ Spawned on demand when a Review closes clean, in **succession** to
     that Review, so it certifies that Review's exact commit; if the branch
-    advances past it, it is **obsoleted and respawned** off the new clean Review.
-  - _Auto-approve:_ while the shared `[approvals] auto_approve` setting is on, an
-    unmarked Approval is AFK: the loop dispatches it and an AFK Luffy session writes
-    the Decision Packet, ending its Approval History with `auto-approved (AFK,
-    Workspace auto-approve on)`; Go closes it `approved`. Off, or marked, it is HITL.
+    advances past it, it is **obsoleted and respawned** off the new clean Review. A Chart's
+    Approval is spawned by Nami once the Chart is drained and stamped, and respawned at the new
+    head when the branch advances; a Chart with nothing ahead of mainline gets none.
+  - _Auto-approve:_ while the `[approvals] auto_approve` setting is on (layered: the
+    machine-local override, then the shared config, then off), an unmarked
+    Approval is AFK: the loop dispatches it and an AFK Luffy session writes the
+    Decision Packet, ending its Approval History with the line for the layer in force
+    at run start: `auto-approved (AFK, Workspace auto-approve on)` (checked-in
+    config), `auto-approved (AFK, machine-local auto-approve on)` (machine-local),
+    or `auto-approved (AFK, auto-approve off at run start)` (flipped off after
+    dispatch); Go closes it `approved`. Off, or marked, it is HITL.
     A third consecutive failed AFK session adds the sticky `auto-approve:failed`
     **fallback marker**, which makes it an ordinary HITL Approval until it closes or
-    a human removes the label (ADR 0341; ADR 0346).
+    a human removes the label (ADR 0341; ADR 0346; ADR 0353).
+  - _Under gitlab:_ the Approval is AFK unless marked `auto-approve:failed`. Its session
+    writes the Decision Packet; Go then opens the Checkpoint's MR as a GitLab Draft (or
+    reuses the open one) with the Packet and the Landing's trailer block as its
+    description, records `MR:` and `MR link:`, and leaves the Approval open, awaiting
+    un-draft. The human's un-draft approves: the MR Watch closes it `approved`
+    (`approved (un-drafted on GitLab)`). Under auto-approve the MR opens not as a
+    GitLab Draft and Go closes the Approval. A re-approval closes at once when the MR is
+    still un-drafted and no pivot amended the Spec since the last approved Approval;
+    otherwise Go re-drafts the MR and it waits (ADR 0382).
+  - _Carried:_ a **carried Approval** is one Go writes, closed approved at birth, when the
+    head differs from the last approved one only by a renumber of the branch's own numbered
+    files. It succeeds the Approval it carries, and its authority is that of its **origin**,
+    the first Approval up that chain that was not carried (ADR 0397
+    (a-renumber-only-head-is-the-approved-squash-replayed…), ADR 0398
+    (a-carried-approval-is-a-go-written-successor…)).
+    _Avoid:_ auto-approved (that names an AFK session's stamp), skipped Approval.
 - **Decision Packet** — the written case for approving a Checkpoint, kept on its
   Approval and carried into its land commit (and, for a remote-truth Workspace,
-  its Merge Request body). Sections: Background, Summary, Evidence, Merge Danger,
-  Execution Notes, Approval History (crew doc `approval-body.md`).
+  its Merge Request body; under gitlab the Draft MR's description from the moment it
+  opens, followed by the Landing's trailer block, ADR 0382). Sections: Background, Summary, Evidence, Merge Danger,
+  Execution Notes, Approval History (crew doc `approval-body.md`). A Chart's
+  counterpart is the **Chart Packet**.
   _Avoid:_ PR body, approval doc, formal document.
+- **Chart Packet** — the written case for approving a Chart, kept on its Approval:
+  the Decision Packet's six headings in the same order, each read for a Chart (the
+  Signal charted and its Destination, a table of the ADRs, GLOSSARY entries, research
+  docs and crew docs that land, the pinned SHA and the defog beads and Survey behind
+  each decision, the ADRs superseded or amended, chart-conflicts and narrowings, the
+  Approval History). Written by Luffy; the Approval's `Commit:` and `Patch-id:` lines
+  stay first and verbatim. It is the land commit's body and, under gitlab, the Draft
+  MR's description, each followed by the trailer block (ADR 0388).
+  _Avoid:_ Chart summary, Chart review.
 - **Conflict** — a rebase conflict, or a numbered-file clash (ADR 0219; ADR 0030/0069),
   hit either by the pre-review probe, when Jinbe would spawn the Review, or while a
   Landing lands the Checkpoint; or a human's **requested rebase** of the Checkpoint
@@ -617,7 +704,7 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     mainline's max in each ADR's own `docs/adr/` and sweeps references in what the Chart owns. The agent
     commits; Nami closes it only after a **post-resolve check** confirms
     mainline's content survived; closing it → the Chart re-drains and
-    spawns a fresh Landing, with **no re-review** (a Chart has no review gate). On a real
+    a fresh Approval follows, with **no Review** (a Chart has none). On a real
     judgment call it **escalates**: a grilling bead on the Chart blocks the
     chart-conflict until the human answers, then the AFK writer applies the
     answer.
@@ -626,11 +713,11 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     requested one (ADR 0261).
 - **Pivot** — work on a Checkpoint proves the **Spec** wrong (the plan, not the
   code). A triaged Signal can raise one on its **Host** by **Reroute**, and a
-  **Task** can raise one on the Checkpoint it holds.
+  **Errand** can raise one on the Checkpoint it holds.
   - _Owner:_ Zoro (triages)
   - _Structure:_ leaf (offshoot of the Build/Review, pointing at the Spec)
   - _Operations:_ raised by the discovering crewmate (Franky/Usopp), whose own
-    bead then closes normally, or by a stuck Task (Brook), which stays claimed; a live pivot **blocks the whole Checkpoint** —
+    bead then closes normally, or by a stuck Errand (Brook), which stays claimed; a live pivot **blocks the whole Checkpoint** —
     every current and later member, the Review/Approval spawn, and the land.
     Zoro triages → **correct the Spec**
     (slice error); **amend** (the FR's intent holds and no built work becomes
@@ -695,10 +782,13 @@ Landing mechanics (not lifted into vocabulary.md): Jinbe owns it. It is
 spawned at the container's land gate, pinned to the commit it will land: on a
 Checkpoint, once an Approval is at head, members are drained and no blocker is
 open, copying the Approval's pin and succeeding it; on a Chart, once it is
-drained and stamped, at the branch head. Jinbe runs it through the **Land
+drained and stamped, once an Approval is approved at the branch head, copying its pin
+and succeeding it (a Chart with nothing ahead of mainline skips the Approval and lands
+its bead pin directly, ADR 0388). Jinbe runs it through the **Land
 strategy**; any error other than conflict or pending (including a dirty main)
-leaves it open and the effort fails. A branch that advanced past its pin makes
-the container's gate respawn a Landing. A container's reconcile closes a
+leaves it open and the effort fails. A branch that advanced past its pin sends a
+Checkpoint's gate back to its Approval gate, and a Chart's gate respawns an
+Approval, as docs/bead-lifecycle.md says. A container's reconcile closes a
 stranded Landing first, and the container closes after its Landing. Under
 gitlab a pending Landing records `MR: !<iid>` and, beside it,
 `MR link: <web_url>` (GitLab's absolute URL for the MR, never derived; no line
@@ -737,7 +827,7 @@ when the URL is unknown).
   - _Notes:_ A Spec's effective content is its body plus its Amendments in
     order, so the Spec stays append-only. A superseding Spec folds them into
     its body. See ADR 0044, ADR 0045.
-- **Task** — a HITL walk-through of steps that change the external world
+- **Errand** — a HITL walk-through of steps that change the external world
   (outside the bead graph and the code), such as creating a repo or minting a
   token.
   - _Owner:_ Brook
@@ -745,55 +835,81 @@ when the URL is unknown).
     else outside (never a Chart child, Checkpoint member or Spec child). Its
     body is a numbered `## Steps` list of Do/Check steps, optionally after a
     lead and fact lines and before a `## Diagnostics` section the guide never
-    walks (crew doc `task-body.md`); its run record is comments: one
+    walks (crew doc `errand-body.md`); its run record is comments: one
     value-free `passed` per step, `amended` for an approved rewrite, one
     `stuck` on a stuck exit.
     Ordered only by `blocks` edges: after a land (blocked by the Checkpoint),
-    before a land (the Checkpoint blocked by it), or after another Task.
-    A Spec's `## Tasks` entry may adopt an existing open Task by id (`task:
+    before a land (the Checkpoint blocked by it), or after another Errand.
+    A Spec's `## Errands` entry may adopt an existing open Errand by id (`errand:
     <id>`): slicing files no duplicate and only adds its ordering edges.
   - _Operations:_ only a human launches or resumes it (`enter`/`b`); the loop never
     does. The guide runs at the repo root, re-runs every Check to find where it
-    is, and closes the Task itself only after a final all-checks pass and the
-    human's in-session yes. It may raise a pivot or Critique on the one
-    Checkpoint it holds. An interrupted or stuck Task stays claimed and
+    is, and closes the Errand itself, with reason `completed`, only after a final
+    all-checks pass and the human's in-session yes. The one exception to "only
+    the guide closes it" is Go's hold clearing step, for a Hold Errand only and
+    never while its guide session is live (ADR 0393). It may raise a pivot or Critique on the one
+    Checkpoint it holds. An interrupted or stuck Errand stays claimed and
     **idle**; `x` unclaims it. Abandoning one is a **withdraw**, with `X` or
-    `mugicrew withdraw <task>`, not a hand `bd close`.
-  - _Notes:_ Not a defog kind: a Chart never contains one (ADR 0013). Agents
-    never file one mid-work; they file an offshoot Signal. Going forward only:
-    an earlier free-standing Task is not migrated, and a later Chart adopt does
-    not carry the Tasks its session drafted. See ADR 0352, ADR 0113, ADR
+    `mugicrew withdraw <errand>`, not a hand `bd close`.
+  - _Notes:_ Not a defog kind: a Chart never contains one (ADR 0013). Errands
+    are filed by `mugicrew errand new`, only from a Spec's `## Errands` when it is
+    sliced and from Nami's charting, grilling and promote-or-stamp sessions; Hold
+    Errands are the only Errands Go files. A crewmate that finds an
+    external-world step partway through a Build, Review or other work still files
+    an offshoot Signal. Going forward only:
+    an earlier free-standing Errand is not migrated, and a later Chart adopt does
+    not carry the Errands its session drafted. See ADR 0352, ADR 0113, ADR
     0114, ADR 0115, ADR 0116, ADR 0117, ADR 0118, ADR 0335, ADR 0342.
-- **Hold Task** — a Task Go files to block a container or Rollback until a
+    Existing `kind:task` beads, closed included, are relabelled by `mugicrew
+    doctor fix`; the loop refuses to start while any remain (ADR 0355).
+  - _History:_ named Task until ADR 0354.
+  - _Avoid:_ "Task" (bd's issue type, Claude Code's Task tools), "chore",
+    "runbook"/"playbook", "TODO", "manual".
+- **Hold Errand** — an Errand Go files to block a container or Rollback until a
   Forge or mainline condition clears (a closed or trailerless merge request, a
   failed pipeline, a foreign land), found again by a whole fact line such as
   `Closed MR: !N`. Its Checks probe through `mugicrew probe` (ADR 0336). It
-  joins its container's Initiative like any Task (ADR 0352).
-  _Avoid:_ "foreign hold" for the foreign-land Task (that term names a
+  joins its container's Initiative like any Errand (ADR 0352).
+  Its closure outcomes are `completed` (the guide, after the human's yes),
+  `cleared: <key line>` and `obsolete: …` (Go's hold clearing step, for the
+  variants it reads) and `withdrawn…` (as Errand). A foreign land (`Foreign:`)
+  and every Chart `Pipeline:` hold are guide-only for clearing, but Go still
+  closes them `obsolete:` when the bead they block is closed (ADR 0393, ADR 0396).
+  It is born open, not as a Draft, because Go files it with no session to
+  publish it. Its lineage is its key fact line, a `blocks` edge to the container
+  or Rollback it holds and, when it re-files after an earlier hold on the same
+  key closed, a `related` edge to that closed hold. It has no `discovered-from`
+  edge: bd keeps one edge per pair, `blocks` already takes the container's pair,
+  and a hold may be filed with no Landing at all. The key, not an edge, is its
+  identity for finding it again, because the MR number or sha that makes a hold
+  unique can't live on an edge.
+  _Avoid:_ "foreign hold" for the foreign-land Errand (that term names a
   checked-out effort branch), "blocker".
 - **Latch** — a bead that blocks other work until a fact in the outside world
   is true; today, a Jira ticket reaching a done status, or a GitLab MR being merged.
   - _Owner:_ Brook
-  - _Structure:_ leaf, free-standing like a Task (never a Chart child,
+  - _Structure:_ leaf, free-standing like an Errand (never a Chart child,
     Checkpoint member, Spec child or Initiative member). Placed only by the
     `blocks` edges it holds; it may block any bead but an
     Initiative (ADR 0348).
   - _Operations:_ filed by a human or a session (as a Draft) through one verb,
     at most one open per watched item; re-checked unattended by the loop on an
-    interval, no session; closes itself once when the fact holds and never
-    reopens; repeated failed checks pause it.
+    interval, no session; closes `completed` once its fact holds, `orphaned`
+    when nothing open waits on it, or `withdrawn` by a human, and never
+    reopens. A watched MR closed unmerged or missing pauses it _unmet_;
+    repeated failed reads, including a gone Jira ticket, pause it _failing_.
   - _Notes:_ Carry makes an open Latch also block a blocked bead's
-    successor; a Latch whose blocked beads are all closed closes itself. See ADR 0222, ADR 0223. _Avoid:_ gate (the
+    successor; a Latch whose blocked beads are all closed closes itself. See ADR 0222 (a-jira-latch-is-one-per-key…), ADR 0223 (an-orphaned-latch-closes…), ADR 0389 (a-latch-whose-mr-is-closed-or-missing…). _Avoid:_ gate (the
     Survey's name; "gate" stays informal for land and review gates), fence,
     external.
 - **Discussion** — one human-started session with Robin, in which she
-  explains the Workspace and, with the human's yes, drafts Signals, as a bead.
+  explains the Workspace and, with the human's yes, drafts Signals and Initiatives, as a bead.
   - _Owner:_ Robin
-  - _Structure:_ leaf, free-standing and off the spine, like a Task: never a
+  - _Structure:_ leaf, free-standing and off the spine, like an Errand: never a
     member of a Chart, Checkpoint or Initiative.
   - _Operations:_ only a human launches, resumes or drops one; the loop never
     does. Robin closes it when the human says they are finished. Each Signal
-    she drafts is an offshoot (`discovered-from`) of it. A retrospective keeps
+    or Initiative she drafts is an offshoot (`discovered-from`) of it. A retrospective keeps
     its title: "Retrospective <target title>", not "Discussion <time>".
   - _Notes:_ See ADR 0194. _Avoid:_ chat, conversation, Robin session (for the
     bead).
@@ -807,7 +923,7 @@ when the URL is unknown).
 - **Checkup** — one human-started session in which Chopper diagnoses, with the
   human, a bead they think is broken (its **target**) and repairs it, as a bead.
   - _Owner:_ Chopper
-  - _Structure:_ leaf, free-standing and off the spine, like a Task; bound to
+  - _Structure:_ leaf, free-standing and off the spine, like an Errand; bound to
     its target by a `related` edge. At most one open Checkup per target.
   - _Operations:_ only a human launches, resumes or drops one; the loop never
     does. While it is open its target carries `paused:checkup`. It closes as
@@ -821,7 +937,9 @@ when the URL is unknown).
   Signal → Chart → Spec → Checkpoint chains, so one large effort spans several
   Checkpoints. Its membership is the effort's workstream tag.
   - _Owner:_ Luffy (steward, creates it; handler, decides on drain whether a
-    next phase opens or the Initiative is done)
+    next phase opens or the Initiative is done). Robin may also create one
+    (bodyless, a Draft, on the human's yes) besides Luffy and the tab; see
+    ADR 0381.
   - _Structure:_ container (parents every bead of each member chain); it has
     no branch and no land, since each member Checkpoint lands on its own
   - _Operations:_ **membership** covers the whole chain: a member Signal's
@@ -839,8 +957,16 @@ when the URL is unknown).
     Initiative itself, and landed work stays. **Withdrawing** a member chain
     closes its unclosed head and leaves the Initiative going. Neither runs
     while a member effort is in flight, and withdraw also waits until no
-    unclosed member is ordered after the chain, except a Task, which the
+    unclosed member is ordered after the chain, except an Errand, which the
     withdraw sweeps instead (ADR 0342).
+    An Initiative ends in one of two closures, each with its reason: **done**
+    (how the Done when finish line holds), on the human's explicit done at a
+    drained Initiative's cut; or **cancelled** (why), a human drop, whether of a
+    whole Initiative with members or of a bodyless one. There is no obsolete,
+    superseded or rejected outcome: the cancel's why carries those cases. A
+    rejected idea is rejected at Signal triage, before any Initiative; an
+    Initiative replaced by another releases its chains, the other adopts them,
+    and the replaced one is cancelled.
     A **parked member** is a later-phase Signal closed with a `later:` reason
     and kept under the Initiative; it never holds the drain (ADR 0255).
   - _Lifecycle:_ derived, first match wins: **closed** → **drained** (no
@@ -850,10 +976,12 @@ when the URL is unknown).
     qualifier, not a lifecycle state; its cut session settles the body first
     (ADR 0182).
   - _Notes:_ A bead belongs to at most one Initiative. Its members include the
-    Tasks and the ordered offshoots filed against a member: every Task joins the
-    Initiative of the member it is ordered against, and a follow-up or
-    prerequisite offshoot joins its cause's, while an unordered offshoot, a
-    Latch and a Pivot stay outside and join only by adoption (ADR 0352).
+    Errands and the offshoots filed against a member: every Errand joins the
+    Initiative of the member it is ordered against, and an offshoot joins its
+    cause's Initiative whatever its order unless its filer opts out with `--outside`,
+    while repair Signals, a Latch and a Pivot stay outside and join only by
+    adoption (ADR 0375 (an-offshoot-whose-cause-is-in-an-initiative-is-born-as-its-member…),
+    ADR 0352).
     Single-Checkpoint work never needs one, unless the Workspace sets Require
     Initiatives. A manual pause on
     it pauses every member (ADR 0081). It carries no defog of its own: a
@@ -881,7 +1009,10 @@ The **landed base** is the single commit a container branch produces when it
 lands on mainline (a rebase+squash commit). It is the seam between the spine's
 branches: the Chart's landed base is where the Checkpoint is cut from. It is a
 derived git fact — recovered from the land commit's `Chart:`/`Checkpoint:`
-trailer, never stored on a bead (ADR 0010).
+trailer, not stored on a bead (ADR 0010) except for a zero-commit Chart. A
+**zero-commit Chart** (its `chart/<id>` head already an ancestor of mainline) writes no land commit under
+any land strategy: its land records an `Anchor: <sha>` pin on the Chart bead, set
+if unset, and Zoro cuts from that pin before any `Chart:` trailer (ADR 0358).
 
 A **direct Spec** (ADR 0035; historically headless, ADR 0012) has no
 container-branch land, so it carries a **Spec anchor** instead: an
@@ -919,10 +1050,11 @@ Named domain relationships, each on one bd edge (ADR 0002):
 - **Carry** — when a Signal, Chart or Spec closes in **succession**, the beads it
   _orders_ (blocks) become ordered by its successor, so a dependent waits for
   the real work, not the stage that described it. Outgoing ordering only,
-  except that an open Latch blocking it also comes to block its
-  successor (ADR 0223); the old edge stays as lineage. A Spec's dependents
-  therefore wait for its Checkpoint to **land**. A Checkpoint obsoleted by a confirmed or escalated
-  **pivot** carries the same way, to the corrected Spec or the escalated Chart.
+  except that an open Latch blocking it also comes to block its successor,
+  unless that successor is an Initiative (ADR 0223, ADR 0348); the old edge
+  stays as lineage. A Spec's dependents therefore wait for its Checkpoint to
+  **land**. A Checkpoint obsoleted by a confirmed or escalated **pivot** carries
+  the same way, to the corrected Spec or the escalated Chart.
   _Avoid:_ "moving" edges (nothing is removed).
 
 ## Ownership roles
@@ -1023,18 +1155,34 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   `mugicrew abort` or TUI `x`: its bead is paused _manual_ first, then its
   processes are terminated, and a live host cleans up as for a failure (ADR 0083).
   _Avoid:_ calling it abandoned, which leaves its claim and tree behind.
-- **Withdraw** — the human dropping one unfinished chain or one Task, inside an
-  Initiative or not: its unclosed head (a chain head, or a Task) and every
+- **Withdraw** — the human dropping one unfinished chain, one Errand or one Latch, inside an
+  Initiative or not: for a chain or an Errand, its unclosed head and every
   unclosed bead under it close with reason `withdrawn` and no successor, and
   their effort worktrees and branches go with them. A chain's withdraw also
-  **sweeps** the Tasks ordered after what it closes, closing them with reason
-  `withdrawn: <head>`, and **before-closes** the Tasks ordered before what
+  **sweeps** the Errands ordered after what it closes, closing them with reason
+  `withdrawn: <head>`, and **before-closes** the Errands ordered before what
   it closes the same way, unless one still holds a bead outside it, which is
   **left open** (ADR 0342, ADR 0351). Dropping a whole Initiative is **cancel**
-  (ADR 0310).
+  (ADR 0310). A withdrawn Latch closes alone with reason `withdrawn`: the
+  beads it blocked stay open and are released, and its `blocks` edges stay
+  (ADR 0389).
   _Avoid:_ "abandon" (an abandoned effort), "cancel" for one chain, "reject"
-  (a triage verdict on a Signal), "swept" for a before-closed Task (swept is the
-  Tasks after).
+  (a triage verdict on a Signal), "swept" for a before-closed Errand (swept is the
+  Errands after).
+- **Mouse mode** — the opt-in capture of the mouse in the main TUI, held in the
+  layered `[tui] mouse` setting (machine-local override, then the checked-in
+  `.mugicrew/config.toml`, then built-in off) and edited from the Settings tab's
+  Mouse mode row, which switches capture live; the TUI's own tmux session
+  follows the setting (its session-scoped `mouse` option, set at start and on
+  every switch). While it is on the terminal's own
+  text selection gives way to Shift-drag (Option/Alt on some terminals). _Avoid:_
+  "mouse support" (it is a setting a human turns on, not a capability).
+- **Theme** — the layered `[tui] theme` setting (machine-local override, then the
+  checked-in `.mugicrew/config.toml`, then built-in dark) that picks one of three
+  presets, `dark`, `light` and `high-contrast`, for the main TUI and the F10
+  bead-detail pane. It is previewed live from the Settings tab's Theme row. An
+  unknown value reads dark. _Avoid:_ "skin" and "color scheme" for the setting, and
+  "palette" except for a preset's role values.
 - **Auto-exit (HITL session)** — the visible countdown that a session's
   closing line starts. When it runs out, the session exits by itself just as a
   human `/exit` would, and ends _finished_. A reply cancels it, and so does its
@@ -1087,6 +1235,12 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   effort's tree once the human has released its claim and lifted its pause. It
   still holds its branch. It is never resumed. The human drops it when the next
   launch on that bead finds it; the effort branch is kept (ADR 0041, ADR 0105).
+- **Orphaned claim** — an AFK bead's claim (`in_progress`) that no live host
+  holds: no dispatcher holds it, no process carries it, and no process runs
+  inside its tree. It takes no AFK pool slot, and only the human's recover
+  repairs it (ADR 0391).
+  _Avoid:_ "abandoned" (the pause a forced loop stop writes), "stranded" for the
+  claim alone.
 - **Effort branch** — the branch a leaf bead's work happens on, `effort/<bead-id>`,
   cut from its container's branch. A container's branch is never checked out;
   work reaches it only by integrate (ADR 0102).
@@ -1125,7 +1279,9 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   only a successful integrate or the human lifts it), _not-built_ (the
   backstop integrated a Build but found no integrate trailer for it on its
   Checkpoint; a run-now re-run that integrates or the human lifts it, ADR
-  0248), _profile_ (its kind
+  0248), _unmet_ (Brook wrote it on a Latch whose watched MR is closed
+  unmerged or missing; a human unpause, or a run-now that reads the MR open
+  or merged, lifts it, ADR 0389), _profile_ (its kind
   resolves to an unrunnable Agent Profile; the loop paused it before any claim
   and lifts it once the profile runs again), _checkup_ (Chopper's fence on a
   Checkup's target while the Checkup is open; the session lifts it last, and
@@ -1133,10 +1289,23 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   fence while it repairs a stranded bead; left behind only by a repair that
   failed partway, and lifted by re-running it, ADR 0127) or _manual_
   (the human paused it, and only the human lifts it). A bead can carry several causes at once; it stays paused until every
-  cause is lifted, and each lifter removes only its own (ADR 0070, ADR 0078, ADR 0082, ADR 0104, ADR 0123, ADR 0127, ADR 0248). A pause never stops an effort already running (ADR 0055).
+  cause is lifted, and each lifter removes only its own (ADR 0070, ADR 0078, ADR 0082, ADR 0104, ADR 0123, ADR 0127, ADR 0248, ADR 0389). A pause never stops an effort already running (ADR 0055).
   A _manual_ pause on a Chart or epic also pauses every member beneath it
   (_inherited pause_); loop-written causes pause only their own bead (ADR 0081).
   _Avoid:_ "held" (that is a branch's foreign hold), "suppressed", "deferred".
+- **Verdict** — the eligibility module's answer for one bead in one mode (loop or
+  run-now): runnable with an action (`run`, `spec`, `land`, `retry`, `retry hold`,
+  loop-only `review`), or not runnable with one **cause** (ADR 0378).
+  _Avoid:_ "decision", "eligibility result".
+- **Cause** (of a verdict) — the first leg that fails, from a closed list in a
+  fixed order (`not-candidate`, `paused`, `inherited-pause`, `container-frozen`,
+  `blocked`, `paced`, then the arm's legs). A `paused` verdict carries the
+  bead's top pause cause verbatim (ADR 0378).
+  _Avoid:_ "reason" for the cause itself (the reason is the cause plus its holders).
+- **Holder** (of a verdict) — a bead that keeps the verdict's cause standing,
+  carried whole, with its effort branch when it is a held bead. A foreign landing's
+  holder is the foreign sha (ADR 0378).
+  _Avoid:_ "blocker" unless it is a blocks edge.
 - **Draft** — a bead still being set up by the effort or session that created
   it. The loop never sees it and it can't be claimed, but every "is it still
   open?" check counts it as open, so a Chart or Checkpoint with drafts is not

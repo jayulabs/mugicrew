@@ -408,38 +408,38 @@ func TestXDialogEscHintIsClose(t *testing.T) {
 	}
 }
 
-func taskPlan(string) (withdraw.Plan, error) {
-	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "tk", Set: []bd.Bead{{ID: "tk", Kind: contract.KindTask, Status: "open", Title: "T-tk", Created: epoch}}}, nil
+func errandPlan(string) (withdraw.Plan, error) {
+	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "tk", Set: []bd.Bead{{ID: "tk", Kind: contract.KindErrand, Status: "open", Title: "T-tk", Created: epoch}}}, nil
 }
 
-func taskModel(t *testing.T, plan func(string) (withdraw.Plan, error)) (Model, *[]string) {
+func errandModel(t *testing.T, plan func(string) (withdraw.Plan, error)) (Model, *[]string) {
 	t.Helper()
 	calls := stubWithdraw(t, plan, func(h string, _ bool) (withdraw.Result, error) { return withdraw.Result{Closed: []string{h}}, nil })
 	m, _ := actModel(t)
-	m, _ = send(t, m, loadedMsg{beads: append(actionBeads(), bd.Bead{ID: "tk", Kind: contract.KindTask, Status: "open", Title: "T-tk", Created: epoch}), live: map[string]bool{"live": true}, sessions: actionSessions()})
+	m, _ = send(t, m, loadedMsg{beads: append(actionBeads(), bd.Bead{ID: "tk", Kind: contract.KindErrand, Status: "open", Title: "T-tk", Created: epoch}), live: map[string]bool{"live": true}, sessions: actionSessions()})
 	return selectBead(t, m, "tk"), calls
 }
 
-func TestXOpensOnAnUnclosedTaskRow(t *testing.T) {
-	m, _ := taskModel(t, taskPlan)
+func TestXOpensOnAnUnclosedErrandRow(t *testing.T) {
+	m, _ := errandModel(t, errandPlan)
 	if !strings.Contains(hintsOf(m), "X withdraw") {
-		t.Errorf("Task hints lack X: %s", hintsOf(m))
+		t.Errorf("Errand hints lack X: %s", hintsOf(m))
 	}
 	m = press(t, m, runeKey("X"))
 	if len(m.modals) != 1 || m.modals[0].kind != xdialog {
-		t.Fatalf("X on a Task opened %d modals (status %q)", len(m.modals), statusOf(m))
+		t.Fatalf("X on an Errand opened %d modals (status %q)", len(m.modals), statusOf(m))
 	}
 	v := ansi.Strip(m.View())
-	if !strings.Contains(v, "A Task has no tree or branch, so nothing is cleaned up.") {
-		t.Errorf("no Task lead:\n%s", v)
+	if !strings.Contains(v, "An Errand has no tree or branch, so nothing is cleaned up.") {
+		t.Errorf("no Errand lead:\n%s", v)
 	}
 	if strings.Contains(v, "✎") || strings.Contains(v, "↑") {
-		t.Errorf("Task row carries a tag:\n%s", v)
+		t.Errorf("Errand row carries a tag:\n%s", v)
 	}
 }
 
-func TestXTaskDialogYConfirmsDInert(t *testing.T) {
-	m, calls := taskModel(t, taskPlan)
+func TestXErrandDialogYConfirmsDInert(t *testing.T) {
+	m, calls := errandModel(t, errandPlan)
 	m = press(t, m, runeKey("X"))
 	m, _ = send(t, m, runeKey("D"))
 	if len(m.modals) != 1 || len(*calls) != 1 {
@@ -452,9 +452,9 @@ func TestXTaskDialogYConfirmsDInert(t *testing.T) {
 	}
 }
 
-func TestXLiveTaskOpensBarredWithSessionFix(t *testing.T) {
-	m, _ := taskModel(t, func(string) (withdraw.Plan, error) {
-		p, _ := taskPlan("")
+func TestXLiveErrandOpensBarredWithSessionFix(t *testing.T) {
+	m, _ := errandModel(t, func(string) (withdraw.Plan, error) {
+		p, _ := errandPlan("")
 		p.Refusals = []withdraw.Refusal{{Kind: withdraw.InFlight, Beads: []string{"tk"}, Fix: "finish or drop its session first (x in the TUI), then try again"}}
 		return p, nil
 	})
@@ -462,37 +462,37 @@ func TestXLiveTaskOpensBarredWithSessionFix(t *testing.T) {
 	v := ansi.Strip(m.View())
 	for _, want := range []string{"Refused", "fix: finish or drop its session first"} {
 		if !strings.Contains(v, want) {
-			t.Errorf("barred Task view lacks %q:\n%s", want, v)
+			t.Errorf("barred Errand view lacks %q:\n%s", want, v)
 		}
 	}
 }
 
-func TestXNonHeadStatusNamesTask(t *testing.T) {
+func TestXNonHeadStatusNamesErrand(t *testing.T) {
 	m, _ := actModel(t)
 	stubWithdraw(t, cleanPlan, ok)
 	m = press(t, selectBead(t, m, "res"), runeKey("X"))
-	if !strings.Contains(statusOf(m), "Task") {
+	if !strings.Contains(statusOf(m), "Errand") {
 		t.Errorf("status %q", statusOf(m))
 	}
 }
 
 // The prototype mc-sdkpu's four scenarios (variant B, ADR 0340) as Plans.
-func sweepTask(id, title string) bd.Bead {
-	return bd.Bead{ID: id, Kind: contract.KindTask, Status: "open", Title: title, Created: epoch}
+func sweepErrand(id, title string) bd.Bead {
+	return bd.Bead{ID: id, Kind: contract.KindErrand, Status: "open", Title: title, Created: epoch}
 }
 
 func sweepBead(id string, k contract.Kind, title, parent string) bd.Bead {
 	return bd.Bead{ID: id, Kind: k, Status: "open", Title: title, Parent: parent, Created: epoch}
 }
 
-func taskAlonePlan(string) (withdraw.Plan, error) {
-	t1, t2, t3 := sweepTask("t1", "Rotate the Forge deploy token"), sweepTask("t2", "Put the new token in the CI secrets"), sweepTask("t3", "Revoke the old token on the Forge")
+func errandAlonePlan(string) (withdraw.Plan, error) {
+	t1, t2, t3 := sweepErrand("t1", "Rotate the Forge deploy token"), sweepErrand("t2", "Put the new token in the CI secrets"), sweepErrand("t3", "Revoke the old token on the Forge")
 	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "t1", Set: []bd.Bead{t2, t3, t1},
 		Swept: []bd.Swept{{Bead: t2, After: "t1"}, {Bead: t3, After: "t2"}}}, nil
 }
 
 func releasePlan(string) (withdraw.Plan, error) {
-	t4, t5 := sweepTask("t4", "Provision the staging Dolt server"), sweepTask("t5", "Point the backup job at staging")
+	t4, t5 := sweepErrand("t4", "Provision the staging Dolt server"), sweepErrand("t5", "Point the backup job at staging")
 	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "t4", Set: []bd.Bead{t5, t4},
 		Swept: []bd.Swept{{Bead: t5, After: "t4"}}, Releases: []string{"cp2"}}, nil
 }
@@ -501,7 +501,7 @@ func chainSweepPlan(string) (withdraw.Plan, error) {
 	cp := sweepBead("c1", contract.KindCheckpoint, "Rotate logs weekly", "")
 	b1 := sweepBead("c1.1", contract.KindBuild, "Build: logrotate config", "c1")
 	sp := sweepBead("s1", contract.KindSpec, "Spec: weekly log rotation", "c1")
-	t6, t7, t8 := sweepTask("t6", "Enable logrotate on the homelab box"), sweepTask("t7", "Delete the old log-purge cron entry"), sweepTask("t8", "Free 40 GB on /var before the Spec lands")
+	t6, t7, t8 := sweepErrand("t6", "Enable logrotate on the homelab box"), sweepErrand("t7", "Delete the old log-purge cron entry"), sweepErrand("t8", "Free 40 GB on /var before the Spec lands")
 	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "c1", Set: []bd.Bead{t6, t7, t8, b1, sp, cp},
 		Swept: []bd.Swept{{Bead: t6, After: "c1"}, {Bead: t7, After: "t6", Also: []string{"cron"}}, {Bead: t8, After: "s1"}}}, nil
 }
@@ -509,18 +509,18 @@ func chainSweepPlan(string) (withdraw.Plan, error) {
 func leftOpenPlan(string) (withdraw.Plan, error) {
 	cp := sweepBead("p1", contract.KindCheckpoint, "Stage Dolt backups", "")
 	b1 := sweepBead("p1.1", contract.KindBuild, "Build: backup target flag", "p1")
-	t9, t4 := sweepTask("t9", "Verify a restore from the staging backup"), sweepTask("t4", "Provision the staging Dolt server")
+	t9, t4 := sweepErrand("t9", "Verify a restore from the staging backup"), sweepErrand("t4", "Provision the staging Dolt server")
 	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "p1", Set: []bd.Bead{t9, b1, cp},
 		Swept: []bd.Swept{{Bead: t9, After: "p1"}}, LeftOpen: []bd.Held{{Bead: t4, Before: "p1", Also: []string{"cp2"}}}}, nil
 }
 
-// beforePlan: a chain head with a before-closed Task, its chained predecessor, a Task
-// swept after the before-closed Task, and a left-open Task under the head.
-// ts hangs after tb only to draw the nesting: SweepTasks never builds that plan, since
-// a Task blocked by a before-closed Task is already in the set before tb before-closes.
+// beforePlan: a chain head with a before-closed Errand, its chained predecessor, an Errand
+// swept after the before-closed Errand, and a left-open Errand under the head.
+// ts hangs after tb only to draw the nesting: SweepErrands never builds that plan, since
+// an Errand blocked by a before-closed Errand is already in the set before tb before-closes.
 func beforePlan(string) (withdraw.Plan, error) {
 	cp := sweepBead("c1", contract.KindCheckpoint, "Rotate logs weekly", "")
-	tb, tp, ts, tl := sweepTask("tb", "Prepare the log volume"), sweepTask("tp", "Order the disk"), sweepTask("ts", "Archive the old logs"), sweepTask("tl", "Audit the log retention")
+	tb, tp, ts, tl := sweepErrand("tb", "Prepare the log volume"), sweepErrand("tp", "Order the disk"), sweepErrand("ts", "Archive the old logs"), sweepErrand("tl", "Audit the log retention")
 	return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "c1", Set: []bd.Bead{ts, tp, tb, cp},
 		Swept:    []bd.Swept{{Bead: ts, After: "tb"}},
 		Before:   []bd.BeforeClosed{{Bead: tb, Before: "c1"}, {Bead: tp, Before: "tb"}},
@@ -545,20 +545,20 @@ func lineOf(t *testing.T, v, sub string) string {
 	return ""
 }
 
-func TestXDialogTaskAloneHangsAfterTasksOnDashedEdges(t *testing.T) {
-	v := sweepView(t, 160, taskAlonePlan)
-	for _, want := range []string{"┄▸ ", "Closes 3 beads as withdrawn: this Task and the 2 Tasks ordered after it.", "A Task has no tree or branch"} {
+func TestXDialogErrandAloneHangsAfterErrandsOnDashedEdges(t *testing.T) {
+	v := sweepView(t, 160, errandAlonePlan)
+	for _, want := range []string{"┄▸ ", "Closes 3 beads as withdrawn: this Errand and the 2 Errands ordered after it.", "An Errand has no tree or"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("view lacks %q:\n%s", want, v)
 		}
 	}
 	l2, l3 := lineOf(t, v, "Put the new token"), lineOf(t, v, "Revoke the old token")
 	if !strings.Contains(l2, "┄▸") || !strings.Contains(l3, "   ┄▸") || strings.Index(l3, "┄▸") <= strings.Index(l2, "┄▸") {
-		t.Errorf("after-Tasks not nested on ┄▸:\n%s\n%s", l2, l3)
+		t.Errorf("after-Errands not nested on ┄▸:\n%s\n%s", l2, l3)
 	}
 	for _, l := range []string{l2, l3} {
 		if strings.ContainsAny(l, "├└") {
-			t.Errorf("an after-Task reads as parentage: %q", l)
+			t.Errorf("an after-Errand reads as parentage: %q", l)
 		}
 	}
 }
@@ -570,7 +570,7 @@ func TestXDialogReleasesALandHold(t *testing.T) {
 		if !strings.Contains(head, "⚑") || (w == 160) != strings.Contains(head, "releases a land hold") {
 			t.Errorf("w=%d head row %q", w, head)
 		}
-		if !strings.Contains(v, "⚑ Stage Dolt backups can then land without this Task's steps.") {
+		if !strings.Contains(v, "⚑ Stage Dolt backups can then land without this Errand's steps.") {
 			t.Errorf("w=%d no release line:\n%s", w, v)
 		}
 		if strings.Index(v, "can then land") > strings.Index(v, "y/enter") {
@@ -591,7 +591,7 @@ func TestXDialogReleasesALandHold(t *testing.T) {
 
 func TestXDialogChainSweepWideAndNarrow(t *testing.T) {
 	v := sweepView(t, 160, chainSweepPlan)
-	for _, want := range []string{"Closes 6 beads as withdrawn: 3 in the chain and 3 Tasks ordered after it.", "⇠ also after Move cron jobs to"} {
+	for _, want := range []string{"Closes 6 beads as withdrawn: 3 in the chain and 3 Errands ordered after it.", "⇠ also after Move cron jobs to"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("wide view lacks %q:\n%s", want, v)
 		}
@@ -610,7 +610,7 @@ func TestXDialogChainSweepWideAndNarrow(t *testing.T) {
 		t.Errorf("sweep rows out of order:\n%s", v)
 	}
 	if !strings.Contains(lineOf(t, v, "Delete the old log-purge"), "┄▸") {
-		t.Errorf("Task after a swept Task lacks ┄▸")
+		t.Errorf("Errand after a swept Errand lacks ┄▸")
 	}
 	n := sweepView(t, 80, chainSweepPlan)
 	if l := lineOf(t, n, "Delete the old log-purge"); !strings.Contains(l, "⇠+1") || strings.Contains(l, "also after") {
@@ -618,13 +618,13 @@ func TestXDialogChainSweepWideAndNarrow(t *testing.T) {
 	}
 }
 
-func TestXDialogLeftOpenTaskHangsDimUnderItsCheckpoint(t *testing.T) {
+func TestXDialogLeftOpenErrandHangsDimUnderItsCheckpoint(t *testing.T) {
 	v := sweepView(t, 160, leftOpenPlan)
 	l := lineOf(t, v, "Provision the staging Dolt server")
 	if !strings.Contains(l, "┄◂") || !strings.Contains(l, "◌ left open: also before Stage Dolt backups") {
 		t.Errorf("left-open row %q", l)
 	}
-	if !strings.Contains(v, "Nothing is discarded · 1 left open.") || !strings.Contains(v, "Closes 3 beads as withdrawn: 2 in the chain and 1 Task ordered after it.") {
+	if !strings.Contains(v, "Nothing is discarded · 1 left open.") || !strings.Contains(v, "Closes 3 beads as withdrawn: 2 in the chain and 1 Errand ordered after it.") {
 		t.Errorf("lead or summary:\n%s", v)
 	}
 	if n := sweepView(t, 80, leftOpenPlan); !strings.Contains(lineOf(t, n, "Provision the staging Dolt server"), "◌+1") {
@@ -633,7 +633,7 @@ func TestXDialogLeftOpenTaskHangsDimUnderItsCheckpoint(t *testing.T) {
 }
 
 func TestXDialogSweptStragglerHangsOffTheHead(t *testing.T) {
-	p, _ := taskAlonePlan("")
+	p, _ := errandAlonePlan("")
 	p.Swept[1].After = "gone"
 	rows := xPlanTree(p)
 	if len(rows) != 3 || !strings.HasPrefix(rows[2].prefix, "┄▸") {
@@ -641,7 +641,7 @@ func TestXDialogSweptStragglerHangsOffTheHead(t *testing.T) {
 	}
 }
 
-func TestXDialogBeforeClosedTaskHangsUndimmedUnderItsBeforeBead(t *testing.T) {
+func TestXDialogBeforeClosedErrandHangsUndimmedUnderItsBeforeBead(t *testing.T) {
 	p, _ := beforePlan("")
 	rows := xPlanTree(p)
 	var got []string
@@ -693,24 +693,46 @@ func TestXDialogLeftOpenTagNamesAlsoBeforeWideAndCountNarrow(t *testing.T) {
 		t.Errorf("narrow tag %q", l)
 	}
 	if !strings.Contains(v, "Nothing is discarded · 1 left open.") {
-		t.Errorf("summary counts more than left-open Tasks:\n%s", v)
+		t.Errorf("summary counts more than left-open Errands:\n%s", v)
 	}
 }
 
-func TestXDialogLeadNamesEachTaskGroup(t *testing.T) {
+func TestXDialogLeadNamesEachErrandGroup(t *testing.T) {
 	cp := sweepBead("c1", contract.KindCheckpoint, "C", "")
 	b := sweepBead("b1", contract.KindBuild, "B", "c1")
-	t1, t2, t3 := sweepTask("t1", "A"), sweepTask("t2", "B2"), sweepTask("t3", "C3")
+	t1, t2, t3 := sweepErrand("t1", "A"), sweepErrand("t2", "B2"), sweepErrand("t3", "C3")
 	for _, c := range []struct {
 		p    withdraw.Plan
 		want string
 	}{
-		{withdraw.Plan{Set: []bd.Bead{t1, b, cp}, Swept: []bd.Swept{{Bead: t1, After: "c1"}}}, "Closes 3 beads as withdrawn: 2 in the chain and 1 Task ordered after it."},
-		{withdraw.Plan{Set: []bd.Bead{t1, t2, b, cp}, Before: []bd.BeforeClosed{{Bead: t1, Before: "c1"}, {Bead: t2, Before: "c1"}}}, "Closes 4 beads as withdrawn: 2 in the chain and 2 Tasks ordered before it."},
-		{withdraw.Plan{Set: []bd.Bead{t1, t2, t3, b, cp}, Swept: []bd.Swept{{Bead: t1, After: "c1"}, {Bead: t2, After: "c1"}}, Before: []bd.BeforeClosed{{Bead: t3, Before: "c1"}}}, "Closes 5 beads as withdrawn: 2 in the chain, 2 Tasks ordered after it and 1 ordered before it."},
+		{withdraw.Plan{Set: []bd.Bead{t1, b, cp}, Swept: []bd.Swept{{Bead: t1, After: "c1"}}}, "Closes 3 beads as withdrawn: 2 in the chain and 1 Errand ordered after it."},
+		{withdraw.Plan{Set: []bd.Bead{t1, t2, b, cp}, Before: []bd.BeforeClosed{{Bead: t1, Before: "c1"}, {Bead: t2, Before: "c1"}}}, "Closes 4 beads as withdrawn: 2 in the chain and 2 Errands ordered before it."},
+		{withdraw.Plan{Set: []bd.Bead{t1, t2, t3, b, cp}, Swept: []bd.Swept{{Bead: t1, After: "c1"}, {Bead: t2, After: "c1"}}, Before: []bd.BeforeClosed{{Bead: t3, Before: "c1"}}}, "Closes 5 beads as withdrawn: 2 in the chain, 2 Errands ordered after it and 1 ordered before it."},
 	} {
 		if got := xLead(c.p); !strings.HasPrefix(got, c.want) {
 			t.Errorf("lead %q, want prefix %q", got, c.want)
+		}
+	}
+}
+
+// X on an unclosed Latch row opens the withdraw dialog naming the Latch and the beads it
+// releases (Spec mc-3cnhf.16 D6).
+func TestXOpensOnAnUnclosedLatchRow(t *testing.T) {
+	latch := bd.Bead{ID: "lt", Kind: contract.KindLatch, Status: "open", Title: "T-lt", Created: epoch}
+	waiter := bd.Bead{ID: "wt", Kind: contract.KindBuild, Status: "open", Title: "Waiting build", Created: epoch, BlockedBy: []string{"lt"}}
+	stubWithdraw(t, func(string) (withdraw.Plan, error) {
+		return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "lt", Set: []bd.Bead{latch}, LatchReleases: []string{"wt"}}, nil
+	}, func(h string, _ bool) (withdraw.Result, error) { return withdraw.Result{Closed: []string{h}}, nil })
+	m, _ := actModel(t)
+	m, _ = send(t, m, loadedMsg{beads: append(actionBeads(), latch, waiter), live: map[string]bool{"live": true}, sessions: actionSessions()})
+	m = press(t, selectBead(t, m, "lt"), runeKey("X"))
+	if len(m.modals) != 1 || m.modals[0].kind != xdialog {
+		t.Fatalf("X on a Latch opened %d modals (status %q)", len(m.modals), statusOf(m))
+	}
+	v := ansi.Strip(m.View())
+	for _, want := range []string{"Withdraw T-lt?", "Releases", "Waiting build"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("Latch dialog lacks %q:\n%s", want, v)
 		}
 	}
 }

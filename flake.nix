@@ -1,5 +1,5 @@
 {
-  description = "mugicrew - agent crew dispatch CLI";
+  description = "mugicrew - local-first agentic software engineering interface";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -31,12 +31,15 @@
             fileset = pkgs.lib.fileset.difference ./. (pkgs.lib.fileset.unions [
               ./GLOSSARY.md
               ./README.md
-              ./docs
+              # bead_lifecycle_test.go reads docs/bead-lifecycle.md, so that one
+              # file stays in the source (editing it rebuilds, as it must).
+              (pkgs.lib.fileset.difference ./docs ./docs/bead-lifecycle.md)
               ./package.json
               ./flake.nix
               ./flake.lock
               (pkgs.lib.fileset.maybeMissing ./npm)
               (pkgs.lib.fileset.maybeMissing ./.github)
+              (pkgs.lib.fileset.maybeMissing ./site)
             ]);
           };
           # Bump flake.lock by hand when this changes; no guard keeps it in

@@ -26,6 +26,8 @@ var (
 	keyCancelYes  = key.NewBinding(key.WithKeys("y", "enter"), key.WithHelp("y/enter", "cancel"))
 	keyCancelLoss = key.NewBinding(key.WithKeys("y", "enter"), key.WithHelp("y/enter", "discard and cancel"))
 	keyBackRows   = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back"))
+	keyWhyFocus   = key.NewBinding(key.WithKeys("tab", "shift+tab"), key.WithHelp("tab", "why"))
+	keyListFocus  = key.NewBinding(key.WithKeys("tab", "shift+tab", "enter"), key.WithHelp("tab", "chains"))
 )
 
 // xChoiceNarrow: under this many inner columns a chain's choice drops to its own line.
@@ -35,8 +37,8 @@ const xChoiceNarrow = 70
 // the tests stub them. Both take the released heads; the first view releases none.
 var (
 	planCancel = planVerb
-	runCancel  = func(initiative string, release []string, discard bool) (withdraw.Result, error) {
-		return runVerb(initiative, release, discard, withdraw.Cancel)
+	runCancel  = func(initiative, why string, release []string, discard bool) (withdraw.Result, error) {
+		return runVerb(initiative, why, release, discard, withdraw.Cancel)
 	}
 )
 
@@ -46,7 +48,7 @@ type cancelChain struct {
 	head   bd.Bead
 	ids    map[string]bool
 	locked string
-	task   bool // a member Task: withdrawn when closed, never locked (ADR 0349)
+	errand bool // a member Errand: withdrawn when closed, never locked (ADR 0349)
 }
 
 // cancelState is the dialog's choices: one release flag per chain, every one starting
@@ -56,6 +58,8 @@ type cancelState struct {
 	release []bool
 	review  bool
 	flash   string
+	why     line // the reason the Initiative closes cancelled: <why>
+	whyOn   bool // the why line has focus: typed keys edit it, not the chain bindings
 }
 
 // cancelOpen is X on an Initiative: read the Plan and open the dialog, barred when the
@@ -74,7 +78,7 @@ func (m Model) cancelDialog(id string, p withdraw.Plan, barred bool, warn string
 	}
 	chains := slices.Clone(p.Chains)
 	slices.SortStableFunc(chains, func(a, b withdraw.Chain) int { return beadCmp(a.Head, b.Head) })
-	cs := &cancelState{release: make([]bool, len(chains)+len(p.Tasks))}
+	cs := &cancelState{release: make([]bool, len(chains)+len(p.Errands))}
 	for i, ch := range chains {
 		c := cancelChain{head: ch.Head, ids: map[string]bool{}}
 		for _, id := range ch.Beads {
@@ -88,11 +92,11 @@ func (m Model) cancelDialog(id string, p withdraw.Plan, barred bool, warn string
 		cs.release[i] = slices.Contains(p.Released, ch.Head.ID)
 		cs.chains = append(cs.chains, c)
 	}
-	tasks := slices.Clone(p.Tasks)
-	slices.SortStableFunc(tasks, beadCmp)
-	for _, t := range tasks {
+	errands := slices.Clone(p.Errands)
+	slices.SortStableFunc(errands, beadCmp)
+	for _, t := range errands {
 		cs.release[len(cs.chains)] = slices.Contains(p.Released, t.ID)
-		cs.chains = append(cs.chains, cancelChain{head: t, ids: map[string]bool{t.ID: true}, task: true})
+		cs.chains = append(cs.chains, cancelChain{head: t, ids: map[string]bool{t.ID: true}, errand: true})
 	}
 	return dialog{kind: xdialog, title: "Cancel " + title + "?", id: id, xs: xState{plan: p, barred: barred, warn: warn, cancel: cs}}
 }
@@ -162,16 +166,16 @@ func chainTags(inv withdraw.Inventory, c cancelChain) (t xTags) {
 
 func chainsNoun(n int) string { return pluralN(n, "chain") }
 
-func tasksNoun(n int) string { return pluralN(n, "Task") }
+func errandsNoun(n int) string { return pluralN(n, "Errand") }
 
-// counts is how many chains and Tasks the cancel closes and releases.
-func (cs *cancelState) counts() (closeChains, relChains, closeTasks, relTasks int) {
+// counts is how many chains and Errands the cancel closes and releases.
+func (cs *cancelState) counts() (closeChains, relChains, closeErrands, relErrands int) {
 	for i, c := range cs.chains {
 		switch {
-		case c.task && cs.release[i]:
-			relTasks++
-		case c.task:
-			closeTasks++
+		case c.errand && cs.release[i]:
+			relErrands++
+		case c.errand:
+			closeErrands++
 		case cs.release[i]:
 			relChains++
 		default:
@@ -187,7 +191,7 @@ func (cs *cancelState) tally(p withdraw.Plan) []string {
 	nClose, rel, tClose, tRel := cs.counts()
 	line := fmt.Sprintf("Closes %s (%s) · releases %s.", chainsNoun(nClose), pluralN(len(closing), "bead"), chainsNoun(rel))
 	if tClose+tRel > 0 {
-		line += fmt.Sprintf(" Withdraws %s · releases %s.", tasksNoun(tClose), tasksNoun(tRel))
+		line += fmt.Sprintf(" Withdraws %s · releases %s.", errandsNoun(tClose), errandsNoun(tRel))
 	}
 	return []string{line, xSummary(closingInventory(p.Inventory, closing), closing)}
 }
@@ -202,8 +206,10 @@ func (d dialog) cancelBindings() []key.Binding {
 		return []key.Binding{keyCancelLoss, keyBackRows}
 	case cs.review:
 		return []key.Binding{keyCancelYes, keyBackRows}
+	case cs.whyOn:
+		return []key.Binding{keyListFocus, keyCloseDialog}
 	}
-	return []key.Binding{keyReview, keyReleaseRow, keyCloseRow, keyDown, keyUp, keyCloseDialog}
+	return []key.Binding{keyReview, keyWhyFocus, keyReleaseRow, keyCloseRow, keyDown, keyUp, keyCloseDialog}
 }
 
 // cancelKey is the cancel dialog's keys.
@@ -233,9 +239,15 @@ func (m Model) cancelKey(d dialog, k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case cs.review:
 		if key.Matches(k, keyCancelYes) {
-			return m.pop().confirmCancel(d.id, cs.released(), cs.loses(d.xs.plan))
+			return m.pop().confirmCancel(d.id, strings.TrimSpace(cs.why.text), cs.released(), cs.loses(d.xs.plan))
 		}
 		return m, nil
+	case cs.whyOn:
+		if key.Matches(k, keyListFocus) {
+			cs.whyOn = false
+		} else {
+			cs.why, cs.flash = cs.why.apply(k), ""
+		}
 	case key.Matches(k, keyDown) && n > 0:
 		d.cur = (d.cur + 1) % n
 		cs.flash = ""
@@ -251,7 +263,13 @@ func (m Model) cancelKey(d dialog, k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cs.release[d.cur], cs.flash = true, ""
 	case key.Matches(k, keyCloseRow) && n > 0:
 		cs.release[d.cur], cs.flash = false, ""
+	case key.Matches(k, keyWhyFocus):
+		cs.whyOn, cs.flash = true, ""
 	case key.Matches(k, keyReview):
+		if strings.TrimSpace(cs.why.text) == "" {
+			cs.flash = "Cancel needs a why: press tab and say why the Initiative is dropped."
+			break
+		}
 		cs.review, cs.flash = true, ""
 	default:
 		return m, nil
@@ -264,15 +282,15 @@ func (m Model) cancelKey(d dialog, k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // confirmCancel runs the verb off the event loop. The verb re-reads the graph under its
 // fence, so a refusal now reopens the dialog barred with the fresh refusals.
-func (m Model) confirmCancel(id string, release []string, discard bool) (Model, tea.Cmd) {
+func (m Model) confirmCancel(id, why string, release []string, discard bool) (Model, tea.Cmd) {
 	return into(m.startAct(id, "cancelling", func() writeDoneMsg {
-		res, err := runCancel(id, release, discard)
+		res, err := runCancel(id, why, release, discard)
 		var p withdraw.Plan
 		var perr error
 		if replans(err) {
 			p, perr = replanCancel(id, release)
 		}
-		return writeDoneMsg{id, func(m Model) (tea.Model, tea.Cmd) { return m.cancelDone(id, res, err, p, perr) }}
+		return writeDoneMsg{id, func(m Model) (tea.Model, tea.Cmd) { return m.cancelDone(id, why, res, err, p, perr) }}
 	}))
 }
 
@@ -286,12 +304,16 @@ func replanCancel(id string, release []string) (withdraw.Plan, error) {
 	return planCancel(id, nil)
 }
 
-func (m Model) cancelDone(id string, res withdraw.Result, err error, p withdraw.Plan, perr error) (tea.Model, tea.Cmd) {
+func (m Model) cancelDone(id, why string, res withdraw.Result, err error, p withdraw.Plan, perr error) (tea.Model, tea.Cmd) {
 	lead := "cancelled " + id
 	if n := len(res.Released); n > 0 {
 		lead += " · " + pluralN(n, "chain") + " released"
 	}
-	return m.verbDone(withdraw.KindCancel, id, err, p, perr, resultSummary(lead, res), m.cancelDialog)
+	return m.verbDone(withdraw.KindCancel, id, err, p, perr, resultSummary(lead, res), func(id string, p withdraw.Plan, barred bool, warn string) dialog {
+		d := m.cancelDialog(id, p, barred, warn)
+		d.xs.cancel.why = lineAt(why) // a reopened dialog keeps the human's why
+		return d
+	})
 }
 
 // cancelView draws the rows page or the review page.
@@ -317,7 +339,7 @@ func (m Model) cancelView(d dialog) string {
 		for _, l := range cs.tally(p) {
 			head = append(head, wrapLines(l, inner)...)
 		}
-		head = append(head, "")
+		head = append(head, "", m.whyLine(cs, inner), "")
 	}
 	if d.xs.warn != "" && !d.xs.barred {
 		for _, l := range wrapLines(d.xs.warn, inner) {
@@ -349,6 +371,18 @@ func choiceOf(c cancelChain, released bool) string {
 		return "( ) close  (●) release"
 	}
 	return "(●) close  ( ) release"
+}
+
+// whyLine is the why input: "Why: " and the text, with the cursor only while focused.
+func (m Model) whyLine(cs *cancelState, inner int) string {
+	const label = "Why: "
+	if !cs.whyOn {
+		if cs.why.text == "" {
+			return label + dimSt.Render("(tab to say why)")
+		}
+		return ansi.Truncate(label+cs.why.text, inner, "…")
+	}
+	return label + cs.why.render(max(inner-len(label), 3))
 }
 
 // cancelRows draws the chains, windowed to budget lines with a k/N counter. Each chain
@@ -409,13 +443,13 @@ func (m Model) cancelRows(d dialog, inner, budget int) []string {
 // the total discarded.
 func (m Model) cancelReview(d dialog, inner int) []string {
 	p, cs := d.xs.plan, d.xs.cancel
-	var closes, releases, withdraws, taskReleases []string
+	var closes, releases, withdraws, errandReleases []string
 	for i, c := range cs.chains {
 		line := "  " + kindTag(&c.head) + " " + c.head.Title
 		if cs.release[i] {
 			l := ansi.Truncate(line, inner, "…")
-			if c.task {
-				taskReleases = append(taskReleases, l)
+			if c.errand {
+				errandReleases = append(errandReleases, l)
 			} else {
 				releases = append(releases, l)
 			}
@@ -425,21 +459,22 @@ func (m Model) cancelReview(d dialog, inner int) []string {
 		if t := chainTags(p.Inventory, c); !t.none() {
 			s = t.String(inner >= xCompact)
 		}
-		if c.task {
+		if c.errand {
 			withdraws = append(withdraws, withTags(line, s, inner))
 		} else {
 			closes = append(closes, withTags(line, s, inner))
 		}
 	}
-	out := []string{fmt.Sprintf("Closes %s:", chainsNoun(len(closes)))}
+	out := append(wrapLines("Why: "+strings.TrimSpace(cs.why.text), inner), "")
+	out = append(out, fmt.Sprintf("Closes %s:", chainsNoun(len(closes))))
 	out = append(out, closes...)
 	out = append(out, "", fmt.Sprintf("Releases %s:", chainsNoun(len(releases))))
 	out = append(out, releases...)
-	if len(withdraws)+len(taskReleases) > 0 {
-		out = append(out, "", fmt.Sprintf("Withdraws %s:", tasksNoun(len(withdraws))))
+	if len(withdraws)+len(errandReleases) > 0 {
+		out = append(out, "", fmt.Sprintf("Withdraws %s:", errandsNoun(len(withdraws))))
 		out = append(out, withdraws...)
-		out = append(out, "", fmt.Sprintf("Releases %s:", tasksNoun(len(taskReleases))))
-		out = append(out, taskReleases...)
+		out = append(out, "", fmt.Sprintf("Releases %s:", errandsNoun(len(errandReleases))))
+		out = append(out, errandReleases...)
 	}
 	closing := cs.closing(p)
 	out = append(out, "")

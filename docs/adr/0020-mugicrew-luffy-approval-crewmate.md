@@ -1,6 +1,6 @@
 # ADR 0020: mugicrew Luffy — the one rich-presentation HITL crewmate whose thin Go launches an approval session
 
-Status: Accepted (§5 amended by ADR 0203)
+Status: Accepted (§5 amended by ADR 0203; §1/§4 amended by ADR 0382 (under-gitlab-the-un-draft…))
 Date: 2026-09-24
 
 Builds on: ADR 0002 (owner-from-kind routing), ADR 0016 (Checkpoint read-model +

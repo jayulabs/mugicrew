@@ -2,6 +2,9 @@ package bd
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 )
 
 // The §4.3 invariants, checkable without a DB: caused-by edge in the right
@@ -47,7 +51,7 @@ func TestSuccessorCreateArgsEnforceInvariants(t *testing.T) {
 	}
 }
 
-func TestSuccessorCreateArgsLeafIsTask(t *testing.T) {
+func TestSuccessorCreateArgsLeafIsErrand(t *testing.T) {
 	args := successorCreateArgs("mc-x", Successor{Kind: contract.KindResearch, Container: false, Title: "t", Description: "d"})
 	for i, a := range args {
 		if a == "--type" && i+1 < len(args) && args[i+1] != "task" {
@@ -328,17 +332,103 @@ func TestClaimIsStatusCAS(t *testing.T) {
 	}
 }
 
-// Actor resolution mirrors bd's: $BEADS_ACTOR, then git user.name, then $USER.
-func TestActorFrom(t *testing.T) {
-	for _, c := range []struct{ env, git, user, want string }{
-		{"env", "git", "user", "env"},
-		{"", "git", "user", "git"},
-		{"", "", "user", "user"},
-		{"", "", "", ""},
+// The actor is read from bd (`bd create --dry-run --json` created_by), and an
+// unreadable bd falls back to the bare name.
+func TestReadActor(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("USER", "bare")
+	for _, c := range []struct {
+		name, out string
+		err       error
+		want      string
+		degraded  bool
+	}{
+		{"configured device", `{"created_by":"alice@laptop"}`, nil, "alice@laptop", false},
+		{"bare name", `{"created_by":"alice"}`, nil, "alice", false},
+		{"unreadable bd", "", errors.New("boom"), "bare", true},
+		{"no created_by", `{}`, nil, "bare", true},
 	} {
-		if got := actorFrom(c.env, func() string { return c.git }, c.user); got != c.want {
-			t.Errorf("actorFrom(%q,%q,%q) = %q, want %q", c.env, c.git, c.user, got, c.want)
+		run = func(...string) (string, error) { return c.out, c.err }
+		if got, degraded := readActor(); got != c.want || degraded != c.degraded {
+			t.Errorf("%s: readActor = %q,%v; want %q,%v", c.name, got, degraded, c.want, c.degraded)
 		}
+	}
+}
+
+// A degraded read is cached too: with bd unreadable, two calls run bd once and
+// return the same bare name.
+func TestCachedActorCachesDegradedRead(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("USER", "bare")
+	calls := 0
+	run = func(...string) (string, error) { calls++; return "", errors.New("boom") }
+	get := cachedActor()
+	n1, d1 := get()
+	n2, d2 := get()
+	if calls != 1 || n1 != "bare" || n2 != n1 || !d1 || !d2 {
+		t.Errorf("calls=%d got %q,%v then %q,%v; want 1 call, bare,true twice", calls, n1, d1, n2, d2)
+	}
+}
+
+// Against a real bd in a scratch HOME (never the user's ~/.config/bd) and a
+// scratch Bead Graph (never the devShell's BEADS_DIR, the real graph), the config
+// actor: key is read, and $BEADS_ACTOR overrides it.
+// scratchActorGraph points HOME at a user config setting actor: me@box, then
+// inits a scratch Bead Graph (BEADS_DIR inside a fresh git repo, which is the cwd)
+// and confirms it is the one in force, so a probe never touches the real graph.
+func scratchActorGraph(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("no bd on PATH")
+	}
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".config", "bd")
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "config.yaml"), []byte("actor: me@box\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	scratch := t.TempDir()
+	if out, err := exec.Command("git", "-C", scratch, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	t.Setenv("BEADS_DIR", filepath.Join(scratch, ".beads"))
+	t.Chdir(scratch)
+	if out, err := exec.Command("bd", "init", "--prefix", "t", "--non-interactive").CombinedOutput(); err != nil {
+		t.Skipf("bd init in a scratch graph: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bd", "config", "get", "issue_prefix").Output(); err != nil || strings.TrimSpace(string(out)) != "t" {
+		t.Fatalf("scratch graph not in force (issue_prefix = %q, %v); refusing to probe the real Bead Graph", out, err)
+	}
+}
+
+func TestReadActorRealBd(t *testing.T) {
+	scratchActorGraph(t)
+	for env, want := range map[string]string{"": "me@box", "zed@dev": "zed@dev"} {
+		t.Setenv("BEADS_ACTOR", env)
+		if got, degraded := readActor(); got != want || degraded {
+			t.Errorf("BEADS_ACTOR=%q: readActor = %q,%v; want %q", env, got, degraded, want)
+		}
+	}
+}
+
+// A Workspace whose bd validates task descriptions on create must not make the
+// probe fail into the degraded bare name: the configured actor still reads back.
+func TestReadActorRealBdValidatingWorkspace(t *testing.T) {
+	scratchActorGraph(t)
+	t.Setenv("BEADS_ACTOR", "")
+	if out, err := exec.Command("bd", "config", "set", "validation.on-create", "error").CombinedOutput(); err != nil {
+		t.Fatalf("bd config set: %v: %s", err, out)
+	}
+	if got, degraded := readActor(); got != "me@box" || degraded {
+		t.Errorf("readActor = %q,%v; want me@box,false", got, degraded)
 	}
 }
 
@@ -439,6 +529,8 @@ func TestCarryLatches(t *testing.T) {
 	var adds [][]string
 	run = func(args ...string) (string, error) {
 		switch {
+		case args[0] == "show":
+			return `[{"id":"ws-cp","status":"open","labels":["kind:checkpoint"]}]`, nil
 		case args[1] == "add":
 			adds = append(adds, args)
 		case args[3] == "--direction=down":
@@ -461,6 +553,92 @@ func TestCarryLatches(t *testing.T) {
 	}
 }
 
+// carryInitiativeRun serves a Latch step whose successor wears kind label succKind
+// (or whose show fails when showErr is set), and records the dep adds.
+func carryInitiativeRun(t *testing.T, succKind string, showErr bool) *[][]string {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	adds := &[][]string{}
+	run = func(args ...string) (string, error) {
+		switch {
+		case args[0] == "show":
+			if showErr {
+				return "", errors.New("bd show: exit status 1: database is locked")
+			}
+			return `[{"id":"ws-succ","status":"open","labels":["kind:` + succKind + `"]}]`, nil
+		case args[1] == "add":
+			*adds = append(*adds, args)
+		case args[3] == "--direction=down":
+			return `[{"id":"lt-open","status":"open","labels":["kind:latch"]},
+			 {"id":"lt-done","status":"closed","labels":["kind:latch"]},
+			 {"id":"mc-blk","status":"open","labels":["kind:build"]}]`, nil
+		case args[3] == "--direction=up":
+			return `[{"id":"mc-a","status":"open","dependency_type":"blocks"}]`, nil
+		}
+		return "[]", nil
+	}
+	return adds
+}
+
+// An Initiative successor takes no Latch edge: the open Latch is skipped as
+// initiative, closed Latches and other blockers are not reported, and the outgoing
+// ordering still carries (ADR 0348 §8, ADR 0085).
+func TestCarrySkipsLatchOntoInitiative(t *testing.T) {
+	adds := carryInitiativeRun(t, "initiative", false)
+	moved, skipped, err := Carry("ws-sig", "ws-succ")
+	if err != nil {
+		t.Fatalf("Carry: %v", err)
+	}
+	if want := []string{"mc-a"}; !slices.Equal(moved, want) {
+		t.Errorf("moved = %v, want %v", moved, want)
+	}
+	if want := []CarrySkip{{"lt-open", "initiative"}}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped = %v, want %v", skipped, want)
+	}
+	if want := [][]string{{"dep", "add", "mc-a", "ws-succ", "-t", "blocks"}}; !reflect.DeepEqual(*adds, want) {
+		t.Errorf("adds = %v, want %v", *adds, want)
+	}
+}
+
+func TestCarryTargetsSkipsLatchOntoInitiative(t *testing.T) {
+	adds := carryInitiativeRun(t, "initiative", false)
+	moved, skipped, err := CarryTargets("ws-sig", "ws-ord", "ws-succ")
+	if err != nil {
+		t.Fatalf("CarryTargets: %v", err)
+	}
+	if want := []string{"mc-a"}; !slices.Equal(moved, want) {
+		t.Errorf("moved = %v, want %v", moved, want)
+	}
+	if want := []CarrySkip{{"lt-open", "initiative"}}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("skipped = %v, want %v", skipped, want)
+	}
+	if want := [][]string{{"dep", "add", "mc-a", "ws-ord", "-t", "blocks"}}; !reflect.DeepEqual(*adds, want) {
+		t.Errorf("adds = %v, want %v", *adds, want)
+	}
+}
+
+// Every other successor kind still takes the Latch edge.
+func TestCarryLatchOntoOtherKinds(t *testing.T) {
+	for _, kind := range []string{"chart", "spec", "checkpoint"} {
+		adds := carryInitiativeRun(t, kind, false)
+		_, skipped, err := Carry("ws-sig", "ws-succ")
+		if err != nil || skipped != nil {
+			t.Fatalf("%s: Carry = %v,%v", kind, skipped, err)
+		}
+		if want := []string{"ws-succ", "lt-open"}; len(*adds) != 2 || !slices.Equal((*adds)[1][2:4], want) {
+			t.Errorf("%s: adds = %v, want the latch edge", kind, *adds)
+		}
+	}
+}
+
+// A failed read of the successor fails the carry.
+func TestCarryLatchSuccessorReadFails(t *testing.T) {
+	carryInitiativeRun(t, "chart", true)
+	if _, _, err := Carry("ws-sig", "ws-succ"); err == nil {
+		t.Fatal("Carry succeeded though the successor could not be read")
+	}
+}
+
 // CarryTargets sends ordering dependents to one bead and open Latches to another,
 // in one pass; neither walk touches the other's target.
 func TestCarryTargets(t *testing.T) {
@@ -469,6 +647,8 @@ func TestCarryTargets(t *testing.T) {
 	var adds [][]string
 	run = func(args ...string) (string, error) {
 		switch {
+		case args[0] == "show":
+			return `[{"id":"ws-pivot","status":"open","labels":["kind:chart"]}]`, nil
 		case args[1] == "add":
 			adds = append(adds, args)
 		case args[3] == "--direction=down":
@@ -659,7 +839,7 @@ func TestDrainBlockersOverSkipsOpenLanding(t *testing.T) {
 // container landed (with or without a carrier suffix); a plain obsolete: sweep
 // still holds.
 func TestDrainBlockersOverSkipsContainerLandedChild(t *testing.T) {
-	efforts := map[string]bool{"a": true, "b": true, "c": true}
+	efforts := &git.EffortSet{Branches: map[string]bool{"a": true, "b": true, "c": true}}
 	kids := []Bead{
 		{ID: "a", Status: "closed", CloseReason: ContainerLandedReason + "; carried by sig"},
 		{ID: "b", Status: "closed", CloseReason: ObsoleteReason + " Spec x superseded"},
@@ -668,6 +848,39 @@ func TestDrainBlockersOverSkipsContainerLandedChild(t *testing.T) {
 	open, held := DrainBlockersOver(kids, efforts)
 	if open != 0 || strings.Join(IDs(held), ",") != "b,c" {
 		t.Errorf("open %d held %v, want 0 and [b c]", open, IDs(held))
+	}
+}
+
+// A closed child is held only when its effort branch exists and is not integrated
+// (tip == cut ref, ADR 0394 (a-closed-effort-whose-tip-is-its-cut-ref…)): an open child
+// opens the gate whatever its refs, a container-landed close is skipped as before.
+func TestDrainGatesReadIntegratedChildrenAsNotHeld(t *testing.T) {
+	efforts := &git.EffortSet{
+		Branches:   map[string]bool{"integ": true, "ahead": true, "nocut": true, "open": true, "landed": true},
+		Integrated: map[string]bool{"integ": true, "open": true, "landed": true},
+	}
+	member := func(id, status, reason string) Bead {
+		return Bead{ID: id, Kind: contract.KindBuild, Status: status, CloseReason: reason}
+	}
+	for _, tc := range []struct {
+		name       string
+		kid        Bead
+		open, held int
+		drained    bool
+	}{
+		{"closed and integrated", member("integ", "closed", "Closed"), 0, 0, true},
+		{"closed and ahead of its cut", member("ahead", "closed", "Closed"), 0, 1, false},
+		{"closed with no cut ref", member("nocut", "closed", "Closed"), 0, 1, false},
+		{"open", member("open", "open", ""), 1, 0, false},
+		{"container landed", member("landed", "closed", ContainerLandedReason), 0, 0, true},
+	} {
+		kids := []Bead{tc.kid}
+		if open, held := DrainBlockersOver(kids, efforts); open != tc.open || len(held) != tc.held {
+			t.Errorf("%s: DrainBlockersOver = %d, %v; want %d, %d", tc.name, open, IDs(held), tc.open, tc.held)
+		}
+		if got := MembersDrainedOver(kids, efforts); got != tc.drained {
+			t.Errorf("%s: MembersDrainedOver = %v, want %v", tc.name, got, tc.drained)
+		}
 	}
 }
 
@@ -727,8 +940,8 @@ func TestNewestLanding(t *testing.T) {
 }
 
 // The hold's blocks edge rides the create: a failure between two calls would leave
-// a Task blocking nothing, invisible to the (container, key) dedupe.
-func TestSpawnBlockingTaskIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
+// an Errand blocking nothing, invisible to the (container, key) dedupe.
+func TestSpawnBlockingErrandIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 	orig := run
 	t.Cleanup(func() { run = orig })
 	var calls [][]string
@@ -738,12 +951,12 @@ func TestSpawnBlockingTaskIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 			return `[{"id":"ws-cp","title":"cp","status":"open","labels":["kind:checkpoint"]}]`, nil
 		}
 		if args[0] == "create" {
-			return "ws-task", nil
+			return "ws-errand", nil
 		}
 		return "[]", nil
 	}
-	id, created, err := SpawnBlockingTaskIfAbsent("ws-cp", "Closed MR: !3\n", "t", "Closed MR: !3\n")
-	if err != nil || !created || id != "ws-task" {
+	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "Closed MR: !3\n")
+	if err != nil || !created || id != "ws-errand" {
 		t.Fatalf("got %q %v %v", id, created, err)
 	}
 	for _, c := range calls {
@@ -756,19 +969,19 @@ func TestSpawnBlockingTaskIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 	}
 }
 
-// A hold that outlives its closed Task re-files related to it (ADR 0338): the
-// edge goes to the most recently closed same-key Task blocking the container.
-func TestSpawnBlockingTaskIfAbsentLinksTheMostRecentlyClosedSameKeyTask(t *testing.T) {
+// A hold that outlives its closed Errand re-files related to it (ADR 0338): the
+// edge goes to the most recently closed same-key Errand blocking the container.
+func TestSpawnBlockingErrandIfAbsentLinksTheMostRecentlyClosedSameKeyErrand(t *testing.T) {
 	const key = "Closed MR: !3\n"
 	for name, c := range map[string]struct {
 		blockers string
 		want     string // related target; "" = no edge
 		created  bool
 	}{
-		"one closed":    {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"}]`, "old", true},
-		"two closed":    {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"},{"id":"newer","status":"closed","labels":["kind:task"],"description":"Closed MR: !3\n","closed_at":"2026-10-02T10:00:00Z"}]`, "newer", true},
-		"other key":     {`[{"id":"old","status":"closed","labels":["kind:task"],"description":"Other\n","closed_at":"2026-10-01T10:00:00Z"}]`, "", true},
-		"open same key": {`[{"id":"live","status":"open","labels":["kind:task"],"description":"Closed MR: !3\n"}]`, "", false},
+		"one closed":    {`[{"id":"old","status":"closed","labels":["kind:errand"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"}]`, "old", true},
+		"two closed":    {`[{"id":"old","status":"closed","labels":["kind:errand"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"},{"id":"newer","status":"closed","labels":["kind:errand"],"description":"Closed MR: !3\n","closed_at":"2026-10-02T10:00:00Z"}]`, "newer", true},
+		"other key":     {`[{"id":"old","status":"closed","labels":["kind:errand"],"description":"Other\n","closed_at":"2026-10-01T10:00:00Z"}]`, "", true},
+		"open same key": {`[{"id":"live","status":"open","labels":["kind:errand"],"description":"Closed MR: !3\n"}]`, "", false},
 	} {
 		orig := run
 		var related []string
@@ -787,7 +1000,7 @@ func TestSpawnBlockingTaskIfAbsentLinksTheMostRecentlyClosedSameKeyTask(t *testi
 			}
 			return "", nil
 		}
-		_, created, err := SpawnBlockingTaskIfAbsent("ws-cp", key, "t", key)
+		_, created, err := SpawnBlockingErrandIfAbsent("ws-cp", key, "t", key)
 		run = orig
 		if err != nil || created != c.created {
 			t.Fatalf("%s: created=%v err=%v", name, created, err)
@@ -894,8 +1107,8 @@ func TestOpenBlocked(t *testing.T) {
 }
 
 func TestClaimedElsewhere(t *testing.T) {
-	t.Cleanup(PinActor("alice"))
-	for a, want := range map[string]bool{"": false, "alice": false, "bob": true} {
+	t.Cleanup(PinActor("alice@laptop"))
+	for a, want := range map[string]bool{"": false, "alice@laptop": false, "alice@desktop": true, "alice": true, "bob@laptop": true} {
 		if got := ClaimedElsewhere(a); got != want {
 			t.Errorf("ClaimedElsewhere(%q) = %v, want %v", a, got, want)
 		}
@@ -969,12 +1182,12 @@ func TestSuccessorCreateArgsMetadata(t *testing.T) {
 
 // A raise Draft is discovered-from its creator, never caused-by it: no successor edge.
 func TestCreateRaiseDraftArgsHaveNoCausedBy(t *testing.T) {
-	args := successorCreateArgs("", Successor{Kind: contract.KindCritique, Title: "t", DraftedBy: "ws-task", Parent: "ws-cp"}, "discovered-from:ws-task")
+	args := successorCreateArgs("", Successor{Kind: contract.KindCritique, Title: "t", DraftedBy: "ws-errand", Parent: "ws-cp"}, "discovered-from:ws-errand")
 	i := slices.Index(args, "--deps")
-	if i < 0 || args[i+1] != "discovered-from:ws-task" {
-		t.Errorf("args = %v, want --deps discovered-from:ws-task only", args)
+	if i < 0 || args[i+1] != "discovered-from:ws-errand" {
+		t.Errorf("args = %v, want --deps discovered-from:ws-errand only", args)
 	}
-	if !slices.Contains(args, "drafted-by:ws-task") && !slices.Contains(args, "kind:critique,drafted-by:ws-task") {
+	if !slices.Contains(args, "drafted-by:ws-errand") && !slices.Contains(args, "kind:critique,drafted-by:ws-errand") {
 		t.Errorf("args = %v, want the drafted-by label", args)
 	}
 }
@@ -1005,19 +1218,38 @@ func TestParseSweptReasonRejectsEveryOtherReason(t *testing.T) {
 	}
 }
 
-// An open Task still carrying the old free-form body satisfies the key match, so the
+// An open Errand still carrying the old free-form body satisfies the key match, so the
 // reformatted filer files no duplicate (Spec D10).
-func TestSpawnBlockingTaskIfAbsentMatchesAnOldFormatOpenBody(t *testing.T) {
+func TestSpawnBlockingErrandIfAbsentMatchesAnOldFormatOpenBody(t *testing.T) {
 	orig := run
 	t.Cleanup(func() { run = orig })
 	run = func(args ...string) (string, error) {
 		if args[0] == "create" {
 			t.Errorf("filed a duplicate: %v", args)
 		}
-		return `[{"id":"old","status":"open","labels":["kind:task"],"description":"MR !3 was closed.\nClosed MR: !3\nFix: reopen it.\n"}]`, nil
+		return `[{"id":"old","status":"open","labels":["kind:errand"],"description":"MR !3 was closed.\nClosed MR: !3\nFix: reopen it.\n"}]`, nil
 	}
-	id, created, err := SpawnBlockingTaskIfAbsent("ws-cp", "Closed MR: !3\n", "t", "new body")
+	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "new body")
 	if err != nil || created || id != "old" {
-		t.Errorf("got %q %v %v, want the old open Task", id, created, err)
+		t.Errorf("got %q %v %v, want the old open Errand", id, created, err)
+	}
+}
+
+func TestAwaitingUndraft(t *testing.T) {
+	mr := "Commit: abc\nMR: !7\n"
+	cases := map[string]struct {
+		b    Bead
+		want bool
+	}{
+		"open approval with MR":   {Bead{Kind: contract.KindApproval, Status: "open", Description: mr}, true},
+		"qualified path":          {Bead{Kind: contract.KindApproval, Status: "open", Description: "MR: g/p!3"}, true},
+		"no MR line":              {Bead{Kind: contract.KindApproval, Status: "open", Description: "Commit: abc"}, false},
+		"closed approval":         {Bead{Kind: contract.KindApproval, Status: "closed", Description: mr}, false},
+		"other kind with MR line": {Bead{Kind: contract.KindCheckpoint, Status: "open", Description: mr}, false},
+	}
+	for name, c := range cases {
+		if got := AwaitingUndraft(c.b); got != c.want {
+			t.Errorf("%s: AwaitingUndraft = %v, want %v", name, got, c.want)
+		}
 	}
 }

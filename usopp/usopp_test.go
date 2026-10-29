@@ -62,22 +62,24 @@ type usoppSeamRec struct {
 func stubUsoppSeams(t *testing.T, r *usoppSeamRec) {
 	t.Helper()
 	oShow, oClose, oSpawn, oOpen, oOpenBeads, oSpec, oHead := showBead, closeBead, spawnChild, openChildrenOfKind, openChildrenBeadsOfKind, specOf, head
-	oPivots, oRaised, oRaise, oPublish, oSurgery := openPivots, pivotsDiscoveredFrom, raisePivot, closeOnPublish, surgeriesOf
+	oPivots, oRaise, oPublish, oSurgery := openPivots, raiseIfPivoted, closeOnPublish, surgeriesOf
 	t.Cleanup(func() {
 		showBead, closeBead, spawnChild, openChildrenOfKind, openChildrenBeadsOfKind, specOf, head = oShow, oClose, oSpawn, oOpen, oOpenBeads, oSpec, oHead
-		openPivots, pivotsDiscoveredFrom, raisePivot, closeOnPublish, surgeriesOf = oPivots, oRaised, oRaise, oPublish, oSurgery
+		openPivots, raiseIfPivoted, closeOnPublish, surgeriesOf = oPivots, oRaise, oPublish, oSurgery
 	})
 	surgeriesOf = func(string) ([]bd.Bead, error) { return nil, nil }
 	oChanged := changedPaths
 	t.Cleanup(func() { changedPaths = oChanged })
 	changedPaths = func(string, string) ([]string, error) { return nil, nil }
 	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
-	pivotsDiscoveredFrom = func(string) ([]bd.Bead, error) { return r.raised, nil }
-	// The raise's edges and close are bd.RaisePivot's (tested in bd); Usopp's job
-	// is handing it the Review, the resolved Spec and the raised pivots.
-	raisePivot = func(_ contract.Ctx, b bd.Bead, _, spec string, ps []bd.Bead) error {
-		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(ps), ","))
-		return nil
+	// The find and the raise are bd.RaiseIfPivoted's (tested in bd); Usopp's job is
+	// handing it the Review and the resolved Spec.
+	raiseIfPivoted = func(_ contract.Ctx, b bd.Bead, spec string) (bool, error) {
+		if len(r.raised) == 0 {
+			return false, nil
+		}
+		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(r.raised), ","))
+		return true, nil
 	}
 	// Outside an effort (stubCtx) the flow publishes the Review's close itself; in
 	// one, bd.CloseOnPublish only hands it to the Publisher.
@@ -198,10 +200,10 @@ func TestPromptRenders(t *testing.T) {
 }
 
 // Spec FR 12: external work found mid-run is an offshoot Signal by the
-// Review, never a Task.
+// Review, never an Errand.
 func TestReviewPromptFilesExternalWorkAsSignal(t *testing.T) {
 	p := reviewPrompt(reviewArgs{ReviewID: "ws-rev", CheckpointID: "ws-cp", SpecID: "ws-spec"})
-	for _, want := range []string{"offshoot Signal, never a Task", "signal-filing.md", "discovered-from ws-rev"} {
+	for _, want := range []string{"offshoot Signal, never an Errand", "signal-filing.md", "discovered-from ws-rev"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("review prompt missing %q", want)
 		}
@@ -441,10 +443,10 @@ func TestRunUnknownKindErrors(t *testing.T) {
 	}
 }
 
-// FR49: a confirm sweep closes the Review mid-session. Fork ok or failed, the
-// re-read sees it closed: no error, no Approval, no edge, no close.
+// FR49 wiring: a confirm sweep closes the Review mid-session and the fork fails; the
+// runner reports it done: no error, no Approval, no edge, no close.
 func TestRunOverSweepClosedReviewIsNoOp(t *testing.T) {
-	for name, forkErr := range map[string]error{"fork ok": nil, "fork failed": errors.New("session killed")} {
+	for name, forkErr := range map[string]error{"fork failed": errors.New("session killed")} {
 		r := &usoppSeamRec{head: "beefcafe", raised: []bd.Bead{{ID: "ws-piv"}}}
 		stubUsoppSeams(t, r)
 		reads := 0

@@ -3,8 +3,10 @@ package luffy
 import (
 	_ "embed"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
+	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 )
 
@@ -39,7 +42,8 @@ var triageTmpl string
 // the Workspace declares contexts, so a Workspace without any renders today's prompt.
 // require, when given, is the Require Initiatives section (requireSection).
 // bound is the Signal's context: label ("" loose); a labelled Signal gets the pre-bound paragraph.
-func triagePrompt(signalID, ref, bound string, ctxs map[string]string, offers []bd.Bead, require ...string) string {
+// body is the Signal's description, whose Initiative: line the Adoption offer quotes.
+func triagePrompt(signalID, ref, bound, body string, ctxs map[string]string, offers []bd.Bead, require ...string) string {
 	p := fmt.Sprintf(triageTmpl, signalID, contract.WayfinderMapFields, contract.DraftInstruction(signalID), "\n\n"+paneProcedure)
 	if len(ctxs) > 0 {
 		p += contextSection(ctxs, repoContexts(), bound != "")
@@ -48,7 +52,7 @@ func triagePrompt(signalID, ref, bound string, ctxs map[string]string, offers []
 		p += preBoundSection(bound)
 	}
 	if len(offers) > 0 {
-		p += adoptionSection(signalID, offers)
+		p += adoptionSection(signalID, body, offers)
 	}
 	p += strings.Join(require, "")
 	if isJiraRef(ref) {
@@ -73,7 +77,7 @@ var initiativesSetting = func() cfglayer.Initiatives {
 func requireSection(signalID string, inis []bd.Bead, extRef bool) string {
 	var list strings.Builder
 	for _, o := range inis {
-		fmt.Fprintf(&list, "- %s — %s\n  Done when: %s\n", o.ID, o.Title, doneWhen(o.Description))
+		fmt.Fprintf(&list, "- %s — %s\n  Done when: %s\n", o.ID, o.Title, bd.DoneWhen(o.Description))
 	}
 	if list.Len() == 0 {
 		list.WriteString("(none open)\n")
@@ -199,31 +203,31 @@ This Signal is pre-bound to context %[1]s by its context:%[1]s label. Ask no con
 
 // adoptionSection is the appended Adoption offer (Spec mc-oseu): each offered
 // Initiative by ID, title and Done when, and the human-gated adopt-before-reconcile rule.
-func adoptionSection(signalID string, offers []bd.Bead) string {
+func adoptionSection(signalID, body string, offers []bd.Bead) string {
 	var list strings.Builder
 	for _, o := range offers {
-		fmt.Fprintf(&list, "- %s — %s\n  Done when: %s\n", o.ID, o.Title, doneWhen(o.Description))
+		fmt.Fprintf(&list, "- %s — %s\n  Done when: %s\n", o.ID, o.Title, bd.DoneWhen(o.Description))
 	}
 	return fmt.Sprintf(`
 ## Adoption offer
 
-This Signal is an offshoot of a member of an open Initiative, so it starts outside it. Offered:
+This Signal is an offshoot of a member of an open Initiative, and %s Offered:
 
 %s
 In the first round, alongside the frontier, offer adopting it and recommend yes or no against that Initiative's Done when. With several Initiatives the human picks one or none. Adopt only on the human's explicit yes for one Initiative: run `+"`mugicrew initiative adopt %s <initiativeID>`"+` BEFORE any mugicrew reconcile, so the successor is born inside the Initiative. On no, write nothing. If the human picks INITIATIVE, do not adopt: Initiatives never nest, so adoption and INITIATIVE are mutually exclusive. REJECT and DUPLICATE need no adoption.
-`, list.String(), signalID)
+`, outsideReason(body), list.String(), signalID)
 }
 
-// doneWhen is the text under the body's "## Done when" heading, else the whole body.
-func doneWhen(body string) string {
-	_, rest, ok := strings.Cut(body, "## Done when")
-	if !ok {
-		return strings.TrimSpace(body)
+// outsideReason says why a Signal is outside its cause's Initiative: it quotes
+// the body's last Initiative: line (the verb writes it last) when there is one, else says only that it is outside.
+func outsideReason(body string) string {
+	lines := strings.Split(body, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); strings.HasPrefix(l, "Initiative:") {
+			return fmt.Sprintf(`its body says "%s".`, l)
+		}
 	}
-	if i := strings.Index(rest, "\n## "); i >= 0 {
-		rest = rest[:i]
-	}
-	return strings.TrimSpace(rest)
+	return "it is outside it."
 }
 
 // phases is the text under the body's "## Phases" heading ("" when absent); display only.
@@ -275,7 +279,7 @@ Place the Signal before any outcome. In the first round, before any mugicrew rec
 - Sibling rules: a same-context sibling in the target phase is never a co-member. If it is a Signal or Chart, merge: run `+"`bd dep remove %[6]s <sibling>`"+` first if any edge joins them, then `+"`bd supersede %[6]s --with <sibling>`"+`, and carry the gist with `+"`bd note <sibling> \"<gist>\"`"+` (Signal) or `+"`mugicrew chart append <sibling> Notes \"<gist>\"`"+` (Chart). If it is a Spec or Checkpoint, never merge into it: sequence the Signal into another phase (park). A sibling in another context may be a co-member; add `+"`bd dep add`"+` blocks edges where one needs the other's code landed.
 - Park: `+"`bd close %[6]s --reason \"later: <title> (phase line on %[1]s)\"`"+`, keeping the parent, plus a Phases line `+"`later: <title> (from %[6]s)`"+` in the same whole-body rewrite. Never `+"`bd supersede <signal> --with <initiative>`"+`: bd keeps one edge per pair, and removing the parent edge first drops membership. Parking works under Require Initiatives. If it closes the Initiative's last unclosed member, tell the human the Initiative is now drained and its cut row appears in the Inbox.
 - DUPLICATE works as ever and keeps the parent.
-%[7]s`, ini.ID, ini.Title, doneWhen(ini.Description), phases(ini.Description), list.String(), signalID, belongOffer(signalID, required, others))
+%[7]s`, ini.ID, ini.Title, bd.DoneWhen(ini.Description), phases(ini.Description), list.String(), signalID, belongOffer(signalID, required, others))
 }
 
 // belongOffer is the way out when the Signal doesn't belong in its Initiative against
@@ -287,7 +291,7 @@ func belongOffer(signalID string, required bool, others []bd.Bead) string {
 	}
 	var list strings.Builder
 	for _, o := range others {
-		fmt.Fprintf(&list, "  - %s — %s\n    Done when: %s\n", o.ID, o.Title, doneWhen(o.Description))
+		fmt.Fprintf(&list, "  - %s — %s\n    Done when: %s\n", o.ID, o.Title, bd.DoneWhen(o.Description))
 	}
 	move := ""
 	if list.Len() > 0 {
@@ -382,7 +386,7 @@ func orderOf(body string) string {
 }
 
 // containerAmong is the first of edges that is a Chart, Spec or Checkpoint in all, or a
-// Task that is a member of ini (its own container, FR23). Status is not checked: a
+// Errand that is a member of ini (its own container, FR23). Status is not checked: a
 // follow-up is normally triaged after its container has closed (ADR 0347).
 func containerAmong(edges, all []bd.Bead, ini bd.Bead) bd.Bead {
 	for _, e := range edges {
@@ -393,7 +397,7 @@ func containerAmong(edges, all []bd.Bead, ini bd.Bead) bd.Bead {
 		switch all[i].Kind {
 		case contract.KindChart, contract.KindSpec, contract.KindCheckpoint:
 			return all[i]
-		case contract.KindTask:
+		case contract.KindErrand:
 			if all[i].Parent == ini.ID {
 				return all[i]
 			}
@@ -620,17 +624,18 @@ func reconcileSignal(sig bd.Bead, context string) error {
 		return err
 	}
 	if sig.Open() {
-		return carryOrdering(sig, chartID)
+		_, err = carryOrdering(sig, chartID)
+		return err
 	}
 	return nil
 }
 
 // carryOrdering carries pred's Ordering edges to succ outside the publish batch
-// (ADR 0085), and records the carry. A carry error fails the reconcile, leaving
-// pred open for the next reconcile to retry.
-func carryOrdering(pred bd.Bead, succ string) error {
+// (ADR 0085), records the carry and returns what Carry skipped. A carry error
+// fails the reconcile, leaving pred open for the next reconcile to retry.
+func carryOrdering(pred bd.Bead, succ string) ([]bd.CarrySkip, error) {
 	moved, skipped, err := carry(pred.ID, succ)
-	return eventlog.RecordCarry(pred, succ, moved, skipped, err)
+	return skipped, eventlog.RecordCarry(pred, succ, moved, skipped, err)
 }
 
 // specTrailer is the legacy direct-Spec anchor trailer ("Spec: <id>"), built
@@ -664,7 +669,7 @@ func reconcileFastLane(sig bd.Bead, specID string) error {
 	if err == nil {
 		// ponytail: logged on every run while the Signal is open, so a resumed
 		// session logs it again; key it on the eventlog if it must be exactly-once.
-		if err = carryOrdering(sig, specID); err == nil {
+		if _, err = carryOrdering(sig, specID); err == nil {
 			attrs = append(attrs, "anchor", sha)
 		}
 	}
@@ -794,9 +799,49 @@ func SeedInitiative(sig bd.Bead, title, body, ref string) error {
 		Kind: contract.KindInitiative, Container: true, Title: title, Description: body, DraftedBy: sig.ID, ExternalRef: ref,
 	})
 	if err == nil {
-		err = carryOrdering(sig, iniID)
+		var skipped []bd.CarrySkip
+		if skipped, err = carryOrdering(sig, iniID); err == nil {
+			err = printLatchSkips(iniID, skipped)
+		}
 	}
 	return eventlog.Record("triage.initiative", "triage.failed", err, append(eventlog.BeadAttrs(sig), "initiative", iniID)...)
+}
+
+// printLatchSkips prints the Initiative's id, then one "<latch> <verb> <key>"
+// line per Latch Carry skipped with reason initiative, so Luffy can ask which
+// member waits and re-latch it (`mugicrew latch <verb> <key> --blocks <member>`).
+// The verb and key come from the Latch's external ref.
+func printLatchSkips(iniID string, skipped []bd.CarrySkip) error {
+	fmt.Fprintln(stdout, iniID)
+	for _, s := range skipped {
+		if s.Reason != "initiative" {
+			continue
+		}
+		l, err := show(s.Bead)
+		if err != nil {
+			return err
+		}
+		verb, key := latchVerbKey(l.ExternalRef)
+		fmt.Fprintf(stdout, "latch %s %s %s\n", s.Bead, verb, key)
+	}
+	return nil
+}
+
+// latchVerbKey splits a Latch's external ref into its latch verb and key; a ref
+// of neither kind comes back as verb "unknown" with the whole ref.
+func latchVerbKey(ref string) (verb, key string) {
+	if k, ok := strings.CutPrefix(ref, bd.JiraLatchRefPrefix); ok {
+		return "jira", k
+	}
+	if k, ok := strings.CutPrefix(ref, bd.MRLatchRefPrefix); ok {
+		// MRCanonical's <host>/<path>!<iid> is not a ref `latch mr` reads back
+		// (ParseMRRef takes it as a path on the Forge host), so print the MR's web URL.
+		if p, iid, err := forge.ParseMRCanonical(k); err == nil {
+			return "mr", fmt.Sprintf("https://%s/%s/-/merge_requests/%d", p.Host, p.Path(), iid)
+		}
+		return "mr", k
+	}
+	return "unknown", ref
 }
 
 // refClash is the ID of an Initiative other than sig's own already-spawned one that
@@ -869,6 +914,9 @@ var (
 	initiativeOf     = bd.InitiativeOf
 	initiativesByRef = bd.InitiativesByRef
 )
+
+// stdout is where reconcile --initiative prints; the luffy test swaps it.
+var stdout io.Writer = os.Stdout
 
 // anchorSeams binds the package seams for bd.Anchor; show reads the Spec bead.
 func anchorSeams(show func(string) (bd.Bead, error)) bd.AnchorSeams {

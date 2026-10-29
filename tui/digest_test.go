@@ -121,9 +121,9 @@ func TestKindPickerSeesBeadsOlderThanWindow(t *testing.T) {
 	m := New(nil, nil).WithLog(eventlog.New(path, func(string) {}))
 	m, cmd := send(t, m, m.loadLogs()().(logsMsg))
 	m, _ = send(t, m, cmd().(digestMsg))
-	m.logKindOf = map[string]contract.Kind{"old": contract.Kind("initiative"), "x": contract.Kind("task"), "none": contract.Kind("signal")}
+	m.logKindOf = map[string]contract.Kind{"old": contract.Kind("initiative"), "x": contract.Kind("errand"), "none": contract.Kind("signal")}
 	got := m.tabAt(tabLogs).(logsTab).kindsPresent()
-	if len(got) != 2 || got[0] != "initiative" || got[1] != "task" {
-		t.Fatalf("kindsPresent = %v, want [initiative task]", got)
+	if len(got) != 2 || got[0] != "errand" || got[1] != "initiative" {
+		t.Fatalf("kindsPresent = %v, want [errand initiative]", got)
 	}
 }

@@ -80,6 +80,12 @@ var (
 )
 
 func main() {
+	luffy.ReadAutoApprove = func() luffy.AutoApprove {
+		a := loop.ReadAutoApprove()
+		return luffy.AutoApprove{On: a.On, Source: a.Source}
+	}
+	loop.ClearHolds = jinbe.ClearHolds
+	luffy.ApprovalMR = luffy.MRPort{Open: jinbe.OpenApprovalMR, Draft: jinbe.ApprovalMRDraft}
 	if len(os.Args) > 1 && os.Args[1] == "hitl-hook" { // hidden: a HITL pane's Claude Code hook (ADR 0099)
 		session.HitlHook(os.Stdin, autoExitAt) // first, before anything that can fail: it always exits 0
 		return
@@ -142,8 +148,12 @@ func main() {
 		err = runSignalTriage(args[2:])
 	case args[0] == "signal" && len(args) >= 2 && args[1] == "offshoot":
 		err = runSignalOffshoot(args[2:], os.Stdout)
-	case args[0] == "task" && len(args) >= 2 && args[1] == "new":
-		err = runTaskNew(args[2:], os.Stdout)
+	case args[0] == "errand" && len(args) >= 2 && args[1] == "new":
+		err = runErrandNew(args[2:], os.Stdout)
+	case args[0] == "errand" && len(args) >= 2 && args[1] == "relabel":
+		err = runErrandRelabel(args[2:], os.Stdout)
+	case args[0] == "task":
+		err = runRetiredTask(args[1:])
 	case args[0] == "intake" && len(args) >= 2 && args[1] == "jira":
 		err = runIntakeJira(args[2:], os.Stdout)
 	case args[0] == "latch" && len(args) >= 2 && args[1] == "jira":
@@ -152,6 +162,8 @@ func main() {
 		err = runLatchMR(args[2:], os.Stdout)
 	case args[0] == "triage" && len(args) >= 2 && args[1] == "locate":
 		err = runTriageLocate(args[2:], os.Stdout)
+	case args[0] == "sequence":
+		err = runSequence(args[1:], os.Stdout)
 	case args[0] == "probe":
 		err = runProbe(args[1:], os.Stdout)
 	case args[0] == "surgery" && len(args) >= 2 && args[1] == "new":
@@ -180,6 +192,8 @@ func main() {
 		os.Exit(runRecover(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "checkup":
 		os.Exit(runCheckup(args[1:], os.Stderr))
+	case args[0] == "backup":
+		os.Exit(runBackup(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "ps":
 		err = runPs(args[1:], os.Stdout)
 	case args[0] == "stats":
@@ -220,8 +234,8 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew --watch            open the TUI; its o starts a watched loop
   mugicrew -C <dir> ...       run in the Workspace containing <dir>
   mugicrew signal new --title T --description D            file a Signal
-  mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none --title T --description D  file an offshoot Signal ordered against its cause's container
-  mugicrew task new --drafted-by <bead> [--after <bead>]... [--before <bead>]... [--outside] --title T --description D  file a Task in the Initiative of the member it is ordered against
+  mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up|prerequisite|none [--outside <why>] [--dry-run] --title T --description D  file an offshoot Signal ordered against its cause's container
+  mugicrew errand new --drafted-by <bead> [--after <bead>]... [--before <bead>]... [--outside] --title T --description D  file an Errand in the Initiative of the member it is ordered against
   mugicrew intake jira <KEY>                                file a Jira work item as a Signal
   mugicrew latch jira <KEY> --blocks <bead>...             hold beads until a Jira ticket is Done
   mugicrew latch mr <ref> --blocks <bead>...               hold beads until a GitLab merge request is merged
@@ -230,12 +244,13 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew surgery new --title T [--problem P] [--checkpoint ID]  file a Surgery on a fresh Checkpoint, or join ID
   mugicrew surgery end <surgery-id>                         end a Surgery
   mugicrew probe mr (<ref> | --branch <b>) | pipeline <ref> (<id> | --main) | landed <id> | foreign [--context <c>]  print one word of MR or pipeline state, read-only
+  mugicrew backup push                                      push the Bead Graph's unpushed commits to its backup remote
   mugicrew checkup <bead> [--problem "<one line>"]          repair a broken bead in a Chopper session
   mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>] [--carries <id,…>]  file a pivot's corrected Spec
   mugicrew pivot escalate <pivot-id> --evidence <file> [--carries <id,…>]  re-chart a pivot from its evidence
-  mugicrew pivot raise <task> [--pivot <f>] [--critique <f>] [--merge-into <pivot> <f>]  probe a Task's held Checkpoint, or raise a pivot or Critique on it
-  mugicrew withdraw <head> [--discard]  drop any unclosed chain head or Task (initiative withdraw is its alias)
-  mugicrew initiative cancel <initiative> [--release <head>]... [--discard]  drop an Initiative and its member chains
+  mugicrew pivot raise <errand> [--pivot <f>] [--critique <f>] [--merge-into <pivot> <f>]  probe an Errand's held Checkpoint, or raise a pivot or Critique on it
+  mugicrew withdraw <head> [--discard]  drop any unclosed chain head, Errand or Latch (initiative withdraw is its alias)
+  mugicrew initiative cancel <initiative> --why <text> [--release <head>]... [--discard]  drop an Initiative and its member chains
   mugicrew initiative adopt <head> <initiative> | release <head>  move a chain into or out of an Initiative
   mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>]  drive a bead to its next state
   mugicrew reconcile <signal> --checkpoint <cp> [--pivot <f>]... [--critique <f>]... [--merge-into <pivot> <f>]...  reroute a Signal onto its host Checkpoint
@@ -251,17 +266,21 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew doctor fix                                       apply doctor's safe fixes, then re-check
   mugicrew integrate                                        squash this effort branch onto its Checkpoint
   mugicrew rebase <chart-or-checkpoint-id>                  file a rebase of an open Chart or Checkpoint onto mainline
+  mugicrew sequence next <path>                             print the number a clashing numbered file renumbers to, above mainline and every open branch
   mugicrew chart append|drop <chart-id> <section> <line>    edit one line of a Chart section
-  mugicrew approval rework <approval> --critique <file>...  file Critiques and retire the Approval for rework
+  mugicrew approval rework <approval> --critique <file>... | --grilling <file>... --research <file>...
+                                    send an Approval back: Critiques (Checkpoint) or defog beads (Chart)
   mugicrew land-lineage <branch>                            fast-forward main onto a lineage branch`
 
 // autoExitAt is hitl-hook's auto_exit setting (ADR 0112), read at arm time from
-// the root of the session's cwd (Spec D2, D8); a cwd outside git is its
-// own root.
-func autoExitAt(cwd string) time.Duration {
-	root, err := git.TopLevelOf(cwd)
+// the Workspace root its pane's socket names: the first worktree of the socket's
+// git common dir, the root the TUI reads (ADR 0356
+// (hitl-hook-resolves-its-workspace-root-from-the-panes-socket)). An unresolvable
+// root is loop.DefaultAutoExit, never a read from the event's cwd.
+func autoExitAt(sock string) time.Duration {
+	root, err := git.RepoRootAt(session.CommonDirOfSocket(sock))
 	if err != nil {
-		root = cwd
+		return loop.DefaultAutoExit
 	}
 	return loop.AutoExitSetting(root).D
 }
@@ -309,9 +328,9 @@ func requireGraph(args []string) error {
 	user := len(args) == 0 ||
 		args[0] == "loop" && (len(args) == 1 || args[1] == watchArg || !strings.HasPrefix(args[1], "--") || os.Getenv("BEADS_DIR") == "") ||
 		args[0] == "signal" && len(args) >= 2 && (args[1] == "new" || args[1] == "triage" || args[1] == "offshoot") ||
-		args[0] == "task" && len(args) >= 2 && args[1] == "new" ||
+		args[0] == "errand" && len(args) >= 2 && (args[1] == "new" || args[1] == "relabel") ||
 		args[0] == "triage" && len(args) >= 2 && args[1] == "locate" ||
-		args[0] == "probe" ||
+		args[0] == "probe" || args[0] == "backup" ||
 		args[0] == "intake" && len(args) >= 2 && args[1] == "jira" ||
 		args[0] == "latch" && len(args) >= 2 && (args[1] == "jira" || args[1] == "mr") ||
 		args[0] == "surgery" && len(args) >= 2 && (args[1] == "new" || args[1] == "end") ||
@@ -377,7 +396,7 @@ var (
 // acted, then any pause left, and exits 0 repaired or nothing to recover, 1
 // refused or a usage error, 2 a failed step (ADR 0127 §9).
 func runRecover(argv []string, w, errw io.Writer) int {
-	loop.StampAutoApprove()
+	loop.StampModeSnapshots()
 	if len(argv) == 0 {
 		if err := listStranded(w); err != nil {
 			fmt.Fprintln(errw, err)
@@ -388,7 +407,7 @@ func runRecover(argv []string, w, errw io.Writer) int {
 	fs := flag.NewFlagSet("recover", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	discard := fs.Bool("discard", false, "drop a dirty tree's uncommitted files")
-	force := fs.Bool("force", false, "override an ambiguous verdict; refused while the loop is on")
+	force := fs.Bool("force", false, "override an ambiguous verdict; refused while the bead's effort flock is held")
 	var id string
 	err := fs.Parse(argv)
 	if err == nil && fs.NArg() > 0 { // the id may sit before the flags
@@ -517,7 +536,12 @@ func runBare(watch bool) error {
 	evlog := eventlog.Open(nil)
 	slog.SetDefault(evlog.Logger("tui"))
 	defer startPprof(os.Stderr)()
-	_, err = tea.NewProgram(tui.New(newCtx(), crew()).WithLog(evlog).WithUsage(claudecode.ReadUsage).WithWatch(watch), tea.WithAltScreen()).Run()
+	mouse := loop.ReadMouse().On
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithFilter(tui.MotionFilter)}
+	if mouse {
+		opts = append(opts, tea.WithMouseAllMotion())
+	}
+	_, err = tea.NewProgram(tui.New(newCtx(), crew()).WithLog(evlog).WithUsage(claudecode.ReadUsage).WithWatch(watch).WithMouse(mouse).WithTheme(loop.ReadTheme().Name), opts...).Run()
 	return err
 }
 
@@ -847,6 +871,11 @@ func runLoopStart(path, common string, watch bool, w io.Writer) error {
 		slog.Error("loop.failed", "err", err.Error())
 		return err
 	}
+	// The child's loop.Run refuses too, but only after the parent has reported
+	// started; refuse here so the human sees it (ADR 0355).
+	if err := refuseLegacyTasks("."); err != nil {
+		return err
+	}
 	m, bin, err := launchBuild(path, common, watch)
 	if err != nil {
 		return err
@@ -872,6 +901,9 @@ func runLoopStart(path, common string, watch bool, w io.Writer) error {
 	}
 	return fmt.Errorf("loop (pid %d) has not taken the lock after %s and may still be starting; see %s", pid, startWait, outPath)
 }
+
+// refuseLegacyTasks is loop start's legacy-bead check; a var so tests stub it.
+var refuseLegacyTasks = bd.RefuseLegacyTasks
 
 // cancelLoop sends the cancel signal to a stop-draining loop; a var so tests observe it.
 var cancelLoop = func(pid int) error { return syscall.Kill(pid, syscall.SIGUSR1) }
@@ -1560,18 +1592,18 @@ func runPivotEscalate(argv []string) error {
 	return zoro.Escalate(argv[0], string(evidence), splitCarries(*carries))
 }
 
-// runPivotRaise is `mugicrew pivot raise <task> [--pivot <body-file>]... [--critique
+// runPivotRaise is `mugicrew pivot raise <errand> [--pivot <body-file>]... [--critique
 // <body-file>]... [--merge-into <pivot> <evidence-file>]...`, Brook's stuck-exit raise.
-// With no flag it is a probe: it names the one open, unlanded Checkpoint the Task holds,
+// With no flag it is a probe: it names the one open, unlanded Checkpoint the Errand holds,
 // its Spec and branch, or says why a raise is refused, and writes nothing
-// (luffy.ProbeRaise). With flags it files the raise as Drafts (luffy.RaiseFromTask);
+// (luffy.ProbeRaise). With flags it files the raise as Drafts (luffy.RaiseFromErrand);
 // every body file is read before any write.
 func runPivotRaise(argv []string, out io.Writer) error {
-	const usage = "usage: mugicrew pivot raise <task> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into <pivot> <evidence-file>]..."
+	const usage = "usage: mugicrew pivot raise <errand> [--pivot <body-file>]... [--critique <body-file>]... [--merge-into <pivot> <evidence-file>]..."
 	if len(argv) == 0 || argv[0] == "" || strings.HasPrefix(argv[0], "-") {
 		return errors.New(usage)
 	}
-	task, rest := argv[0], argv[1:]
+	errand, rest := argv[0], argv[1:]
 	var req luffy.RaiseRequest
 	read := func(path string) (string, error) {
 		body, err := os.ReadFile(path)
@@ -1605,9 +1637,9 @@ func runPivotRaise(argv []string, out io.Writer) error {
 		rest = rest[n:]
 	}
 	if req.None() {
-		return luffy.ProbeRaise(task, out)
+		return luffy.ProbeRaise(errand, out)
 	}
-	return luffy.RaiseFromTask(task, req)
+	return luffy.RaiseFromErrand(errand, req)
 }
 
 // runSignalNew files a Signal via the bd intake helper (spec §7.1). Title +
@@ -1678,7 +1710,7 @@ var (
 )
 
 // checkLatchTargets refuses a --blocks target that does not exist or is an
-// Initiative: blocking one would freeze every member Task through bd's block
+// Initiative: blocking one would freeze every member Errand through bd's block
 // cascade, so the Latch belongs on the member actually waiting (Spec FR32).
 func checkLatchTargets(verb, typed string, blocks []string) error {
 	for _, id := range blocks {
@@ -1730,17 +1762,20 @@ func runLatchJira(argv []string, w io.Writer) error {
 		fmt.Fprintf(w, "%s is already done; no latch filed\n", it.Key)
 		return nil
 	}
-	ref := "jira-latch-" + it.Key
+	ref := bd.JiraLatchRefPrefix + it.Key
 	latch, found, err := latchOf(ref)
 	if err != nil {
 		return fmt.Errorf("latch jira %s: %w", typed, err)
 	}
 	id := latch.ID
-	if !found {
+	if !found { // born blocking every target in the one create
 		body := fmt.Sprintf("Watches: jira %[1]s\nhttps://%[2]s/browse/%[1]s\n\n%[3]s", it.Key, site, it.Summary)
-		if id, err = newLatch("Jira "+it.Key+" is done", body, ref, *draftedBy); err != nil {
+		id, err = newLatch("Jira "+it.Key+" is done", body, ref, *draftedBy, blocks)
+		if err != nil {
 			return fmt.Errorf("latch jira %s: %w", typed, err)
 		}
+		fmt.Fprintln(w, id)
+		return nil
 	}
 	for _, target := range blocks {
 		if err := blocksEdge(target, id); err != nil {
@@ -1801,17 +1836,20 @@ func runLatchMR(argv []string, w io.Writer) error {
 		return fmt.Errorf("latch mr %s: %s is %s, not merged; reopen it or block on another MR", typed, disp, mr.State)
 	}
 	canon := forge.MRCanonical(proj, iid)
-	ref := "gitlab-mr-latch-" + canon
+	ref := bd.MRLatchRefPrefix + canon
 	latch, found, err := latchOf(ref)
 	if err != nil {
 		return fmt.Errorf("latch mr %s: %w", typed, err)
 	}
 	id := latch.ID
-	if !found {
+	if !found { // born blocking every target in the one create
 		body := fmt.Sprintf("Watches: mr %s\n%s\n\n%s", canon, mr.WebURL, mr.Title)
-		if id, err = newLatch("MR "+disp+" is merged", body, ref, *draftedBy); err != nil {
+		id, err = newLatch("MR "+disp+" is merged", body, ref, *draftedBy, blocks)
+		if err != nil {
 			return fmt.Errorf("latch mr %s: %w", typed, err)
 		}
+		fmt.Fprintln(w, id)
+		return nil
 	}
 	for _, target := range blocks {
 		if err := blocksEdge(target, id); err != nil {
@@ -1937,11 +1975,18 @@ func kidDirs(kids []session.Child) string {
 // editChart is the locked Chart-body edit, a var so the CLI's tests stub it.
 var editChart = bd.EditChartBody
 
+// finishChart is the guarded no-fog stamp, a var so the CLI's tests stub it.
+var finishChart = bd.FinishChart
+
 // runChart is `mugicrew chart append|drop <chart> <section> <line>` (Spec D9):
-// a defog session's one-line Chart-body edit under the land lock.
+// a defog session's one-line Chart-body edit under the land lock, or
+// `mugicrew chart finish <chart> --survey <survey>`: a no-fog Survey's stamp.
 func runChart(argv []string) error {
+	if len(argv) == 4 && argv[0] == "finish" && argv[2] == "--survey" {
+		return finishChart(argv[1], argv[3])
+	}
 	if len(argv) != 4 || argv[0] != "append" && argv[0] != "drop" {
-		return errors.New("usage: mugicrew chart append|drop <chart-id> <section> <line>")
+		return errors.New("usage: mugicrew chart append|drop <chart-id> <section> <line> | mugicrew chart finish <chart-id> --survey <survey-id>")
 	}
 	return editChart(argv[1], argv[2], argv[3], argv[0] == "drop")
 }
@@ -1949,21 +1994,24 @@ func runChart(argv []string) error {
 // reworkApproval is the Approval rework act, a var so the CLI's tests stub it.
 var reworkApproval = bd.ReworkApproval
 
-// runApproval is `mugicrew approval rework <approval> --critique <file>
-// [--critique <file>...]` (Spec FR6): it prints the published Critique ids.
+// runApproval is `mugicrew approval rework <approval> --critique <file>...`
+// (a Checkpoint's) or `--grilling <file>... --research <file>...` (a Chart's)
+// (Spec FR6): it prints the published ids.
 func runApproval(argv []string, out io.Writer) error {
-	const usage = "usage: mugicrew approval rework <approval> --critique <file> [--critique <file>...]"
+	const usage = "usage: mugicrew approval rework <approval> (--critique <file>... | --grilling <file>... --research <file>...)"
 	if len(argv) < 2 || argv[0] != "rework" {
 		return errors.New(usage)
 	}
 	fs := flag.NewFlagSet("approval rework", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var files stringList
-	fs.Var(&files, "critique", "a Critique file: # Title, then a body")
+	var critiques, grillings, research stringList
+	fs.Var(&critiques, "critique", "a Critique file: # Title, then a body (a Checkpoint's Approval only)")
+	fs.Var(&grillings, "grilling", "a grilling defog file: # Title, then a body (a Chart's Approval only)")
+	fs.Var(&research, "research", "a research defog file: # Title, then a body (a Chart's Approval only)")
 	if err := fs.Parse(argv[2:]); err != nil || fs.NArg() != 0 || argv[1] == "" || strings.HasPrefix(argv[1], "-") {
 		return errors.New(usage)
 	}
-	ids, err := reworkApproval(argv[1], files)
+	ids, err := reworkApproval(argv[1], critiques, grillings, research)
 	if err != nil {
 		return err
 	}
@@ -1993,7 +2041,7 @@ var (
 // an active AFK effort or has a live session; a session table that can't be read
 // refuses the act rather than guess.
 func runWithdraw(argv []string) error {
-	loop.StampAutoApprove()
+	loop.StampModeSnapshots()
 	argv, discard := cutDiscard(argv)
 	if len(argv) != 1 || argv[0] == "" {
 		return errors.New("usage: mugicrew withdraw <head> [--discard]")
@@ -2025,8 +2073,8 @@ func cutDiscard(argv []string) (rest []string, discard bool) {
 	return rest, discard
 }
 
-// printSwept names the Tasks a withdraw of head closed with it (those ordered after
-// the set, then those ordered before it), the Tasks it left open, and each land hold
+// printSwept names the Errands a withdraw of head closed with it (those ordered after
+// the set, then those ordered before it), the Errands it left open, and each land hold
 // it released (Spec mc-xw3ez D9, mc-d5zdj D4).
 func printSwept(w io.Writer, head string, res withdraw.Result) {
 	for _, s := range res.Swept {
@@ -2037,6 +2085,9 @@ func printSwept(w io.Writer, head string, res withdraw.Result) {
 	}
 	for _, h := range res.LeftOpen {
 		fmt.Fprintf(w, "left open %s: also before %s\n", h.Bead.ID, strings.Join(h.Also, ", "))
+	}
+	if len(res.LatchReleases) > 0 {
+		fmt.Fprintf(w, "unblocks: %s\n", strings.Join(res.LatchReleases, " "))
 	}
 	for _, c := range res.Holds {
 		fmt.Fprintf(w, "land hold released: %s\n", c)
@@ -2055,8 +2106,8 @@ func printKept(w io.Writer, res withdraw.Result) {
 // (runWithdraw), and `adopt <head> <initiative>` / `release <head>` (Spec D5), the
 // TUI's a/A as verbs.
 func runInitiative(argv []string) error {
-	loop.StampAutoApprove()
-	const usage = "usage: mugicrew initiative cancel <initiative> [--release <head>]... [--discard] | withdraw <head> [--discard] | adopt <head> <initiative> | release <head>"
+	loop.StampModeSnapshots()
+	const usage = "usage: mugicrew initiative cancel <initiative> --why <text> [--release <head>]... [--discard] | withdraw <head> [--discard] | adopt <head> <initiative> | release <head>"
 	switch {
 	case len(argv) == 3 && argv[0] == "adopt":
 		return adoptChain(argv[1], argv[2])
@@ -2072,15 +2123,16 @@ func runInitiative(argv []string) error {
 	var release stringList
 	fs.Var(&release, "release", "member chain head to release instead of close (repeatable)")
 	discard := fs.Bool("discard", false, "close even though it discards uncommitted or unintegrated work")
+	why := fs.String("why", "", "why the Initiative is dropped; it closes cancelled: <why>")
 	// the Initiative comes first, its flags after
-	if fs.Parse(argv[2:]) != nil || fs.NArg() != 0 || strings.HasPrefix(argv[1], "-") {
+	if fs.Parse(argv[2:]) != nil || fs.NArg() != 0 || strings.HasPrefix(argv[1], "-") || strings.TrimSpace(*why) == "" {
 		return errors.New(usage)
 	}
 	o, err := withdraw.LiveOpts(initiativeSessions)
 	if err != nil {
 		return err
 	}
-	o.Release, o.Discard = release, *discard
+	o.Release, o.Discard, o.Why = release, *discard, *why
 	res, err := cancelInitiative(argv[1], o)
 	if err == nil {
 		fmt.Println("cancelled", argv[1]+": closed", strings.Join(res.Closed, " "))
@@ -2110,6 +2162,7 @@ func beadDetail(id, width string, out, errw io.Writer) int {
 	}
 	if err == nil {
 		lipgloss.SetColorProfile(termenv.ANSI256)
+		tui.ApplyThemeName(loop.ReadTheme().Name)
 		var text string
 		if text, err = tui.BeadDetail(newCtx(), crew(), id, w); err == nil {
 			fmt.Fprintln(out, text)

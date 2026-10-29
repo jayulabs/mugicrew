@@ -1,4 +1,4 @@
-<!-- hand-kept · summarises ADR 0030 (adr-number-collision-guard) §5, ADR 0079 §1 (escalate only on an unreadable referent), ADR 0088 (this doc's split), ADR 0219 (the-adr-number-guard-is-a-numbered-file-clash-check…), ADR 0225 (a-forge-merged-number-clash-is-renumbered…) -->
+<!-- hand-kept · summarises ADR 0030 (adr-number-collision-guard) §5, ADR 0079 §1 (escalate only on an unreadable referent), ADR 0088 (this doc's split), ADR 0219 (the-adr-number-guard-is-a-numbered-file-clash-check…), ADR 0225 (a-forge-merged-number-clash-is-renumbered…), ADR 0397 (mugicrew-a-renumber-only-head-is-the-approved-squash-replayed…), ADR 0398 (mugicrew-a-carried-approval-is-a-go-written-successor…) -->
 
 # Renumbering clashing numbered files
 
@@ -20,14 +20,19 @@ container's subtree, as your prompt names them.
 1. Rebase onto the base first, so mainline's files are in view.
 2. Each matched directory numbers its own files (for ADRs, each `docs/adr/`,
    at the root or nested under any path, e.g. `apps/<app>/docs/adr/`).
-   For each colliding file, find the highest number in ITS directory on current
-   mainline (`git ls-tree --name-only {{MAINLINE}} <its-dir>`, e.g.
-   `apps/mugicrew/docs/adr/`), not just the carried base: mainline may have
-   moved. The next free number is above that max. Move the branch's clashing
-   files to the next free numbers, preserving their original order (the lowest
-   colliding file gets the lowest new number; if the branch also added
-   non-colliding files that would now sort out of order, move those up too).
-   Mainline's numbers stay fixed.
+   For each colliding file, run `mugicrew sequence next <path>` from your
+   worktree: it prints the number to move to, at the rule's width. It sits one
+   above the max over mainline's files in that directory and every file another
+   open `checkpoint/*`, `chart/*` or `effort/*` branch adds there, so a
+   container landing ahead of you cannot take it (reading only mainline's max,
+   `git ls-tree --name-only {{MAINLINE}} <its-dir>`, loses that race and costs a
+   Review, an Approval and a Landing per lap). It
+   skips your own branch and your own file's other laps; gaps are fine. If it
+   fails (no rule, two rules, the number outgrows its width), escalate. Move the
+   branch's clashing files to consecutive numbers up from the printed one,
+   preserving their original order (the lowest colliding file gets the printed
+   number; if the branch also added non-colliding files that would now sort out
+   of order, move those up too). Mainline's numbers stay fixed.
 3. Rename each file (`git mv`) keeping its directory, prefix and the rest of
    its name; change only the captured digits, at the renamed file's own width
    (`0007` → `0012`, never `12`). If the new path would leave the sequence's

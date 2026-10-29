@@ -11,7 +11,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/jira"
@@ -34,6 +36,16 @@ func doctorWS(t *testing.T, missing ...string) string {
 		lookPath, doctorBD, doctorToolVersion, doctorExe, doctorOS = oldLook, oldBD, oldVer, oldExe, oldOS
 	})
 	doctorExe = func() (string, error) { return "/bin/mugicrew", nil }
+	oldLegacy := doctorLegacyTasks
+	t.Cleanup(func() { doctorLegacyTasks = oldLegacy })
+	doctorLegacyTasks = func(string) ([]bd.Bead, error) { return nil, nil }
+	oldActor := doctorActor
+	t.Cleanup(func() { doctorActor = oldActor })
+	doctorActor = func() (string, bool) { return "alice@laptop", false }
+	oldRemote, oldUnpushed, oldNow := doctorBackupRemote, doctorBackupUnpushed, doctorNow
+	t.Cleanup(func() { doctorBackupRemote, doctorBackupUnpushed, doctorNow = oldRemote, oldUnpushed, oldNow })
+	doctorBackupRemote = func(string) (string, bool, error) { return "", false, errors.New("no sql-server in test") }
+	doctorBackupUnpushed = func(string) (int, time.Time, error) { return 0, time.Time{}, nil }
 	doctorToolVersion = func(bin string, _ ...string) (string, error) { return healthyVersions[bin], nil }
 	lookPath = func(bin string) (string, error) {
 		for _, m := range missing {
@@ -298,6 +310,61 @@ func TestDoctorGateNeedsNix(t *testing.T) {
 	}
 }
 
+func TestDoctorGateCommand(t *testing.T) {
+	dir := doctorWS(t, "nomake")
+	cfg := filepath.Join(dir, ".mugicrew", "config.toml")
+	run := func(toml string) (string, int) {
+		writeCfg(t, cfg, toml)
+		return doctorRun(t)
+	}
+
+	out, code := run("gate_command = \"make test\"\n")
+	if code != 0 || !strings.Contains(out, "ok  gate command (top level):") || strings.Contains(out, "nix:") {
+		t.Errorf("bare name on PATH: code %d out %q", code, out)
+	}
+	out, code = run("gate_command = \"nomake test\"\n")
+	if code != 1 || !strings.Contains(out, "FAIL  gate command (top level):") || !strings.Contains(out, "every gated land will fail without it") {
+		t.Errorf("bare name off PATH: code %d out %q", code, out)
+	}
+
+	out, code = run("gate_command = \"./script.sh --x\"\n")
+	if code != 1 || !strings.Contains(out, "FAIL  gate command (top level):") {
+		t.Errorf("script absent: code %d out %q", code, out)
+	}
+	os.WriteFile(filepath.Join(dir, "script.sh"), []byte("#!/bin/sh\n"), 0o755)
+	if out, code = doctorRun(t); code != 0 || !strings.Contains(out, "ok  gate command (top level):") {
+		t.Errorf("script present: code %d out %q", code, out)
+	}
+
+	child := filepath.Join(dir, "child")
+	os.Mkdir(child, 0o755)
+	exec.Command("git", "-C", child, "init", "-q").Run()
+	out, code = run("[context.c]\nrepo = \"child\"\ngate_command = \"./t.sh\"\n")
+	if code != 1 || !strings.Contains(out, "FAIL  gate command (context c):") {
+		t.Errorf("child script absent: code %d out %q", code, out)
+	}
+	os.WriteFile(filepath.Join(child, "t.sh"), []byte("#!/bin/sh\n"), 0o755)
+	if out, code = doctorRun(t); code != 0 || !strings.Contains(out, "ok  gate command (context c):") {
+		t.Errorf("child script present: code %d out %q", code, out)
+	}
+
+	for _, c := range []string{"(cd x && make)", "{ make; }", "! make", "FOO=1 nomake", "'nomake' x", "$SHELL -c x", "if nomake; then :; fi", "cd x && nomake"} {
+		out, code = run("gate_command = \"" + strings.ReplaceAll(c, "\"", "\\\"") + "\"\n")
+		if code != 0 || !strings.Contains(out, "ok  gate command (top level): not checked") {
+			t.Errorf("%q: code %d out %q", c, code, out)
+		}
+	}
+
+	out, code = run("gate = \"g\"\ngate_command = \"make\"\n")
+	if code != 1 || !strings.Contains(out, "FAIL  gate command (top level):") || !strings.Contains(out, "both gate and gate_command") {
+		t.Errorf("both keys: code %d out %q", code, out)
+	}
+	out, code = run("[context.c]\nrepo = \"child\"\ngate = \"g\"\ngate_command = \"make\"\n")
+	if code != 1 || !strings.Contains(out, "context c") || !strings.Contains(out, "both gate and gate_command") {
+		t.Errorf("both keys in context: code %d out %q", code, out)
+	}
+}
+
 func TestDoctorBdStore(t *testing.T) {
 	ctx := func(mode string) func(string, ...string) (string, error) {
 		return func(_ string, args ...string) (string, error) {
@@ -336,7 +403,7 @@ func TestDoctorBdStore(t *testing.T) {
 			if tc.noRepo {
 				root = ""
 			}
-			got := checkBdStore(root)
+			got := checkBdStoreAndBackup(root)[:1]
 			if len(got) != 1 || plainStyle.rollCall(got[0]) != fmt.Sprintf("%s  bd store: %s", tc.st, tc.detail) {
 				t.Fatalf("got %v", got)
 			}
@@ -344,7 +411,7 @@ func TestDoctorBdStore(t *testing.T) {
 			if has := strings.Contains(item, "To fix"); has != tc.wantFix {
 				t.Errorf("To fix = %v, want %v:\n%s", has, tc.wantFix, item)
 			}
-			if tc.wantFix && (!strings.Contains(item, "• on a fresh clone run `mugicrew init`") || !strings.Contains(item, `• otherwise see README "Bd store mode" to migrate`)) {
+			if tc.wantFix && (!strings.Contains(item, "• on a fresh clone run `mugicrew init`") || !strings.Contains(item, `• otherwise see docs/bd-store.md to migrate`)) {
 				t.Errorf("fix steps missing:\n%s", item)
 			}
 		})
@@ -604,7 +671,7 @@ func TestDoctorGitlabGroup(t *testing.T) {
 		authErr        error
 		want, not      []string
 	}{
-		{"ok", git.LandStrategyGitlab, nil, []string{"ok  glab user: ana", "ok  squash settings ns/p: ok", "ok  git credential: credential available", "FAIL  squash settings ns/c (context c): project squash_option is \"default_off\"", "• set Squash commits to Require"}, []string{"README", "forge: project"}},
+		{"ok", git.LandStrategyGitlab, nil, []string{"ok  glab user: ana", "ok  squash settings ns/p: ok", "ok  git credential: credential available", "FAIL  squash settings ns/c (context c): project squash_option is \"default_off\"", "• set Squash commits to Require"}, []string{"docs/gitlab.md", "forge: project"}},
 		{"auth", git.LandStrategyGitlab, errors.New("no login"), []string{"FAIL  glab user: not authenticated for gl.example.com: no login", "• run one interactive web `glab auth login`", "More: docs/install.md#gitlab"}, []string{"squash settings"}},
 		{"local", git.LandStrategyLocal, nil, nil, []string{"glab user", "squash settings", "git credential"}},
 	} {
@@ -811,6 +878,39 @@ func TestDoctorBinaryLine(t *testing.T) {
 	}
 }
 
+func TestDoctorBinaryLineFromSource(t *testing.T) {
+	doctorWS(t)
+	real, _ := filepath.EvalSymlinks(t.TempDir())
+	exe, wrapper, other := filepath.Join(real, "exe"), filepath.Join(real, "wrapper"), filepath.Join(real, "other")
+	for _, f := range []string{exe, wrapper, other} {
+		os.WriteFile(f, nil, 0o755)
+	}
+	oldRoot, oldEnv := sourceRoot, doctorEnv
+	t.Cleanup(func() { sourceRoot, doctorEnv = oldRoot, oldEnv })
+	doctorExe = func() (string, error) { return exe, nil }
+	for _, tc := range []struct {
+		name, root, marker, path string
+		warn                     bool
+	}{
+		{"stamped, marker is first on PATH", "/src", wrapper, wrapper, false},
+		{"stamped, marker set, other first", "/src", wrapper, other, true},
+		{"stamped, no marker, other first", "/src", "", other, true},
+		{"stamped, no marker, exe first", "/src", "", exe, false},
+		{"unstamped, marker ignored", "", wrapper, wrapper, true},
+	} {
+		sourceRoot = tc.root
+		doctorEnv = func(string) string { return tc.marker }
+		lookPath = func(string) (string, error) { return tc.path, nil }
+		out, _ := doctorRun(t)
+		if got := strings.Contains(out, "warn  binary: "+exe); got != tc.warn {
+			t.Errorf("%s: warn %v out %q", tc.name, got, out)
+		}
+		if tc.root != "" && !strings.Contains(out, "binary: "+exe+" (from source /src)") {
+			t.Errorf("%s: detail missing in %q", tc.name, out)
+		}
+	}
+}
+
 func TestDoctorGitCredentialSafeGating(t *testing.T) {
 	oStrat := git.LandStrategyName
 	t.Cleanup(func() { git.LandStrategyName = oStrat })
@@ -874,7 +974,7 @@ func TestDoctorSquashSettingsDetailAndSteps(t *testing.T) {
 		if !strings.Contains(out, tc.step) {
 			t.Errorf("missing %q in %q", tc.step, out)
 		}
-		if strings.Contains(out, "make it") || strings.Contains(out, "README") || strings.Contains(out, "set Squash commits to Require (") {
+		if strings.Contains(out, "make it") || strings.Contains(out, "docs/gitlab.md") || strings.Contains(out, "set Squash commits to Require (") {
 			t.Errorf("detail carries the fix: %q", out)
 		}
 	}
@@ -1036,5 +1136,184 @@ func TestDoctorWorkspaceSetUpRow(t *testing.T) {
 	writeCfg(t, shared, "= bad")
 	if out, _ = doctorRun(t); !strings.Contains(out, "FAIL  config shared") || strings.Contains(out, "warn  workspace setup") || !strings.Contains(out, "skip  workspace setup") {
 		t.Errorf("unusable: out %q", out)
+	}
+}
+
+func stubSpecList(t *testing.T, specs string) {
+	t.Helper()
+	prev := doctorBD
+	t.Cleanup(func() { doctorBD = prev })
+	doctorBD = func(d string, args ...string) (string, error) {
+		if args[0] == "list" {
+			return specs, nil
+		}
+		return prev(d, args...)
+	}
+}
+
+func TestDoctorOldFormSpecsWarnByName(t *testing.T) {
+	doctorWS(t)
+	body := func(title, desc string) map[string]string { return map[string]string{"title": title, "description": desc} }
+	b, _ := json.Marshal([]map[string]string{
+		body("Heading spec", "intro\n\n## Tasks\n\n- a\n"),
+		body("Optional spec", "intro\n\n## Tasks (optional)\n\n- a\n"),
+		body("Adopt spec", "intro\n\ntask: mc-1\n"),
+		body("Tasksomething spec", "### Tasksomething\n"),
+		body("Clean spec", "## Errands\n\nerrand: mc-2\n"),
+	})
+	stubSpecList(t, string(b))
+	out, _ := doctorRun(t)
+	for _, want := range []string{"warn  old-form spec Heading spec", "warn  old-form spec Optional spec", "warn  old-form spec Adopt spec", "edit it to ## Errands / errand: <id>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "Clean spec") || strings.Contains(out, "Tasksomething spec") {
+		t.Errorf("clean Spec flagged: %q", out)
+	}
+	for _, r := range checkOldFormSpecs(".") {
+		if r.status == stWarn && r.fix.safe != nil {
+			t.Errorf("row %q has a safe fix", r.name)
+		}
+	}
+}
+
+func TestDoctorOldFormSpecsNoneOK(t *testing.T) {
+	doctorWS(t)
+	stubSpecList(t, "[]")
+	out, _ := doctorRun(t)
+	if !strings.Contains(out, "ok  old-form specs") {
+		t.Errorf("out %q", out)
+	}
+}
+
+func TestDoctorKindProfilesTaskKey(t *testing.T) {
+	for _, layer := range []string{".git/mugicrew/config.toml", ".mugicrew/config.toml"} {
+		dir := doctorWS(t)
+		t.Setenv("OE_ROOT", "")
+		writeCfg(t, filepath.Join(dir, layer), "[kind_profiles]\ntask = \"x\"\n")
+		out, _ := doctorRun(t)
+		if !strings.Contains(out, "kind_profiles has a task key") || !strings.Contains(out, "rename key task → errand") {
+			t.Errorf("%s: out %q", layer, out)
+		}
+	}
+	dir := doctorWS(t)
+	t.Setenv("OE_ROOT", "")
+	writeCfg(t, filepath.Join(dir, ".mugicrew", "config.toml"), "[kind_profiles]\nerrand = \"x\"\n")
+	out, _ := doctorRun(t)
+	if strings.Contains(out, "rename key task") {
+		t.Errorf("errand key flagged: %q", out)
+	}
+}
+
+func TestCheckBackup(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	server := func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "context":
+			return `{"dolt_mode":"server"}`, nil
+		case "where":
+			return whereJSON("@BEADS@"), nil
+		}
+		return "mc", nil
+	}
+	for _, tc := range []struct {
+		name          string
+		noRepo        bool
+		bd            func(string, ...string) (string, error)
+		url           string
+		ok            bool
+		count         int
+		age           time.Duration
+		unpushedErr   error
+		backupRow     string
+		freshnessRow  string
+		wantInstallMD bool
+	}{
+		{name: "no repo", noRepo: true, backupRow: "skip  off-machine backup: no git repo", freshnessRow: "skip  backup freshness: backup not configured"},
+		{name: "store not server", bd: func(_ string, a ...string) (string, error) { return doctorBDWhere(a) }, backupRow: "skip  off-machine backup: bd store is not a server", freshnessRow: "skip  backup freshness: backup not configured"},
+		{name: "no remote", bd: server, backupRow: "warn  off-machine backup: no off-machine backup configured", freshnessRow: "skip  backup freshness: backup not configured", wantInstallMD: true},
+		{name: "same filesystem", bd: server, url: "file://@DIR@", ok: true, backupRow: "warn  off-machine backup: file:// destination is on this machine's filesystem", freshnessRow: "ok  backup freshness: 0 commits unpushed", wantInstallMD: true},
+		{name: "credentialed url hides credential", bd: server, url: "https://u:secret@dolt.lan/db", ok: true, backupRow: "ok  off-machine backup: https://***@dolt.lan/db", freshnessRow: "ok  backup freshness: 0 commits unpushed"},
+		{name: "fresh unpushed", bd: server, url: "https://dolt.lan/db", ok: true, count: 3, age: 23 * time.Hour, backupRow: "ok  off-machine backup: https://dolt.lan/db", freshnessRow: "ok  backup freshness: 3 commits unpushed"},
+		{name: "stale", bd: server, url: "https://dolt.lan/db", ok: true, count: 5, age: 30 * time.Hour, backupRow: "ok  off-machine backup: https://dolt.lan/db", freshnessRow: "warn  backup freshness: 5 commits unpushed, oldest 30h0m0s", wantInstallMD: true},
+		{name: "never pushed", bd: server, url: "https://dolt.lan/db", ok: true, unpushedErr: errors.New("unknown ref remotes/backup/main"), backupRow: "ok  off-machine backup: https://dolt.lan/db", freshnessRow: "warn  backup freshness: unpushed commits unreadable: unknown ref remotes/backup/main", wantInstallMD: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := doctorWS(t)
+			if tc.bd != nil {
+				wrapped := tc.bd
+				doctorBD = func(d string, a ...string) (string, error) {
+					out, err := wrapped(d, a...)
+					return strings.ReplaceAll(out, "@BEADS@", filepath.Join(dir, ".beads")), err
+				}
+			}
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			doctorNow = func() time.Time { return now }
+			url := strings.ReplaceAll(tc.url, "@DIR@", filepath.Join(dir, ".beads"))
+			doctorBackupRemote = func(string) (string, bool, error) { return url, tc.ok, nil }
+			doctorBackupUnpushed = func(string) (int, time.Time, error) {
+				if tc.unpushedErr != nil {
+					return 0, time.Time{}, tc.unpushedErr
+				}
+				if tc.count == 0 {
+					return 0, time.Time{}, nil
+				}
+				return tc.count, now.Add(-tc.age), nil
+			}
+			root := dir
+			if tc.noRepo {
+				root = ""
+			}
+			got := checkBdStoreAndBackup(root)[1:]
+			if len(got) != 2 || plainStyle.rollCall(got[0]) != tc.backupRow || plainStyle.rollCall(got[1]) != tc.freshnessRow {
+				t.Fatalf("got %q", []string{plainStyle.rollCall(got[0]), plainStyle.rollCall(got[1])})
+			}
+			for _, r := range got {
+				if r.status == stFail {
+					t.Errorf("row FAILed: %v", r)
+				}
+				if (r.status == stWarn) != (r.pre != "") || (r.status == stWarn && len(r.fix.steps) == 0) {
+					t.Errorf("warn rows need pre and a manual fix: %+v", r)
+				}
+				if r.status == stWarn && !strings.Contains(strings.Join(r.fix.steps, " "), "install.md") {
+					t.Errorf("fix does not name install.md: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+// doctorBDWhere answers bd where with a path and bd context with an embedded store.
+func doctorBDWhere(args []string) (string, error) {
+	if args[0] == "where" {
+		return whereJSON("/x"), nil
+	}
+	if args[0] == "context" {
+		return `{"dolt_mode":"embedded"}`, nil
+	}
+	return "mc", nil
+}
+
+func TestDoctorBackupWarnsKeepExitCodeZero(t *testing.T) {
+	doctorWS(t)
+	doctorBD = func(_ string, args ...string) (string, error) {
+		switch args[0] {
+		case "context":
+			return `{"dolt_mode":"server"}`, nil
+		case "where":
+			return whereJSON("/x"), nil
+		}
+		return "mc", nil
+	}
+	doctorBackupRemote = func(string) (string, bool, error) { return "", false, nil }
+	out, code := doctorRun(t)
+	if !strings.Contains(out, "warn  off-machine backup: no off-machine backup configured") {
+		t.Errorf("no backup warn row:\n%s", out)
+	}
+	if strings.Contains(out, "FAIL") || code != 0 {
+		t.Errorf("code %d, want 0 with only warnings:\n%s", code, out)
 	}
 }

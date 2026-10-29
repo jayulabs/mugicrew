@@ -118,8 +118,8 @@ func recordWrites(t *testing.T, err error) map[string][]string {
 	old := updateBody
 	t.Cleanup(func() { updateBody = old })
 	updateBody = func(id string, args []string) error {
-		if git.RecordedMRLink(args[1]) == "" {
-			return nil
+		if git.RecordedMRLink(args[1]) == "" || strings.Contains(args[1], git.MRPipelineKey) {
+			return nil // not a link write: the facts recorder writes MR pipeline: beside it
 		}
 		if err != nil {
 			return err
@@ -443,5 +443,230 @@ func TestMRWatchNothingOwedCloseClearsItsLines(t *testing.T) {
 	}
 	if !slices.Equal(r.closed, []string{"ws-watch"}) || strings.Contains(held["ws-watch"], "Close-outs") {
 		t.Errorf("closed %v body %q, want the Watch closed with no lines", r.closed, held["ws-watch"])
+	}
+}
+
+const waitingPacket = "Commit: abc\nMR: !7\n\n### Approval History\n\nfirst Approval.\n\n## The advisory note\n\nok\n"
+
+// waitingBody is the body waitingApproval carries; a test swaps it for another packet.
+var waitingBody = waitingPacket
+
+func waitingApproval() bd.Bead {
+	return bd.Bead{ID: "ws-ap", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Description: waitingBody}
+}
+
+// undraftTick is one Watch tick over an opened MR whose draft flag is draft, with the container's
+// waiting Approval; it returns the Approval's body as last written.
+func undraftTick(t *testing.T, r *jinbeSeamRec, draft bool, kids ...bd.Bead) (*jinbeSeamRec, string) {
+	t.Helper()
+	ap := waitingApproval()
+	body := ap.Description
+	r.mr = &forge.MR{IID: 7, State: "opened", Title: "Ship it", Draft: draft}
+	r.threadKids = append([]bd.Bead{ap}, kids...)
+	stubJinbeSeams(t, r)
+	oShow := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		if id == ap.ID {
+			ap.Description = body
+			return ap, nil
+		}
+		return oShow(id)
+	}
+	updateBody = func(id string, args []string) error {
+		if id == ap.ID {
+			body = args[1]
+		}
+		return nil
+	}
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	return r, body
+}
+
+func TestMRWatchLeavesAnApprovalWaitingWhileItsMRIsDraft(t *testing.T) {
+	r, body := undraftTick(t, &jinbeSeamRec{}, true)
+	if len(r.closed) != 0 || body != waitingPacket {
+		t.Errorf("closed %v body %q, want the Approval left waiting", r.closed, body)
+	}
+}
+
+func TestMRWatchClosesAWaitingApprovalApprovedOnceItsMRIsUndrafted(t *testing.T) {
+	r, body := undraftTick(t, &jinbeSeamRec{}, false)
+	if !slices.Equal(r.closed, []string{"ws-ap"}) || r.reasons[0] != "approved" {
+		t.Errorf("closed %v %v, want the Approval closed approved", r.closed, r.reasons)
+	}
+	want := "Commit: abc\nMR: !7\n\n### Approval History\n\nfirst Approval.\napproved (un-drafted on GitLab)\n\n## The advisory note\n\nok\n"
+	if body != want {
+		t.Errorf("body %q, want %q", body, want)
+	}
+}
+
+func TestMRWatchDoesNotCreditTheHumanWithAnAutoApprovedApprovalsUndraft(t *testing.T) {
+	autoBody := "Commit: abc\nMR: !7\n\n### Approval History\n\nauto-approved (AFK, Workspace auto-approve on)\nMR: !7\n"
+	o := waitingBody
+	waitingBody = autoBody
+	t.Cleanup(func() { waitingBody = o })
+	r, body := undraftTick(t, &jinbeSeamRec{}, false)
+	if !slices.Equal(r.closed, []string{"ws-ap"}) || body != autoBody {
+		t.Errorf("closed %v body %q, want the Approval closed with its History untouched", r.closed, body)
+	}
+}
+
+func TestMRWatchHoldsAnUndraftApprovalWhileAPivotIsOpen(t *testing.T) {
+	r := &jinbeSeamRec{pivots: []bd.Bead{{ID: "p1", Kind: contract.KindPivot, Status: "open"}}}
+	r, body := undraftTick(t, r, false)
+	if len(r.closed) != 0 || body != waitingPacket {
+		t.Errorf("closed %v body %q, want the close held by the pivot", r.closed, body)
+	}
+}
+
+// mergedTick is one Watch tick over a merged MR with the container's waiting Approval.
+func mergedTick(t *testing.T, r *jinbeSeamRec) (*jinbeSeamRec, string) {
+	t.Helper()
+	ap := waitingApproval()
+	body := ap.Description
+	r.mr = &forge.MR{IID: 7, State: forge.StateMerged, Title: "Ship it"}
+	r.threadKids = []bd.Bead{ap}
+	stubJinbeSeams(t, r)
+	oShow := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		if id == ap.ID {
+			ap.Description = body
+			return ap, nil
+		}
+		return oShow(id)
+	}
+	updateBody = func(id string, args []string) error {
+		if id == ap.ID {
+			body = args[1]
+		}
+		return nil
+	}
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	return r, body
+}
+
+func TestMRWatchClosesAWaitingApprovalApprovedWhenItsMRIsMerged(t *testing.T) {
+	r, body := mergedTick(t, &jinbeSeamRec{})
+	if !slices.Contains(r.closed, "ws-ap") || r.reasons[slices.Index(r.closed, "ws-ap")] != "approved" {
+		t.Errorf("closed %v %v, want the Approval closed approved", r.closed, r.reasons)
+	}
+	if !strings.Contains(body, "first Approval.\napproved (un-drafted on GitLab)\n") {
+		t.Errorf("body %q, want the History ended", body)
+	}
+}
+
+func TestMRWatchClosesAWaitingApprovalOfAMergedMRPastAnOpenPivot(t *testing.T) {
+	r, body := mergedTick(t, &jinbeSeamRec{pivots: []bd.Bead{{ID: "p1", Kind: contract.KindPivot, Status: "open"}}})
+	if !slices.Contains(r.closed, "ws-ap") || !strings.Contains(body, mergedPastPivotLine) {
+		t.Errorf("closed %v body %q, want the Approval closed with the past-pivot line", r.closed, body)
+	}
+}
+
+func TestMRWatchStillTurnsACommentOnADraftMRIntoACritique(t *testing.T) {
+	r := &jinbeSeamRec{discussions: []forge.Discussion{plain("p1", note(20, 7, "why X?"))}}
+	r.mr = nil
+	r, _ = undraftTick(t, r, true)
+	if len(r.reviewSpawned) != 1 {
+		t.Errorf("spawned %+v, want one Forge Review for the Draft MR's comment", r.reviewSpawned)
+	}
+}
+
+func TestEndApprovalHistoryIsIdempotent(t *testing.T) {
+	once := bd.EndApprovalHistory(waitingPacket, undraftedLine)
+	if twice := bd.EndApprovalHistory(once, undraftedLine); twice != once {
+		t.Errorf("second write %q, want %q", twice, once)
+	}
+}
+
+// closedDraftTick is one Watch tick over a closed Draft MR with the container's waiting Approval.
+func closedDraftTick(t *testing.T, r *jinbeSeamRec) *jinbeSeamRec {
+	t.Helper()
+	ap := waitingApproval()
+	r.mr = &forge.MR{IID: 7, State: "closed", Draft: true, WebURL: "https://gl/p/-/merge_requests/7"}
+	r.threadKids = []bd.Bead{ap}
+	stubJinbeSeams(t, r)
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestMRWatchHoldsTheCheckpointOnceWhenAWaitingApprovalsDraftMRIsClosed(t *testing.T) {
+	r := &jinbeSeamRec{}
+	closedDraftTick(t, r)
+	closedDraftTick(t, r)
+	if len(r.errands) != 1 || r.errands[0] != "ws-cp|Closed MR: !7\n" {
+		t.Errorf("errands %q, want one Brook Task keyed on the closed MR", r.errands)
+	}
+	if !strings.Contains(r.errandBody, "the waiting Approval resumes on a reopened MR, or the Checkpoint is abandoned") {
+		t.Errorf("body %q lacks the Approval wording", r.errandBody)
+	}
+	if len(r.closed) != 0 {
+		t.Errorf("closed %v, want the Approval and the Watch left open", r.closed)
+	}
+}
+
+func TestMRWatchResumesTheWaitOnAReopenedDraftMR(t *testing.T) {
+	r, _ := undraftTick(t, &jinbeSeamRec{}, false)
+	if !slices.Equal(r.closed, []string{"ws-ap"}) {
+		t.Errorf("closed %v, want the Approval closed approved after reopen and un-draft", r.closed)
+	}
+}
+
+// chartContainer makes the Watch's container a Chart.
+func chartContainer(t *testing.T) {
+	t.Helper()
+	showBead = func(string) (bd.Bead, error) {
+		return bd.Bead{ID: "ws-cp", Kind: contract.KindChart, Title: "Chart it", Status: "open"}, nil
+	}
+}
+
+func TestMRWatchClosesAChartsWaitingApprovalApprovedOnceItsMRIsUndrafted(t *testing.T) {
+	ap := waitingApproval()
+	r := &jinbeSeamRec{mr: &forge.MR{IID: 7, State: forge.StateOpened, Draft: false}, threadKids: []bd.Bead{ap}}
+	stubJinbeSeams(t, r)
+	chartContainer(t)
+	body := ap.Description
+	oShow := showBead
+	showBead = func(id string) (bd.Bead, error) {
+		if id == ap.ID {
+			ap.Description = body
+			return ap, nil
+		}
+		return oShow(id)
+	}
+	updateBody = func(id string, args []string) error {
+		if id == ap.ID {
+			body = args[1]
+		}
+		return nil
+	}
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.closed, []string{"ws-ap"}) || r.reasons[0] != "approved" || !strings.Contains(body, "first Approval.\napproved (un-drafted on GitLab)\n") {
+		t.Errorf("closed %v %v body %q, want the Chart's Approval closed approved", r.closed, r.reasons, body)
+	}
+}
+
+func TestMRWatchHoldsAChartWithChartWordingWhenItsDraftMRIsClosed(t *testing.T) {
+	r := &jinbeSeamRec{}
+	ap := waitingApproval()
+	r.mr = &forge.MR{IID: 7, State: "closed", Draft: true, WebURL: "https://gl/p/-/merge_requests/7"}
+	r.threadKids = []bd.Bead{ap}
+	stubJinbeSeams(t, r)
+	chartContainer(t)
+	if err := reconcileMRWatch(openWatch()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.errands) != 1 || !strings.Contains(r.errandBody, "or the Chart is abandoned") || strings.Contains(r.errandBody, "Checkpoint") {
+		t.Errorf("errands %q body %q, want one Brook Task in Chart wording", r.errands, r.errandBody)
+	}
+	if len(r.closed) != 0 {
+		t.Errorf("closed %v, want the Approval and the Watch left open", r.closed)
 	}
 }

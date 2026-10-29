@@ -3,6 +3,8 @@ name: publish
 on:
   push:
     branches: [main]
+    # a site-only publish is deployed by pages.yml and does not run the release
+    paths-ignore: ['site/**']
   # branch runs (Checkpoint verification) never reach publish: it only runs from main.
   # A manual dispatch on main passes that gate too, so it publishes.
   workflow_dispatch:

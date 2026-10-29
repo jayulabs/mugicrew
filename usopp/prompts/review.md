@@ -133,7 +133,7 @@ Critiques — they wait behind the pivot's gate.
 
 Work in the external world that you find mid-run (outside the bead graph and
 the code: a repo to create, a token to mint, a console to click through) is an
-offshoot Signal, never a Task, so intake gates it like any other work. Read crew
+offshoot Signal, never an Errand, so intake gates it like any other work. Read crew
 doc signal-filing.md and file it in its offshoot form,
 discovered-from {{.ReviewID}}; the description holds what is needed and why.
 

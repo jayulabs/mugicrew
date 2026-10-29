@@ -596,3 +596,42 @@ func TestF10BeadPaneBelowAgentRealTmux(t *testing.T) {
 		t.Errorf("prototype pane width = %s, want 40", got)
 	}
 }
+
+// setSessionMouse changes one session's mouse option on a real throwaway server,
+// leaving another session and the global value as they were.
+func TestSetSessionMouseRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not on PATH")
+	}
+	sock := filepath.Join(t.TempDir(), "m.sock")
+	tm := func(args ...string) string {
+		t.Helper()
+		b, err := tmuxCmd(sock, append([]string{"-f", "/dev/null"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, b)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	t.Cleanup(func() { tmuxCmd(sock, "kill-server").Run() })
+	tm("new-session", "-d", "-s", "tui-1")
+	tm("new-session", "-d", "-s", "other")
+	pane := tm("display-message", "-p", "-t", "tui-1:", "#{pane_id}")
+	read := func(args ...string) string { return tm(append([]string{"show-options", "-v"}, args...)...) }
+	global := read("-g", "mouse")
+	otherBefore := read("-t", "other", "mouse") // "" while the session sets none
+	for _, on := range []bool{true, false} {
+		want := map[bool]string{true: "on", false: "off"}[on]
+		if err := setSessionMouse(sock, pane, on); err != nil {
+			t.Fatal(err)
+		}
+		if got := read("-t", "tui-1", "mouse"); got != want {
+			t.Errorf("tui-1 mouse = %q after on=%v, want %q", got, on, want)
+		}
+		if got := read("-g", "mouse"); got != global {
+			t.Errorf("global mouse = %q, want %q", got, global)
+		}
+		if got := read("-t", "other", "mouse"); got != otherBefore {
+			t.Errorf("other session mouse = %q, want %q", got, otherBefore)
+		}
+	}
+}

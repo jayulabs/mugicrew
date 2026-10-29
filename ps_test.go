@@ -11,26 +11,28 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
-	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/registry"
 )
 
-// stubPs points the ps verb's bd read and probe at fakes; the probe records the
-// ids it was asked about so the test can assert one call covers every row.
+// stubPs points the ps verb's bd read and the shared orphan reading at fakes; the
+// reading records the ids it was asked about so the test can assert one call
+// covers every row. A bead not in alive reads orphaned.
 func stubPs(t *testing.T, beads []bd.Bead, alive map[string]bool) *[][]string {
 	t.Helper()
-	oi, op := inProgress, probe
-	t.Cleanup(func() { inProgress, probe = oi, op })
+	oi, op := inProgress, orphans
+	t.Cleanup(func() { inProgress, orphans = oi, op })
 	var calls [][]string
 	inProgress = func() ([]bd.Bead, error) { return beads, nil }
-	probe = func(ids []string) map[string]bool {
-		calls = append(calls, ids)
+	orphans = func(bs []bd.Bead) map[string]bool {
+		var ids []string
 		out := map[string]bool{}
-		for _, id := range ids {
-			out[id] = alive[id]
+		for _, b := range bs {
+			ids = append(ids, b.ID)
+			out[b.ID] = !alive[b.ID]
 		}
+		calls = append(calls, ids)
 		return out
 	}
 	return &calls
@@ -131,7 +133,7 @@ func TestPsAndAbortResolveGraphWithoutBeadsDir(t *testing.T) {
 
 	var seen string
 	stubPs(t, []bd.Bead{{ID: "mc-b", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"}}, nil)
-	probe = func(ids []string) map[string]bool { seen = os.Getenv("BEADS_DIR"); return nil }
+	orphans = func([]bd.Bead) map[string]bool { seen = os.Getenv("BEADS_DIR"); return nil }
 	if err := runPs(nil, io.Discard); err != nil || seen != graph {
 		t.Errorf("ps probed under BEADS_DIR %q, %v; want %q", seen, err, graph)
 	}
@@ -148,8 +150,8 @@ func TestPsAndAbortResolveGraphWithoutBeadsDir(t *testing.T) {
 
 func TestPsListsRunningAFKApproval(t *testing.T) {
 	o := loop.ReadAutoApprove
-	t.Cleanup(func() { loop.ReadAutoApprove = o; registry.ResetAutoApprove() })
-	loop.ReadAutoApprove = func() cfglayer.Approvals { return cfglayer.Approvals{AutoApprove: true} }
+	t.Cleanup(func() { loop.ReadAutoApprove = o; registry.ResetModeSnapshots() })
+	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{On: true} }
 	stubPs(t, []bd.Bead{
 		{ID: "mc-ap", Kind: contract.KindApproval, Status: "in_progress", Parent: "ws-cp"},
 	}, map[string]bool{"mc-ap": true})

@@ -33,7 +33,7 @@ func TestCancelRefusedReasons(t *testing.T) {
 	g := append(fixture(), b("far", "signal", "", "b1"))
 	graph(t, g...)
 	evs := eventlogtest.Capture(t)
-	if _, err := Cancel("in", Opts{}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why"}); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if e := (*evs)[0]; e.Name != "cancel.refused" || e.Attrs["reason"] != "ordered after the chain" {
@@ -47,7 +47,7 @@ func TestCancelRefusedReasons(t *testing.T) {
 	stubRelease(t)
 	required = func() bool { return true }
 	*evs = nil
-	if _, err := Cancel("in", Opts{Release: []string{"cp"}}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why", Release: []string{"cp"}}); err == nil {
 		t.Fatal("want a refusal")
 	}
 	if e := (*evs)[0]; e.Attrs["reason"] != "release refused: Require Initiatives" || !slices.Equal(e.Attrs["blocking"].([]string), []string{"cp"}) {
@@ -68,7 +68,7 @@ func TestCancelFailedAtReleaseNamesHeadAndReleased(t *testing.T) {
 		return nil
 	}
 	evs := eventlogtest.Capture(t)
-	if _, err := Cancel("in", Opts{Release: []string{"cp", "s2"}}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why", Release: []string{"cp", "s2"}}); err == nil {
 		t.Fatal("want an error")
 	}
 	e := (*evs)[0]
@@ -82,7 +82,7 @@ func TestCancelFailedAtCloseNamesReleased(t *testing.T) {
 	stubRelease(t)
 	forceClose = func([]string, string) error { return errors.New("boom") }
 	evs := eventlogtest.Capture(t)
-	if _, err := Cancel("in", Opts{Release: []string{"cp"}}); err == nil {
+	if _, err := Cancel("in", Opts{Why: "why", Release: []string{"cp"}}); err == nil {
 		t.Fatal("want an error")
 	}
 	if e := (*evs)[0]; !slices.Equal(e.Attrs["released"].([]string), []string{"cp"}) || e.Attrs["step"] != "close" {

@@ -7,36 +7,36 @@ import (
 )
 
 // IsWithdrawable reports whether withdraw takes b: an IsChainHead, or an unclosed
-// Task that is not an unpublished Draft (Spec mc-xw3ez D1). IsChainHead stays
-// unchanged: a cancel's chain list and a release by chain head never see a Task, which
+// Errand or Latch that is not an unpublished Draft (Spec mc-xw3ez D1, mc-3cnhf.16 D6). IsChainHead stays
+// unchanged: a cancel's chain list and a release by chain head never see an Errand, which
 // cancel and release handle as a member (ADR 0349).
 func IsWithdrawable(b Bead, all []Bead) bool {
-	return IsChainHead(b, all) || (b.Kind == contract.KindTask && b.Unclosed() && !IsDraft(b))
+	return IsChainHead(b, all) || ((b.Kind == contract.KindErrand || b.Kind == contract.KindLatch) && b.Unclosed() && !IsDraft(b))
 }
 
-// Sweep is the Tasks a withdraw closes beyond its chain, the ones it spares and
+// Sweep is the Errands a withdraw closes beyond its chain, the ones it spares and
 // the land holds it lets go (Spec mc-xw3ez D2, mc-d5zdj D1).
 type Sweep struct {
-	Swept    []Swept        // forward rule: a Task after an in-set bead, in sweep order
-	Before   []BeforeClosed // backward rule: a Task before the set, in close order
-	LeftOpen []Held         // Tasks blocking an in-set bead that stay open
-	Releases []string       // unclosed Checkpoints outside the final set blocked by a closing Task
+	Swept    []Swept        // forward rule: an Errand after an in-set bead, in sweep order
+	Before   []BeforeClosed // backward rule: an Errand before the set, in close order
+	LeftOpen []Held         // Errands blocking an in-set bead that stay open
+	Releases []string       // unclosed Checkpoints outside the final set blocked by a closing Errand
 }
 
-// Swept is a Task the withdraw closes with the beads in closing.
+// Swept is an Errand the withdraw closes with the beads in closing.
 type Swept struct {
 	Bead  Bead
 	After string   // the closing or swept bead it hangs under (first in-set blocker)
 	Also  []string // unclosed blockers outside the final set
 }
 
-// BeforeClosed is a Task the withdraw closes because everything it blocks closes too.
+// BeforeClosed is an Errand the withdraw closes because everything it blocks closes too.
 type BeforeClosed struct {
 	Bead   Bead
 	Before string // the first in-set bead it blocks: the row it hangs under
 }
 
-// Held is a Task that blocks an in-set bead but stays open, because it also blocks
+// Held is an Errand that blocks an in-set bead but stays open, because it also blocks
 // something outside the final set.
 type Held struct {
 	Bead   Bead
@@ -44,17 +44,17 @@ type Held struct {
 	Also   []string // unclosed beads it blocks outside the final set; never empty for a chain head
 }
 
-// SweepTasks computes, over the snapshot all, what withdrawing closing sweeps: every
-// unclosed, published Task outside closing blocked by a bead in closing or already
+// SweepErrands computes, over the snapshot all, what withdrawing closing sweeps: every
+// unclosed, published Errand outside closing blocked by a bead in closing or already
 // swept (a fixed point). With backward on (a chain head's withdraw, ADR 0351) it
-// also before-closes every unclosed, published Task whose unclosed dependents are
+// also before-closes every unclosed, published Errand whose unclosed dependents are
 // non-empty and all in the set, the two rules alternating until neither grows. The
-// Tasks that block an in-set bead and stay open are left open; with backward off
+// Errands that block an in-set bead and stay open are left open; with backward off
 // those are only the direct blockers of a closing Checkpoint. It also returns the
-// unclosed Checkpoints outside the final set whose in-set blockers are all Tasks,
+// unclosed Checkpoints outside the final set whose in-set blockers are all Errands,
 // which the withdraw releases rather than refuses. Every other bead ordered after
 // the final set still refuses, through OrderedAfter.
-func SweepTasks(closing, all []Bead, backward bool) Sweep {
+func SweepErrands(closing, all []Bead, backward bool) Sweep {
 	in := map[string]bool{}
 	for _, b := range closing {
 		in[b.ID] = true
@@ -69,7 +69,7 @@ func SweepTasks(closing, all []Bead, backward bool) Sweep {
 			}
 		}
 	}
-	eligible := func(b Bead) bool { return b.Kind == contract.KindTask && b.Unclosed() && !IsDraft(b) && !in[b.ID] }
+	eligible := func(b Bead) bool { return b.Kind == contract.KindErrand && b.Unclosed() && !IsDraft(b) && !in[b.ID] }
 	var s Sweep
 	for grew := true; grew; {
 		grew = false
@@ -144,15 +144,15 @@ func SweepTasks(closing, all []Bead, backward bool) Sweep {
 			continue
 		}
 		var held bool
-		allTasks := true
+		allErrands := true
 		for _, id := range b.BlockedBy {
 			if !in[id] {
 				continue
 			}
 			held = true
-			allTasks = allTasks && byID[id].Kind == contract.KindTask
+			allErrands = allErrands && byID[id].Kind == contract.KindErrand
 		}
-		if held && allTasks {
+		if held && allErrands {
 			s.Releases = append(s.Releases, b.ID)
 		}
 	}

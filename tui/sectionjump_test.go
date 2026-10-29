@@ -192,8 +192,14 @@ func TestSectionJumpHint(t *testing.T) {
 		} else {
 			m = emptyTab(t, tc.k)
 		}
+		m, _ = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 60}) // the bead verbs on a bead-less row lengthen the list
 		m = press(t, m, runeKey("?"))
-		if !strings.Contains(m.View(), "section") {
+		seen := m.View()
+		for range 40 { // the ? list scrolls: the bead verbs of a row with no bead push J/K below the first page
+			m = press(t, m, runeKey("j"))
+			seen += m.View()
+		}
+		if !strings.Contains(seen, "section") {
 			t.Errorf("tab %s: ? lacks J/K section", tc.k)
 		}
 	}

@@ -44,6 +44,12 @@ var runBatch = func(script string) error {
 
 // runBatchOnce is one bd batch exec; a var so a test fakes the process under the retry.
 var runBatchOnce = func(script string) error {
+	if sealed {
+		return errSealed("batch")
+	}
+	if err := errUnpinned("batch"); err != nil {
+		return err
+	}
 	cmd := exec.Command("bd", "batch")
 	cmd.Stdin = strings.NewReader(script)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // as run: a loop's Ctrl-C must not kill the write (ADR 0050)
@@ -55,11 +61,7 @@ var runBatchOnce = func(script string) error {
 
 // Drafts lists the creator's Drafts.
 func Drafts(creator string) ([]Bead, error) {
-	out, err := run("list", "--label", contract.DraftedBy(creator), "--status", "deferred", "-n", "0", "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{Label: contract.DraftedBy(creator), Status: []string{"deferred"}})
 }
 
 // Publish makes the creator's Drafts normal beads in one bd batch (ADR 0059 §4,
@@ -74,42 +76,38 @@ func Publish(creator string, edges []Edge, closing *Closing) ([]string, error) {
 		return nil, err
 	}
 	ids := IDs(drafts)
-	script := publishScript(drafts, edges, closing)
-	if script == "" {
+	ops := publishOps(drafts, edges, closing)
+	if len(ops) == 0 {
 		return nil, nil
 	}
-	if err := runBatch(script); err != nil {
+	if err := core.Batch(ops); err != nil {
 		return nil, err
 	}
 	if len(ids) > 0 {
-		_, _ = run(append(append([]string{"label", "remove"}, ids...), contract.DraftedBy(creator))...)
+		_ = core.RemoveLabel(ids, contract.DraftedBy(creator))
 	}
 	return ids, nil
 }
 
-// publishScript is Publish's batch, pure (bar the title.stripped event) so its
-// order is testable without a db. A kind-prefixed Draft title is stripped in its
-// open line, never rejected (ADR 0097).
-func publishScript(drafts []Bead, edges []Edge, closing *Closing) string {
-	var b strings.Builder
+// publishOps is Publish's batch, pure (bar the title.stripped event) so its order is
+// testable without a db: the final edges, every Draft to open, then the finishing close. A
+// kind-prefixed Draft title is stripped in its open op, never rejected (ADR 0097).
+func publishOps(drafts []Bead, edges []Edge, closing *Closing) []Op {
+	var ops []Op
 	for _, e := range edges {
-		fmt.Fprintln(&b, strings.TrimSpace("dep add "+e.From+" "+e.To+" "+e.Type))
+		ops = append(ops, EdgeOp(e.From, e.To, e.Type))
 	}
 	for _, d := range drafts {
-		line := "update " + d.ID + " status=open"
+		title := ""
 		if t := stripTitle(d.Title, "id", d.ID); t != d.Title {
-			line += " title=" + batchQuote(t)
+			title = t
 		}
-		fmt.Fprintln(&b, line)
+		ops = append(ops, OpenOp(d.ID, title))
 	}
 	if closing != nil {
-		line := "close " + closing.ID
-		if r := batchQuote(closing.Reason); r != `""` {
-			line += " " + r
-		}
-		fmt.Fprintln(&b, line)
+		ops = append(ops, CloseOp(closing.ID, closing.Reason))
 	}
-	return b.String()
+	return ops
 }
 
 // batchQuote quotes a bd batch value, flattened to one line: batch is line-oriented.
@@ -128,13 +126,14 @@ type BranchOutcome struct {
 // DeleteDrafts deletes the creator's Drafts — a failed effort's or dropped
 // session's unpublished work (ADR 0059 §6). None is a no-op. Returns the ids,
 // and the outcomes of then deleting each deleted container Draft's branch, which never fail the Draft delete.
-func DeleteDrafts(creator string) ([]string, []BranchOutcome, error) {
+// s is the Serializer the caller runs under (ADR 0070): the delete is a read-then-write.
+func DeleteDrafts(creator string, s Serializer) ([]string, []BranchOutcome, error) {
 	drafts, err := Drafts(creator)
 	if err != nil || len(drafts) == 0 {
 		return nil, nil, err
 	}
 	ids := IDs(drafts)
-	if _, err := run(append(append([]string{"delete"}, ids...), "--force")...); err != nil {
+	if err := core.Delete(ids, s); err != nil {
 		return nil, nil, err
 	}
 	return ids, deleteDraftBranches(drafts), nil

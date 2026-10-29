@@ -31,11 +31,11 @@ downstream as a kind:build under the Checkpoint the Spec cuts. Never create an
 doing the build is not.
 
 A step the work will need in the external world (outside the bead graph and
-the code) may be drafted as a Task, never a Chart child (no
---parent), its body in crew doc task-body.md's format, blocked on the Chart or
+the code) may be drafted as an Errand, never a Chart child (no
+--parent), its body in crew doc errand-body.md's format, blocked on the Chart or
 Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
-    mugicrew task new --drafted-by %[1]s --after %[4]s \
+    mugicrew errand new --drafted-by %[1]s --after %[4]s \
       --title "..." --description "<its ## Steps body>"
 
 ## The Chart
@@ -65,9 +65,11 @@ whole-description bd update:
 3. Map the frontier breadth-first: fan out across the whole space, surfacing
    the open questions and the first steps takeable now.
 4. Write Notes, Not-yet-specified and Out-of-scope with mugicrew chart append.
-   Leave Decisions-so-far empty: it fills as defog beads close.
-5. Spawn at least one defog bead — mixed kinds, one or more — each a Draft
-   child of the Chart:
+   Keeping the Chart with fog, leave Decisions-so-far empty: it fills as defog
+   beads close. Finishing in place (see "Finish in place"), append one line per
+   settled decision, each naming the Survey's ID.
+5. Seed fog, or finish in place with no fog. To seed fog, spawn at least one
+   defog bead — mixed kinds, one or more — each a Draft child of the Chart:
      bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:%[1]s \
        --parent %[4]s --no-inherit-labels --title "..." --description "..."
    If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
@@ -99,11 +101,27 @@ The Destination is Luffy's scope call. You may push back on it only these ways:
      mugicrew signal offshoot --from %[1]s --drafted-by %[1]s --order none ...
   then close:
      bd close %[4]s --force --reason "handed back: <why>"
-  A Chart with no fog — you could write its whole Spec now — is handed back the
-  same way, so Luffy fast-lanes the new Signal.
+- **Finish in place** a Chart with no fog left, whether or not it needs an ADR:
+  you could write its whole Spec now. Only on the human's explicit assent to
+  "no fog"; never on your own judgment. Then, in order:
+  1. Write any ADR the decisions need on your effort branch.
+  2. Record the decisions in the Survey's notes:
+       bd update %[1]s --notes "<decisions>"
+  3. For each decision, append a line naming the Survey:
+       mugicrew chart append %[4]s Decisions-so-far "<gist> (%[1]s)"
+  4. Stamp the Chart defogged:
+       mugicrew chart finish %[4]s --survey %[1]s
+  5. Exit cleanly and close neither bead: mugicrew closes the Survey, and the
+     stamped Chart goes on to its Spec.
+  If %[4]s already carries chart:defogged and a Decisions-so-far line names
+  %[1]s, a prior session finished it before it crashed: read the Survey's notes
+  back and ask the human "still no fog?". On assent, re-run chart finish and
+  exit clean. Otherwise draft fog (settling removes the stamp), or hand the Chart
+  back for a wrong Destination.
 - **Reject** (bd close %[4]s --force --reason "<why>") or **duplicate**
   (bd supersede %[4]s --with <original-id>) only on the human's explicit assent.
 
-Do exactly one of: keep the Chart with its fog seeded, hand it back, reject it,
-or mark it a duplicate, before you finish. A push-back closes only the Chart,
-never the Survey: mugicrew closes the Survey when this session exits cleanly.
+Do exactly one of: keep the Chart with its fog seeded, finish it in place, hand
+it back, reject it, or mark it a duplicate, before you finish. A push-back
+closes only the Chart; finishing in place closes neither bead. mugicrew closes
+the Survey when this session exits cleanly.

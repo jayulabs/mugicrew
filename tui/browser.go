@@ -64,8 +64,8 @@ type noBrowserErr struct{}
 
 func (noBrowserErr) Error() string { return "no browser candidate" }
 
-// openMRRow is w on a Merge Requests row of either tab: Watch w and the container cp it waits on
-// name the MR (the context only for the nested body form), then openMR launches it.
+// openMRRow is w on a Merge Requests row of either tab not yet moved onto the router: Watch w
+// and the container cp it waits on name the MR, then openMR launches it. The contract Build removes it.
 func (m Model) openMRRow(w, cp *bd.Bead) (tea.Model, tea.Cmd) {
 	ref := "its MR"
 	if path, iid := git.RecordedMRPath(w.Description); iid != 0 {
@@ -78,11 +78,25 @@ func (m Model) openMRRow(w, cp *bd.Bead) (tea.Model, tea.Cmd) {
 	return m.openMR(w, ref)
 }
 
-// openMR is w on a Merge Requests row: the TUI stays up while the browser launches.
+// openMRBead is w on a bead row: the bead's own MR link: line names the MR (the context
+// only for the nested body form, resolved from the bead's parent), then openMR launches it.
+func (m Model) openMRBead(b *bd.Bead) (tea.Model, tea.Cmd) {
+	ref := b.ID
+	if path, iid := git.RecordedMRPath(b.Description); iid != 0 {
+		ctxName := ""
+		if p := beadIndex(m.beads, b.Parent); path != "" && p >= 0 {
+			ctxName = bd.ContextOf(m.beads[p])
+		}
+		ref = git.MRRef(ctxName, iid)
+	}
+	return m.openMR(b, ref)
+}
+
+// openMR is w on a bead row: the TUI stays up while the browser launches.
 func (m Model) openMR(w *bd.Bead, ref string) (tea.Model, tea.Cmd) {
 	url := git.RecordedMRLink(w.Description)
 	if url == "" {
-		m.setStatus("no link yet for " + ref + " (waiting on Jinbe's backfill)")
+		m.setStatus("no link yet on " + ref + " — nothing to open (a Watch's link waits on Jinbe's backfill)")
 		return m, nil
 	}
 	return m, func() tea.Msg {

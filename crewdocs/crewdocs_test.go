@@ -193,18 +193,18 @@ func TestDefogSessionTendsChartThroughVerb(t *testing.T) {
 	}
 }
 
-// Spec D4: task-body.md is the one Task body format producers and
+// Spec D4: errand-body.md is the one Errand body format producers and
 // Brook read — the three markers, the web-UI inference, Ask: only when nothing
 // is probeable, re-runnable Checks, and no ordering lines.
-func TestTaskBodyFormat(t *testing.T) {
-	b, err := fs.ReadFile(docs, "task-body.md")
+func TestErrandBodyFormat(t *testing.T) {
+	b, err := fs.ReadFile(docs, "errand-body.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{"## Steps", "Do:", "Check:", "[secret]", "[elevated]", "[irreversible]", "a Do with no command", "`Ask:` replaces `Check:` only when nothing is probeable", "safe to re-run", "never carries `after:` or `before:`", "`Initiative:` line", "written by `mugicrew task new`, not the author"} {
+	for _, want := range []string{"## Steps", "Do:", "Check:", "[secret]", "[elevated]", "[irreversible]", "a Do with no command", "`Ask:` replaces `Check:` only when nothing is probeable", "safe to re-run", "never carries `after:` or `before:`", "`Initiative:` line", "written by `mugicrew errand new`, not the author"} {
 		if !strings.Contains(s, want) {
-			t.Errorf("task-body.md missing %q", want)
+			t.Errorf("errand-body.md missing %q", want)
 		}
 	}
 }
@@ -237,10 +237,17 @@ func TestSignalFilingKeepsItsRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{"--no-inherit-labels", "mugicrew signal offshoot", "--parent", "If it fails with *already exists* or *1213*, re-run the same create"} {
+	for _, want := range []string{"--no-inherit-labels", "mugicrew signal offshoot", "--parent", "--outside", "--dry-run", "Initiative: line", "If it fails with *already exists* or *1213*, re-run the same create"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("signal-filing.md missing %q", want)
 		}
+	}
+	// An Initiative is a container, so the lead must not say the offshoot joins none.
+	if !strings.Contains(strings.Join(strings.Fields(s), " "), "A Signal for work you found. It is born in its cause's Initiative unless you opt out:") {
+		t.Errorf("signal-filing.md Offshoot lead does not say it is born in its cause's Initiative unless you opt out")
+	}
+	if strings.Contains(s, "not a member of any container") {
+		t.Errorf("signal-filing.md still says an offshoot is not a member of any container")
 	}
 	// The retry rule is its own section, so the offshoot form reads it too.
 	const retry = "If it fails with *already exists* or *1213*"

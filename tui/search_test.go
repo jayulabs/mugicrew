@@ -20,7 +20,7 @@ func searchModel(t *testing.T) (Model, *[]string) {
 		words = append(words, w)
 		return []bd.Bead{{ID: "old", Status: "closed", Title: "Alpha old", Kind: contract.KindBuild, Parent: "anc"}}, nil
 	})
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Alpha open", Kind: contract.KindTask}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Alpha open", Kind: contract.KindErrand}})
 	store := map[string]bd.Bead{
 		"anc": {ID: "anc", Status: "closed", Title: "Old chart", Kind: contract.KindChart, Container: true},
 		"old": {ID: "old", Status: "closed", Title: "Alpha old", Kind: contract.KindBuild, Parent: "anc"},
@@ -151,7 +151,7 @@ func TestOpenMatchThatClosesStaysInHits(t *testing.T) {
 	m, _ := searchModel(t)
 	m, cmds := typeWords(t, m, "alpha")
 	m, _ = send(t, m, batchSearch(cmds[4]))
-	closed := bd.Bead{ID: "a", Status: "closed", Title: "Alpha open", Kind: contract.KindTask}
+	closed := bd.Bead{ID: "a", Status: "closed", Title: "Alpha open", Kind: contract.KindErrand}
 	seam(t, &listOpen, func() ([]bd.Bead, error) { return nil, nil })
 	seam(t, &defaultIDs, func() ([]string, error) { return []string{"a"}, nil })
 	seam(t, &listByID, func([]string) ([]bd.Bead, error) { return []bd.Bead{closed}, nil })
@@ -165,7 +165,7 @@ func TestOpenMatchThatClosesOutsideDefaultSetStaysInHits(t *testing.T) {
 	m, _ := searchModel(t)
 	m, cmds := typeWords(t, m, "alpha")
 	m, _ = send(t, m, batchSearch(cmds[4]))
-	closed := bd.Bead{ID: "a", Status: "closed", Title: "Alpha open", Kind: contract.KindTask}
+	closed := bd.Bead{ID: "a", Status: "closed", Title: "Alpha open", Kind: contract.KindErrand}
 	seam(t, &listOpen, func() ([]bd.Bead, error) { return nil, nil })
 	seam(t, &defaultIDs, func() ([]string, error) { return nil, nil })
 	seam(t, &listByID, func(ids []string) ([]bd.Bead, error) {

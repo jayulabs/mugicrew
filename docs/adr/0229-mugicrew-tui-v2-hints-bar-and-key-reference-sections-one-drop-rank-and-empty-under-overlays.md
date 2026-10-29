@@ -4,6 +4,7 @@ Status: Accepted
 Amended by ADR 0241 (§1, §3, §5: n new in nav and pinned, u and U gone, the n new › group).
 Amended by ADR 0321 (§5: one global `<k>  tmux prefix (nested)` line while nested with a prefix2).
 Amended by ADR 0258 (§1, §3, §5: E raw is removed; E explorer joins the shell keys in the ? reference after o loop on/off, never on the bar).
+Amended by ADR 0359 (§1, §3: every bead verb is in the row section; w ranks 4.5, X 5.5; c stays 12, B/U 14).
 Date: 2026-10-16
 
 Supersedes ADR 0058 §4 (Content and Layout) and §5 (separator tightening),
@@ -91,3 +92,5 @@ docs/research/tui-key-hint-surfaces-and-bindings-inventory.md.
 Amended 2026-10-17: the Stats tab's `d dist time/cost` is a tab extra (§1 tab section, §3 tab-extra rank), and `hintOf` places `d` by its label: `d detail` and `d close` stay in the nav section at rank 2.
 
 Amended 2026-10-17: the `r` drop-rank slot now ranks `r retrospective` (it was rebase, which moved into the New menu).
+
+Amended 2026-10-29 (Spec Retrospective starts from the New menu's t row, mc-6giio): the `r` drop-rank slot no longer ranks `r retrospective`; no bead-row `r` binding remains, so the entry is removed.

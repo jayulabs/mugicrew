@@ -36,13 +36,13 @@ never send the human to a bead id or to `bd show` in place of its content.
   `Rerouted from <signal>` evidence comment. Its **Ask Critique** is the
   kind:critique row in `bd dep list <pivotID> --direction=up -t discovered-from --json`.
 
-- A Task raiser: a `kind:task` row among the discovered-from rows. A Task that
+- An Errand raiser: a `kind:errand` row among the discovered-from rows. An Errand that
   hit a defect or a wrong FR stays stuck on this Checkpoint and does not close.
   `bd show` it and read its stuck comment, which names the pivot and what to
   wait for. Its **Ask Critique** is the kind:critique row discovered-from the
   pivot, as for a Signal.
 
-- The Checkpoint's held Tasks, raising or not: the open `kind:task` rows from
+- The Checkpoint's held Errands, raising or not: the open `kind:errand` rows from
   the same `bd dep list %[2]s --direction=down -t blocks --json` read. A
   confirm or escalate must account for each.
 
@@ -82,8 +82,8 @@ Show each as a pivot card of exactly this shape and field order:
     **Raised by** — each raising bead's finding and merged raiser's comment, quoted.
       For a Signal raiser, quote the Signal's report and its `## Triage (<signal>)`
       section; for a merged-into pivot, the `Rerouted from <signal>` comment instead.
-      For a Task raiser, quote the Task's stuck comment and the pivot's
-      `Raised by Task` line.
+      For an Errand raiser, quote the Errand's stuck comment and the pivot's
+      `Raised by Errand` line.
     **Amendments on this FR** — quoted, or "none".
     **Built so far** — short summary of work toward this FR; hunks on request.
     **Recommendation** — outcome and reason, citing the amend line.
@@ -135,31 +135,31 @@ decided on it. Read "the Ask" for "the unfinished FR" below.
 
 Several Ask Critiques on one pivot (after a merge) are each treated so.
 
-### Task raisers
+### Errand raisers
 
-A pivot with a Task raiser has an Ask Critique too, and it is treated exactly as
+A pivot with an Errand raiser has an Ask Critique too, and it is treated exactly as
 for a Signal raiser above (dismiss rewrites or closes it, amend comments on it),
 so skip the step-1 refile of Dismiss and Amend: the Ask Critique already exists.
-The Task is never closed by you or the sweep.
+The Errand is never closed by you or the sweep.
 
-On dismiss or amend, add one comment on EACH raising Task (skip if it has one for
+On dismiss or amend, add one comment on EACH raising Errand (skip if it has one for
 this pivot):
 
-    bd comments add <taskID> "pivot <pivotID> dismissed|amended: <gist>. <which Critique to wait for>"
+    bd comments add <errandID> "pivot <pivotID> dismissed|amended: <gist>. <which Critique to wait for>"
 
 where the last part names which Critique to wait for (`Wait for <critiqueID>.`), or,
 if the Ask Critique was closed, says "the step may be wrong; amend it on resume".
 
-### Held Tasks on confirm and escalate
+### Held Errands on confirm and escalate
 
-A Task holds the Checkpoint's land and the sweep neither closes nor carries it,
-so the corrected Spec must re-hold it. In step 1 of Confirm, list the held Tasks
-(the open `kind:task` rows from step 2, raising or not) and put each to the
-human: adopt it or leave it out. Write each adopted Task into the corrected
-Spec's `## Tasks` as `### <Task title>`, `task: <id>`, `before: land`, with no
-Steps body. A Task left out stays open for the human to abandon.
+An Errand holds the Checkpoint's land and the sweep neither closes nor carries it,
+so the corrected Spec must re-hold it. In step 1 of Confirm, list the held Errands
+(the open `kind:errand` rows from step 2, raising or not) and put each to the
+human: adopt it or leave it out. Write each adopted Errand into the corrected
+Spec's `## Errands` as `### <Errand title>`, `errand: <id>`, `before: land`, with no
+Steps body. An Errand left out stays open for the human to abandon.
 
-On escalate, the evidence must name each held Task and whether the human wants it
+On escalate, the evidence must name each held Errand and whether the human wants it
 adopted; the new Chart's Spec carries the entry.
 
 ### Dismiss

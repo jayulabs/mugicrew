@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
@@ -79,7 +81,7 @@ func TestLaunchApprovalComposesSession(t *testing.T) {
 // Spec FR10: the description Luffy writes keeps the Commit: pin line verbatim
 // and first, then a blank line, then the Decision Packet, in one bd update.
 func TestApprovalPromptWritesPinFirstThenPacket(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil, false)
+	p := approvalPrompt("ws-appr", false, false, nil, false, false)
 	for _, want := range []string{"bd update ws-appr --body-file <body-file>", "Commit: <sha>", "verbatim", "blank line", "Decision Packet"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("approval prompt missing %q", want)
@@ -93,7 +95,7 @@ func TestApprovalPromptWritesPinFirstThenPacket(t *testing.T) {
 // Spec mc-dbxb FR1, FR7, FR9, FR10: the approval prompt shows the packet in a
 // sibling doc pane and degrades to inline-only.
 func TestApprovalPromptShowsPacketInGlowPane(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil, false)
+	p := approvalPrompt("ws-appr", false, false, nil, false, false)
 	if strings.Contains(p, "%!") || strings.Contains(p, "--description") {
 		t.Errorf("approval prompt has a format artifact or the inline --description:\n%s", p)
 	}
@@ -169,6 +171,7 @@ type afkRun struct {
 	out    string
 	err    error
 	closed bool // the Approval is closed before Run
+	swept  bool // the Approval is closed once the session has run
 	runs   []contract.Invocation
 	closes []string // CloseOnPublish id+" "+reason
 }
@@ -176,9 +179,11 @@ type afkRun struct {
 func stubAFK(t *testing.T, r *afkRun) {
 	t.Helper()
 	stubGraph(t, "ws-spec", nil)
+	swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{On: true, Source: "config.toml"} })
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyLocal, nil })
 	swap(t, &show, func(id string) (bd.Bead, error) {
 		b := bd.Bead{ID: id, Kind: contract.KindApproval, Parent: "ws-cp", Status: "open", Description: git.CommitPin(afkPin)}
-		if r.closed {
+		if r.closed || (r.swept && len(r.runs) > 0) {
 			b.Status = "closed"
 		}
 		if len(r.runs) > 0 {
@@ -213,6 +218,14 @@ func TestRunApprovalAlreadyClosedDoesNothing(t *testing.T) {
 	stubAFK(t, r)
 	if err := runAFK(r); err != nil || len(r.runs) != 0 || len(r.closes) != 0 {
 		t.Errorf("closed Approval: err %v, runs %d, closes %v; want nothing", err, len(r.runs), r.closes)
+	}
+}
+
+func TestRunApprovalSweptDuringRunIsDone(t *testing.T) {
+	r := &afkRun{swept: true, err: errors.New("killed")}
+	stubAFK(t, r)
+	if err := runAFK(r); err != nil || len(r.closes) != 0 {
+		t.Errorf("swept Approval: err %v, closes %v; want done, nothing closed", err, r.closes)
 	}
 }
 
@@ -260,7 +273,7 @@ func TestRunApprovalBadSessionErrorsWithoutClose(t *testing.T) {
 // The AFK prompt takes no claim, opens no pane, has no human gate, never reworks
 // or closes; it ends the History and the session on fixed lines.
 func TestApprovalPromptAFK(t *testing.T) {
-	p := approvalPromptAFK("ws-appr", true, nil)
+	p := approvalPromptAFK("ws-appr", false, true, nil, afkLine)
 	for _, want := range []string{
 		"Commit:", "git diff main", "HEAD advanced since this was reviewed",
 		afkLine, "bd update ws-appr --body-file", "Approved: <one-line gist>",
@@ -284,8 +297,8 @@ func TestApprovalPromptAFK(t *testing.T) {
 // The HITL prompt renders as it did before the core/tail split.
 func TestApprovalPromptHITLUnchanged(t *testing.T) {
 	for file, got := range map[string]string{
-		"testdata/approval_plain.txt":   approvalPrompt("ws-appr", false, nil, false),
-		"testdata/approval_surgery.txt": approvalPrompt("ws-appr", true, []bd.Bead{{ID: "s1", Title: "T"}}, false),
+		"testdata/approval_plain.txt":   approvalPrompt("ws-appr", false, false, nil, false, false),
+		"testdata/approval_surgery.txt": approvalPrompt("ws-appr", false, true, []bd.Bead{{ID: "s1", Title: "T"}}, false, false),
 	} {
 		want, err := os.ReadFile(file)
 		if err != nil {
@@ -326,7 +339,7 @@ func TestRunCarriesContextToChart(t *testing.T) {
 // The prompt renders with the bead id and carries no stray % that fmt.Sprintf
 // would turn into %!(...) — guards a broken embed or a literal %.
 func TestPromptRenders(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil, false)
+	p := approvalPrompt("ws-appr", false, false, nil, false, false)
 	if !strings.Contains(p, "ws-appr") {
 		t.Errorf("approval prompt missing the bead id")
 	}
@@ -339,7 +352,7 @@ func TestPromptRenders(t *testing.T) {
 // citation, every crew-doc reference resolves, and none of the shared stance the
 // Crewmate preamble now carries is repeated.
 func TestApprovalPromptSkillFree(t *testing.T) {
-	p := approvalPrompt("ws-appr", false, nil, false)
+	p := approvalPrompt("ws-appr", false, false, nil, false, false)
 	promptguard.Check(t, "approval", p)
 	for _, dup := range []string{"by their title", "bare id", "authorization, not authorship"} {
 		if strings.Contains(p, dup) {
@@ -507,15 +520,20 @@ func TestLaunchInitiativeFailsOnShowError(t *testing.T) {
 }
 
 // Approval's focus line is the labelled Checkpoint's alone; a no-context
-// Workspace never reads the container (ADR 0157).
+// Workspace reads the container only once, for its kind (a Chart's Approval takes the
+// Chart core), and never for the focus line (ADR 0157).
 func TestLaunchApprovalFocus(t *testing.T) {
 	launch := func(label string, noShow bool) string {
 		stubGraph(t, "", nil)
 		inner := show
+		reads := 0
 		show = func(id string) (bd.Bead, error) {
 			if id == "ws-cp" {
+				if reads++; noShow && reads > 1 {
+					t.Fatal("bd show for the container's focus on a no-context Workspace")
+				}
 				if noShow {
-					t.Fatal("bd show for the container on a no-context Workspace")
+					return bd.Bead{ID: id, Kind: contract.KindCheckpoint}, nil
 				}
 				return bd.Bead{ID: id, Labels: []string{label}}, nil
 			}
@@ -548,7 +566,7 @@ func TestLaunchApprovalFocus(t *testing.T) {
 // Spec FR11, FR12: the Approval may raise an offshoot Signal through
 // the crew doc, and rework goes only through the verb.
 func TestApprovalPromptRaisesSignalThroughCrewDoc(t *testing.T) {
-	p := strings.Join(strings.Fields(approvalPrompt("ws-appr", false, nil, false)), " ")
+	p := strings.Join(strings.Fields(approvalPrompt("ws-appr", false, false, nil, false, false)), " ")
 	for _, want := range []string{"signal-filing.md", "discovered-from the Approval", "except raising an offshoot Signal on the human's yes", "mugicrew approval rework"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("approval prompt missing %q", want)
@@ -622,11 +640,449 @@ func TestLaunchApprovalCarriesFallbackLineOnlyWhenMarked(t *testing.T) {
 // The unattended prompt has no human to answer, and its core joins the tail with
 // a blank line.
 func TestApprovalPromptAFKHasNoHumanReferenceAndJoinsWithBlankLine(t *testing.T) {
-	p := approvalPromptAFK("ws-appr", true, nil)
+	p := approvalPromptAFK("ws-appr", false, true, nil, afkLine)
 	if strings.Contains(p, "the human asks") {
 		t.Error("AFK prompt still tells the session to answer the human")
 	}
 	if !strings.Contains(p, "then the Decision Packet.\n\nKeep one body file") {
 		t.Errorf("AFK prompt core/tail join lacks a blank line:\n%s", p)
+	}
+}
+
+// The closing line is picked by the layer in force, not by what was shadowed.
+func TestAFKHistoryLine(t *testing.T) {
+	for name, c := range map[string]struct {
+		in   AutoApprove
+		want string
+	}{
+		"local on":                  {AutoApprove{On: true, Source: "local"}, localHistoryLine},
+		"shared on":                 {AutoApprove{On: true, Source: "config.toml"}, workspaceHistoryLine},
+		"local off over shared on":  {AutoApprove{On: false, Source: "local"}, offHistoryLine},
+		"unusable local, shared on": {AutoApprove{On: true, Source: "config.toml"}, workspaceHistoryLine},
+		"off":                       {AutoApprove{Source: "default"}, offHistoryLine},
+	} {
+		if got := afkHistoryLine(c.in); got != c.want {
+			t.Errorf("%s: line = %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// Run reads the setting once: the prompt carries the faked source's line and the
+// check demands it, so another layer's line is refused.
+func TestRunApprovalLineFollowsSource(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, localHistoryLine), out: "Approved: x"}
+	stubAFK(t, r)
+	reads := 0
+	swap(t, &ReadAutoApprove, func() AutoApprove {
+		reads++
+		return AutoApprove{On: true, Source: "local"}
+	})
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if reads != 1 {
+		t.Errorf("setting read %d times, want 1", reads)
+	}
+	if p := r.runs[0].Prompt; !strings.Contains(p, localHistoryLine) || strings.Contains(p, workspaceHistoryLine) {
+		t.Errorf("prompt does not carry only the machine-local line:\n%s", p)
+	}
+	w := &afkRun{body: afkPacket(afkPin, workspaceHistoryLine), out: "Approved: x"}
+	stubAFK(t, w)
+	swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{On: true, Source: "local"} })
+	err := runAFK(w)
+	if err == nil || !strings.Contains(err.Error(), localHistoryLine) || len(w.closes) != 0 {
+		t.Errorf("Workspace line under a local run: err %v, closes %v; want a refusal naming %q", err, w.closes, localHistoryLine)
+	}
+}
+
+// Under gitlab with auto-approve on, the MR opens ready (not Draft) for the container
+// and the Approval, then the Approval closes approved; local never opens one.
+func TestRunApprovalGitlabAutoApproveOpensTheMRThenCloses(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, afkLine), out: "Approved: x"}
+	stubAFK(t, r)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	var opened []string
+	swap(t, &ApprovalMR.Open, func(c, a bd.Bead, draft bool) error {
+		opened = append(opened, fmt.Sprintf("%s %s draft=%v closes=%d", c.ID, a.ID, draft, len(r.closes)))
+		return nil
+	})
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := []string{"ws-cp ws-appr draft=false closes=0"}; !slices.Equal(opened, want) {
+		t.Errorf("opens = %v, want %v", opened, want)
+	}
+	if len(r.closes) != 1 || r.closes[0] != "ws-appr approved" {
+		t.Errorf("closes = %v, want [ws-appr approved]", r.closes)
+	}
+}
+
+// A failed MR open leaves the Approval open for the next dispatch.
+func TestRunApprovalGitlabMROpenFailureClosesNothing(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, afkLine), out: "Approved: x"}
+	stubAFK(t, r)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &ApprovalMR.Open, func(bd.Bead, bd.Bead, bool) error { return errors.New("forge down") })
+	if err := runAFK(r); err == nil || len(r.closes) != 0 {
+		t.Errorf("err %v closes %v, want an error and no close", err, r.closes)
+	}
+}
+
+// The local strategy opens no MR.
+func TestRunApprovalLocalOpensNoMR(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, afkLine), out: "Approved: x"}
+	stubAFK(t, r)
+	swap(t, &ApprovalMR.Open, func(bd.Bead, bd.Bead, bool) error { t.Error("MR opened under local"); return nil })
+	if err := runAFK(r); err != nil || len(r.closes) != 1 {
+		t.Errorf("err %v closes %v", err, r.closes)
+	}
+}
+
+// Under gitlab with auto-approve off the session writes no History ending: the MR opens
+// as a GitLab Draft and the Approval stays open through the no-close publish.
+func TestRunApprovalGitlabAutoApproveOffOpensDraftMRAndWaits(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, ""), out: "Approved: x"}
+	stubAFK(t, r)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{Source: "default"} })
+	var opened, edges []string
+	swap(t, &ApprovalMR.Open, func(c, a bd.Bead, draft bool) error {
+		opened = append(opened, fmt.Sprintf("%s %s draft=%v", c.ID, a.ID, draft))
+		return nil
+	})
+	swap(t, &edgesOnPublish, func(_ contract.Ctx, id string, _ []bd.Edge) error {
+		edges = append(edges, id)
+		return nil
+	})
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := []string{"ws-cp ws-appr draft=true"}; !slices.Equal(opened, want) {
+		t.Errorf("opens = %v, want %v", opened, want)
+	}
+	if len(r.closes) != 0 || !slices.Equal(edges, []string{"ws-appr"}) {
+		t.Errorf("closes %v edges %v, want no close and one no-close publish", r.closes, edges)
+	}
+	if p := r.runs[0].Prompt; strings.Contains(p, "auto-approved (") || strings.Contains(p, "auto-approve on") {
+		t.Errorf("wait prompt carries an auto-approved ending:\n%s", p)
+	}
+}
+
+// The wait variant refuses an auto-approved ending (only auto-approve may write it) and
+// an unwritten Packet.
+func TestRunApprovalGitlabWaitVariantChecksPacket(t *testing.T) {
+	for name, body := range map[string]string{
+		"auto ending":      afkPacket(afkPin, afkLine),
+		"packet unwritten": git.CommitPin(afkPin),
+		"moved pin":        afkPacket("deadbee", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := &afkRun{body: body, out: "Approved: x"}
+			stubAFK(t, r)
+			swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+			swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{Source: "default"} })
+			swap(t, &ApprovalMR.Open, func(bd.Bead, bd.Bead, bool) error { t.Error("MR opened"); return nil })
+			if err := runAFK(r); err == nil || len(r.closes) != 0 {
+				t.Errorf("err %v closes %v, want an error and no close", err, r.closes)
+			}
+		})
+	}
+}
+
+// reapprovalRun drives a gitlab, auto-approve-off Approval whose MR is open and un-drafted
+// (draft=false) or Draft, over the container's other Approvals and gate pivots.
+// openedBody is the Description of the Approval the last reapprovalRun handed OpenApprovalMR.
+var openedBody string
+
+func reapprovalRun(t *testing.T, draft bool, approvals, pivots []bd.Bead) (r *afkRun, opened, bodies []string) {
+	t.Helper()
+	r = &afkRun{body: afkPacket(afkPin, ""), out: "Approved: x"}
+	stubAFK(t, r)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{Source: "default"} })
+	swap(t, &ApprovalMR.Draft, func(bd.Bead) (bool, bool, error) { return true, draft, nil })
+	swap(t, &approvalsOf, func(string) ([]bd.Bead, error) { return approvals, nil })
+	swap(t, &gatePivotsOf, func(string) ([]bd.Bead, error) { return pivots, nil })
+	swap(t, &ApprovalMR.Open, func(c, a bd.Bead, d bool) error {
+		opened = append(opened, fmt.Sprintf("draft=%v", d))
+		openedBody = a.Description
+		return nil
+	})
+	swap(t, &updateBody, func(_ string, args []string) error { bodies = append(bodies, args[1]); return nil })
+	swap(t, &edgesOnPublish, func(contract.Ctx, string, []bd.Edge) error { return nil })
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return r, opened, bodies
+}
+
+func priorApproval(reason, body string, created time.Time) bd.Bead {
+	return bd.Bead{ID: "ws-old", Kind: contract.KindApproval, Status: "closed", CloseReason: reason, Description: body, Created: created}
+}
+
+func gatePivot(reason string, closed time.Time) bd.Bead {
+	return bd.Bead{ID: "ws-pv", Title: "FR 3: wrong", Kind: contract.KindPivot, Status: "closed", CloseReason: reason, Closed: closed}
+}
+
+var cutoffAt = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+
+func TestReapprovalUndraftedMRSpecUnchangedSkips(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	r, opened, bodies := reapprovalRun(t, false, []bd.Bead{prior}, nil)
+	if len(opened) != 0 || !slices.Equal(r.closes, []string{"ws-appr approved"}) {
+		t.Errorf("opened %v closes %v, want a skip close", opened, r.closes)
+	}
+	if len(bodies) != 1 || !strings.HasSuffix(bodies[0], "approved (MR already un-drafted, Spec unchanged)\n") {
+		t.Errorf("bodies = %q", bodies)
+	}
+}
+
+func TestReapprovalDismissedPivotSkips(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	r, _, _ := reapprovalRun(t, false, []bd.Bead{prior}, []bd.Bead{gatePivot("dismissed: no", cutoffAt.Add(time.Hour))})
+	if !slices.Equal(r.closes, []string{"ws-appr approved"}) {
+		t.Errorf("closes = %v, want a skip", r.closes)
+	}
+}
+
+func TestReapprovalAmendedPivotAtCutoffRedrafts(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	r, opened, bodies := reapprovalRun(t, false, []bd.Bead{prior}, []bd.Bead{gatePivot("amended: FR 3", cutoffAt)}) // a tie counts
+	if len(r.closes) != 0 || !slices.Equal(opened, []string{"draft=true"}) {
+		t.Errorf("closes %v opened %v, want a re-draft and no close", r.closes, opened)
+	}
+	if len(bodies) != 1 || !strings.HasSuffix(bodies[0], "re-drafted (Spec changed by pivot FR 3: wrong)\n") {
+		t.Errorf("bodies = %q", bodies)
+	}
+}
+
+func TestReapprovalRedraftHandsOpenApprovalMRTheBodyWithItsHistoryLine(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	_, _, bodies := reapprovalRun(t, false, []bd.Bead{prior}, []bd.Bead{gatePivot("amended: FR 3", cutoffAt)})
+	if len(bodies) != 1 || openedBody != bodies[0] {
+		t.Errorf("OpenApprovalMR saw body %q, want the History-appended body %q", openedBody, bodies)
+	}
+}
+
+func TestReapprovalAmendedPivotBeforeCutoffSkips(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	r, _, _ := reapprovalRun(t, false, []bd.Bead{prior}, []bd.Bead{gatePivot("amended: FR 3", cutoffAt.Add(-time.Second))})
+	if !slices.Equal(r.closes, []string{"ws-appr approved"}) {
+		t.Errorf("closes = %v, want a skip", r.closes)
+	}
+}
+
+func TestReapprovalNoApprovedApprovalRedrafts(t *testing.T) {
+	prior := priorApproval("rework: x", afkPacket(afkPin, ""), cutoffAt)
+	r, opened, bodies := reapprovalRun(t, false, []bd.Bead{prior}, nil)
+	if len(r.closes) != 0 || !slices.Equal(opened, []string{"draft=true"}) || len(bodies) != 0 {
+		t.Errorf("closes %v opened %v bodies %q, want a silent re-draft", r.closes, opened, bodies)
+	}
+}
+
+func TestReapprovalAutoApprovedCutoffRedrafts(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, afkLine), cutoffAt)
+	r, opened, _ := reapprovalRun(t, false, []bd.Bead{prior}, nil)
+	if len(r.closes) != 0 || !slices.Equal(opened, []string{"draft=true"}) {
+		t.Errorf("closes %v opened %v, want a re-draft", r.closes, opened)
+	}
+}
+
+// The real auto-approve flow appends MR: lines after the History's auto-approved ending.
+func TestReapprovalAutoApprovedCutoffWithMRLinesRedrafts(t *testing.T) {
+	body := afkPacket(afkPin, afkLine) + "MR: !7\nMR link: https://gitlab.example/p/-/merge_requests/7\n"
+	prior := priorApproval("approved", body, cutoffAt)
+	r, opened, _ := reapprovalRun(t, false, []bd.Bead{prior}, nil)
+	if len(r.closes) != 0 || !slices.Equal(opened, []string{"draft=true"}) {
+		t.Errorf("closes %v opened %v, want a re-draft", r.closes, opened)
+	}
+}
+
+// A Draft MR (the human re-drafted it, or it is the first open) takes the plain wait path.
+func TestReapprovalDraftMRWaits(t *testing.T) {
+	prior := priorApproval("approved", afkPacket(afkPin, ""), cutoffAt)
+	r, opened, bodies := reapprovalRun(t, true, []bd.Bead{prior}, nil)
+	if len(r.closes) != 0 || !slices.Equal(opened, []string{"draft=true"}) || len(bodies) != 0 {
+		t.Errorf("closes %v opened %v bodies %q, want the plain wait", r.closes, opened, bodies)
+	}
+}
+
+func TestApprovalPromptHITLGitlabWritesThePacketInsteadOfClosing(t *testing.T) {
+	p := approvalPrompt("ws-appr", false, false, nil, true, true)
+	if strings.Contains(p, "bd close ws-appr --reason=approved") || !strings.Contains(p, "GitLab Draft") {
+		t.Errorf("gitlab HITL prompt still closes approved or omits the Draft:\n%s", p)
+	}
+	if local := approvalPrompt("ws-appr", false, false, nil, true, false); !strings.Contains(local, "bd close ws-appr --reason=approved") {
+		t.Errorf("local HITL prompt lost its close:\n%s", local)
+	}
+}
+
+func TestOpenFallbackMR(t *testing.T) {
+	packet := afkPacket(afkPin, "")
+	cases := map[string]struct {
+		strategy string
+		labels   []string
+		body     string
+		want     []string
+	}{
+		"gitlab fallback opens a Draft": {git.LandStrategyGitlab, []string{registry.AutoApproveFailedLabel}, packet, []string{"ws-cp ws-appr draft=true"}},
+		"local does nothing":            {git.LandStrategyLocal, []string{registry.AutoApproveFailedLabel}, packet, nil},
+		"no fallback marker":            {git.LandStrategyGitlab, nil, packet, nil},
+		"packet never written":          {git.LandStrategyGitlab, []string{registry.AutoApproveFailedLabel}, git.CommitPin(afkPin), nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			swap(t, &git.LandStrategyName, func() (string, error) { return c.strategy, nil })
+			swap(t, &show, func(id string) (bd.Bead, error) {
+				if id == "ws-cp" {
+					return bd.Bead{ID: "ws-cp"}, nil
+				}
+				return bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Labels: c.labels, Description: c.body}, nil
+			})
+			var opened []string
+			swap(t, &ApprovalMR.Open, func(cp, a bd.Bead, draft bool) error {
+				opened = append(opened, fmt.Sprintf("%s %s draft=%v", cp.ID, a.ID, draft))
+				return nil
+			})
+			if err := OpenFallbackMR("ws-appr"); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(opened, c.want) {
+				t.Errorf("opens = %v, want %v", opened, c.want)
+			}
+		})
+	}
+}
+
+// chartParent makes the fake graph's ws-cp a Chart, so the Approval under it is a Chart's.
+func chartParent(t *testing.T) {
+	t.Helper()
+	inner := show
+	swap(t, &show, func(id string) (bd.Bead, error) {
+		b, err := inner(id)
+		if id == "ws-cp" {
+			b.Kind = contract.KindChart
+		}
+		return b, err
+	})
+	swap(t, &specOf, func(string) (string, bool, error) { t.Error("Spec read for a Chart"); return "", false, nil })
+	swap(t, &surgeriesOf, func(string) ([]bd.Bead, error) { t.Error("Surgeries read for a Chart"); return nil, nil })
+}
+
+const chartPatch = "deadbeef42"
+
+func chartApprovalBody(packet string) string {
+	return git.CommitPin(afkPin) + "\n" + git.PatchIDPin(chartPatch) + "\n\n" + packet
+}
+
+// A Chart's prompts swap only the core (and the HITL rework step); the heads and tails stay one text.
+func TestChartApprovalPromptsUseTheChartCore(t *testing.T) {
+	cp, ch := approvalPrompt("ws-appr", false, true, nil, false, false), approvalPrompt("ws-appr", true, false, nil, false, false)
+	for _, want := range []string{"Chart Packet", "Patch-id: <id>", "chart/<chart-id>", "HEAD advanced since this was reviewed", "--grilling <file>", "--research <file>"} {
+		if !strings.Contains(ch, want) {
+			t.Errorf("Chart HITL prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(ch, "--critique") || strings.Contains(ch, "Surgery") {
+		t.Errorf("Chart HITL prompt carries Checkpoint wording:\n%s", ch)
+	}
+	if strings.Contains(cp, "Chart Packet") || !strings.Contains(cp, "--critique <file>") {
+		t.Errorf("Checkpoint HITL prompt changed")
+	}
+	for name, p := range map[string]string{"afk": approvalPromptAFK("ws-appr", true, false, nil, afkLine), "wait": approvalPromptAFKWait("ws-appr", true, false, nil)} {
+		if !strings.Contains(p, "chart/<chart-id>") || !strings.Contains(p, "You are Luffy") {
+			t.Errorf("%s Chart prompt lacks the Chart core within the shared head", name)
+		}
+	}
+}
+
+func TestCheckPacketKeepsThePatchIDLine(t *testing.T) {
+	ok := chartApprovalBody("## Background\nx\n")
+	for name, tc := range map[string]struct {
+		body string
+		ok   bool
+	}{
+		"kept":    {ok, true},
+		"dropped": {git.CommitPin(afkPin) + "\n\n## Background\nx\n", false},
+		"altered": {git.CommitPin(afkPin) + "\n" + git.PatchIDPin("other") + "\n\n## Background\nx\n", false},
+		"moved":   {git.CommitPin(afkPin) + "\n\n" + git.PatchIDPin(chartPatch) + "\n## Background\nx\n", false},
+		"no body": {git.CommitPin(afkPin) + "\n" + git.PatchIDPin(chartPatch) + "\n", false},
+	} {
+		err := checkPacket(tc.body, afkPin, chartPatch, "")
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", name, err, tc.ok)
+		}
+	}
+	if err := checkPacket(afkPacket(afkPin, ""), afkPin, "", ""); err != nil {
+		t.Errorf("a Checkpoint packet (no patch-id) refused: %v", err)
+	}
+}
+
+func stubChartAFK(t *testing.T, r *afkRun, auto bool) {
+	t.Helper()
+	stubAFK(t, r)
+	chartParent(t)
+	inner := show
+	swap(t, &show, func(id string) (bd.Bead, error) { // the Approval carries its patch-id before the run
+		b, err := inner(id)
+		if id == "ws-appr" && len(r.runs) == 0 {
+			b.Description = chartApprovalBody("")
+		}
+		return b, err
+	})
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyGitlab, nil })
+	if !auto {
+		swap(t, &ReadAutoApprove, func() AutoApprove { return AutoApprove{Source: "default"} })
+	}
+}
+
+func TestRunChartApprovalGitlabAutoOffOpensDraftMRAndWaits(t *testing.T) {
+	r := &afkRun{body: chartApprovalBody("## Background\nx\n\n### Approval History\nFirst Approval.\n"), out: "Approved: x"}
+	stubChartAFK(t, r, false)
+	var opened, edges []string
+	swap(t, &ApprovalMR.Open, func(c, a bd.Bead, draft bool) error {
+		opened = append(opened, fmt.Sprintf("%s %s draft=%v", c.ID, a.ID, draft))
+		return nil
+	})
+	swap(t, &edgesOnPublish, func(_ contract.Ctx, id string, _ []bd.Edge) error { edges = append(edges, id); return nil })
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !slices.Equal(opened, []string{"ws-cp ws-appr draft=true"}) || len(r.closes) != 0 || !slices.Equal(edges, []string{"ws-appr"}) {
+		t.Errorf("opened %v closes %v edges %v", opened, r.closes, edges)
+	}
+	if !strings.Contains(r.runs[0].Prompt, "chart/<chart-id>") {
+		t.Errorf("session did not get the Chart core")
+	}
+}
+
+func TestRunChartApprovalAutoOnOpensReadyMRAndCloses(t *testing.T) {
+	r := &afkRun{body: chartApprovalBody("## Background\nx\n\n### Approval History\nFirst Approval.\n" + afkLine + "\n"), out: "Approved: x"}
+	stubChartAFK(t, r, true)
+	var opened []string
+	swap(t, &ApprovalMR.Open, func(c, a bd.Bead, draft bool) error { opened = append(opened, fmt.Sprint(draft)); return nil })
+	if err := runAFK(r); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !slices.Equal(opened, []string{"false"}) || len(r.closes) != 1 || r.closes[0] != "ws-appr approved" {
+		t.Errorf("opened %v closes %v", opened, r.closes)
+	}
+}
+
+func TestRunChartApprovalDroppedPatchIDErrorsWithoutOpeningMR(t *testing.T) {
+	r := &afkRun{body: afkPacket(afkPin, afkLine), out: "Approved: x"}
+	stubChartAFK(t, r, true)
+	swap(t, &ApprovalMR.Open, func(bd.Bead, bd.Bead, bool) error { t.Error("MR opened"); return nil })
+	if err := runAFK(r); err == nil || len(r.closes) != 0 {
+		t.Errorf("err %v closes %v, want an error and no close", err, r.closes)
+	}
+}
+
+func TestRunChartApprovalLocalAutoOnCloses(t *testing.T) {
+	r := &afkRun{body: chartApprovalBody("## Background\nx\n\n### Approval History\nFirst Approval.\n" + afkLine + "\n"), out: "Approved: x"}
+	stubChartAFK(t, r, true)
+	swap(t, &git.LandStrategyName, func() (string, error) { return git.LandStrategyLocal, nil })
+	if err := runAFK(r); err != nil || len(r.closes) != 1 {
+		t.Errorf("err %v closes %v", err, r.closes)
 	}
 }

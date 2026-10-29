@@ -1,7 +1,7 @@
 # ADR 0130: mugicrew Nami pushes back on Luffy's Destination by narrowing, splitting or a hand-back
 
 Status: Accepted
-Amended by: ADR 0140 (§6: branch deletion keys on a Survey session whose parent Chart closed with no Spec successor)
+Amended by: ADR 0140 (§6: branch deletion keys on a Survey session whose parent Chart closed with no Spec successor); ADR 0357 (mugicrew-a-survey-with-no-fog-finishes…) (§5 removed: no fog finishes the Chart in place)
 Date: 2026-10-11
 Amends: ADR 0129 §8
 

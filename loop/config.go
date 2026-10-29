@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -216,6 +217,50 @@ func SetLocalKindProfile(root, key, name string) error {
 	})
 }
 
+// SetLocalAutoApprove sets the machine-local [approvals] auto_approve to *v, or
+// deletes the key when v is nil (ADR 0353 §5). The table is dropped once empty; a
+// non-table value starts a fresh table. A malformed local file is refused.
+func SetLocalAutoApprove(root string, v *bool) error {
+	return editLocal(root, true, func(cfg map[string]any) {
+		ap, ok := cfg["approvals"].(map[string]any)
+		if !ok {
+			ap = map[string]any{}
+		}
+		if v == nil {
+			delete(ap, "auto_approve")
+		} else {
+			ap["auto_approve"] = *v
+		}
+		if len(ap) == 0 {
+			delete(cfg, "approvals")
+		} else {
+			cfg["approvals"] = ap
+		}
+	})
+}
+
+// SetLocalMouse sets the machine-local [tui] mouse to *v, or deletes the key when
+// v is nil. The table is dropped once empty; a non-table value starts a fresh
+// table. A malformed local file is refused.
+func SetLocalMouse(root string, v *bool) error {
+	return editLocal(root, true, func(cfg map[string]any) {
+		t, ok := cfg["tui"].(map[string]any)
+		if !ok {
+			t = map[string]any{}
+		}
+		if v == nil {
+			delete(t, "mouse")
+		} else {
+			t["mouse"] = *v
+		}
+		if len(t) == 0 {
+			delete(cfg, "tui")
+		} else {
+			cfg["tui"] = t
+		}
+	})
+}
+
 // editLocal applies edit to the machine-local override and keeps the rest: it
 // reads <git common dir of root>/mugicrew/config.toml, edits it, and writes the
 // whole back to a temp file in that dir, creating it if needed, renamed over
@@ -279,6 +324,22 @@ func KindProfile(root string, kind contract.Kind) ProfileMapping {
 // unusable key warns once per call however many rows are then resolved.
 func KindProfiles(root string) (local, shared map[string]string) {
 	return readKindProfiles(cfglayer.LocalPath(root)), readKindProfiles(cfglayer.SharedPath(root))
+}
+
+// LegacyTaskKey reports whether the local and the shared layer's kind_profiles
+// table still has the pre-Errand task key, which readKindProfiles drops.
+func LegacyTaskKey(root string) (local, shared bool) {
+	has := func(path string) bool {
+		var cfg struct {
+			KindProfiles map[string]any `toml:"kind_profiles"`
+		}
+		if cfglayer.Decode(path, &cfg) != cfglayer.Set {
+			return false
+		}
+		_, ok := cfg.KindProfiles["task"]
+		return ok
+	}
+	return has(cfglayer.LocalPath(root)), has(cfglayer.SharedPath(root))
 }
 
 // ResolveProfile is the ADR 0122 §3 chain over the two layers' maps: the first
@@ -370,18 +431,191 @@ func readLandStrategy(path string) (string, cfglayer.State) {
 	return *cfg.LandStrategy, cfglayer.Set
 }
 
-// ReadAutoApprove is the shared [approvals] settings read, a var so tests fake it.
-// An unresolved repo reads off, as the Initiatives read does. The TUI refresh and
-// the one-shot verbs share it, so they agree with the loop.
-var ReadAutoApprove = func() cfglayer.Approvals {
-	root, err := git.RepoRoot()
-	if err != nil {
-		return cfglayer.Approvals{}
-	}
-	return cfglayer.AutoApproveSetting(root)
+// AutoApprove is the resolved [approvals] auto_approve and where it came from, from one read.
+type AutoApprove struct {
+	On        bool   // the crew approves Approvals itself
+	Source    string // "local" | "config.toml" | "default"
+	Unusable  string // the first layer skipped as unusable; "" if none
+	Shared    bool   // the checked-in value when Source is "local" and SharedSet
+	SharedSet bool   // a checked-in value is set under a local one (it may be false, off)
 }
 
-// StampAutoApprove stamps the registry's auto-approve snapshot from the shared
+// AutoApproveSetting layers [approvals] auto_approve the way AutoExitSetting
+// layers auto_exit (ADR 0353): local, then checked-in, then off, re-read on
+// every call. A missing table or key falls through silently; a malformed file or
+// mistyped value warns config.unusable and falls through.
+func AutoApproveSetting(root string) AutoApprove {
+	l := resolve(root, readAutoApprove, false)
+	return AutoApprove{On: l.v, Source: l.source, Unusable: l.unusable, Shared: l.shared, SharedSet: l.sharedSet}
+}
+
+// readAutoApprove decodes [approvals] auto_approve from one config file; path "" is
+// missing. A mistyped value or a non-table approvals fails the decode: unusable.
+func readAutoApprove(path string) (bool, cfglayer.State) {
+	var cfg struct {
+		Approvals *struct {
+			AutoApprove *bool `toml:"auto_approve"`
+		}
+	}
+	if state := cfglayer.Decode(path, &cfg); state != cfglayer.Set {
+		return false, state
+	}
+	if cfg.Approvals == nil || cfg.Approvals.AutoApprove == nil {
+		return false, cfglayer.Missing
+	}
+	return *cfg.Approvals.AutoApprove, cfglayer.Set
+}
+
+// ReadAutoApprove is the layered [approvals] auto_approve read (ADR 0353), a var so
+// tests fake it. An unresolved repo reads off, as the Initiatives read does. The
+// TUI refresh and the one-shot verbs share it, so they agree with the loop.
+var ReadAutoApprove = func() AutoApprove {
+	root, err := git.RepoRoot()
+	if err != nil {
+		return AutoApprove{Source: "default"}
+	}
+	return AutoApproveSetting(root)
+}
+
+// StampModeSnapshots stamps the registry's auto-approve snapshot from the layered
 // setting, at the start of a one-shot verb or TUI refresh that reaches a mode
-// predicate (Spec D4).
-func StampAutoApprove() { registry.SetAutoApprove(ReadAutoApprove().AutoApprove) }
+// predicate (Spec D4, ADR 0353).
+//
+// It stamps the land-strategy snapshot too: under gitlab an Approval is AFK whether or
+// not auto-approve is on. An unusable land_strategy reads as not gitlab.
+func StampModeSnapshots() {
+	registry.SetAutoApprove(ReadAutoApprove().On)
+	name, err := git.LandStrategyName()
+	registry.SetGitlab(err == nil && name == git.LandStrategyGitlab)
+}
+
+// Mouse is the resolved [tui] mouse and where it came from, from one read.
+type Mouse struct {
+	On        bool   // the TUI captures the mouse
+	Source    string // "local" | "config.toml" | "default"
+	Unusable  string // the first layer skipped as unusable; "" if none
+	Shared    bool   // the checked-in value when Source is "local" and SharedSet
+	SharedSet bool   // a checked-in value is set under a local one (it may be false, off)
+}
+
+// MouseSetting layers [tui] mouse the way AutoApproveSetting layers auto_approve
+// (ADR 0353): local, then checked-in, then off, re-read on every call. A missing
+// table or key falls through silently; a malformed file or mistyped value warns
+// config.unusable and falls through.
+func MouseSetting(root string) Mouse {
+	l := resolve(root, readMouse, false)
+	return Mouse{On: l.v, Source: l.source, Unusable: l.unusable, Shared: l.shared, SharedSet: l.sharedSet}
+}
+
+// readMouse decodes [tui] mouse from one config file; path "" is missing. A
+// mistyped value or a non-table tui fails the decode: unusable.
+func readMouse(path string) (bool, cfglayer.State) {
+	var cfg struct {
+		TUI *struct {
+			Mouse *bool `toml:"mouse"`
+		} `toml:"tui"`
+	}
+	if state := cfglayer.Decode(path, &cfg); state != cfglayer.Set {
+		return false, state
+	}
+	if cfg.TUI == nil || cfg.TUI.Mouse == nil {
+		return false, cfglayer.Missing
+	}
+	return *cfg.TUI.Mouse, cfglayer.Set
+}
+
+// ReadMouse is the layered [tui] mouse read, a var so tests fake it. An
+// unresolved repo reads off.
+var ReadMouse = func() Mouse {
+	root, err := git.RepoRoot()
+	if err != nil {
+		return Mouse{Source: "default"}
+	}
+	return MouseSetting(root)
+}
+
+// SetLocalTheme sets the machine-local [tui] theme to *v, or deletes the key when
+// v is nil, as SetLocalMouse does for mouse.
+func SetLocalTheme(root string, v *string) error {
+	return editLocal(root, true, func(cfg map[string]any) {
+		t, ok := cfg["tui"].(map[string]any)
+		if !ok {
+			t = map[string]any{}
+		}
+		if v == nil {
+			delete(t, "theme")
+		} else {
+			t["theme"] = *v
+		}
+		if len(t) == 0 {
+			delete(cfg, "tui")
+		} else {
+			cfg["tui"] = t
+		}
+	})
+}
+
+// ThemeNames lists the TUI's color presets in the order the Settings tab cycles
+// them; the first is the built-in default. The tui package keys its palettes by
+// these names.
+var ThemeNames = []string{"dark", "light", "high-contrast"}
+
+// Theme is the resolved [tui] theme and where it came from, from one read.
+type Theme struct {
+	Name      string // the preset in force; an unknown value reads dark
+	Source    string // "local" | "config.toml" | "default"
+	Unusable  string // the first layer skipped as unusable; "" if none
+	Unknown   string // the raw value the winning layer held when it names no preset; "" if known
+	Shared    string // the checked-in preset when Source is "local" and SharedSet
+	SharedSet bool   // a checked-in value is set under a local one
+}
+
+// themeName maps a layer's raw value to its preset and the raw value when it is
+// unknown (ADR 0387 §4: an unknown value falls back to dark, not to a lower layer).
+func themeName(raw string) (name, unknown string) {
+	if slices.Contains(ThemeNames, raw) {
+		return raw, ""
+	}
+	return ThemeNames[0], raw
+}
+
+// ThemeSetting layers [tui] theme the way MouseSetting layers mouse: local, then
+// checked-in, then built-in dark, re-read on every call. A non-string value or a
+// malformed file warns config.unusable and falls through; an unknown string is
+// set and wins, reading dark.
+func ThemeSetting(root string) Theme {
+	l := resolve(root, readTheme, ThemeNames[0])
+	t := Theme{Source: l.source, Unusable: l.unusable, SharedSet: l.sharedSet}
+	t.Name, t.Unknown = themeName(l.v)
+	if l.sharedSet {
+		t.Shared, _ = themeName(l.shared)
+	}
+	return t
+}
+
+// readTheme decodes [tui] theme from one config file; path "" is missing. A
+// mistyped value or a non-table tui fails the decode: unusable.
+func readTheme(path string) (string, cfglayer.State) {
+	var cfg struct {
+		TUI *struct {
+			Theme *string `toml:"theme"`
+		} `toml:"tui"`
+	}
+	if state := cfglayer.Decode(path, &cfg); state != cfglayer.Set {
+		return "", state
+	}
+	if cfg.TUI == nil || cfg.TUI.Theme == nil {
+		return "", cfglayer.Missing
+	}
+	return *cfg.TUI.Theme, cfglayer.Set
+}
+
+// ReadTheme is the layered [tui] theme read, a var so tests fake it. An
+// unresolved repo reads dark.
+var ReadTheme = func() Theme {
+	root, err := git.RepoRoot()
+	if err != nil {
+		return Theme{Name: ThemeNames[0], Source: "default"}
+	}
+	return ThemeSetting(root)
+}

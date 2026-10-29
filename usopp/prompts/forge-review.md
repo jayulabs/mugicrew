@@ -105,7 +105,7 @@ A `<draft-key>` is any short label you pick for a bead you file; notes feeding
 the same bead share a key. A pass whose ledger misses a JUDGE note is discarded
 and retried.
 
-Offshoot work you find in the external world is a Signal, never a Task: read
+Offshoot work you find in the external world is a Signal, never an Errand: read
 crew doc signal-filing.md, discovered-from {{.ReviewID}}.
 
 ## Beads already filed from this MR

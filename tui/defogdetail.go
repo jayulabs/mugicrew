@@ -22,6 +22,7 @@ func (t defogTab) detailVP() viewport.Model {
 var leafWords = map[lstate]string{
 	sReady: "ready", sBlocked: "blocked", sPaused: "paused", sLaunching: "launching",
 	sLive: "live", sTurn: "your turn", sAsk: "needs approval", sDone: "done — /exit", sExited: "exited",
+	sUndraft: "awaiting un-draft",
 }
 
 // chartSections splits a Chart body by '## ' heading: the lines under each (blank
@@ -112,6 +113,14 @@ func (t defogTab) rowText(r dRow) string {
 	if r.kind == dMR {
 		if url := git.RecordedMRLink(b.Description); url != "" { // read through the helper only: never derived from the iid, path or host
 			field(&h, "MR link", url)
+		}
+		if r.chart.Unclosed() {
+			for _, f := range parseMRFacts(b.Description).fields() {
+				field(&h, f[0], f[1])
+			}
+		}
+		if v := g.stabilizingField(r.chart); v != "" {
+			field(&h, "stabilizing", v)
 		}
 	}
 	if b.Kind == contract.KindChart {

@@ -58,6 +58,49 @@ func TestAlive(t *testing.T) {
 	}
 }
 
+// Only effort verbs (reconcile, run) count on the mugicrew side: a read-only or
+// repair verb naming the bead is not its effort holder.
+func TestAliveEffortVerbsOnly(t *testing.T) {
+	const id = "ws-a13.4"
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"transcript", []string{"mugicrew", "transcript", id}, false},
+		{"bead-detail", []string{"mugicrew", "bead-detail", id, "--x"}, false},
+		{"recover", []string{"mugicrew", "recover", id}, false},
+		{"checkup", []string{"mugicrew", "checkup", id}, false},
+		{"stats", []string{"mugicrew", "stats", id}, false},
+		{"wrapped transcript", []string{".mugicrew-wrapped", "transcript", id}, false},
+		{"run host", []string{"mugicrew", "run", id, "--lock-fd=3"}, true},
+		{"-C then reconcile", []string{"mugicrew", "-C", "/x", "reconcile", id}, true},
+		{"-C then transcript", []string{"mugicrew", "-C", "/x", "transcript", id}, false},
+		{"-C dir named like the id", []string{"mugicrew", "-C", id, "transcript", "other"}, false},
+		{"bare -C", []string{"mugicrew", "-C"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fakeProc(t, c.argv)
+			if got := Alive([]string{id})[id]; got != c.want {
+				t.Errorf("alive = %v, want %v", got, c.want)
+			}
+			if got := len(Pids(id)) > 0; got != c.want {
+				t.Errorf("Pids found = %v, want %v", got, c.want)
+			}
+		})
+	}
+	t.Run("viewer beside reconcile", func(t *testing.T) {
+		fakeProc(t, []string{"mugicrew", "transcript", id}, []string{"mugicrew", "reconcile", id})
+		if !Alive([]string{id})[id] {
+			t.Error("want alive")
+		}
+		if got := Pids(id); !slices.Equal(got, []int{2}) {
+			t.Errorf("Pids = %v, want [2]", got)
+		}
+	})
+}
+
 // A vanished pid (no cmdline) or an unreadable one is skipped, never an error,
 // and doesn't hide the live processes beside it.
 func TestAliveSkipsVanishedAndUnreadable(t *testing.T) {

@@ -1,6 +1,6 @@
 # ADR 0333: The TUI opens a Merge Request by its recorded MR link with w, in a detached browser
 
-Status: Accepted; amends ADR 0226 (a-gitlab-landing-s-mr-iid-and-sub-state-ride-the-rollup…) §3 and its Considered Options. Amended by Spec mc-j3mw8: §1–§3 and the last Considered Option now name two Merge Requests sections, Execute's for Checkpoint MRs and Defog's for Chart MRs.
+Status: Accepted; §2's Merge-Requests-only scope for `w` superseded by ADR 0360 for Approval rows (see ADR 0382 (under-gitlab-the-un-draft…)); amends ADR 0226 (a-gitlab-landing-s-mr-iid-and-sub-state-ride-the-rollup…) §3 and its Considered Options. Amended by Spec mc-j3mw8: §1–§3 and the last Considered Option now name two Merge Requests sections, Execute's for Checkpoint MRs and Defog's for Chart MRs. Amended by Spec mc-w2a8c (Bead verbs offered wherever a bead row appears): §1–§2's w is no longer limited to the Merge Requests sections — it opens the MR link: line of any bead row that records one; the rollup and d drawers stay as they are.
 Date: 2026-10-21
 
 Spec mc-rqbew (Merge Requests section in the Execute tab, backed by MR link:

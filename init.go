@@ -15,6 +15,7 @@ import (
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/loop"
 )
 
 // Seams for the Forge: glab is never live in tests.
@@ -39,10 +40,12 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(w)
 	prefix := fs.String("prefix", "", "issue prefix (skips the prompt)")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-		fmt.Fprintln(w, "usage: mugicrew init [--prefix <p>]")
+	mouse := fs.String("mouse", "", "mouse mode on|off (skips the prompt)")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || (*mouse != "" && *mouse != "on" && *mouse != "off") {
+		fmt.Fprintln(w, "usage: mugicrew init [--prefix <p>] [--mouse on|off]")
 		return 1
 	}
+	in = bufio.NewReader(in) // one buffer for every prompt: bufio.NewReader returns it as is
 	root, err := git.RepoRoot()
 	if err != nil {
 		fmt.Fprintln(w, "mugicrew init:", err)
@@ -63,7 +66,7 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 	fresh := gerr != nil
 	if !fresh && *prefix != "" { // a half-moved store resolves too: bd init would be skipped silently
 		if got, err := initBD(root, "config", "get", "issue_prefix"); err != nil || got != *prefix {
-			fmt.Fprintf(w, "mugicrew init: a Bead Graph already resolves with issue prefix %q (read error: %v), not %q; to rebuild a half-moved store see README \"Bd store mode\": bd init --server --stealth --prefix %s, then mugicrew init\n", got, err, *prefix, *prefix)
+			fmt.Fprintf(w, "mugicrew init: a Bead Graph already resolves with issue prefix %q (read error: %v), not %q; to rebuild a half-moved store see docs/bd-store.md: bd init --server --stealth --prefix %s, then mugicrew init\n", got, err, *prefix, *prefix)
 			return 1
 		}
 	}
@@ -94,10 +97,42 @@ func runInit(args []string, in io.Reader, w io.Writer) int {
 	} else {
 		fmt.Fprintln(w, "a Bead Graph already resolves; the store was left as is")
 	}
+	if code := initMouse(root, *mouse, in, w); code != 0 {
+		return code
+	}
 	if set, _ := cfglayer.WorkspaceSetUp(root); !set {
 		fmt.Fprintln(w, "this Workspace is not set up: the first human runs mugicrew init workspace (docs/install.md#first-human-in-a-workspace)")
 	}
 	fmt.Fprintln(w, "run mugicrew doctor next")
+	return 0
+}
+
+// initMouse settles the machine-local [tui] mouse key once: --mouse writes it,
+// else a terminal is asked; with no terminal, or a key already set, it is left.
+// The flag wins over a set key; a set or unusable local key only skips the prompt.
+func initMouse(root, flagVal string, in io.Reader, w io.Writer) int {
+	cur := loop.MouseSetting(root)
+	if flagVal == "" && cur.Source == "local" {
+		return 0
+	}
+	if flagVal == "" && cur.Unusable == "local" {
+		fmt.Fprintln(w, "mugicrew init: the local [tui] mouse value is unusable; fix it or pass --mouse on|off")
+		return 0
+	}
+	on := flagVal == "on"
+	if flagVal == "" {
+		if !initIsTTY() {
+			return 0
+		}
+		fmt.Fprintln(w, "Shift-drag (Option/Alt on some terminals) selects text while mouse mode is on.")
+		fmt.Fprint(w, "Enable mouse mode? [y/N] ")
+		line, _ := bufio.NewReader(in).ReadString('\n')
+		on = strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y")
+	}
+	if err := loop.SetLocalMouse(root, &on); err != nil {
+		fmt.Fprintln(w, "mugicrew init: cannot write [tui] mouse:", err)
+		return 1
+	}
 	return 0
 }
 

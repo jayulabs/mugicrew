@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // line is a single-line text input with a movable cursor (the bubbles
@@ -64,11 +65,7 @@ func (l line) apply(msg tea.KeyMsg) line {
 // overshoots to 3 cells (… + cursor + …), clamp if tiny widths ever matter.
 func (l line) render(w int) string {
 	r := []rune(l.text)
-	n := len(r) // cells: the runes, plus the ▏ block when the cursor sits at the end
-	if l.cur >= n {
-		n++
-	}
-	w = max(w, 1)
+	lo, hi, n := l.window(w)
 	cell := func(i int) string {
 		switch {
 		case i == len(r):
@@ -77,24 +74,6 @@ func (l line) render(w int) string {
 			return cursorSty.Render(string(r[i]))
 		}
 		return string(r[i])
-	}
-	s, e := 0, n
-	if n > w {
-		s = min(max(l.cur-(w-1)/2, 0), n-w)
-		e = s + w
-	}
-	left, right := s > 0, e < n
-	lo, hi := s, e
-	if left {
-		lo++
-	}
-	if right {
-		hi--
-	}
-	if c := max(hi-lo, 1); l.cur < lo {
-		lo, hi = l.cur, l.cur+c
-	} else if l.cur >= hi {
-		lo, hi = l.cur+1-c, l.cur+1
 	}
 	var b strings.Builder
 	if lo > 0 {
@@ -109,13 +88,77 @@ func (l line) render(w int) string {
 	return b.String()
 }
 
+// window is the cells [lo, hi) render(w) draws between its … marks, out of n cells: the
+// runes, plus the ▏ block when the cursor sits at the end. Cell len(text) is that block.
+func (l line) window(w int) (lo, hi, n int) {
+	n = utf8.RuneCountInString(l.text)
+	if l.cur >= n {
+		n++
+	}
+	w = max(w, 1)
+	s, e := 0, n
+	if n > w {
+		s = min(max(l.cur-(w-1)/2, 0), n-w)
+		e = s + w
+	}
+	left, right := s > 0, e < n
+	lo, hi = s, e
+	if left {
+		lo++
+	}
+	if right {
+		hi--
+	}
+	if c := max(hi-lo, 1); l.cur < lo {
+		lo, hi = l.cur, l.cur+c
+	} else if l.cur >= hi {
+		lo, hi = l.cur+1-c, l.cur+1
+	}
+	return lo, hi, n
+}
+
+// at puts the cursor on the rune drawn in cell col of render(w), reproducing render's
+// window: a leading … maps to the first visible rune, a trailing … to the last, and a cell
+// past the text (or on the ▏ block) to the end.
+func (l line) at(col, w int) line {
+	lo, hi, n := l.window(w)
+	end := utf8.RuneCountInString(l.text)
+	if lo > 0 {
+		col--
+	}
+	i := lo + max(col, 0)
+	if i >= hi && hi < n { // on the trailing …, or beyond it
+		i = hi - 1
+	}
+	l.cur = max(min(i, end), 0)
+	return l
+}
+
 // fitHeader builds a header line w wide around the input in: the input is the part
 // that shrinks, by however far the rest of the line overflows w.
 func fitHeader(w int, in line, build func(input string) string) string {
-	full := in.render(utf8.RuneCountInString(in.text) + 1)
-	h := build(full)
-	if over := lipgloss.Width(h) - w; over > 0 {
-		h = build(in.render(max(lipgloss.Width(full)-over, 1)))
+	iw := inputWidth(w, in, build)
+	return build(in.render(iw))
+}
+
+// inputWidth is the width fitHeader gives the input.
+func inputWidth(w int, in line, build func(input string) string) int {
+	iw := utf8.RuneCountInString(in.text) + 1
+	full := in.render(iw)
+	if over := lipgloss.Width(build(full)) - w; over > 0 {
+		iw = max(lipgloss.Width(full)-over, 1)
 	}
-	return h
+	return iw
+}
+
+// inputAt moves in's cursor to the rune drawn at header column col of fitHeader(w, in, build).
+func inputAt(w, col int, in line, build func(input string) string) line {
+	iw := inputWidth(w, in, build)
+	const mark = "\uE000"
+	head := ansi.Strip(build(strings.Repeat(mark, iw)))
+	i := strings.Index(head, mark)
+	if i < 0 {
+		return in
+	}
+	return in.at(col-lipgloss.Width(head[:i]), iw)
 }

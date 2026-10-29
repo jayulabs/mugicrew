@@ -294,7 +294,7 @@ func TestDefogEnter(t *testing.T) {
 		{"paused", "paused is paused (paused:manual) — not launching"},
 		{"inh", "inh is paused by pc — not launching"},
 		{"i:ini", "space folds"},
-		{"c", "c: Chart not drained — 3/12 children closed"},
+		{"c", "c: Chart not drained"},
 		{"c/closed", "space folds"},
 	} {
 		n, cmd := send(t, defogAt(t, m, c.id), enterKey())
@@ -338,7 +338,7 @@ func TestDefogEnter(t *testing.T) {
 	}
 }
 
-// x, +/- and E take Graph's paths on bead rows; n, e, z and t stay unbound.
+// x, +/- and E take Graph's paths on bead rows; e opens the edit form.
 func TestDefogSharedKeys(t *testing.T) {
 	m, _ := defogActModel(t)
 	if n, cmd := send(t, defogAt(t, m, "turn"), runeKey("x")); cmd != nil || len(n.modals) != 1 {
@@ -347,10 +347,8 @@ func TestDefogSharedKeys(t *testing.T) {
 	if _, cmd := send(t, defogAt(t, m, "ready"), runeKey("+")); cmd == nil {
 		t.Error("+ did not start a priority write")
 	}
-	for _, k := range []string{"e", "z"} {
-		if n, cmd := send(t, defogAt(t, m, "ready"), runeKey(k)); cmd != nil || len(n.modals) != 0 || n.View() != defogAt(t, m, "ready").View() {
-			t.Errorf("%s is bound on Defog", k)
-		}
+	if n, _ := send(t, defogAt(t, m, "ready"), runeKey("e")); len(n.modals) != 1 {
+		t.Error("e did not open the edit form on Defog")
 	}
 }
 
@@ -358,16 +356,16 @@ func TestDefogSharedKeys(t *testing.T) {
 func TestDefogHints(t *testing.T) {
 	m, _ := defogActModel(t)
 	for _, c := range []struct{ id, want string }{
-		{"ready", "enter launch · b bg · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"turn", "enter attach · d detail · p pause · x drop · t transcript · +/- prio · J/K section"},
-		{"blk", "d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"paused", "d detail · p unpause · t transcript · +/- prio · J/K section"},
-		{"inh", "d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"afk", "enter run · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"c", "space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
-		{"fail", "enter retry · d detail · p pause · t transcript · +/- prio · J/K section"},
-		{"dr", "enter spec · space fold · d detail · p pause · X withdraw · t transcript · +/- prio · J/K section · r retrospective"},
-		{"i:ini", "space fold · d detail · X cancel · J/K section"},
+		{"ready", "enter launch · b bg · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"turn", "enter attach · d detail · p pause · x drop · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"blk", "d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · U unblock · J/K section"},
+		{"paused", "d detail · p unpause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"inh", "d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"afk", "enter run · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"c", "space fold · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"},
+		{"fail", "enter retry · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"dr", "enter spec · space fold · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"},
+		{"i:ini", "space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section"},
 		{"c/closed", "space fold · d detail · J/K section"},
 	} {
 		n := defogAt(t, m, c.id)
@@ -380,11 +378,11 @@ func TestDefogHints(t *testing.T) {
 		}
 	}
 	n := press(t, defogAt(t, m, "c/closed"), runeKey(" "))
-	if got := hintsOf(defogAt(t, n, "closed")); got != "d detail · t transcript · J/K section" {
+	if got := hintsOf(defogAt(t, n, "closed")); got != "d detail · t transcript · e edit · c checkup · J/K section" {
 		t.Errorf("closed child: hints %q, want d detail · t transcript · J/K section", got)
 	}
 	o := press(t, defogAt(t, m, "ready"), runeKey("d"))
-	if got := hintsOf(o); got != "enter launch · b bg · d close · pgup/pgdn scroll · p pause · t transcript · +/- prio · J/K section" {
+	if got := hintsOf(o); got != "enter launch · b bg · d close · pgup/pgdn scroll · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
 		t.Errorf("detail open: hints %q", got)
 	}
 }
@@ -514,7 +512,7 @@ func TestDefogBg(t *testing.T) {
 			t.Errorf("%s: cmd=%v modals=%d status=%q, want cmd=%v %q", c.id, cmd != nil, len(n.modals), statusOf(n), c.cmd, c.say)
 		}
 	}
-	if got := hintsOf(defogAt(t, m, "ready")); got != "enter launch · b bg · d detail · p pause · t transcript · +/- prio · J/K section" {
+	if got := hintsOf(defogAt(t, m, "ready")); got != "enter launch · b bg · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
 		t.Errorf("ready hints %q", got)
 	}
 	n := press(t, defogAt(t, m, "c/closed"), runeKey(" "))

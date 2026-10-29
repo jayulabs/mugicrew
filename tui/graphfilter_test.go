@@ -3,6 +3,7 @@ package tui
 import (
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -211,10 +212,10 @@ func TestGraphFilterSelectionFollowsBead(t *testing.T) {
 	bs := stubBeads()
 	for i := range bs {
 		if bs[i].ID == "run" {
-			bs[i].Title = "In flight task"
+			bs[i].Title = "In flight errand"
 		}
 		if bs[i].ID == "paused" {
-			bs[i].Title = "Paused task"
+			bs[i].Title = "Paused errand"
 		}
 		if bs[i].ID == "long" { // keeps a match, so there is a neighbour
 			bs[i].Title = "Long build"
@@ -460,9 +461,9 @@ func draftBeads() []bd.Bead {
 	)
 }
 
-// Drafts show only under the deferred status facet, with ancestors as context;
-// counts follow, and gates still count a Draft as open (Spec FR2, FR3, FR6, FR7, FR9, FR10).
-func TestGraphHidesDrafts(t *testing.T) {
+// The default (unclosed) view shows Drafts and their subtrees; the open facet leaves
+// them out. Header counts include Drafts, like gates (Spec FR1, FR2, FR9).
+func TestGraphShowsDrafts(t *testing.T) {
 	m := sized(t, 120, 40)
 	m, _ = send(t, m, runeKey("4")) // Graph rebuilds only while it is the tab
 	m, _ = send(t, m, loadedMsg{beads: draftBeads(), live: map[string]bool{}, sessions: map[string]session.Info{}})
@@ -474,31 +475,26 @@ func TestGraphHidesDrafts(t *testing.T) {
 		return ids
 	}
 	for _, id := range []string{"dbuild", "dch", "dsv", "dsig"} {
-		if slices.Contains(all(g), id) {
-			t.Errorf("default Graph shows Draft %s", id)
+		if !slices.Contains(all(g), id) {
+			t.Errorf("default Graph hides Draft %s", id)
 		}
 	}
-	for _, st := range []string{"unclosed", "open"} {
-		g2 := g
-		g2.q.status = st
-		if rows := all(g2.rebuild()); slices.Contains(rows, "dbuild") || slices.Contains(rows, "dsv") {
-			t.Errorf("status %s shows a Draft: %v", st, rows)
-		}
+	g2 := g
+	g2.q.status = "open"
+	if rows := all(g2.rebuild()); slices.Contains(rows, "dbuild") || slices.Contains(rows, "dsv") {
+		t.Errorf("status open shows a Draft: %v", rows)
 	}
-	if c, tot := g.childCounts("ch"); c != 0 || tot != 3 {
-		t.Errorf("childCounts(ch) = %d/%d; want 0/3", c, tot)
+	if c, tot := g.childCounts("ch"); c != 0 || tot != 4 {
+		t.Errorf("childCounts(ch) = %d/%d; want 0/4", c, tot)
 	}
-	if l, n, _ := g.initiativeProgress("ini"); l != 0 || n != 1 {
-		t.Errorf("initiative landed %d/%d; want 0/1", l, n)
+	if l, n, _ := g.initiativeProgress("ini"); l != 0 || n != 2 {
+		t.Errorf("initiative landed %d/%d; want 0/2", l, n)
 	}
-	if _, tot := g.gateChildCounts("ch"); tot != 4 {
-		t.Errorf("gate counts %d members; want 4 (Draft still open)", tot)
-	}
-	if g.total != 7 {
-		t.Errorf("total %d; want 7 published beads", g.total)
+	if g.total != 11 {
+		t.Errorf("total %d; want 11 beads, Drafts included", g.total)
 	}
 
-	g.q.status = "deferred"
+	g.q.status = "draft"
 	g = g.rebuild()
 	matches, context := shown(g.groups)
 	if !slices.Equal(matches, []string{"dbuild", "dsig", "dch", "dsv"}) {
@@ -511,8 +507,8 @@ func TestGraphHidesDrafts(t *testing.T) {
 		t.Errorf("deferred N of M matched = %d; want 4", g.matched)
 	}
 	g = g.clearOne()
-	if slices.Contains(all(g), "dsv") {
-		t.Error("clearing the facet leaves Drafts shown")
+	if !slices.Contains(all(g), "dsv") {
+		t.Error("clearing the facet hides Drafts")
 	}
 }
 
@@ -526,12 +522,26 @@ func TestInitiativeProgressCountsOnlyLandedCheckpoints(t *testing.T) {
 		{ID: "ini", Kind: contract.KindInitiative, Container: true, Status: "open", Title: "Ship v2", Created: epoch},
 		{ID: "cpa", Kind: contract.KindCheckpoint, Container: true, Status: "closed", Parent: "ini", Created: epoch},
 		{ID: "lda", Kind: contract.KindLanding, Status: "closed", CloseReason: "landed: abc123", Parent: "cpa", Closed: old, Created: epoch},
-		{ID: "cpb", Kind: contract.KindCheckpoint, Container: true, Status: "closed", CloseReason: "nothing to land: Task-only Spec", Parent: "ini", Created: epoch},
+		{ID: "cpb", Kind: contract.KindCheckpoint, Container: true, Status: "closed", CloseReason: "nothing to land: Errand-only Spec", Parent: "ini", Created: epoch},
 		{ID: "cpc", Kind: contract.KindCheckpoint, Container: true, Status: "closed", CloseReason: "obsolete: pivot", Parent: "ini", Created: epoch},
 		{ID: "cpd", Kind: contract.KindCheckpoint, Container: true, Status: "open", Title: "Live phase", Parent: "ini", Created: epoch},
 	}
 	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: map[string]session.Info{}})
 	if l, n, live := gr(m).initiativeProgress("ini"); l != 1 || n != 4 {
 		t.Errorf("initiative landed %d/%d (live %q); want 1/4", l, n, live)
+	}
+}
+
+// The picker names the Draft facet draft, not deferred, and a saved deferred loads as draft (ADR 0176 §4).
+func TestStatusPickerNamesDraft(t *testing.T) {
+	if !slices.Contains(statusItems, "draft") || slices.Contains(statusItems, "deferred") {
+		t.Errorf("statusItems %v: want draft and no deferred", statusItems)
+	}
+	p := filepath.Join(t.TempDir(), "graph-filter.json")
+	if err := os.WriteFile(p, []byte(`{"status":"deferred"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadQuery(p).status; got != "draft" {
+		t.Errorf("saved deferred loads as %q; want draft", got)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/registry"
@@ -25,9 +24,11 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/agentprofile"
+	"jayulabs.org/mugicrew/backup"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
+	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/git"
 )
@@ -73,7 +74,7 @@ func TestIsAFKLeafFencesToRegistry(t *testing.T) {
 		{contract.KindCheckpoint, false},   // registered afk container, not a leaf
 		{contract.KindLatch, true},         // Brook's in-process Jira check
 		{contract.KindRollback, true},      // Jinbe's afk leaf (ADR 0047) — the loop runs it, t triggers it
-		{contract.KindTask, false},         // HITL (brook) — only a human launches a Task (FR19)
+		{contract.KindErrand, false},       // HITL (brook) — only a human launches an Errand (FR19)
 		{contract.KindInitiative, false},   // HITL container (luffy) — inert to the loop (FR45)
 		{"", false},                        // non-mugicrew planning bead (no kind)
 	}
@@ -112,11 +113,11 @@ func TestIsActiveAFKEffort(t *testing.T) {
 // discriminates downstream. A non-chart bead (research leaf, or the sibling
 // Checkpoint container) is excluded.
 func TestIsDrainedChartCandidate(t *testing.T) {
-	charted := bd.Bead{Kind: contract.KindChart, Description: "Destination: ship it"}
+	charted := bd.Bead{Kind: contract.KindChart, Status: "open", Description: "Destination: ship it"}
 	if !IsDrainedChartCandidate(charted) {
 		t.Error("a charted, not-defogged Chart must be a drain candidate")
 	}
-	defogged := bd.Bead{Kind: contract.KindChart, Description: "Destination: ship it", Labels: []string{"chart:defogged"}}
+	defogged := bd.Bead{Kind: contract.KindChart, Status: "open", Description: "Destination: ship it", Labels: []string{"chart:defogged"}}
 	if !IsDrainedChartCandidate(defogged) {
 		t.Error("a drained defogged Chart must still be a candidate — both flows route through one path")
 	}
@@ -126,10 +127,10 @@ func TestIsDrainedChartCandidate(t *testing.T) {
 	if !IsDrainedChartCandidate(placeholder) {
 		t.Error("a published Chart with the placeholder body must be a candidate — the body gate is retired")
 	}
-	if IsDrainedChartCandidate(bd.Bead{Kind: contract.KindResearch, Description: "Destination: ship it"}) {
+	if IsDrainedChartCandidate(bd.Bead{Kind: contract.KindResearch, Status: "open", Description: "Destination: ship it"}) {
 		t.Error("a non-chart leaf kind is never a drain-chart candidate")
 	}
-	if IsDrainedChartCandidate(bd.Bead{Kind: contract.KindCheckpoint, Description: "Destination: ship it"}) {
+	if IsDrainedChartCandidate(bd.Bead{Kind: contract.KindCheckpoint, Status: "open", Description: "Destination: ship it"}) {
 		t.Error("a Checkpoint container is not a drain-chart candidate — the kind:chart guard separates them")
 	}
 }
@@ -141,7 +142,7 @@ func TestIsCheckpointCandidate(t *testing.T) {
 	if !IsCheckpointCandidate(bd.Bead{Kind: contract.KindCheckpoint}) {
 		t.Error("a Checkpoint container must be a candidate")
 	}
-	if IsCheckpointCandidate(bd.Bead{Kind: contract.KindChart, Labels: []string{"chart:defogged"}}) {
+	if IsCheckpointCandidate(bd.Bead{Kind: contract.KindChart, Status: "open", Labels: []string{"chart:defogged"}}) {
 		t.Error("a Chart is not a Checkpoint candidate")
 	}
 	if IsCheckpointCandidate(bd.Bead{Kind: contract.KindBuild}) {
@@ -149,122 +150,32 @@ func TestIsCheckpointCandidate(t *testing.T) {
 	}
 }
 
-// Drafts are the one Chart gate (ADR 0059 §3, §7): a charted Chart whose only
-// children are Drafts is not drained, so it is not a candidate — bd.OpenChildren
-// counts each child through Bead.Open, which the stub mirrors.
-func TestChartWithOnlyDraftChildrenIsNotCandidate(t *testing.T) {
-	oKids := openChildren
-	t.Cleanup(func() { openChildren = oKids })
-	kids := []bd.Bead{{ID: "k1", Kind: contract.KindResearch, Status: "deferred", Labels: []string{"drafted-by:ws-sig"}}}
-	openChildren = func(string) (int, error) {
-		n := 0
-		for _, k := range kids {
-			if k.Open() {
-				n++
-			}
-		}
-		return n, nil
+// stubLoopReads restores the live view's reads after the test and stubs them so every
+// container has one closed member, its trailer is not landed, and nothing blocks it.
+func stubLoopReads(t *testing.T) {
+	t.Helper()
+	oKids, oLanded := listChildren, landedBase
+	t.Cleanup(func() { listChildren, landedBase = oKids, oLanded })
+	listChildren = func(id string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: id + ".1", Kind: contract.KindBuild, Status: "closed", Parent: id}}, nil
 	}
-	chart := bd.Bead{ID: "ws-chart", Kind: contract.KindChart, Status: "open", Description: "Destination: ship it"}
-	got, err := (&Loop{}).candidates([]bd.Bead{chart}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("candidates = %v, want none: Draft children undrain the Chart", bd.IDs(got))
-	}
-}
-
-// A Chart whose only child is an open Survey is not a candidate, whatever its
-// body; once the Survey and every defog bead are closed, it is, and an open
-// Draft undrains it (Spec D10, FR 20-21).
-func TestChartWithAnOpenSurveyIsNotCandidate(t *testing.T) {
-	oKids, oOpen, oLanded := openChildren, openChildrenOf, landedBase
-	t.Cleanup(func() { openChildren, openChildrenOf, landedBase = oKids, oOpen, oLanded })
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
 	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	survey := bd.Bead{ID: "s1", Kind: contract.KindSurvey, Status: "open"}
-	closedSurvey := bd.Bead{ID: "s1", Kind: contract.KindSurvey, Status: "closed"}
-	cases := []struct {
-		name string
-		kids []bd.Bead
-		want bool
-	}{
-		{"only an open Survey", []bd.Bead{survey}, false},
-		{"Survey and every defog bead closed", []bd.Bead{closedSurvey, {ID: "k1", Kind: contract.KindResearch, Status: "closed"}}, true},
-		{"an open Draft", []bd.Bead{closedSurvey, {ID: "k1", Kind: contract.KindResearch, Status: "deferred", Labels: []string{"drafted-by:s1"}}}, false},
-	}
-	for _, c := range cases {
-		openChildren = func(string) (int, error) {
-			n := 0
-			for _, k := range c.kids {
-				if k.Open() {
-					n++
-				}
-			}
-			return n, nil
-		}
-		for _, body := range []string{"Destination: ship it", contract.ChartPlaceholderBody} {
-			chart := bd.Bead{ID: "ws-chart", Kind: contract.KindChart, Status: "open", Description: body}
-			got, err := (&Loop{}).candidates([]bd.Bead{chart}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if (len(got) == 1) != c.want {
-				t.Errorf("%s, body %q: candidates = %v, want candidate=%v", c.name, body, bd.IDs(got), c.want)
-			}
-		}
-	}
-}
-
-// A closed child still holding effort/<child> undrains its Chart (Spec
-// D7, FR 47): candidacy skips the Chart and waits silently, no event per tick.
-func TestChartWithAHeldChildIsNotCandidateAndLogsNothing(t *testing.T) {
-	oKids := openChildren
-	t.Cleanup(func() { openChildren = oKids })
-	evs := captureEvents(t)
-	kids := []bd.Bead{{ID: "k1", Kind: contract.KindResearch, Status: "closed"}}
-	openChildren = func(string) (int, error) {
-		open, held := bd.DrainBlockersOver(kids, map[string]bool{"k1": true})
-		return open + len(held), nil
-	}
-	chart := bd.Bead{ID: "ws-chart", Kind: contract.KindChart, Status: "open", Description: "Destination: ship it"}
-	got, err := (&Loop{}).candidates([]bd.Bead{chart}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Errorf("candidates = %v, want none: k1's effort ref undrains the Chart", bd.IDs(got))
-	}
-	if len(*evs) != 0 {
-		t.Errorf("events = %v, want none: an automated gate waits silently", eventlogtest.Names(*evs))
-	}
 }
 
 // A paused bead is out of candidacy for every candidate kind, whatever its cause,
 // and only the bead itself is read — an unpaused sibling still dispatches (ADR
 // 0055 §3).
 func TestCandidatesSkipPausedBeads(t *testing.T) {
-	oKids, oClosed, oApproved, oOpen, oLanded := openChildren, closedApprovalsOf, approvedAtHead, openChildrenOf, landedBase
-	t.Cleanup(func() {
-		openChildren, closedApprovalsOf, approvedAtHead, openChildrenOf, landedBase = oKids, oClosed, oApproved, oOpen, oLanded
-	})
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	openChildren = func(string) (int, error) { return 0, nil }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{Status: "closed", CloseReason: bd.ApprovedReason}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
+	stubLoopReads(t)
 
 	body := "Destination: ship it"
 	var ready, want []bd.Bead
 	for _, k := range []contract.Kind{contract.KindResearch, contract.KindChart, contract.KindCheckpoint} {
 		for _, cause := range []string{bd.PausedForeignHold, bd.PausedManual, bd.PausedFailing} {
-			ready = append(ready, bd.Bead{ID: string(k) + "-" + cause, Kind: k, Description: body, Labels: []string{"paused:" + cause}})
+			ready = append(ready, bd.Bead{ID: string(k) + "-" + cause, Kind: k, Status: "open", Description: body, Labels: []string{"paused:" + cause}})
 		}
-		ready = append(ready, bd.Bead{ID: string(k) + "-both", Kind: k, Description: body, Labels: []string{"paused:foreign-hold", "paused:manual"}})
-		live := bd.Bead{ID: string(k) + "-live", Kind: k, Description: body}
+		ready = append(ready, bd.Bead{ID: string(k) + "-both", Kind: k, Status: "open", Description: body, Labels: []string{"paused:foreign-hold", "paused:manual"}})
+		live := bd.Bead{ID: string(k) + "-live", Kind: k, Status: "open", Description: body}
 		ready, want = append(ready, live), append(want, live)
 	}
 	got, err := (&Loop{}).candidates(ready, nil)
@@ -281,15 +192,9 @@ func TestCandidatesSkipPausedBeads(t *testing.T) {
 // Checkpoint has no at-head Approval nor a landed trailer, and the open Surgery
 // keeps its Review from being due, so Jinbe's arm reads false.
 func TestCandidatesSkipOpenSurgeryCheckpoint(t *testing.T) {
-	stubCheckpointReady(t)
+	stubLoopReads(t)
 	surgery := bd.Bead{ID: "ws-surg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"}
-	reviewDue = func(id string, approved func(string, string) bool) (bool, error) {
-		atHead := func(body string) bool { return approved(body, "checkpoint/"+id) }
-		return bd.ReviewDueOver([]bd.Bead{surgery}, nil, nil, atHead), nil
-	}
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
+	listChildren = func(string) ([]bd.Bead, error) { return []bd.Bead{surgery}, nil }
 
 	ready := []bd.Bead{
 		{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open"},
@@ -304,18 +209,19 @@ func TestCandidatesSkipOpenSurgeryCheckpoint(t *testing.T) {
 // idle (ADR 0160); it is admitted once the Surgery closes. A Critique already in
 // progress is not in the ready frontier, so it is never re-read.
 func TestCandidatesHoldCritiqueWhileSurgeryOpen(t *testing.T) {
-	orig := openSurgeries
-	t.Cleanup(func() { openSurgeries = orig })
+	stubLoopReads(t)
 	critique := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"}
 	for _, status := range []string{"open", "in_progress"} {
-		openSurgeries = func(string) ([]bd.Bead, error) {
+		listChildren = func(string) ([]bd.Bead, error) {
 			return []bd.Bead{{ID: "ws-surg", Kind: contract.KindSurgery, Status: status}}, nil
 		}
 		if got, err := (&Loop{}).candidates([]bd.Bead{critique}, nil); err != nil || len(got) != 0 {
 			t.Errorf("%s Surgery: candidates = %v, %v; want none", status, bd.IDs(got), err)
 		}
 	}
-	openSurgeries = func(string) ([]bd.Bead, error) { return nil, nil }
+	listChildren = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-surg", Kind: contract.KindSurgery, Status: "closed"}}, nil
+	}
 	if got, err := (&Loop{}).candidates([]bd.Bead{critique}, nil); err != nil || len(got) != 1 {
 		t.Errorf("Surgery closed: candidates = %v, %v; want the Critique", bd.IDs(got), err)
 	}
@@ -329,7 +235,7 @@ func TestInitiativeIsInertToTheLoop(t *testing.T) {
 		t.Errorf("candidates = %v, %v; want none, no error", bd.IDs(got), err)
 	}
 	initiative.Status = "in_progress"
-	if n := CountInflight([]bd.Bead{initiative}); n != 0 {
+	if n := CountInflight([]bd.Bead{initiative}, nil); n != 0 {
 		t.Errorf("CountInflight = %d, want 0: an Initiative takes no pool slot", n)
 	}
 }
@@ -338,14 +244,31 @@ func TestInitiativeIsInertToTheLoop(t *testing.T) {
 // an unknown parent is an unpaused root. A test that cares stubs them.
 func TestMain(m *testing.M) {
 	StopWindow = 0 // tests send stop and force back to back; window tests set their own
+	// The tick's mode stamp must not read the machine's auto_approve or land_strategy.
+	// land_strategy is read from the cwd's repo: inside the package dir (the checkout
+	// under test) it reads local; tests that chdir into their own repo get the real read.
+	ReadAutoApprove = func() AutoApprove { return AutoApprove{Source: "default"} }
+	realStrategy := git.LandStrategyName
+	pkgDir, _ := os.Getwd()
+	git.LandStrategyName = func() (string, error) {
+		if wd, err := os.Getwd(); err == nil && wd == pkgDir || strings.HasPrefix(wd, pkgDir+string(os.PathSeparator)) {
+			return git.LandStrategyLocal, nil
+		}
+		return realStrategy()
+	}
 	pausedBeads = func() ([]bd.Bead, error) { return nil, nil }
 	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id}, nil }
-	membersDrained = func(string) (bool, error) { return true, nil } // never read a real bd or git
+	listChildren = func(string) ([]bd.Bead, error) { return nil, nil } // never read a real bd or git
+	effortRefsAcross = func() (*git.EffortSet, error) { return git.NewEffortSet(), nil }
+	headOf = func(string) (string, error) { return "", errors.New("headOf reached unstubbed") }
 	openBlockers = func(string) ([]bd.Bead, error) { return nil, nil }
 	landedBase = func(string) (string, error) {
 		return "", errors.New("landedBase reached unstubbed: it would read the real repo")
 	}
 	openBeads = func() ([]bd.Bead, error) { return nil, nil }
+	refuseLegacyTasks = func(string) error { return nil }
+	// Run starts a backup push at once: never take the repo's backup lock or reach a live bd sql-server.
+	backupSync = func(_, _ string) (backup.Outcome, error) { return backup.NoRemote, nil }
 	// Drop bd from PATH (any dir holding an entry named bd, executable or not) so an unstubbed bd call fails here as in the nix sandbox.
 	var keep []string
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
@@ -361,16 +284,9 @@ func TestMain(m *testing.M) {
 // in every arm, at any depth, reaching the paused ancestor through the known rows
 // or one show; a container's failing pause stays local.
 func TestCandidatesSkipInheritedPause(t *testing.T) {
-	oKids, oClosed, oApproved, oOpen, oShow := openChildren, closedApprovalsOf, approvedAtHead, openChildrenOf, showBead
-	t.Cleanup(func() {
-		openChildren, closedApprovalsOf, approvedAtHead, openChildrenOf, showBead = oKids, oClosed, oApproved, oOpen, oShow
-	})
-	openChildren = func(string) (int, error) { return 0, nil }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{Status: "closed", CloseReason: bd.ApprovedReason}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
+	stubLoopReads(t)
+	oShow := showBead
+	t.Cleanup(func() { showBead = oShow })
 	// ws-mid is in no set the tick holds, so the walk shows it.
 	showBead = func(id string) (bd.Bead, error) {
 		switch id {
@@ -382,9 +298,6 @@ func TestCandidatesSkipInheritedPause(t *testing.T) {
 		return bd.Bead{}, fmt.Errorf("unexpected show %s", id)
 	}
 
-	oLanded := landedBase
-	t.Cleanup(func() { landedBase = oLanded })
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
 	known := []bd.Bead{
 		{ID: "mc-paused", Kind: contract.KindChart, Labels: []string{"paused:manual"}},
 		{ID: "mc-failing", Kind: contract.KindChart, Labels: []string{"paused:failing"}},
@@ -394,14 +307,14 @@ func TestCandidatesSkipInheritedPause(t *testing.T) {
 	var ready, want []bd.Bead
 	for _, k := range []contract.Kind{contract.KindResearch, contract.KindChart, contract.KindCheckpoint} {
 		for _, parent := range []string{"mc-paused", "ws-mid"} {
-			ready = append(ready, bd.Bead{ID: string(k) + "-under-" + parent, Kind: k, Description: body, Parent: parent})
+			ready = append(ready, bd.Bead{ID: string(k) + "-under-" + parent, Kind: k, Status: "open", Description: body, Parent: parent})
 		}
-		live := bd.Bead{ID: string(k) + "-under-failing", Kind: k, Description: body, Parent: "mc-failing"}
+		live := bd.Bead{ID: string(k) + "-under-failing", Kind: k, Status: "open", Description: body, Parent: "mc-failing"}
 		ready, want = append(ready, live), append(want, live)
 	}
 	ready = append(ready,
-		bd.Bead{ID: "defog-under-initiative", Kind: contract.KindResearch, Description: body, Parent: "ws-ichart"},
-		bd.Bead{ID: "build-under-initiative", Kind: contract.KindBuild, Description: body, Parent: "ws-icp"})
+		bd.Bead{ID: "defog-under-initiative", Kind: contract.KindResearch, Status: "open", Description: body, Parent: "ws-ichart"},
+		bd.Bead{ID: "build-under-initiative", Kind: contract.KindBuild, Status: "open", Description: body, Parent: "ws-icp"})
 	got, err := (&Loop{}).candidates(ready, known)
 	if err != nil {
 		t.Fatal(err)
@@ -442,165 +355,28 @@ func TestTickFailsOnPausedListError(t *testing.T) {
 	}
 }
 
-// The Checkpoint drain-candidacy arm (FR43/FR44): ready iff a closed Approval pins
-// the current tip (approvedAtHead) OR the land trailer is already on mainline (roll-
-// forward). A stale pin (HEAD moved) with no landed trailer is NOT ready on these
-// arms; the Review arm is TestCheckpointReadyWhenReviewDue's.
-func TestCheckpointReady(t *testing.T) {
-	stubCheckpointReady(t)
-
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "in_progress"}
-	notLanded := func(string) (string, error) { return "", git.ErrNotLanded }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-
-	// Approved at head → ready.
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: cafef00d"}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
-	landedBase = notLanded
-	if ready, err := CheckpointReady(cp); err != nil || !ready {
-		t.Errorf("an approved-at-head Checkpoint must be ready, got (%v, %v)", ready, err)
-	}
-
-	// Stale approval (pin != tip), not landed → NOT ready.
-	approvedAtHead = func(string, string) bool { return false }
-	if ready, err := CheckpointReady(cp); err != nil || ready {
-		t.Errorf("a stale approval with no landed trailer must NOT be ready, got (%v, %v)", ready, err)
-	}
-
-	// No approval but the land trailer is on mainline (post-land crash) → ready to roll forward.
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
-	landedBase = func(string) (string, error) { return "landsha", nil }
-	if ready, err := CheckpointReady(cp); err != nil || !ready {
-		t.Errorf("an already-landed-but-open Checkpoint must be ready to roll forward, got (%v, %v)", ready, err)
-	}
-}
-
-// A foreign land of a Checkpoint's or Chart's trailer is a refusal, not "not landed" (ADR 0187 §4).
-func TestForeignLandRefusesReadiness(t *testing.T) {
-	stubCheckpointReady(t)
-	foreign := &git.ForeignLanding{Trailer: "Checkpoint: ws-cp", Ours: "a", Theirs: "b", Sha: "f00d"}
-	landedBase = func(string) (string, error) { return "", foreign }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	var fe *git.ForeignLanding
-	if _, err := CheckpointReady(bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint}); !errors.As(err, &fe) {
-		t.Errorf("CheckpointReady err = %v, want *ForeignLanding", err)
-	}
-	if _, err := ChartLandingHeld(bd.Bead{ID: "ws-ch", Kind: contract.KindChart}); !errors.As(err, &fe) {
-		t.Errorf("ChartLandingHeld err = %v, want *ForeignLanding", err)
-	}
-}
-
-// stubCheckpointReady restores CheckpointReady's seams after the test and stubs
-// reviewDue to "not due", so a test opts into the Review arm explicitly.
-func stubCheckpointReady(t *testing.T) {
-	t.Helper()
-	oClosed, oApproved, oLanded, oOpen, oDue, oDrained, oBlockers := closedApprovalsOf, approvedAtHead, landedBase, openChildrenOf, reviewDue, membersDrained, openBlockers
-	t.Cleanup(func() {
-		closedApprovalsOf, approvedAtHead, landedBase, openChildrenOf, reviewDue, membersDrained, openBlockers = oClosed, oApproved, oLanded, oOpen, oDue, oDrained, oBlockers
-	})
-	reviewDue = func(string, func(string, string) bool) (bool, error) { return false, nil }
-	membersDrained = func(string) (bool, error) { return true, nil }
-}
-
-// An Approval at head is no candidate while a closed member still holds
-// effort/<id> (Spec FR 28), silently (FR 47); with the ref gone it is.
-func TestCheckpointReadyApprovedWaitsOnLiveEffortRef(t *testing.T) {
-	stubCheckpointReady(t)
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: tip"}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
-	kids := []bd.Bead{{ID: "c1", Kind: contract.KindConflict, Status: "closed"}}
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open"}
-	for _, tc := range []struct {
-		efforts map[string]bool
-		want    bool
-	}{{map[string]bool{"c1": true}, false}, {nil, true}} {
-		membersDrained = func(string) (bool, error) { return bd.MembersDrainedOver(kids, tc.efforts), nil }
-		evs := captureEvents(t)
-		if ready, err := CheckpointReady(cp); err != nil || ready != tc.want {
-			t.Errorf("efforts %v: CheckpointReady = %v, %v; want %v", tc.efforts, ready, err, tc.want)
-		}
-		if len(*evs) != 0 {
-			t.Errorf("events = %v, want none: an automated gate waits silently", eventlogtest.Names(*evs))
-		}
-	}
-}
-
-// A drained Checkpoint with no Approval at head is a candidate, so Jinbe re-derives
-// the Review spawn every tick (Spec FR 30); a closed member still holding
-// effort/<id> keeps it out, silently (FR 47).
-func TestCheckpointReadyWhenReviewDue(t *testing.T) {
-	stubCheckpointReady(t)
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	kids := []bd.Bead{{ID: "b1", Kind: contract.KindBuild, Status: "closed"}}
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open"}
-	for _, tc := range []struct {
-		efforts map[string]bool
-		want    bool
-	}{{nil, true}, {map[string]bool{"b1": true}, false}} {
-		reviewDue = func(id string, approved func(string, string) bool) (bool, error) {
-			atHead := func(body string) bool { return approved(body, "checkpoint/"+id) }
-			return bd.ReviewDueOver(kids, tc.efforts, nil, atHead), nil
-		}
-		evs := captureEvents(t)
-		if ready, err := CheckpointReady(cp); err != nil || ready != tc.want {
-			t.Errorf("efforts %v: CheckpointReady = %v, %v; want %v", tc.efforts, ready, err, tc.want)
-		}
-		if len(*evs) != 0 {
-			t.Errorf("events = %v, want none: an automated gate waits silently", eventlogtest.Names(*evs))
-		}
-	}
-}
-
-// After a stale-Approval self-heal CheckpointReady sees >=2 closed
-// Approvals — the stale obsoleted one first, the real at-head one second. It must scan ALL
-// of them and stay a candidate on the at-head one; a first-match read on the stale pin
-// (approvedAtHead false) with no landed trailer would strand the land off the loop.
-func TestCheckpointReadyScansAllClosedApprovalsAfterSelfHeal(t *testing.T) {
-	stubCheckpointReady(t)
-
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "in_progress"}
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: oldpin"}, {CloseReason: bd.ApprovedReason, Description: "Commit: newtip"}}, nil
-	}
-	// Only the second (at-head) Approval's pin matches the tip.
-	approvedAtHead = func(body, _ string) bool { return body == "Commit: newtip" }
-	if ready, err := CheckpointReady(cp); err != nil || !ready {
-		t.Errorf("an at-head Approval behind a stale one must keep the Checkpoint ready, got (%v, %v)", ready, err)
-	}
-}
-
 // The land-only hold (Spec D6, FR 16): bd ready hides a blocked
 // Checkpoint and its members, so the frontier re-admits a Checkpoint whose every
-// open blocker is a Task, plus its open, otherwise-unblocked members. Any other
+// open blocker is an Errand, plus its open, otherwise-unblocked members. Any other
 // open blocker (a pivot's gate) keeps it, and its members, hidden.
-func TestReadmitTaskHeldCheckpoint(t *testing.T) {
-	task := bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "open"}
+func TestReadmitErrandHeldCheckpoint(t *testing.T) {
+	errand := bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}
 	pivot := bd.Bead{ID: "ws-pivot", Kind: contract.KindPivot, Status: "open"}
-	held := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-task", "mc-donetask"}}
+	held := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-errand", "mc-doneerrand"}}
 	build := bd.Bead{ID: "ws-cp.1", Kind: contract.KindBuild, Status: "open", Parent: "ws-cp"}
 	open := []bd.Bead{
-		task, pivot, held, build,
-		{ID: "mc-donetask", Kind: contract.KindTask, Status: "closed"},
+		errand, pivot, held, build,
+		{ID: "mc-doneerrand", Kind: contract.KindErrand, Status: "closed"},
 		{ID: "ws-cp.2", Kind: contract.KindBuild, Status: "open", Parent: "ws-cp", BlockedBy: []string{"ws-cp.1"}},
 		{ID: "ws-cp.3", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"},
 		{ID: "ws-cp.4", Kind: contract.KindBuild, Status: "deferred", Parent: "ws-cp"},
-		{ID: "ws-gated", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-task", "ws-pivot"}},
+		{ID: "ws-gated", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-errand", "ws-pivot"}},
 		{ID: "ws-gated.1", Kind: contract.KindBuild, Status: "open", Parent: "ws-gated"},
-		{ID: "ws-after", Kind: contract.KindTask, Status: "open", BlockedBy: []string{"ws-task"}},
+		{ID: "ws-after", Kind: contract.KindErrand, Status: "open", BlockedBy: []string{"ws-errand"}},
 	}
-	ready := []bd.Bead{task, pivot}
+	ready := []bd.Bead{errand, pivot}
 	got := Readmit(ready, open)
-	if want := []string{"ws-task", "ws-pivot", "ws-cp", "ws-cp.1"}; !reflect.DeepEqual(bd.IDs(got), want) {
+	if want := []string{"ws-errand", "ws-pivot", "ws-cp", "ws-cp.1"}; !reflect.DeepEqual(bd.IDs(got), want) {
 		t.Errorf("Readmit = %v, want %v", bd.IDs(got), want)
 	}
 	// Already in the frontier: no duplicate.
@@ -630,7 +406,7 @@ func TestReadmitLandOnlyHolds(t *testing.T) {
 		{"signal", []contract.Kind{contract.KindSignal}, true},
 		{"chart", []contract.Kind{contract.KindChart}, true},
 		{"spec", []contract.Kind{contract.KindSpec}, true},
-		{"task+signal", []contract.Kind{contract.KindTask, contract.KindSignal}, true},
+		{"errand+signal", []contract.Kind{contract.KindErrand, contract.KindSignal}, true},
 		{"pivot", []contract.Kind{contract.KindPivot}, false},
 		{"pivot+signal", []contract.Kind{contract.KindPivot, contract.KindSignal}, false},
 		{"unknown", []contract.Kind{contract.Kind("mystery")}, false},
@@ -651,18 +427,18 @@ func TestReadmitLandOnlyHolds(t *testing.T) {
 	}
 }
 
-// A Rollback held only on an open Task (a revert MR's HITL hold) is re-admitted so
+// A Rollback held only on an open Errand (a revert MR's HITL hold) is re-admitted so
 // Jinbe still ticks it and sees the human's merge or close; any other blocker keeps it hidden.
-func TestReadmitTaskHeldRollback(t *testing.T) {
-	task := bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "open"}
+func TestReadmitErrandHeldRollback(t *testing.T) {
+	errand := bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}
 	pivot := bd.Bead{ID: "ws-pivot", Kind: contract.KindPivot, Status: "open"}
 	open := []bd.Bead{
-		task, pivot,
-		{ID: "ws-rb", Kind: contract.KindRollback, Status: "open", BlockedBy: []string{"ws-task"}},
-		{ID: "ws-rb2", Kind: contract.KindRollback, Status: "open", BlockedBy: []string{"ws-task", "ws-pivot"}},
+		errand, pivot,
+		{ID: "ws-rb", Kind: contract.KindRollback, Status: "open", BlockedBy: []string{"ws-errand"}},
+		{ID: "ws-rb2", Kind: contract.KindRollback, Status: "open", BlockedBy: []string{"ws-errand", "ws-pivot"}},
 	}
-	got := Readmit([]bd.Bead{task, pivot}, open)
-	if want := []string{"ws-task", "ws-pivot", "ws-rb"}; !reflect.DeepEqual(bd.IDs(got), want) {
+	got := Readmit([]bd.Bead{errand, pivot}, open)
+	if want := []string{"ws-errand", "ws-pivot", "ws-rb"}; !reflect.DeepEqual(bd.IDs(got), want) {
 		t.Errorf("Readmit = %v, want %v", bd.IDs(got), want)
 	}
 }
@@ -670,17 +446,18 @@ func TestReadmitTaskHeldRollback(t *testing.T) {
 // A re-admitted Checkpoint's open members are loop candidates, and so is the
 // drained Checkpoint itself for its Review spawn (FR 16): only the land waits.
 func TestReadmittedCheckpointMembersAreCandidates(t *testing.T) {
-	stubCheckpointReady(t)
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	reviewDue = func(string, func(string, string) bool) (bool, error) { return true, nil }
+	stubLoopReads(t)
+	listChildren = func(id string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-cp.1", Kind: contract.KindBuild, Status: "closed", Parent: id}}, nil
+	}
+	oBlockers := openBlockers
+	t.Cleanup(func() { openBlockers = oBlockers })
 	openBlockers = func(string) ([]bd.Bead, error) {
-		return []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open"}}, nil
+		return []bd.Bead{{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}}, nil
 	}
 	open := []bd.Bead{
-		{ID: "ws-task", Kind: contract.KindTask, Status: "open"},
-		{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-task"}},
+		{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"},
+		{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, BlockedBy: []string{"ws-errand"}},
 		{ID: "ws-cp.1", Kind: contract.KindBuild, Status: "open", Parent: "ws-cp"},
 	}
 	got, err := (&Loop{}).candidates(Readmit(nil, open), nil)
@@ -689,73 +466,6 @@ func TestReadmittedCheckpointMembersAreCandidates(t *testing.T) {
 	}
 	if want := []string{"ws-cp", "ws-cp.1"}; !reflect.DeepEqual(bd.IDs(got), want) {
 		t.Errorf("candidates = %v, want %v", bd.IDs(got), want)
-	}
-}
-
-// The land guard (FR 14): an approved-at-head, drained Checkpoint with an open
-// blocker is not land-ready; closing the blocker makes it land-ready with no
-// extra step (FR 17).
-func TestCheckpointReadyHeldByOpenBlocker(t *testing.T) {
-	stubCheckpointReady(t)
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: cafef00d"}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	var blockers []bd.Bead
-	openBlockers = func(string) ([]bd.Bead, error) { return blockers, nil }
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open"}
-
-	blockers = []bd.Bead{{ID: "ws-task", Kind: contract.KindTask, Status: "open", Title: "Rotate the key"}}
-	if ready, err := CheckpointReady(cp); err != nil || ready {
-		t.Errorf("held by an open Task: CheckpointReady = %v, %v; want not ready", ready, err)
-	}
-	if _, held, _ := CheckpointLandHold(cp); !reflect.DeepEqual(bd.Titles(held), []string{"Rotate the key"}) {
-		t.Errorf("CheckpointLandHold held = %v, want the open blocker", bd.Titles(held))
-	}
-	blockers = nil // the Task closed
-	if ready, err := CheckpointReady(cp); err != nil || !ready {
-		t.Errorf("Task closed: CheckpointReady = %v, %v; want ready", ready, err)
-	}
-	openBlockers = func(string) ([]bd.Bead, error) { return nil, errors.New("boom") }
-	if _, err := CheckpointReady(cp); err == nil {
-		t.Error("a blocker read error must propagate, not read as unheld")
-	}
-}
-
-// An open kind:conflict or kind:critique member undrains the Checkpoint: even
-// with an approval still pinned to the tip (approvedAtHead true), a pending
-// conflict/critique means re-dispatch would busy-spin, so candidacy must exclude
-// it — restoring the undrain property the drained-Chart gate has (FR43/FR44).
-func TestCheckpointReadyExcludesOpenConflictOrCritique(t *testing.T) {
-	stubCheckpointReady(t)
-
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "in_progress"}
-	// Approved at head AND landed — the readiness arms both say "ready".
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: cafef00d"}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
-	landedBase = func(string) (string, error) { return "landsha", nil }
-
-	for _, open := range []contract.Kind{contract.KindConflict, contract.KindCritique} {
-		open := open
-		openChildrenOf = func(_ string, k contract.Kind) (int, error) {
-			if k == open {
-				return 1, nil
-			}
-			return 0, nil
-		}
-		if ready, err := CheckpointReady(cp); err != nil || ready {
-			t.Errorf("a Checkpoint with an open %s child must NOT be ready, got (%v, %v)", open, ready, err)
-		}
-	}
-
-	// The open-children read failing propagates, not silently "ready".
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, errors.New("boom") }
-	if _, err := CheckpointReady(cp); err == nil {
-		t.Error("an open-children read error must propagate")
 	}
 }
 
@@ -770,15 +480,46 @@ func TestCountInflightCountsOnlyAFK(t *testing.T) {
 		{Kind: contract.KindBuild},    // franky afk → counts
 		{Kind: contract.KindGrilling}, // hitl, nami-owned → must NOT count
 		{Kind: ""},                    // non-mugicrew → ignored
-	})
+	}, nil)
 	if got != 3 {
 		t.Errorf("afk inflight = %d, want 3 (every owner's AFK counts; HITL grilling must not take a pool slot)", got)
 	}
 }
 
+// An Orphaned claim holds no pool slot (ADR 0391); a live AFK bead (a held flock
+// with no child yet reads non-orphan) still does, and HITL still counts nothing.
+func TestCountInflightSkipsOrphans(t *testing.T) {
+	got := CountInflight([]bd.Bead{
+		{ID: "o1", Kind: contract.KindBuild},
+		{ID: "o2", Kind: contract.KindChart},
+		{ID: "live", Kind: contract.KindBuild},
+		{ID: "h", Kind: contract.KindGrilling},
+	}, map[string]bool{"o1": true, "o2": true, "live": false})
+	if got != 1 {
+		t.Errorf("inflight = %d, want 1 (orphans hold no slot, the live claim does)", got)
+	}
+}
+
+// CountOrphaned is CountInflight's complement over AFK beads; HITL counts in neither.
+func TestCountOrphanedIsCountInflightsComplement(t *testing.T) {
+	beads := []bd.Bead{
+		{ID: "o1", Kind: contract.KindBuild},
+		{ID: "o2", Kind: contract.KindChart},
+		{ID: "live", Kind: contract.KindBuild},
+		{ID: "h", Kind: contract.KindGrilling},
+	}
+	orphans := map[string]bool{"o1": true, "o2": true, "h": true}
+	if got := CountOrphaned(beads, orphans); got != 2 {
+		t.Errorf("orphaned = %d, want 2", got)
+	}
+	if got := CountInflight(beads, orphans); got != 1 {
+		t.Errorf("inflight = %d, want 1", got)
+	}
+}
+
 // The Zoro wiring proof — a registered kind:spec resolves to owner
 // "zoro" via the registry row (FR1); the tail kind:build now resolves to "franky",
-// while an unregistered kind (task) stays ownerless and is left
+// while an unregistered kind (errand) stays ownerless and is left
 // sitting. Leaf-vs-worktree dispatch moved to the dispatch package
 // (dispatch.TestRunEffortRoutesPerKind); not re-spelled here.
 func TestSpecOwnedByZoro(t *testing.T) {
@@ -796,10 +537,10 @@ func TestSpecOwnedByZoro(t *testing.T) {
 // The AFK pool (Spec FR5/FR6/FR8/FR11): picks stop once in-flight plus
 // picked reach the pool, in any mix of owners, the same owner more than once.
 func TestSelectDispatchPool(t *testing.T) {
-	r1 := bd.Bead{ID: "r1", Kind: contract.KindResearch, Parent: "ws-c1"} // nami, chart/ws-c1
-	r2 := bd.Bead{ID: "r2", Kind: contract.KindResearch, Parent: "ws-c2"} // nami, chart/ws-c2
-	r3 := bd.Bead{ID: "r3", Kind: contract.KindResearch, Parent: "ws-c3"} // nami, chart/ws-c3
-	f1 := bd.Bead{ID: "f1", Kind: contract.KindBuild, Parent: "mc-k"}     // franky, checkpoint/mc-k
+	r1 := bd.Bead{ID: "r1", Kind: contract.KindResearch, Status: "open", Parent: "ws-c1"} // nami, chart/ws-c1
+	r2 := bd.Bead{ID: "r2", Kind: contract.KindResearch, Status: "open", Parent: "ws-c2"} // nami, chart/ws-c2
+	r3 := bd.Bead{ID: "r3", Kind: contract.KindResearch, Status: "open", Parent: "ws-c3"} // nami, chart/ws-c3
+	f1 := bd.Bead{ID: "f1", Kind: contract.KindBuild, Status: "open", Parent: "mc-k"}     // franky, checkpoint/mc-k
 	ids := func(bs []bd.Bead) string { return strings.Join(bd.IDs(bs), ",") }
 	for _, c := range []struct {
 		name           string
@@ -826,13 +567,13 @@ func TestSelectDispatchPool(t *testing.T) {
 // a pool slot. Leaves never skip: each works its own effort/<id> and integrates
 // under the land lock, so siblings in one container dispatch concurrently (FR 54).
 func TestSelectDispatchSkipsHeldContainer(t *testing.T) {
-	r := bd.Bead{ID: "r", Kind: contract.KindResearch, Parent: "mc-c"}                            // nami, onto chart/mc-c
-	f1 := bd.Bead{ID: "f1", Kind: contract.KindBuild, Parent: "mc-k"}                             // franky, onto checkpoint/mc-k
-	f2 := bd.Bead{ID: "f2", Kind: contract.KindBuild, Parent: "mc-k"}                             // franky, onto checkpoint/mc-k
-	k := bd.Bead{ID: "mc-k", Kind: contract.KindCheckpoint}                                       // jinbe, lands checkpoint/mc-k
-	c := bd.Bead{ID: "mc-c", Kind: contract.KindChart}                                            // nami, charting chart/mc-c
-	cl := bd.Bead{ID: "mc-c", Kind: contract.KindChart, Labels: []string{contract.LabelDefogged}} // nami, lands chart/mc-c
-	j := bd.Bead{ID: "mc-j", Kind: contract.KindCheckpoint}                                       // jinbe, lands checkpoint/mc-j
+	r := bd.Bead{ID: "r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}                            // nami, onto chart/mc-c
+	f1 := bd.Bead{ID: "f1", Kind: contract.KindBuild, Status: "open", Parent: "mc-k"}                             // franky, onto checkpoint/mc-k
+	f2 := bd.Bead{ID: "f2", Kind: contract.KindBuild, Status: "open", Parent: "mc-k"}                             // franky, onto checkpoint/mc-k
+	k := bd.Bead{ID: "mc-k", Kind: contract.KindCheckpoint}                                                       // jinbe, lands checkpoint/mc-k
+	c := bd.Bead{ID: "mc-c", Kind: contract.KindChart}                                                            // nami, charting chart/mc-c
+	cl := bd.Bead{ID: "mc-c", Kind: contract.KindChart, Status: "open", Labels: []string{contract.LabelDefogged}} // nami, lands chart/mc-c
+	j := bd.Bead{ID: "mc-j", Kind: contract.KindCheckpoint}                                                       // jinbe, lands checkpoint/mc-j
 	ids := func(bs []bd.Bead) string { return strings.Join(bd.IDs(bs), ",") }
 	for _, tc := range []struct {
 		name           string
@@ -866,7 +607,7 @@ func TestByContainerPriority(t *testing.T) {
 		{ID: "i0", Kind: contract.KindInitiative, Priority: 0},
 	}
 	mk := func(id, parent string, p int) bd.Bead {
-		return bd.Bead{ID: id, Kind: contract.KindBuild, Parent: parent, Priority: p}
+		return bd.Bead{ID: id, Kind: contract.KindBuild, Status: "open", Parent: parent, Priority: p}
 	}
 	for _, c := range []struct {
 		name  string
@@ -890,10 +631,13 @@ func TestByContainerPriority(t *testing.T) {
 // With one free pool slot the tick dispatches a P2 slice of a P0 Checkpoint
 // ahead of a P2 slice of a P4 Checkpoint, whatever bd ready's order.
 func TestTickDispatchesHigherPriorityContainerFirst(t *testing.T) {
-	oReady, oIP, oOpen, oClaim, oRun := readyBeads, inProgressBeads, openBeads, claimBead, runEffort
+	oReady, oIP, oOpen, oClaim, oRun, oOrph, oTrees := readyBeads, inProgressBeads, openBeads, claimBead, runEffort, readOrphans, effortTrees
+	effortTrees = func() (map[string]string, bool) { return nil, true }
 	t.Cleanup(func() {
-		readyBeads, inProgressBeads, openBeads, claimBead, runEffort = oReady, oIP, oOpen, oClaim, oRun
+		effortTrees = oTrees
+		readyBeads, inProgressBeads, openBeads, claimBead, runEffort, readOrphans = oReady, oIP, oOpen, oClaim, oRun, oOrph
 	})
+	readOrphans = func([]liveness.Effort, []int) map[string]bool { return nil } // every busy claim is hosted
 	k0 := bd.Bead{ID: "k0", Kind: contract.KindCheckpoint, Status: "open", Priority: 0}
 	k4 := bd.Bead{ID: "k4", Kind: contract.KindCheckpoint, Status: "open", Priority: 4}
 	low := bd.Bead{ID: "low", Kind: contract.KindBuild, Status: "open", Parent: "k4", Priority: 2}
@@ -917,6 +661,52 @@ func TestTickDispatchesHigherPriorityContainerFirst(t *testing.T) {
 	l.wg.Wait()
 	if !slices.Equal(claimed, []string{"high"}) {
 		t.Errorf("claimed %v, want only the P0 Checkpoint's slice", claimed)
+	}
+}
+
+// A dead loop's claims stop holding pool slots: with the whole pool in_progress
+// but orphaned, the tick fills every slot, and writes nothing for the orphans.
+func TestTickFillsSlotsOrphansFree(t *testing.T) {
+	oReady, oIP, oOpen, oClaim, oRun, oOrph, oTrees := readyBeads, inProgressBeads, openBeads, claimBead, runEffort, readOrphans, effortTrees
+	effortTrees = func() (map[string]string, bool) { return nil, true }
+	t.Cleanup(func() {
+		effortTrees = oTrees
+		readyBeads, inProgressBeads, openBeads, claimBead, runEffort, readOrphans = oReady, oIP, oOpen, oClaim, oRun, oOrph
+	})
+	k := bd.Bead{ID: "k", Kind: contract.KindCheckpoint, Status: "open"}
+	var busy, cands []bd.Bead
+	orphaned := map[string]bool{}
+	for i := range Pool(".") {
+		id := fmt.Sprintf("dead%d", i)
+		busy = append(busy, bd.Bead{ID: id, Kind: contract.KindBuild, Status: "in_progress", Parent: "kx"})
+		orphaned[id] = true
+		cands = append(cands, bd.Bead{ID: fmt.Sprintf("new%d", i), Kind: contract.KindBuild, Status: "open", Parent: "k"})
+	}
+	reads := 0
+	readOrphans = func([]liveness.Effort, []int) map[string]bool { reads++; return orphaned }
+	readyBeads = func() ([]bd.Bead, error) { return cands, nil }
+	openBeads = func() ([]bd.Bead, error) { return append([]bd.Bead{k}, cands...), nil }
+	inProgressBeads = func() ([]bd.Bead, error) { return busy, nil }
+	var claimed []string
+	claimBead = func(b bd.Bead) (*liveness.Hold, error) {
+		claimed = append(claimed, b.ID)
+		return nil, errors.New("stop")
+	}
+	l := &Loop{Crew: map[string]contract.Crewmate{"franky": nil}}
+	if err := l.tick(); err != nil {
+		t.Fatal(err)
+	}
+	l.wg.Wait()
+	if len(claimed) != len(cands) {
+		t.Errorf("claimed %v, want all %d slots the orphans free", claimed, len(cands))
+	}
+	if reads != 1 {
+		t.Errorf("orphan reading ran %d times, want once per tick", reads)
+	}
+	for _, b := range busy {
+		if len(b.Labels) != 0 || b.Status != "in_progress" {
+			t.Errorf("orphan %s was touched: %+v", b.ID, b)
+		}
 	}
 }
 
@@ -957,8 +747,8 @@ func TestLoopPassesLiveAFKReader(t *testing.T) {
 	})
 	readyBeads = func() ([]bd.Bead, error) {
 		return []bd.Bead{
-			{ID: "p", Kind: contract.KindChartConflict, Parent: "mc-c", Labels: []string{"paused:" + bd.PausedForeignHold}},
-			{ID: "r", Kind: contract.KindChartConflict, Parent: "mc-c"},
+			{ID: "p", Kind: contract.KindChartConflict, Status: "open", Parent: "mc-c", Labels: []string{"paused:" + bd.PausedForeignHold}},
+			{ID: "r", Kind: contract.KindChartConflict, Status: "open", Parent: "mc-c"},
 		}, nil
 	}
 	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
@@ -1018,7 +808,7 @@ func TestTickFailureIsAnEvent(t *testing.T) {
 // A bead whose owner has no crewmate is loop.no_owner at Warn, and nothing is claimed.
 func TestNoOwnerIsAnEvent(t *testing.T) {
 	evs := captureEvents(t)
-	(&Loop{Crew: map[string]contract.Crewmate{}}).dispatch(bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Parent: "mc-c"})
+	(&Loop{Crew: map[string]contract.Crewmate{}}).dispatch(bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"})
 	if len(*evs) != 1 || (*evs)[0].Name != "loop.no_owner" || (*evs)[0].Level != slog.LevelWarn || (*evs)[0].Attrs["bead"] != "mc-r" {
 		t.Errorf("events = %+v, want one Warn loop.no_owner for mc-r", *evs)
 	}
@@ -1036,7 +826,7 @@ func (idleCrew) Launch(contract.Ctx, contract.Bead) (contract.LaunchCommand, err
 func TestClaimFailureIsAnEvent(t *testing.T) {
 	evs := captureEvents(t)
 	noBD(t)
-	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Parent: "mc-c"}
+	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}
 	(&Loop{Crew: map[string]contract.Crewmate{ownerOf(b): idleCrew{}}}).dispatch(b)
 	if len(*evs) != 1 || (*evs)[0].Name != "claim.failed" || (*evs)[0].Level != slog.LevelError ||
 		(*evs)[0].Attrs["by"] != ownerOf(b) || (*evs)[0].Attrs["err"] == "" {
@@ -1074,7 +864,7 @@ func blockingLoop(t *testing.T) (l *Loop, b bd.Bead, started chan string, releas
 	})
 	pauseBead = func(string, string) error { return nil } // a force stop's abandon pause never reaches a live bd
 	git.RepoRoot = func() (string, error) { return cwd, nil }
-	b = bd.Bead{ID: "mc-r", Title: "Research: r", Kind: contract.KindResearch, Parent: "mc-c"}
+	b = bd.Bead{ID: "mc-r", Title: "Research: r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}
 	ticks = &atomic.Int32{}
 	readyBeads = func() ([]bd.Bead, error) {
 		if ticks.Add(1) == 1 {
@@ -1233,7 +1023,7 @@ func TestStopMidTickClaimsNoMore(t *testing.T) {
 	captureEvents(t)
 	l, b, _, release, _ := blockingLoop(t)
 	defer close(release)
-	build := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "mc-k"}
+	build := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Status: "open", Parent: "mc-k"}
 	l.Crew[ownerOf(build)] = idleCrew{}
 	first := true
 	readyBeads = func() ([]bd.Bead, error) {
@@ -1270,7 +1060,7 @@ func holdLoop(t *testing.T, cuts ...dispatch.Cut) (l *Loop, b bd.Bead, pauses *[
 	t.Helper()
 	oClaim, oRun, oPause := claimBead, runEffort, pauseBead
 	t.Cleanup(func() { claimBead, runEffort, pauseBead = oClaim, oRun, oPause })
-	b = bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Parent: "mc-c"}
+	b = bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}
 	claimBead = func(bd.Bead) (*liveness.Hold, error) { return nil, nil }
 	i := 0
 	runEffort = func(contract.Ctx, contract.Crewmate, bd.Bead, io.Writer, string, dispatch.InflightFunc) (dispatch.Outcome, error) {
@@ -1443,6 +1233,19 @@ func TestThreeFailedLatchChecksPause(t *testing.T) {
 	}
 }
 
+// A latch check that paused itself unmet returned nil (stepOK), so it resets the
+// failing tally rather than adding to it: two failures, an unmet check, two more
+// failures write no paused:failing.
+func TestUnmetLatchCheckResetsFailingCount(t *testing.T) {
+	l, b, pauses := failLoop(t, stepFailed, stepFailed, stepOK, stepFailed, stepFailed)
+	b.Kind = contract.KindLatch
+	l.Crew = map[string]contract.Crewmate{ownerOf(b): idleCrew{}}
+	play(l, b, 5)
+	if len(*pauses) != 0 {
+		t.Fatalf("pauses = %q, want none", *pauses)
+	}
+}
+
 // A clean return resets the failure count; busy and held skips (even ones whose
 // unclaim errored) neither add nor reset, so a held/failed alternation pauses on
 // the 3rd failure (ADR 0078 §2).
@@ -1585,7 +1388,7 @@ func TestUnrunnableProfilePausesBeforeClaim(t *testing.T) {
 	evs := captureEvents(t)
 	oClaim, oRun, oPause := claimBead, runEffort, pauseBead
 	t.Cleanup(func() { claimBead, runEffort, pauseBead = oClaim, oRun, oPause })
-	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Parent: "mc-c"}
+	b := bd.Bead{ID: "mc-r", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}
 	claimBead = func(bd.Bead) (*liveness.Hold, error) { t.Error("claimed an unrunnable bead"); return nil, nil }
 	runEffort = func(contract.Ctx, contract.Crewmate, bd.Bead, io.Writer, string, dispatch.InflightFunc) (dispatch.Outcome, error) {
 		t.Error("ran an effort on an unrunnable profile")
@@ -1621,7 +1424,7 @@ func TestAutoClearProfile(t *testing.T) {
 	oReady, oIP, oClaim, oUn := readyBeads, inProgressBeads, claimBead, unpauseBead
 	t.Cleanup(func() { readyBeads, inProgressBeads, claimBead, unpauseBead = oReady, oIP, oClaim, oUn })
 	paused := func(id string, k contract.Kind, causes ...string) bd.Bead {
-		b := bd.Bead{ID: id, Kind: k, Parent: "mc-c"}
+		b := bd.Bead{ID: id, Kind: k, Status: "open", Parent: "mc-c"}
 		for _, c := range causes {
 			b.Labels = append(b.Labels, "paused:"+c)
 		}
@@ -2229,58 +2032,6 @@ func TestTickFailsOnGateTargetError(t *testing.T) {
 	}
 }
 
-// An open Landing holds its approved Checkpoint so it isn't re-dispatched every
-// tick, but the trailer on mainline still readies it for the roll-forward backstop.
-func TestCheckpointLandHoldsOnOpenLanding(t *testing.T) {
-	stubCheckpointReady(t)
-	openChildrenOf = func(_ string, k contract.Kind) (int, error) {
-		if k == contract.KindLanding {
-			return 1, nil
-		}
-		return 0, nil
-	}
-	closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{CloseReason: bd.ApprovedReason, Description: "Commit: cafef00d"}}, nil
-	}
-	approvedAtHead = func(string, string) bool { return true }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	openBlockers = func(string) ([]bd.Bead, error) { return nil, nil }
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open"}
-
-	if ready, err := CheckpointReady(cp); err != nil || ready {
-		t.Errorf("open Landing: CheckpointReady = %v, %v; want held", ready, err)
-	}
-	landedBase = func(string) (string, error) { return "landsha", nil }
-	if ready, err := CheckpointReady(cp); err != nil || !ready {
-		t.Errorf("trailer on mainline: CheckpointReady = %v, %v; want ready", ready, err)
-	}
-}
-
-// A drained Chart with an open Landing and no trailer on mainline is not a
-// candidate; with the trailer on mainline it stays one, so its reconcile backstops
-// a stranded Landing.
-func TestChartCandidacyHoldsOnOpenLanding(t *testing.T) {
-	oKids, oOpen, oLanded := openChildren, openChildrenOf, landedBase
-	t.Cleanup(func() { openChildren, openChildrenOf, landedBase = oKids, oOpen, oLanded })
-	openChildren = func(string) (int, error) { return 0, nil }
-	openChildrenOf = func(_ string, k contract.Kind) (int, error) {
-		if k == contract.KindLanding {
-			return 1, nil
-		}
-		return 0, nil
-	}
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	chart := bd.Bead{ID: "ws-chart", Kind: contract.KindChart, Status: "open", Description: "Destination: ship it"}
-
-	if got, err := (&Loop{}).candidates([]bd.Bead{chart}, nil); err != nil || len(got) != 0 {
-		t.Errorf("open Landing: candidates = %v, %v; want held", got, err)
-	}
-	landedBase = func(string) (string, error) { return "landsha", nil }
-	if got, err := (&Loop{}).candidates([]bd.Bead{chart}, nil); err != nil || len(got) != 1 {
-		t.Errorf("trailer on mainline: candidates = %v, %v; want ready", got, err)
-	}
-}
-
 // The loop holds the effort's lock from claim until its goroutine is done: the
 // bead reads alive while the effort runs and dead once the loop has drained (ADR 0154).
 func TestDispatchHoldsEffortLockUntilGoroutineEnds(t *testing.T) {
@@ -2407,7 +2158,7 @@ func TestLimitedEffortHoldsDispatchUntilReset(t *testing.T) {
 	clock := t0
 	now = func() time.Time { return clock }
 	freed := bd.Bead{ID: "free", Kind: contract.KindChartConflict, Parent: "mc-c", Labels: []string{"paused:" + bd.PausedForeignHold}}
-	work := bd.Bead{ID: "r", Kind: contract.KindChartConflict, Parent: "mc-c"}
+	work := bd.Bead{ID: "r", Kind: contract.KindChartConflict, Status: "open", Parent: "mc-c"}
 	readyBeads = func() ([]bd.Bead, error) { return []bd.Bead{freed, work}, nil }
 	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
 	claimBead = func(bd.Bead) (*liveness.Hold, error) { return nil, nil }
@@ -2483,8 +2234,8 @@ func TestLimitedHoldDispatchesOnlyMechanicalCandidates(t *testing.T) {
 	t.Cleanup(func() { readyBeads, inProgressBeads, claimBead, runEffort, now = oReady, oIP, oClaim, oRun, oNow })
 	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	now = func() time.Time { return t0 }
-	landing := bd.Bead{ID: "land", Kind: contract.KindLanding, Parent: "mc-c"}
-	build := bd.Bead{ID: "build", Kind: contract.KindBuild, Parent: "mc-c"}
+	landing := bd.Bead{ID: "land", Kind: contract.KindLanding, Status: "open", Parent: "mc-c"}
+	build := bd.Bead{ID: "build", Kind: contract.KindBuild, Status: "open", Parent: "mc-c"}
 	readyBeads = func() ([]bd.Bead, error) { return []bd.Bead{landing, build}, nil }
 	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
 	claimBead = func(bd.Bead) (*liveness.Hold, error) { return nil, nil }
@@ -2517,7 +2268,7 @@ func TestEarlyResumeCostsAtMostOnePoolOfLimitedEfforts(t *testing.T) {
 	now = func() time.Time { return clock }
 	var cands []bd.Bead
 	for i := range Pool(".") + 2 {
-		cands = append(cands, bd.Bead{ID: fmt.Sprintf("r%d", i), Kind: contract.KindChartConflict, Parent: fmt.Sprintf("mc-c%d", i)})
+		cands = append(cands, bd.Bead{ID: fmt.Sprintf("r%d", i), Kind: contract.KindChartConflict, Status: "open", Parent: fmt.Sprintf("mc-c%d", i)})
 	}
 	readyBeads = func() ([]bd.Bead, error) { return slices.Clone(cands), nil }
 	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
@@ -2655,14 +2406,17 @@ func TestTickEffortsReadOncePerTick(t *testing.T) {
 	orig := effortRefsAcross
 	t.Cleanup(func() { effortRefsAcross = orig; effortSet.Store(nil) })
 	reads := 0
-	effortRefsAcross = func() (map[string]bool, error) { reads++; return map[string]bool{"b1": true}, nil }
+	effortRefsAcross = func() (*git.EffortSet, error) {
+		reads++
+		return &git.EffortSet{Branches: map[string]bool{"b1": true}}, nil
+	}
 	effortSet.Store(nil)
 	if tickEfforts() != nil {
 		t.Error("tickEfforts outside a tick = non-nil, want nil (the gates read for themselves)")
 	}
 	effortSet.Store(memoEfforts(effortRefsAcross))
 	for range 3 {
-		if !tickEfforts()["b1"] {
+		if !tickEfforts().Branches["b1"] {
 			t.Fatal("tickEfforts missing b1")
 		}
 	}
@@ -2672,10 +2426,11 @@ func TestTickEffortsReadOncePerTick(t *testing.T) {
 }
 
 // A nested Chart or Checkpoint whose trailer is on the child's main (not the
-// Workspace's) reads as landed: its drained-Chart hold and CheckpointReady look at the
+// Workspace's) reads as landed: its Landed read and verdict look at the
 // child, so a landed nested Chart never re-spawns Landings (Spec FR 35).
 func TestLandedNestedContainerIsSeenInTheChild(t *testing.T) {
-	stubCheckpointReady(t)
+	oLanded := landedBase
+	t.Cleanup(func() { landedBase = oLanded })
 	ws := t.TempDir()
 	g := func(dir string, args ...string) {
 		t.Helper()
@@ -2698,46 +2453,42 @@ func TestLandedNestedContainerIsSeenInTheChild(t *testing.T) {
 	landedBase = func(string) (string, error) {
 		return "", fmt.Errorf("not on the Workspace's main: %w", git.ErrNotLanded)
 	}
-	openChildrenOf = func(_ string, k contract.Kind) (int, error) { // an open Landing, no conflict or critique
-		if k == contract.KindLanding {
-			return 1, nil
-		}
-		return 0, nil
+	oKids := listChildren
+	t.Cleanup(func() { listChildren = oKids })
+	listChildren = func(id string) ([]bd.Bead, error) { // an open Landing, no conflict or critique
+		return []bd.Bead{{ID: "ld", Kind: contract.KindLanding, Status: "open", Parent: id}}, nil
 	}
 	labels := []string{"context:child"}
 
-	chart := bd.Bead{ID: "ch1", Kind: contract.KindChart, Labels: labels}
-	if held, err := ChartLandingHeld(chart); err != nil || held {
-		t.Errorf("landed nested Chart: held = (%v, %v), want not held", held, err)
+	chart := bd.Bead{ID: "ch1", Kind: contract.KindChart, Status: "open", Labels: labels}
+	if v, err := Judge(chart, ModeLoop, []bd.Bead{chart}, Inputs{}, newLive(nil)); err != nil || v.Cause == CauseLandingOpen {
+		t.Errorf("landed nested Chart: verdict = (%+v, %v), want not landing-open", v, err)
 	}
-	cp := bd.Bead{ID: "cp1", Kind: contract.KindCheckpoint, Labels: labels}
-	if ready, _, err := CheckpointLandHold(cp); err != nil || !ready {
-		t.Errorf("landed nested Checkpoint: ready = (%v, %v)", ready, err)
+	cp := bd.Bead{ID: "cp1", Kind: contract.KindCheckpoint, Status: "open", Labels: labels}
+	if v, err := Judge(cp, ModeLoop, []bd.Bead{cp}, Inputs{}, newLive(nil)); err != nil || !v.Runnable {
+		t.Errorf("landed nested Checkpoint: verdict = (%+v, %v)", v, err)
 	}
 	// the same ids, unlabelled, are not seen: the Workspace's main has no trailer
-	if held, _ := ChartLandingHeld(bd.Bead{ID: "ch1", Kind: contract.KindChart}); !held {
-		t.Error("an unlabelled Chart read the child")
+	bare := bd.Bead{ID: "ch1", Kind: contract.KindChart, Status: "open"}
+	if v, _ := Judge(bare, ModeLoop, []bd.Bead{bare}, Inputs{}, newLive(nil)); v.Cause != CauseLandingOpen {
+		t.Errorf("an unlabelled Chart read the child: verdict = %+v", v)
 	}
 }
 
 // One container whose trailer another Bead Graph landed is skipped, not a tick failure:
 // the other ready bead is still a candidate (FR 42, ADR 0187).
 func TestCandidatesSkipForeignLandedContainer(t *testing.T) {
-	stubCheckpointReady(t)
+	stubLoopReads(t)
 	foreign := &git.ForeignLanding{Trailer: "Checkpoint: ws-cp", Ours: "a", Theirs: "b", Sha: "f00d"}
 	landedBase = func(string) (string, error) { return "", foreign }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	oKids := openChildren
-	t.Cleanup(func() { openChildren = oKids })
-	openChildren = func(string) (int, error) { return 0, nil }
 	body := "Destination: ship it"
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Description: body}
-	chart := bd.Bead{ID: "ws-ch", Kind: contract.KindChart, Description: body}
-	other := bd.Bead{ID: "ws-other", Kind: contract.KindResearch, Description: body}
-	oTask := bd.SpawnBlockingTask
-	t.Cleanup(func() { bd.SpawnBlockingTask = oTask })
+	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Description: body}
+	chart := bd.Bead{ID: "ws-ch", Kind: contract.KindChart, Status: "open", Description: body}
+	other := bd.Bead{ID: "ws-other", Kind: contract.KindResearch, Status: "open", Description: body}
+	oErrand := bd.SpawnBlockingErrand
+	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
 	var held []string
-	bd.SpawnBlockingTask = func(container, key, _, _ string) (string, bool, error) {
+	bd.SpawnBlockingErrand = func(container, key, _, _ string) (string, bool, error) {
 		held = append(held, container+" "+strings.TrimSpace(key))
 		return "t", true, nil
 	}
@@ -2746,29 +2497,25 @@ func TestCandidatesSkipForeignLandedContainer(t *testing.T) {
 		t.Fatalf("candidates err = %v, want the foreign land skipped", err)
 	}
 	if want := []string{"ws-cp Foreign: f00d", "ws-ch Foreign: f00d"}; !reflect.DeepEqual(held, want) {
-		t.Errorf("hold Tasks = %v, want %v", held, want)
+		t.Errorf("hold Errands = %v, want %v", held, want)
 	}
 	if want := []string{"ws-other"}; !reflect.DeepEqual(bd.IDs(got), want) {
 		t.Errorf("candidates = %v, want %v", bd.IDs(got), want)
 	}
 }
 
-// A failing hold Task is not a skip: the tick fails rather than losing the refusal.
-func TestCandidatesForeignHoldTaskErrorFailsTick(t *testing.T) {
-	stubCheckpointReady(t)
+// A failing hold Errand is not a skip: the tick fails rather than losing the refusal.
+func TestCandidatesForeignHoldErrandErrorFailsTick(t *testing.T) {
+	stubLoopReads(t)
 	foreign := &git.ForeignLanding{Trailer: "Checkpoint: ws-cp", Ours: "a", Theirs: "b", Sha: "f00d"}
 	landedBase = func(string) (string, error) { return "", foreign }
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	oKids := openChildren
-	t.Cleanup(func() { openChildren = oKids })
-	openChildren = func(string) (int, error) { return 0, nil }
-	oTask := bd.SpawnBlockingTask
-	t.Cleanup(func() { bd.SpawnBlockingTask = oTask })
+	oErrand := bd.SpawnBlockingErrand
+	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
 	boom := errors.New("bd down")
-	bd.SpawnBlockingTask = func(_, _, _, _ string) (string, bool, error) { return "", false, boom }
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Description: "Destination: ship it"}
+	bd.SpawnBlockingErrand = func(_, _, _, _ string) (string, bool, error) { return "", false, boom }
+	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Description: "Destination: ship it"}
 	if _, err := (&Loop{}).candidates([]bd.Bead{cp}, nil); !errors.Is(err, boom) {
-		t.Errorf("candidates err = %v, want the Task-filing error", err)
+		t.Errorf("candidates err = %v, want the Errand-filing error", err)
 	}
 }
 
@@ -2797,37 +2544,6 @@ func TestStopWindowDebouncesDuplicate(t *testing.T) {
 	close(release)
 }
 
-// Only an Approval closed exactly "approved" at the tip makes a Checkpoint land-ready
-// (ADR 0203 §5); rework, obsoleted and empty closes land nothing.
-func TestCheckpointReadyCountsOnlyApprovedClose(t *testing.T) {
-	stubCheckpointReady(t)
-	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "in_progress"}
-	openChildrenOf = func(string, contract.Kind) (int, error) { return 0, nil }
-	landedBase = func(string) (string, error) { return "", git.ErrNotLanded }
-	approvedAtHead = func(string, string) bool { return true }
-	membersDrained = func(string) (bool, error) { return true, nil }
-	openBlockers = func(string) ([]bd.Bead, error) { return nil, nil }
-	reviewDue = func(string, func(string, string) bool) (bool, error) { return false, nil }
-	for _, tc := range []struct {
-		reason string
-		want   bool
-	}{
-		{"approved", true},
-		{"rework: mc-1, mc-2", false},
-		{"Approval obsoleted: tip moved", false},
-		{"obsolete: x", false},
-		{"Approved", false},
-		{"", false},
-	} {
-		closedApprovalsOf = func(string, contract.Kind) ([]bd.Bead, error) {
-			return []bd.Bead{{Status: "closed", CloseReason: tc.reason, Description: "Commit: tip"}}, nil
-		}
-		if ready, _, err := CheckpointLandHold(cp); err != nil || ready != tc.want {
-			t.Errorf("close reason %q: ready = %v, %v; want %v", tc.reason, ready, err, tc.want)
-		}
-	}
-}
-
 // A latch is a candidate only when due: unstamped, or last checked over JiraPoll
 // ago. Non-latch AFK leaves ignore the stamps (Spec mc-8ymw.9 D5).
 func TestCandidatesLatchDueOnlyAfterInterval(t *testing.T) {
@@ -2843,10 +2559,10 @@ func TestCandidatesLatchDueOnlyAfterInterval(t *testing.T) {
 		"gone":  t0, // no longer ready
 	}
 	ready := []bd.Bead{
-		{ID: "new", Kind: contract.KindLatch},
-		{ID: "fresh", Kind: contract.KindLatch},
-		{ID: "stale", Kind: contract.KindLatch},
-		{ID: "build", Kind: contract.KindLanding, Parent: "mc-c"},
+		{ID: "new", Kind: contract.KindLatch, Status: "open"},
+		{ID: "fresh", Kind: contract.KindLatch, Status: "open"},
+		{ID: "stale", Kind: contract.KindLatch, Status: "open"},
+		{ID: "build", Kind: contract.KindLanding, Status: "open", Parent: "mc-c"},
 	}
 	got, err := l.candidates(ready, nil)
 	if err != nil {
@@ -2908,7 +2624,7 @@ func TestLatchNotDueUsesWatchedSystemInterval(t *testing.T) {
 		{"unparseable uses jira", "junk", 10 * time.Minute, true},
 	} {
 		l.checked = map[string]time.Time{"x": t0.Add(-tc.age)}
-		b := bd.Bead{ID: "x", Kind: contract.KindLatch, Description: tc.body}
+		b := bd.Bead{ID: "x", Kind: contract.KindLatch, Status: "open", Description: tc.body}
 		if got := l.paceNotDue(b); got != tc.want {
 			t.Errorf("%s: paceNotDue = %v, want %v", tc.name, got, tc.want)
 		}
@@ -2923,7 +2639,7 @@ func TestMRWatchPacedOnLandingPoll(t *testing.T) {
 	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	now = func() time.Time { return t0 }
 	l := &Loop{JiraPoll: 15 * time.Minute, GitlabPoll: 2 * time.Minute, LandingPoll: time.Minute}
-	b := bd.Bead{ID: "w", Kind: contract.KindMRWatch, Parent: "mc-c"}
+	b := bd.Bead{ID: "w", Kind: contract.KindMRWatch, Status: "open", Parent: "mc-c"}
 	for _, tc := range []struct {
 		name string
 		age  time.Duration
@@ -3149,7 +2865,7 @@ func TestCancelThenStopThenForce(t *testing.T) {
 	captureEvents(t)
 	l, _, started, release, _ := blockingLoop(t)
 	defer close(release)
-	b2 := bd.Bead{ID: "mc-r2", Title: "Research: r2", Kind: contract.KindResearch, Parent: "mc-c"}
+	b2 := bd.Bead{ID: "mc-r2", Title: "Research: r2", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"}
 	var resumed atomic.Bool
 	first := readyBeads
 	readyBeads = func() ([]bd.Bead, error) {
@@ -3530,8 +3246,8 @@ func TestLandingPacingLeavesOtherKinds(t *testing.T) {
 		"res":   t0,
 	}
 	got := dispatched(t, l,
-		bd.Bead{ID: "latch", Kind: contract.KindLatch},
-		bd.Bead{ID: "res", Kind: contract.KindResearch, Parent: "mc-c"},
+		bd.Bead{ID: "latch", Kind: contract.KindLatch, Status: "open"},
+		bd.Bead{ID: "res", Kind: contract.KindResearch, Status: "open", Parent: "mc-c"},
 	)
 	if want := []string{"latch", "res"}; !slices.Equal(got, want) {
 		t.Errorf("candidates = %v, want %v", got, want)
@@ -3541,8 +3257,8 @@ func TestLandingPacingLeavesOtherKinds(t *testing.T) {
 func stubAutoApprove(t *testing.T, on *bool) {
 	t.Helper()
 	o := ReadAutoApprove
-	t.Cleanup(func() { ReadAutoApprove = o; registry.ResetAutoApprove() })
-	ReadAutoApprove = func() cfglayer.Approvals { return cfglayer.Approvals{AutoApprove: *on} }
+	t.Cleanup(func() { ReadAutoApprove = o; registry.ResetModeSnapshots() })
+	ReadAutoApprove = func() AutoApprove { return AutoApprove{On: *on} }
 }
 
 // An open Approval is a loop candidate only while the tick's auto-approve stamp is
@@ -3593,18 +3309,426 @@ func TestCountInflightCountsClaimedApprovalOnlyWhileAutoApproveIsOn(t *testing.T
 	stubAutoApprove(t, &on)
 	claimed := bd.Bead{Kind: contract.KindApproval, Status: "in_progress"}
 	registry.SetAutoApprove(false)
-	if n := CountInflight([]bd.Bead{claimed}); n != 0 {
+	if n := CountInflight([]bd.Bead{claimed}, nil); n != 0 {
 		t.Errorf("off: CountInflight = %d, want 0 (a HITL Approval takes no slot)", n)
 	}
 	registry.SetAutoApprove(true)
-	if n := CountInflight([]bd.Bead{claimed}); n != 1 {
+	if n := CountInflight([]bd.Bead{claimed}, nil); n != 1 {
 		t.Errorf("on: CountInflight = %d, want 1", n)
 	}
 	if !IsActiveAFKEffort(claimed) {
 		t.Error("on: a claimed Approval should be an active AFK effort")
 	}
 	claimed.Labels = []string{registry.AutoApproveFailedLabel}
-	if n := CountInflight([]bd.Bead{claimed}); n != 0 || IsAFKLeaf(claimed) {
+	if n := CountInflight([]bd.Bead{claimed}, nil); n != 0 || IsAFKLeaf(claimed) {
 		t.Errorf("marked: CountInflight = %d, IsAFKLeaf = %v; want 0, false", n, IsAFKLeaf(claimed))
+	}
+}
+
+// Run refuses to start while any kind:task bead remains, naming mugicrew doctor fix,
+// and takes no work: no tick reads the graph (ADR 0355).
+func TestRunRefusesLegacyTaskBeads(t *testing.T) {
+	orig := refuseLegacyTasks
+	t.Cleanup(func() { refuseLegacyTasks = orig })
+	refuseLegacyTasks = func(string) error { return errors.New("2 bead(s) still labelled kind:task: run `mugicrew doctor fix`") }
+	l, _, _, _, ticks := blockingLoop(t)
+	errc, states := run(l, make(chan os.Signal, 1))
+	err := <-errc
+	if err == nil || !strings.Contains(err.Error(), "mugicrew doctor fix") {
+		t.Fatalf("Run error = %v; want one naming mugicrew doctor fix", err)
+	}
+	if len(states) != 0 {
+		t.Errorf("Run reported %d state(s); want none", len(states))
+	}
+	if n := ticks.Load(); n != 0 {
+		t.Errorf("ticks = %d; want no work taken", n)
+	}
+}
+
+// The backup job fires every BackupInterval while the loop is on and through a
+// stop drain, hands Sync the loop trigger, and stops when Run returns. A push
+// that fails is the job's own (Sync records backup.failed): the loop writes no
+// loop.tick_failed and keeps polling.
+func TestBackupJobRunsOnAndDrainingAndStopsWithRun(t *testing.T) {
+	evs := captureEvents(t)
+	l, _, started, release, ticks := blockingLoop(t)
+	var calls atomic.Int32
+	var trigger atomic.Value
+	oSync, oEvery := backupSync, BackupInterval
+	t.Cleanup(func() { backupSync, BackupInterval = oSync, oEvery })
+	BackupInterval = 5 * time.Millisecond
+	backupSync = func(_, tr string) (backup.Outcome, error) {
+		trigger.Store(tr)
+		calls.Add(1)
+		return backup.Failed, errors.New("dolt: push refused")
+	}
+	waitCalls := func(n int32) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); calls.Load() < n; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("backup job ran %d times, want >= %d", calls.Load(), n)
+			}
+		}
+	}
+	sig := make(chan os.Signal, 2)
+	errc, _ := run(l, sig)
+	<-started
+	waitCalls(2)
+	if got := trigger.Load(); got != eventlog.BackupLoop {
+		t.Errorf("trigger = %v, want %q", got, eventlog.BackupLoop)
+	}
+	if ticks.Load() < 2 {
+		waitTicks := time.Now().Add(5 * time.Second)
+		for ticks.Load() < 2 && time.Now().Before(waitTicks) {
+			time.Sleep(time.Millisecond)
+		}
+		if ticks.Load() < 2 {
+			t.Fatal("loop stopped polling after a failed backup push")
+		}
+	}
+	sig <- syscall.SIGTERM // draining: the effort is still in flight
+	time.Sleep(20 * time.Millisecond)
+	n := calls.Load()
+	waitCalls(n + 2)
+	close(release)
+	if err := <-errc; err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	stopped := calls.Load()
+	time.Sleep(30 * time.Millisecond)
+	if calls.Load() != stopped {
+		t.Error("backup job kept running after Run returned")
+	}
+	for _, e := range *evs {
+		if e.Name == "loop.tick_failed" {
+			t.Errorf("a failed backup push became %+v", e)
+		}
+	}
+}
+
+// The backup job keeps firing while the loop is limited: a Plan usage hold stops
+// dispatch, not the backup.
+func TestBackupJobRunsWhileLimited(t *testing.T) {
+	captureEvents(t)
+	l, _, started, release, _ := blockingLoop(t)
+	var calls atomic.Int32
+	oSync, oEvery := backupSync, BackupInterval
+	t.Cleanup(func() { backupSync, BackupInterval = oSync, oEvery })
+	BackupInterval = 5 * time.Millisecond
+	backupSync = func(_, _ string) (backup.Outcome, error) {
+		calls.Add(1)
+		return backup.Pushed, nil
+	}
+	reset := time.Now().Add(time.Hour)
+	sig := make(chan os.Signal, 4)
+	errc, states := run(l, sig)
+	<-started
+	l.mu.Lock()
+	l.limitedUntil, l.limit = reset, contract.Limit{ResetsAt: reset, Source: "message"}
+	l.mu.Unlock()
+	sig <- syscall.SIGTERM
+	waitState(t, states, "draining")
+	sig <- syscall.SIGUSR1
+	waitState(t, states, "limited")
+	n := calls.Load()
+	for deadline := time.Now().Add(5 * time.Second); calls.Load() < n+2; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("backup job ran %d times while limited, want >= %d", calls.Load(), n+2)
+		}
+	}
+	sig <- syscall.SIGTERM
+	close(release)
+	if err := <-errc; err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+// The backup job pushes when it starts, not only after a full BackupInterval: a
+// loop that restarts onto each landed build starts a fresh job every time, and
+// waiting an hour from each start would never push.
+func TestBackupJobPushesOnStartWithoutWaitingAnInterval(t *testing.T) {
+	var calls atomic.Int32
+	oSync, oEvery := backupSync, BackupInterval
+	t.Cleanup(func() { backupSync, BackupInterval = oSync, oEvery })
+	BackupInterval = time.Hour
+	backupSync = func(_, _ string) (backup.Outcome, error) {
+		calls.Add(1)
+		return backup.Pushed, nil
+	}
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go runBackups(quit, done)
+	for deadline := time.Now().Add(5 * time.Second); calls.Load() < 1; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a fresh backup job made no push within BackupInterval")
+		}
+	}
+	close(quit)
+	<-done
+}
+
+// Run joins the backup job: a push in flight when the stop completes holds Run
+// open, so it cannot outlive Run into the exec of a restart.
+func TestRunWaitsForInFlightBackupPush(t *testing.T) {
+	l, _, started, release, _ := blockingLoop(t)
+	inPush, finish := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	oSync, oEvery := backupSync, BackupInterval
+	t.Cleanup(func() { backupSync, BackupInterval = oSync, oEvery })
+	BackupInterval = time.Hour
+	backupSync = func(_, _ string) (backup.Outcome, error) {
+		once.Do(func() { close(inPush) })
+		<-finish
+		return backup.Pushed, nil
+	}
+	sig := make(chan os.Signal, 2)
+	errc, _ := run(l, sig)
+	<-started
+	<-inPush
+	sig <- syscall.SIGTERM
+	close(release)
+	select {
+	case err := <-errc:
+		t.Fatalf("Run returned %v with a backup push in flight", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(finish)
+	if err := <-errc; err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+// An Approval is an AFK leaf under gitlab, except while it waits on its MR's un-draft.
+func TestIsAFKLeafRefusesAnApprovalAwaitingUndraft(t *testing.T) {
+	registry.SetGitlab(true)
+	t.Cleanup(registry.ResetModeSnapshots)
+	fresh := bd.Bead{Kind: contract.KindApproval, Status: "open", Description: "Commit: abc"}
+	waiting := fresh
+	waiting.Description += "\nMR: !7\nMR link: https://gl/x/-/merge_requests/7"
+	if !IsAFKLeaf(fresh) {
+		t.Error("an Approval without an MR: line is an AFK leaf under gitlab")
+	}
+	if IsAFKLeaf(waiting) {
+		t.Error("an Approval with an MR: line is waiting, not a leaf")
+	}
+}
+
+// A Rollback with a recorded revert MR is paced on LandingPoll from its last effort's
+// end; one with no MR: line, or no stamp, is always due.
+func TestRollbackPacedOnLandingPoll(t *testing.T) {
+	oNow := now
+	t.Cleanup(func() { now = oNow })
+	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return t0 }
+	l := &Loop{LandingPoll: time.Minute}
+	withMR := bd.Bead{ID: "rb", Kind: contract.KindRollback, Description: "Revert.\n\nMR: !7\n"}
+	noMR := bd.Bead{ID: "rb", Kind: contract.KindRollback, Description: "Revert."}
+	for _, tc := range []struct {
+		name string
+		b    bd.Bead
+		age  time.Duration
+		want bool
+	}{
+		{"MR inside poll", withMR, 30 * time.Second, true},
+		{"MR past poll", withMR, 2 * time.Minute, false},
+		{"no MR, fresh stamp", noMR, time.Second, false},
+	} {
+		l.checked = map[string]time.Time{"rb": t0.Add(-tc.age)}
+		if got := l.paceNotDue(tc.b); got != tc.want {
+			t.Errorf("%s: paceNotDue = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	l.checked = nil
+	if l.paceNotDue(withMR) {
+		t.Error("unstamped Rollback must be due")
+	}
+	l.stampChecked(noMR) // the effort that wrote the MR: line started without it
+	if !l.paceNotDue(withMR) {
+		t.Error("stamped Rollback with an MR must not be due")
+	}
+}
+
+// An Errand-held Rollback readmitted by Readmit is skipped as paced inside its interval,
+// and the skip leaves its consecutive-failure count alone.
+func TestReadmittedRollbackSkippedWhilePaced(t *testing.T) {
+	oNow := now
+	t.Cleanup(func() { now = oNow })
+	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return t0 }
+	errand := bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}
+	rb := bd.Bead{ID: "ws-rb", Kind: contract.KindRollback, Status: "open", BlockedBy: []string{"ws-errand"}, Description: "MR: !7\n"}
+	got := Readmit([]bd.Bead{errand}, []bd.Bead{errand, rb})
+	if !slices.Contains(bd.IDs(got), "ws-rb") {
+		t.Fatalf("Readmit = %v, want the Rollback", bd.IDs(got))
+	}
+	l := &Loop{LandingPoll: time.Minute, failing: map[string]int{"ws-rb": 2}}
+	l.checked = map[string]time.Time{"ws-rb": t0.Add(-10 * time.Second)}
+	cands, err := l.candidates(got, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(bd.IDs(cands), "ws-rb") {
+		t.Errorf("candidates = %v, want the paced Rollback skipped", bd.IDs(cands))
+	}
+	if l.failing["ws-rb"] != 2 {
+		t.Errorf("failing = %v, want unchanged", l.failing)
+	}
+}
+
+// The reap deletes a closed integrated bead's branch (in its owning repo) and logs it; it
+// keeps an open bead's, a checked-out one, and one ahead of its cut ref; a failing delete
+// is logged and nothing else fails.
+func TestReapIntegrated(t *testing.T) {
+	origB, origC, origD := reapBeads, reapCheckedOut, reapDelete
+	t.Cleanup(func() { reapBeads, reapCheckedOut, reapDelete = origB, origC, origD })
+	status := map[string]string{"done": "closed", "kid": "closed", "open": "open", "tree": "closed", "ahead": "closed", "bad": "closed"}
+	reapBeads = func(ids []string) ([]bd.Bead, error) {
+		var out []bd.Bead
+		for _, id := range ids {
+			out = append(out, bd.Bead{ID: id, Status: status[id]})
+		}
+		return out, nil
+	}
+	reads := map[git.Repo]int{}
+	reapCheckedOut = func(r git.Repo) (map[string]bool, error) {
+		reads[r]++
+		return map[string]bool{"effort/tree": true}, nil
+	}
+	type del struct {
+		repo   git.Repo
+		branch string
+	}
+	var dels []del
+	reapDelete = func(r git.Repo, b string) error {
+		dels = append(dels, del{r, b})
+		if b == "effort/bad" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	evs := captureEvents(t)
+	set := git.NewEffortSet()
+	for _, id := range []string{"done", "kid", "open", "tree", "ahead", "bad"} {
+		set.Branches[id] = true
+		if id != "ahead" {
+			set.Integrated[id] = true
+		}
+	}
+	set.Owner["kid"] = git.Repo("/ws/child")
+	reapIntegrated(set)
+	want := []del{{"", "effort/bad"}, {"", "effort/done"}, {"/ws/child", "effort/kid"}}
+	slices.SortFunc(dels, func(a, b del) int { return strings.Compare(a.branch, b.branch) })
+	if !slices.Equal(dels, want) {
+		t.Errorf("deletes = %v, want %v", dels, want)
+	}
+	if reads[""] != 1 || reads["/ws/child"] != 1 {
+		t.Errorf("worktree reads = %v, want one per repo", reads)
+	}
+	var deleted, kept int
+	for _, e := range *evs {
+		switch e.Name {
+		case "branch.deleted":
+			deleted++
+		case "branch.kept":
+			kept++
+		}
+	}
+	if deleted != 2 || kept != 1 {
+		t.Errorf("events = %+v, want 2 branch.deleted and 1 branch.kept", *evs)
+	}
+	reapIntegrated(nil) // no set: nothing to do
+}
+
+func TestClearHoldsPacedOnLandingPollAndPruned(t *testing.T) {
+	oNow, oStep := now, ClearHolds
+	t.Cleanup(func() { now, ClearHolds = oNow, oStep })
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return t0 }
+	var asked []string
+	ClearHolds = func(open []bd.Bead, due func(string) bool, checked func(string)) {
+		for _, b := range open {
+			if due(b.ID) {
+				asked = append(asked, b.ID)
+				checked(b.ID) // a failed check stamps too
+			}
+		}
+	}
+	l := &Loop{LandingPoll: time.Minute}
+	open := []bd.Bead{{ID: "h1"}, {ID: "h2"}}
+	l.clearHolds(open)
+	if len(asked) != 2 {
+		t.Fatalf("a newly seen hold is due at once: %v", asked)
+	}
+	asked = nil
+	now = func() time.Time { return t0.Add(30 * time.Second) }
+	l.clearHolds(open)
+	if len(asked) != 0 {
+		t.Fatalf("a hold checked within the poll is not re-read: %v", asked)
+	}
+	now = func() time.Time { return t0.Add(2 * time.Minute) }
+	l.clearHolds(open[:1])
+	if len(asked) != 1 || asked[0] != "h1" {
+		t.Fatalf("past the poll h1 is due: %v", asked)
+	}
+	if _, ok := l.holdChecked["h2"]; ok {
+		t.Fatal("an Errand that left the open set must be pruned")
+	}
+	if len(l.checked) != 0 {
+		t.Fatal("hold checks must not feed the latch pacing map")
+	}
+}
+
+// holdTick runs n ticks over open with the step recording the Errands it was asked to
+// check, and the pause writes and claims recorded.
+func holdTick(t *testing.T, n int, ready, open []bd.Bead) (checked []string, pauses []string) {
+	t.Helper()
+	oReady, oIP, oOpen, oClaim, oPause, oStep, oNow := readyBeads, inProgressBeads, openBeads, claimBead, pauseBead, ClearHolds, now
+	t.Cleanup(func() {
+		readyBeads, inProgressBeads, openBeads, claimBead, pauseBead, ClearHolds, now = oReady, oIP, oOpen, oClaim, oPause, oStep, oNow
+	})
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	readyBeads = func() ([]bd.Bead, error) { return ready, nil }
+	inProgressBeads = func() ([]bd.Bead, error) { return nil, nil }
+	openBeads = func() ([]bd.Bead, error) { return open, nil }
+	claimBead = func(b bd.Bead) (*liveness.Hold, error) { t.Errorf("claimed %s", b.ID); return nil, nil }
+	pauseBead = func(id, cause string) error { pauses = append(pauses, id+" "+cause); return nil }
+	ClearHolds = func(open []bd.Bead, due func(string) bool, stamp func(string)) {
+		for _, b := range open {
+			if b.Kind == contract.KindErrand && due(b.ID) {
+				checked = append(checked, b.ID)
+				stamp(b.ID)
+			}
+		}
+	}
+	l := &Loop{LandingPoll: time.Minute}
+	for i := range n {
+		now = func() time.Time { return t0.Add(time.Duration(i) * 2 * time.Minute) }
+		if err := l.tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return checked, pauses
+}
+
+// A hold under a held Chart is absent from bd ready yet still checked each period.
+func TestHoldUnderHeldChartIsStillChecked(t *testing.T) {
+	hold := bd.Bead{ID: "h1", Kind: contract.KindErrand, Status: "open", Parent: "mc-c"}
+	chart := bd.Bead{ID: "mc-c", Kind: contract.KindChart, Status: "open", BlockedBy: []string{"h1"}, Labels: []string{"hold"}}
+	checked, pauses := holdTick(t, 2, nil, []bd.Bead{hold, chart})
+	if !slices.Equal(checked, []string{"h1", "h1"}) || len(pauses) != 0 {
+		t.Fatalf("checked %v pauses %v", checked, pauses)
+	}
+}
+
+// Repeated checks of a hold never write paused:failing on the Errand or its container, a
+// Landing under an already-filed hold included (Spec D2: after three ticks still not paused).
+func TestHoldChecksNeverPause(t *testing.T) {
+	hold := bd.Bead{ID: "h1", Kind: contract.KindErrand, Status: "open", Parent: "mc-cp"}
+	cp := bd.Bead{ID: "mc-cp", Kind: contract.KindCheckpoint, Status: "open"}
+	landing := bd.Bead{ID: "mc-l", Kind: contract.KindLanding, Status: "open", Parent: "mc-cp", BlockedBy: []string{"h1"}}
+	checked, pauses := holdTick(t, 4, nil, []bd.Bead{hold, cp, landing})
+	if len(checked) != 4 || len(pauses) != 0 {
+		t.Fatalf("checked %v pauses %v, want 4 checks and no pause", checked, pauses)
 	}
 }

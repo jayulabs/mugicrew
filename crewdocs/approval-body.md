@@ -1,12 +1,16 @@
 <!-- hand-kept · adapted from mattpocock/skills skills/engineering/pr (the pr skill's visual-choosing guidance and brevity rules); summarises ADR 0020 (Luffy's approval session) -->
 
-# The Decision Packet
+# The Decision Packet and the Chart Packet
 
 The Decision Packet is the written case for approving a Checkpoint: kept on its
 Approval, carried into its land commit (and, for a remote-truth Workspace, its
 Merge Request body). The human certifies it; the crewmate writes it. Write it in
 the Workspace's GLOSSARY language so a human can follow it, skip preambles, and
 keep prose brief. Refer to beads and Specs by title, never by bare id.
+
+A Chart's Approval carries the **Chart Packet** instead: the same six headings
+in the same order, each read for a Chart (see "The Chart Packet" below). This
+opening, the brevity rules and the advisory note apply to both Packets.
 
 ## Sections
 
@@ -50,8 +54,50 @@ Every earlier Approval on this Checkpoint: its pinned SHA, how it ended
 failed gate build), and what changed before the next one. When this is the first
 Approval, one line says so.
 
+## The Chart Packet
+
+A Chart has no Spec, Review or Surgeries: defog and the Approval are its review.
+Read each section for what lands on mainline from the `chart/<id>` branch. The
+body starts with the `Commit:` and `Patch-id:` lines, both verbatim, then the
+Packet. Under gitlab the Packet is the Draft MR's description, so write "Draft
+MR" or "GitLab Draft", never bare "Draft".
+
+### Background
+
+The Signal the Chart charted, by title, and the Chart's Destination.
+
+### Summary
+
+A table of what lands: ADRs, GLOSSARY entries, research docs and crew docs, each
+with where it lands and why. Then the Decisions-so-far index, one line per
+decision. The visual rule above applies.
+
+### Evidence
+
+The pinned SHA, and the closed defog beads (grilling, research, prototype) and
+the Survey, each by title.
+
+### Merge Danger
+
+The Door (one-way or two-way) and the Blast Radius, naming each ADR the Chart
+supersedes or amends.
+
+### Execution Notes
+
+Chart-conflicts and how each was resolved, offshoot Signals, and Destination
+narrowings. Say "none" in one line when there were none. When the Chart has an
+open blocker, add one line per blocker: "Land waits on <blocker title> until it
+lands".
+
+### Approval History
+
+As for the Decision Packet: every earlier Approval on this Chart, its pinned
+SHA, how it ended (obsoleted as stale, sent back for rework (defog beads …),
+read from its `rework:` close reason, or approved and then undone), and what
+changed before the next one; one line saying so when this is the first.
+
 ## The advisory note
 
-Whenever the Approval's pin is behind the Checkpoint branch's tip, the very first
-line of the Decision Packet is the note **HEAD advanced since this was reviewed**.
+Whenever the Approval's pin is behind the Checkpoint or Chart branch's tip, the very first
+line of the Packet (below the pin lines) is the note **HEAD advanced since this was reviewed**.
 Omit it when the pin is the tip.

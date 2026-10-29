@@ -245,7 +245,7 @@ func TestGraphDrawer(t *testing.T) {
 		ls := lines(ansi.Strip(m.View()))
 		rule := -1
 		for i, l := range ls {
-			if strings.HasPrefix(l, strings.Repeat("─", w)) {
+			if strings.HasPrefix(l, "╭"+strings.Repeat("─", w-2)+"╮") {
 				rule = i
 			}
 		}
@@ -363,12 +363,12 @@ func TestGraphMutesAFKLeafTitles(t *testing.T) {
 	forceANSI256(t)
 	beads := []bd.Bead{
 		{ID: "ch", Kind: contract.KindChart, Container: true, Status: "open", Title: "Header chart", Created: epoch},
-		{ID: "sel", Kind: contract.KindTask, Status: "open", Title: "Selected hitl", Parent: "ch", BlockedBy: []string{"blk", "ch2"}, Created: epoch},
+		{ID: "sel", Kind: contract.KindErrand, Status: "open", Title: "Selected hitl", Parent: "ch", BlockedBy: []string{"blk", "ch2"}, Created: epoch},
 		{ID: "ch2", Kind: contract.KindChart, Container: true, Status: "open", Title: "Blocking chart", Created: epoch},
 		{ID: "afk", Kind: contract.KindBuild, Status: "open", Title: "Afk open", Parent: "ch", Created: epoch.Add(time.Hour)},
-		{ID: "hitl", Kind: contract.KindTask, Status: "open", Title: "Hitl open", Parent: "ch", Created: epoch.Add(2 * time.Hour)},
+		{ID: "hitl", Kind: contract.KindErrand, Status: "open", Title: "Hitl open", Parent: "ch", Created: epoch.Add(2 * time.Hour)},
 		{ID: "cafk", Kind: contract.KindBuild, Status: "closed", Title: "Afk closed", Parent: "ch", Created: epoch.Add(3 * time.Hour)},
-		{ID: "chitl", Kind: contract.KindTask, Status: "closed", Title: "Hitl closed", Parent: "ch", Created: epoch.Add(4 * time.Hour)},
+		{ID: "chitl", Kind: contract.KindErrand, Status: "closed", Title: "Hitl closed", Parent: "ch", Created: epoch.Add(4 * time.Hour)},
 		{ID: "blk", Kind: contract.KindBuild, Status: "open", Title: "Afk blocker", Parent: "ch", Created: epoch.Add(5 * time.Hour)},
 		{ID: "pz", Kind: contract.KindBuild, Status: "open", Title: "Afk paused", Parent: "ch", Labels: []string{"paused:manual"}, Created: epoch.Add(6 * time.Hour)},
 	}
@@ -431,7 +431,7 @@ var footRowRe = regexp.MustCompile(`^(![^ !]|… \+\d+ more blockers)`)
 func footerBeads() []bd.Bead {
 	return []bd.Bead{
 		{ID: "ch", Kind: contract.KindChart, Container: true, Status: "open", Title: "Header chart", Created: epoch},
-		{ID: "sel", Kind: contract.KindTask, Status: "open", Title: "Selected hitl", Parent: "ch", BlockedBy: []string{"vis", "gone", "far", "gone-aaaaaaaaaaaa", "gone-bbbbbbbbbbbb", "gone-cccccccccccc"}, Created: epoch},
+		{ID: "sel", Kind: contract.KindErrand, Status: "open", Title: "Selected hitl", Parent: "ch", BlockedBy: []string{"vis", "gone", "far", "gone-aaaaaaaaaaaa", "gone-bbbbbbbbbbbb", "gone-cccccccccccc"}, Created: epoch},
 		{ID: "vis", Kind: contract.KindBuild, Status: "open", Title: "Visible blocker", Parent: "ch", Created: epoch.Add(time.Hour)},
 		{ID: "far", Kind: contract.KindBuild, Status: "open", Title: "Faraway blocker with a very long title", Parent: "other", Created: epoch.Add(2 * time.Hour)},
 		{ID: "gone", Kind: contract.KindBuild, Status: "open", Title: "Gone blocker", Parent: "other", Created: epoch.Add(4 * time.Hour)},
@@ -439,7 +439,7 @@ func footerBeads() []bd.Bead {
 		{ID: "gone-bbbbbbbbbbbb", Kind: contract.KindBuild, Status: "open", Title: "Gone b", Parent: "other", Created: epoch.Add(6 * time.Hour)},
 		{ID: "gone-cccccccccccc", Kind: contract.KindBuild, Status: "open", Title: "Gone c", Parent: "other", Created: epoch.Add(7 * time.Hour)},
 		{ID: "other", Kind: contract.KindChart, Container: true, Status: "closed", Title: "Other chart", Created: epoch.Add(-time.Hour)},
-		{ID: "free", Kind: contract.KindTask, Status: "open", Title: "Unblocked", Parent: "ch", Created: epoch.Add(3 * time.Hour)},
+		{ID: "free", Kind: contract.KindErrand, Status: "open", Title: "Unblocked", Parent: "ch", Created: epoch.Add(3 * time.Hour)},
 	}
 }
 
@@ -496,7 +496,7 @@ func TestGraphBlockerFooterAboveRule(t *testing.T) {
 	forceANSI256(t)
 	got := footerView(t, 80, 20, "sel", true)
 	for i := len(got) - 1; i > 0; i-- {
-		if strings.HasPrefix(got[i], "────") {
+		if strings.HasPrefix(got[i], "╭───") {
 			if !strings.Contains(got[i-1], "more blockers") {
 				t.Errorf("row above rule = %q, want footer", got[i-1])
 			}
@@ -535,7 +535,7 @@ func TestDrawerFooterReservesRows(t *testing.T) {
 		return func(off, lh int) []string { return slices.Repeat([]string{"F"}, n) }
 	}
 	for _, c := range []struct{ n, h, want int }{{0, 6, 6}, {1, 6, 5}, {3, 6, 3}, {6, 6, 6}} {
-		got := strings.Split(drawerWin(len(ls), func(i int) string { return ls[i] }, 9, false, 20, c.h, viewport.Model{}, foot(c.n)), "\n")
+		got := strings.Split(drawerWin(len(ls), func(i int) string { return ls[i] }, 9, false, 20, c.h, viewport.Model{}, foot(c.n), nil), "\n")
 		list := 0
 		for _, l := range got {
 			if l != "F" {

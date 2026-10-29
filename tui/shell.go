@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,14 +93,13 @@ type liveCounter interface{ liveN() int }
 
 // tabExtra is the active tab's extra keys, for ? and the coverage test.
 func (m Model) tabExtra() []key.Binding {
-	_, r := m.retroKeys()
 	if m.focus.id != "" {
-		return slices.Concat(m.focusExtra(), r)
+		return m.focusExtra()
 	}
 	if e, ok := m.tabAt(m.tab).(extraKeys); ok {
-		return slices.Concat(e.extra(), r)
+		return e.extra()
 	}
-	return r
+	return nil
 }
 
 // tabAt is tab i with the shell's live data handed over: the shell owns the data, so
@@ -149,7 +149,7 @@ func (m Model) tabAt(i int) component {
 // (launchWhy, blocked, openBlockers, canAdopt…); any tab's keys route through it.
 func (m Model) gateData() graphData {
 	return graphData{
-		beads: m.beads, idx: m.idx, live: m.live, sessions: m.sessions, efforts: m.efforts, cpTips: m.cpTips, landEv: m.landEv, launching: m.launching, launched: m.launched,
+		beads: m.beads, idx: m.idx, live: m.live, orphans: m.orphans, sessions: m.sessions, sessErr: m.sessErr, efforts: m.efforts, cpTips: m.cpTips, frontier: m.frontier, landed: m.landed, ancestors: m.ancestors, landEv: m.landEv, launching: m.launching, launched: m.launched,
 		pending: m.pending, crew: m.crew, comments: m.comments, rollups: m.rollups, extRef: m.initiatives.ExternalRef, landName: m.landName, landErr: m.landErr, w: m.w, h: m.h - chromeH,
 	}
 }
@@ -198,6 +198,22 @@ func (settingsTab) count() int                { return 0 }
 func (settingsTab) actN() int                 { return 0 }
 func (t settingsTab) bindings() []key.Binding { return t.m.settingsBindings() }
 
+func (t settingsTab) hit(_, h, y int) hitTarget { return t.m.settingsHit(h, y) }
+
+// selectKey moves the cursor to row key (a row number), as j/k would.
+func (t settingsTab) selectKey(key string) component {
+	if n, err := strconv.Atoi(key); err == nil {
+		t.m.setRow = n
+		t.m.setTop = t.m.settingsTop(t.m.setTop)
+	}
+	return t
+}
+
+func (t settingsTab) wheel(_, h, _, delta int) component {
+	t.m = t.m.settingsWheel(h, delta)
+	return t
+}
+
 // Shell keys (ADR 0142): shown in ?, never in the hints bar (FR29).
 var (
 	keyJump     = key.NewBinding(key.WithKeys(jumpKeys()...), key.WithHelp("1-6 # $ *", "jump to tab"))
@@ -224,6 +240,7 @@ var (
 // stack and the ? reference, and routes a key to the topmost modal first, then the
 // shell keys, then the active tab.
 type Model struct {
+	noSnap     bool // a synthesized click key is running: the list stays scrolled
 	ctx        contract.Ctx
 	crew       map[string]contract.Crewmate
 	tabs       []component
@@ -237,6 +254,13 @@ type Model struct {
 	prefix2    string // the nested tmux prefix ? read on opening; "" shows no line
 	focus             // the Initiative focus drilldown over the active tab (ADR 0173); id "" is off
 	w, h       int
+	click      lastClick // the last left press a double-click pairs against
+	hover      hover     // what the pointer rests on (mouse mode)
+	menu       *ctxMenu  // the open right-click menu (mouse mode)
+	tabHeld    bool      // the tab strip's start is held by the wheel or ‹/›, not following the active tab
+	tabStart   int       // the held first visible tab
+	wheelAcc   *wheelAcc // wheel presses queued behind a render, merged into one scroll (ADR 0383 §2)
+	mouseOn    bool      // mouse capture is on (the resolved [tui] mouse); every mouse path checks it first
 
 	settingsState // the Settings tab's cache and staged edits (FR54–56)
 	usageState    // the Plan usage poller's cache and backoff (FR53)
@@ -278,11 +302,16 @@ type Model struct {
 	// clones the slice and edits a field in place, so it keeps idx.
 	beads       []bd.Bead
 	idx         *snapIndex
-	live        map[string]bool         // effort liveness: active AFK effort id → alive; display only
+	live        map[string]bool         // effort liveness: active AFK effort id → not orphaned (follows the orphan reading, not probeLiveness); display only
+	orphans     map[string]bool         // the Orphaned-claim reading, from the same load; display and the pool count
 	sessions    map[string]session.Info // the tmux session table; display and attach only
+	sessErr     error                   // the last session read's error: the table above is then empty, not truthful
 	recents     []string                // Recents, read with each load and after each save; never read on the event loop
 	recentSaves int                     // saves folded so far: a load that began before one holds a stale Recents
-	efforts     map[string]bool         // bead ids holding effort/<id>
+	efforts     *git.EffortSet          // bead ids holding effort/<id>, and which are integrated
+	frontier    []bd.Bead               // bd ready -n 0, every refresh
+	landed      map[string]string       // landed map, slow tier
+	ancestors   map[string]bd.Bead      // walk ancestors missing from beads
 	cpTips      map[string]string       // Checkpoint id → its checkpoint/<id> tip sha; empty when unread
 	landEv      map[string]string       // bead id → latest landing-relevant event msg, folded from logs
 	inits       map[string]initStats    // the Initiatives tab's line-2 counts, per refresh
@@ -337,18 +366,25 @@ func newTabs() []component {
 
 func New(ctx contract.Ctx, crew map[string]contract.Crewmate) Model {
 	return Model{
-		ctx:     ctx,
-		crew:    crew,
-		tabs:    newTabs(),
-		loading: true, // Init's slow load is in flight; a tick must not stack another
-		w:       80,
-		h:       24,
+		ctx:      ctx,
+		crew:     crew,
+		tabs:     newTabs(),
+		loading:  true, // Init's slow load is in flight; a tick must not stack another
+		w:        80,
+		h:        24,
+		wheelAcc: &wheelAcc{},
 	}
 }
 
-func (m Model) Init() tea.Cmd { return tea.Batch(m.loadSlow(), m.loadLogs(), tick(), m.pollUsage()) }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(m.loadSlow(), m.loadLogs(), tick(), m.pollUsage(), tmuxMouse(m.mouseOn))
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m = m.flushWheel() // merged wheel presses land before any message acts
+	if _, ok := msg.(wheelFlush); ok {
+		return m, nil
+	}
 	if s, ok := msg.(logsScanMsg); ok {
 		return m.foldScan(s)
 	}
@@ -356,6 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m, scan := next.(Model).syncScan()
 	m, comments := m.syncComments()
 	m, rollup := m.syncRollup()
+	m = m.menuSettle().hoverSettle()
 	return m, tea.Batch(cmd, scan, comments, rollup)
 }
 
@@ -380,9 +417,22 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		if c := m.menu; c != nil { // keep the menu open, clamped to the new screen
+			c.x, c.y = max(min(c.x, m.w-c.mw), 0), max(min(c.y, m.h-c.mh), 0)
+		}
 		m.setTop = m.settingsTop(m.setTop)
 	case tea.KeyMsg:
+		if m.menu != nil { // the menu-closing key does nothing else, so a held tab strip stays held
+			m.hover = hover{}
+			return m.menuKey(msg)
+		}
+		m.tabHeld = false
+		m.hover = hover{} // only the selector marks the keyboard; the next motion always passes MotionFilter
 		return m.keyRecording(msg)
+	case tea.MouseMsg:
+		return m.mouseEvent(msg)
+	case tea.ResumeMsg:
+		return m, m.rearmMouse()
 	default:
 		old := m.focusKeys()
 		if next, cmd, ok := m.fold(msg); ok {
@@ -423,6 +473,12 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.capturing() && k.Type != tea.KeyCtrlC { // a tab's text input owns every key but quit
 		return m.graphQueryKey(k)
 	}
+	if m.focus.id == "" && m.tab == tabGraph && draftRefuses(k) { // one guard for every mutating key on a Draft row, before any dialog or subprocess (Spec mc-pyamf D6)
+		if why := m.gateData().draftWhy(m.selection()); why != "" {
+			m.setStatus(why)
+			return m, nil
+		}
+	}
 	if key.Matches(k, keyRecents) {
 		return m.recentsOpen()
 	}
@@ -444,11 +500,11 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	if h, e := m.retroKeys(); key.Matches(k, keyRetro) && len(h)+len(e) > 0 {
-		return m.retrospective(m.selection())
-	}
 	if key.Matches(k, keyYank) {
 		return m.yank()
+	}
+	if next, cmd, ok := m.beadVerbRoute(k); ok {
+		return next, cmd
 	}
 	if m.focus.id != "" {
 		if next, cmd, ok := m.focusKey(k); ok {
@@ -507,9 +563,6 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return next, cmd
 			}
 		case graphTab:
-			if next, cmd, ok := m.graphKey(k); ok {
-				return next, cmd
-			}
 			if next, cmd, ok := m.actionKey(k); ok {
 				return next, cmd
 			}
@@ -634,12 +687,17 @@ func (m Model) tabKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.tabs = slices.Clone(m.tabs) // a copied Model must not share the tab it updates
 	m.tabs[m.tab], cmd = m.tabAt(m.tab).update(k)
-	if st, ok := m.tabs[m.tab].(settingsTab); ok { // take back what the key did to the shell
+	return m.takeBackSettings(), cmd
+}
+
+// takeBackSettings takes back what a key or click did to the shell through the Settings tab.
+func (m Model) takeBackSettings() Model {
+	if st, ok := m.tabs[m.tab].(settingsTab); ok {
 		m = st.m
 		m.tabs = slices.Clone(m.tabs)
 		m.tabs[m.tab] = settingsTab{}
 	}
-	return m, cmd
+	return m
 }
 
 // capturing reports whether the active tab is typing into an input, which takes
@@ -664,35 +722,30 @@ func (m Model) modeBindings() []key.Binding {
 	return slices.Concat(m.tabBindings(), m.tabExtra(), m.gotoBindings(), m.newBindings(), shellKeys)
 }
 
+// The theme's styles, installed by applyTheme (theme.go).
 var (
-	accent    = lipgloss.Color("212")
-	hintBg    = lipgloss.Color("236")
-	dim       = lipgloss.Color("240")
-	dimSt     = lipgloss.NewStyle().Foreground(dim)
-	warnSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	aliveSt   = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
-	afkSt     = lipgloss.NewStyle().Foreground(lipgloss.Color("151"))
-	waitSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	accent    lipgloss.Color
+	hintBg    lipgloss.Color
+	dim       lipgloss.Color
+	dimSt     lipgloss.Style
+	warnSt    lipgloss.Style
+	aliveSt   lipgloss.Style
+	afkSt     lipgloss.Style
+	waitSt    lipgloss.Style
 	cursorSty = lipgloss.NewStyle().Reverse(true) // a line input's cursor cell
-	brand     = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	badgeSt   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-	hintBar   = lipgloss.NewStyle().Background(hintBg)
-	refBox    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(accent).Padding(0, 1)
+	brand     lipgloss.Style
+	badgeSt   lipgloss.Style
+	hintBar   lipgloss.Style
+	refBox    lipgloss.Style
 
 	// variant A folder tabs (prototype mc-lu2x.1): the active one opens into the body
 	boxActive   = lipgloss.Border{Top: "─", Bottom: " ", Left: "│", Right: "│", TopLeft: "╭", TopRight: "╮", BottomLeft: "┘", BottomRight: "└"}
 	boxInactive = lipgloss.Border{Top: "─", Bottom: "─", Left: "│", Right: "│", TopLeft: "╭", TopRight: "╮", BottomLeft: "┴", BottomRight: "┴"}
-	tabActive   = lipgloss.NewStyle().Border(boxActive).BorderForeground(accent).Foreground(accent).Bold(true).Padding(0, 1)
-	tabInactive = lipgloss.NewStyle().Border(boxInactive).BorderForeground(dim).Foreground(lipgloss.Color("245")).Padding(0, 1)
+	tabActive   lipgloss.Style
+	tabInactive lipgloss.Style
+	tabHover    lipgloss.Style
 
-	hintHelp = func() help.Model {
-		h := help.New()
-		hs := &h.Styles // the bar's background must survive each key's style reset
-		hs.ShortKey = hs.ShortKey.Background(hintBg).Foreground(lipgloss.Color("252")).Bold(true)
-		hs.ShortDesc = hs.ShortDesc.Background(hintBg).Foreground(lipgloss.Color("245"))
-		hs.ShortSeparator = hs.ShortSeparator.Background(hintBg).Foreground(dim)
-		return h
-	}()
+	hintHelp help.Model
 )
 
 // shortHelpView is bubbles' help.ShortHelpView without its unstyled " " between
@@ -716,12 +769,10 @@ func shortHelpView(bs []key.Binding) string {
 
 // tabBindings are the active tab's verbs.
 func (m Model) tabBindings() []key.Binding {
-	h, _ := m.retroKeys()
 	if m.focus.id != "" {
-		fb := m.focusBindings()
-		return slices.Concat(fb[:len(fb)-1], h, fb[len(fb)-1:]) // esc back stays last
+		return m.focusBindings()
 	}
-	return slices.Concat(m.tabAt(m.tab).bindings(), h)
+	return m.tabAt(m.tab).bindings()
 }
 
 // tabLabel is "<jump key> <Name>", plus amber ●N while N sessions wait on you, else a
@@ -739,15 +790,38 @@ func tabLabel(i int, c component) string {
 	return l
 }
 
+// tabSpan is the columns [x0, x1) a tab block covers on the tab strip.
+type tabSpan struct{ tab, x0, x1 int }
+
+// tabStrip is a drawn tab bar and where its tabs and clip markers sit, from the one
+// computation that rendered it. left and right are the lit ‹/› cells ([x0, x1)), zero when unlit.
+type tabStrip struct {
+	view        string
+	spans       []tabSpan
+	start       int // the first visible tab
+	clipped     bool
+	left, right [2]int
+	maxStart    int // the furthest the strip can slide
+}
+
 // tabBar renders the folder tabs into exactly w columns, sliding a window of
 // whole tabs that always holds the active one; ‹ › on the label row mark the
 // clipped sides (FR7, FR8).
 func tabBar(labels []string, active, w int) string {
+	return tabLayout(labels, active, -1, -1, w).view
+}
+
+// tabLayout lays the tab strip out. start is the held first tab, -1 to follow active;
+// a held start may push the active tab out of view. hover is the tab to brighten, -1 for none.
+func tabLayout(labels []string, active, start, hover, w int) tabStrip {
 	blocks := make([]string, len(labels))
 	for i, l := range labels {
-		if i == active {
+		switch {
+		case i == active:
 			blocks[i] = tabActive.Render(l)
-		} else {
+		case i == hover:
+			blocks[i] = tabHover.Render(l)
+		default:
 			blocks[i] = tabInactive.Render(l)
 		}
 	}
@@ -759,14 +833,25 @@ func tabBar(labels []string, active, w int) string {
 	}
 	fill := func(n int) string { return "\n\n" + dimSt.Render(strings.Repeat("─", n)) }
 	avail := w - 4 // room for both markers
-	start, end := 0, active
-	for start < active && span(start, active) > avail {
-		start++
+	maxStart := len(labels) - 1
+	for maxStart > 0 && span(maxStart-1, len(labels)-1) <= avail {
+		maxStart--
 	}
-	for end+1 < len(labels) && span(start, end+1) <= avail {
+	st, end := start, 0
+	if start < 0 {
+		st, end = 0, active
+		for st < active && span(st, active) > avail {
+			st++
+		}
+	} else {
+		st = min(start, maxStart)
+		end = st
+	}
+	for end+1 < len(labels) && span(st, end+1) <= avail {
 		end++
 	}
-	clipped := start > 0 || end < len(labels)-1
+	clipped := st > 0 || end < len(labels)-1
+	out := tabStrip{start: st, clipped: clipped, maxStart: maxStart}
 	marker := func(on bool, s string) string {
 		col := strings.Split(fill(2), "\n") // the marker continues the rule line
 		if on {
@@ -775,18 +860,31 @@ func tabBar(labels []string, active, w int) string {
 		return strings.Join(col, "\n")
 	}
 	var parts []string
+	x := 0
 	if clipped {
-		parts = append(parts, marker(start > 0, "‹ "))
+		parts = append(parts, marker(st > 0, "‹ "))
+		if st > 0 {
+			out.left = [2]int{0, 2}
+		}
+		x = 2
 	}
-	parts = append(parts, blocks[start:end+1]...)
+	for i := st; i <= end; i++ {
+		out.spans = append(out.spans, tabSpan{i, x, x + lipgloss.Width(blocks[i])})
+		x += lipgloss.Width(blocks[i])
+		parts = append(parts, blocks[i])
+	}
 	if clipped {
 		parts = append(parts, marker(end < len(labels)-1, " ›"))
+		if end < len(labels)-1 {
+			out.right = [2]int{x, x + 2}
+		}
 	}
 	bar := lipgloss.JoinHorizontal(lipgloss.Bottom, parts...)
 	if gap := w - lipgloss.Width(bar); gap > 0 {
 		bar = lipgloss.JoinHorizontal(lipgloss.Bottom, bar, fill(gap))
 	}
-	return bar
+	out.view = bar
+	return out
 }
 
 // flatHints is a dialog's or input's keys as one flat line (no sections, no rank): when
@@ -834,12 +932,32 @@ func (m Model) View() string {
 			wrap.Inherit(dimSt).Render(fmt.Sprintf("need %dx%d, have %dx%d — enlarge to continue", floorCols, floorRows, m.w, m.h)), m.w, m.h)
 	}
 	if len(m.modals) > 0 {
-		return m.modalView()
+		return m.paintModalHover(m.modalView())
 	}
 	if m.ref {
 		return m.refView()
 	}
-	return m.frame()
+	return m.paintMenu(m.paintHover(m.frame()))
+}
+
+// strip is the tab strip as drawn: held start if the wheel or ‹/› set one, the hovered tab
+// brightened. hov overrides the hover tab when >= 0.
+func (m Model) strip(hov int) tabStrip {
+	labels := make([]string, len(m.tabs))
+	for i := range m.tabs {
+		labels[i] = tabLabel(i, m.tabAt(i)) // the badge reads live data
+	}
+	if m.settingsStaged() { // FR11
+		labels[tabSettings] += " •"
+	}
+	start := -1
+	if m.tabHeld {
+		start = m.tabStart
+	}
+	if hov < 0 && m.hover.set && m.hover.tabOn && m.mouseLive() {
+		hov = m.hover.tab
+	}
+	return tabLayout(labels, m.tab, start, hov, m.w)
 }
 
 // frame is the header, tabs, body, status line and hints bar: what a dialog or ?
@@ -848,17 +966,10 @@ func (m Model) frame() string {
 	if m.focus.id != "" {
 		return m.focusFrame()
 	}
-	labels := make([]string, len(m.tabs))
-	for i := range m.tabs {
-		labels[i] = tabLabel(i, m.tabAt(i)) // the badge reads live data
-	}
-	if m.settingsStaged() { // FR11
-		labels[tabSettings] += " •"
-	}
 	body := fit(m.tabAt(m.tab).view(m.w, m.h-chromeH), m.w, m.h-chromeH)
 	return fit(strings.Join([]string{
 		m.headerView(),
-		tabBar(labels, m.tab, m.w),
+		m.strip(-1).view,
 		body,
 		" " + strings.ReplaceAll(m.status, "\n", " "), // status line
 		m.hintsView(),
@@ -883,3 +994,11 @@ func (m Model) headerView() string {
 	right := m.headerRight(m.w - lipgloss.Width(left) - 1)
 	return left + strings.Repeat(" ", max(1, m.w-lipgloss.Width(left)-lipgloss.Width(right))) + right
 }
+
+func (t settingsTab) snap(_, h int) component {
+	t.m = t.m.settingsSnap(h)
+	return t
+}
+
+// unscroll is a no-op: unscrollAll resets the pane's viewport on the Model it lives on.
+func (t settingsTab) unscroll() component { return t }

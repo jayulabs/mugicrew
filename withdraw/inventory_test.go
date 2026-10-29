@@ -163,7 +163,12 @@ func TestInventoryUnintegrated(t *testing.T) {
 	}
 	w.git(t, w.ws, "update-ref", "refs/mugicrew/cut/b1", cut)
 	w.git(t, w.ws, "checkout", "-q", "checkpoint/cp")
-	w.commits(t, w.ws, 2) // the container moves on; the cut ref still counts only the effort's own
+	// the container moves on with commits unlike the effort's (the same message in the
+	// same clock second would make them byte-identical); the cut ref still counts only
+	// the effort's own
+	for range 2 {
+		w.git(t, w.ws, "commit", "-q", "--allow-empty", "-m", "container")
+	}
 	w.git(t, w.ws, "checkout", "-q", "main")
 	left = take(t, Opts{}, build("b1")).Beads[0]
 	if left.Unintegrated != 3 || left.AtMost || left.Replace {

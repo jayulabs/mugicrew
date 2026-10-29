@@ -1,6 +1,6 @@
 # ADR 0185: An open Merge Request outlives its Landings; a Forge-side close or trailerless merge holds the container on a Task
 
-Status: Accepted (amended by ADR 0189; §8 amended by Spec "Landings paced by a configurable poll interval measured from the previous effort's end" and by the Spec "Forge Reviews file a container's Merge Request feedback deduplicated…" (the MR Watch))
+Status: Accepted (amended by ADR 0189; §1, §4 and §8 amended by ADR 0382 (under-gitlab-the-un-draft…); §8 amended by Spec "Landings paced by a configurable poll interval measured from the previous effort's end" and by the Spec "Forge Reviews file a container's Merge Request feedback deduplicated…" (the MR Watch) and by the Spec "Rollbacks with a recorded revert MR are paced on landing_poll_interval"; §8 amended by ADR 0393 (go-clears-a-hold-errand-through-a-paced-typed-step…))
 Date: 2026-10-14
 
 Chart mc-t72m.2 (GitLab Merge Request land strategy for a single-repo
@@ -58,7 +58,9 @@ are in docs/research/gitlab-merge-request-mechanics-through-glab.md.
    logged once, without an error each tick. No exponential or adaptive backoff.
    The same budget covers the **MR Watch**, which reads an open container's MR on
    the same interval between Landings. It skips its read while a Landing is
-   pending, so one MR is read once per period.
+   pending, so one MR is read once per period. The same budget covers a
+   **Rollback with a recorded revert MR** (an `MR:` line), including one held only
+   by an Errand and readmitted; a Rollback with no recorded MR stays due every tick.
 
 ## Considered Options
 

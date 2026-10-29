@@ -134,7 +134,7 @@ func TestGraphClosedHeaderTitleStruck(t *testing.T) {
 	beads := []bd.Bead{
 		{ID: "done", Kind: contract.KindChart, Container: true, Status: "closed", Title: "Done chart", Created: epoch},
 		{ID: "live", Kind: contract.KindChart, Container: true, Status: "open", Title: "Live chart", Created: epoch},
-		{ID: "m", Kind: contract.KindTask, Status: "open", Title: "member", Parent: "live", Created: epoch},
+		{ID: "m", Kind: contract.KindErrand, Status: "open", Title: "member", Parent: "live", Created: epoch},
 	}
 	m := sized(t, 120, 30)
 	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{}, sessions: map[string]session.Info{}})

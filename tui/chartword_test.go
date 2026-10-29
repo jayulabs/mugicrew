@@ -9,6 +9,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/git"
 )
 
 func TestChartWords(t *testing.T) {
@@ -66,12 +67,23 @@ func TestChartWords(t *testing.T) {
 					c.chart(b)
 				}
 			})}, c.kids...)
-			g := graphData{beads: append(beads, c.extra...), live: map[string]bool{"ch": c.live, "p": c.live}, efforts: map[string]bool{"b": true}}
+			g := graphData{beads: append(beads, c.extra...), live: map[string]bool{"ch": c.live, "p": c.live}, efforts: &git.EffortSet{Branches: map[string]bool{"b": true}}}
 			r := g.chartWord(g.beadByID("ch"))
 			if r.Word != c.word || r.Rank != c.rank || strings.Join(r.Also, ", ") != c.also || r.Why == "" {
 				t.Errorf("chartWord = %q rank %d also %v why %q; want %q rank %d also %q", r.Word, r.Rank, r.Also, r.Why, c.word, c.rank, c.also)
 			}
 		})
+	}
+}
+
+func TestChartWordSurveyDueStamped(t *testing.T) {
+	g := graphData{beads: []bd.Bead{
+		dbead("ch", contract.KindChart, "open", "", 1, isContainer, func(b *bd.Bead) { b.Labels = []string{contract.LabelDefogged} }),
+		dbead("sv", contract.KindSurvey, "open", "ch", 1),
+	}}
+	r := g.chartWord(g.beadByID("ch"))
+	if r.Word != "survey due" || !strings.Contains(r.Why, "Chart stamped: confirm to finish") {
+		t.Errorf("unclosed Survey, session not alive, Chart stamped = %q why %q", r.Word, r.Why)
 	}
 }
 

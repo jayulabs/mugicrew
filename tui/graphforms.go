@@ -69,7 +69,7 @@ func canBlock(b *bd.Bead) bool { return b != nil && b.Unclosed() && b.Status != 
 
 // canRebase is r's gate: an open Chart or Checkpoint (ADR 0262).
 func canRebase(b *bd.Bead) bool {
-	return b != nil && b.Open() && (b.Kind == contract.KindChart || b.Kind == contract.KindCheckpoint)
+	return b != nil && b.Open() && !b.Draft() && (b.Kind == contract.KindChart || b.Kind == contract.KindCheckpoint)
 }
 
 // rebaseFlash renders a Request outcome as the verb prints it (FR 12).
@@ -154,11 +154,11 @@ func formBindings(beads []bd.Bead, b *bd.Bead) []key.Binding {
 	return bs
 }
 
-// formRefusal says why a, A, B, U or z does nothing on b,
+// formRefusal says why a, A, B, U, c, e or z does nothing on b,
 // or "" for any other key.
 func formRefusal(k tea.KeyMsg, b *bd.Bead) string {
 	if b == nil {
-		if key.Matches(k, keyAdopt) || key.Matches(k, keyRelease) || key.Matches(k, keyReject) || key.Matches(k, keyBlock) || key.Matches(k, keyUnblock) || key.Matches(k, keyCheckup) {
+		if key.Matches(k, keyAdopt) || key.Matches(k, keyRelease) || key.Matches(k, keyReject) || key.Matches(k, keyBlock) || key.Matches(k, keyUnblock) || key.Matches(k, keyCheckup) || key.Matches(k, keyEdit) {
 			return "nothing selected"
 		}
 		return ""
@@ -183,6 +183,8 @@ func formRefusal(k tea.KeyMsg, b *bd.Bead) string {
 		return "Drafts can't be blocked"
 	case key.Matches(k, keyUnblock):
 		return "no open blockers"
+	case key.Matches(k, keyCheckup):
+		return "a Checkup can't be checked up on"
 	}
 	return ""
 }
@@ -190,7 +192,7 @@ func formRefusal(k tea.KeyMsg, b *bd.Bead) string {
 // graphKey opens the form for a Graph form key bound on the selection; ok is false
 // for any other key. Gating through formBindings keeps handled == bound.
 func (m Model) graphKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
-	b := m.selection()
+	b := m.rowBead()
 	var open key.Binding
 	for _, kb := range formBindings(m.beads, b) {
 		if key.Matches(k, kb) {
@@ -203,6 +205,9 @@ func (m Model) graphKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		return m, nil, false
+	}
+	if m.refusePending(b.ID) { // before every verb's own gate, A's included
+		return m, nil, true
 	}
 	switch open.Keys()[0] {
 	case "A":
@@ -218,9 +223,6 @@ func (m Model) graphKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			}}
 		})
 		return next, cmd, true
-	}
-	if m.refusePending(b.ID) {
-		return m, nil, true
 	}
 	switch open.Keys()[0] {
 	case "c":
@@ -370,6 +372,12 @@ func enterResume(why string) string { return strings.Replace(why, "l to resume",
 // names the orphan; a launch failure leaves the Surgery idle.
 func (m Model) fileSurgery(pend, title string, d dialog, join, ini string) (tea.Model, tea.Cmd) {
 	return m.startWrite(pend, "filing", func() writeDoneMsg {
+		if err := refuseLegacy(); err != nil { // before filing: a refusal leaves no unlaunched bead
+			return writeDoneMsg{pend, func(m Model) (tea.Model, tea.Cmd) {
+				m.setStatus("create: " + err.Error())
+				return m, nil
+			}}
+		}
 		var id string
 		var err error
 		cp, filed := join, ""

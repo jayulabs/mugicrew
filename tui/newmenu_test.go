@@ -51,7 +51,7 @@ func TestNewMenuOpensOnEveryTabAndFocus(t *testing.T) {
 
 func TestNewMenuSwallowsKeys(t *testing.T) {
 	m := press(t, graphModel(t, 120, 30), runeKey("n"))
-	for _, k := range []string{"1", "g", "q", "?", "R", "t"} {
+	for _, k := range []string{"1", "g", "q", "?", "R", "w"} {
 		if o := press(t, m, runeKey(k)); !newOpen(o) || o.tab != m.tab || o.ref {
 			t.Errorf("%s acted under the New menu", k)
 		}

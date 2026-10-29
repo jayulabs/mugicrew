@@ -73,7 +73,7 @@ func TestReworkApprovalMalformedWritesNothing(t *testing.T) {
 		"duplicate": {ok, critFile(t, "# A\n\nother\n")},
 		"missing":   {filepath.Join(t.TempDir(), "nope.md")},
 	} {
-		if _, err := ReworkApproval("ap", files); err == nil {
+		if _, err := ReworkApproval("ap", files, nil, nil); err == nil {
 			t.Errorf("%s: want an error", name)
 		}
 	}
@@ -89,14 +89,14 @@ func TestReworkApprovalRefusals(t *testing.T) {
 		want string
 	}{
 		"not an approval": {[]map[string]any{row("cp", "checkpoint", "open", "", nil), row("ap", "build", "open", "cp", nil)}, "not a kind:approval"},
-		"orphan":          {[]map[string]any{row("ap", "approval", "open", "", nil)}, "not a child of a Checkpoint"},
+		"orphan":          {[]map[string]any{row("ap", "approval", "open", "", nil)}, "not a child of a Checkpoint or a Chart"},
 		"closed":          {[]map[string]any{row("cp", "checkpoint", "open", "", nil), row("ap", "approval", "closed", "cp", map[string]any{"close_reason": "rework: x1"})}, "rework: x1"},
 		"deferred":        {[]map[string]any{row("cp", "checkpoint", "open", "", nil), row("ap", "approval", "deferred", "cp", nil)}, "is deferred, not open or in_progress"},
 		"blocked":         {[]map[string]any{row("cp", "checkpoint", "open", "", nil), row("ap", "approval", "blocked", "cp", nil)}, "is blocked, not open or in_progress"},
 		"missing":         {nil, "no bead"},
 	} {
 		calls, scripts := reworkWorld(t, tc.rows, nil)
-		_, err := ReworkApproval("ap", f)
+		_, err := ReworkApproval("ap", f, nil, nil)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
 		}
@@ -113,7 +113,7 @@ func TestReworkApprovalAdoptsPrunesAndPublishes(t *testing.T) {
 		row("d3", "signal", "deferred", "", map[string]any{"title": "Sig"}),       // rides along
 	}
 	calls, scripts := reworkWorld(t, goodGraph(), drafts)
-	ids, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nbody a\n"), critFile(t, "# B\n\nline1\nline2\n")})
+	ids, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nbody a\n"), critFile(t, "# B\n\nline1\nline2\n")}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,10 +139,81 @@ func TestReworkApprovalAdoptsPrunesAndPublishes(t *testing.T) {
 // FR9: an open Approval is accepted as well as an in_progress one.
 func TestReworkApprovalAcceptsOpenApproval(t *testing.T) {
 	_, scripts := reworkWorld(t, graphWith("open"), nil)
-	if _, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nbody\n")}); err != nil {
+	if _, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nbody\n")}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(*scripts) != 1 || !strings.Contains((*scripts)[0], `close ap "rework: c1"`) {
 		t.Errorf("scripts = %q: want one batch closing the open Approval", *scripts)
+	}
+}
+
+func chartGraph() []map[string]any {
+	return []map[string]any{
+		row("ch", "chart", "open", "", map[string]any{"labels": []string{"kind:chart", "chart:defogged"}}),
+		row("ap", "approval", "in_progress", "ch", nil),
+	}
+}
+
+func TestReworkApprovalChartFilesDefogAndUnstamps(t *testing.T) {
+	drafts := []map[string]any{
+		row("d1", "grilling", "deferred", "ch", map[string]any{"title": "G"}),     // adopted
+		row("d2", "research", "deferred", "ch", map[string]any{"title": "Stray"}), // pruned
+		row("d3", "signal", "deferred", "", map[string]any{"title": "Sig"}),       // rides along
+	}
+	calls, scripts := reworkWorld(t, chartGraph(), drafts)
+	ids, err := ReworkApproval("ap", nil, []string{critFile(t, "# G\n\nbody\n")}, []string{critFile(t, "# R\n\nline1\nline2\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"d1", "c1"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids = %v, want %v", ids, want)
+	}
+	var create string
+	var unstamped bool
+	for _, c := range *calls {
+		switch c[0] {
+		case "create":
+			create = strings.Join(c, " ")
+		case "label":
+			unstamped = unstamped || reflect.DeepEqual(c, []string{"label", "remove", "ch", "chart:defogged"})
+		}
+	}
+	for _, w := range []string{"--labels kind:research,drafted-by:ap", "--parent ch", "--title R"} {
+		if !strings.Contains(create, w) {
+			t.Errorf("create %q lacks %q", create, w)
+		}
+	}
+	if strings.Contains(create, "kind:chart") || !unstamped {
+		t.Errorf("create %q, unstamped %v: want no kind:chart and chart:defogged removed", create, unstamped)
+	}
+	s := strings.Join(*scripts, "")
+	if len(*scripts) != 1 || !strings.Contains(s, `close ap "rework: d1, c1"`) || !strings.Contains(s, "update d3 status=open") {
+		t.Errorf("scripts = %q", *scripts)
+	}
+}
+
+func TestReworkApprovalRefusesWrongFlagForContainer(t *testing.T) {
+	f := []string{critFile(t, "# A\n\nbody\n")}
+	for name, tc := range map[string]struct {
+		rows               []map[string]any
+		crit, grill, resch []string
+		want               string
+	}{
+		"chart critique":       {chartGraph(), f, nil, nil, "--critique applies to a Checkpoint"},
+		"checkpoint grilling":  {goodGraph(), nil, f, nil, "apply to a Chart"},
+		"checkpoint research":  {goodGraph(), nil, nil, f, "apply to a Chart"},
+		"chart mixed critique": {chartGraph(), f, f[:0], nil, "--critique applies"},
+	} {
+		calls, scripts := reworkWorld(t, tc.rows, nil)
+		if name == "chart mixed critique" {
+			tc.grill = []string{critFile(t, "# G\n\nb\n")}
+		}
+		_, err := ReworkApproval("ap", tc.crit, tc.grill, tc.resch)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
+		}
+		if len(*calls)+len(*scripts) != 0 {
+			t.Errorf("%s: wrote %v %v", name, *calls, *scripts)
+		}
 	}
 }

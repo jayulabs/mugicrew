@@ -77,7 +77,7 @@ func TestRequest(t *testing.T) {
 	}{
 		{"filed checkpoint", open(contract.KindCheckpoint), nil, Filed, "", ""},
 		{"filed chart", open(contract.KindChart), nil, Filed, "", ""},
-		{"other kind", open(contract.KindTask), nil, Refused, "task", ""},
+		{"other kind", open(contract.KindErrand), nil, Refused, "errand", ""},
 		{"closed", bd.Bead{ID: "mc-c", Kind: contract.KindChart, Status: "closed"}, nil, Refused, "closed", ""},
 		{"no bead", bd.Bead{ID: "other"}, nil, Refused, "no such bead", ""},
 		{"no branch", open(contract.KindChart), func(s *Seams) { s.HasBranch = func(git.Repo, string) bool { return false } }, Refused, "no branch", ""},

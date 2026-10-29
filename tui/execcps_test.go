@@ -82,7 +82,7 @@ func TestExecCheckpointsRowLineAndDetail(t *testing.T) {
 		t.Fatalf("sec=%v tree=%v", sec, tree)
 	}
 	l, _ := tab.body(*sec, 12, false, "")
-	if !strings.Contains(l, "blocked on Task") {
+	if !strings.Contains(l, "blocked on Errand") {
 		t.Errorf("line %q lacks the Rollup word", l)
 	}
 	if a, b := tab.rowText(*sec), tab.rowText(*tree); a != b {

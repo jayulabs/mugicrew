@@ -1,6 +1,7 @@
 # ADR 0352: mugicrew every Task joins the Initiative of the member it is ordered against
 
 Status: Accepted
+Amended by ADR 0375 (an-offshoot-whose-cause-is-in-an-initiative-is-born-as-its-member…) (§2: offshoots of any order join; Latches and Pivots stay outside).
 Date: 2026-10-22
 Amends: ADR 0113 (task-production-and-ordering-against-checkpoint-lands) §2; ADR 0117 (task-tui-surface-and-no-human-front-door) §3; ADR 0128 (initiative-container-membership-and-owner) §6; ADR 0133 (initiative-lifecycle-drain-cancel-withdraw) §8; ADR 0221 (require-initiatives-gates-surgery-release-and-reconcile…) §3 and its Considered Options reason for Tasks; ADR 0342 (withdraw-takes-a-task-and-a-chains-withdraw-sweeps-the-tasks-ordered-after-it) §1.
 

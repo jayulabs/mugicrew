@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"jayulabs.org/mugicrew/claudecode"
 	"jayulabs.org/mugicrew/contract"
@@ -31,8 +32,8 @@ var (
 	clock         = time.Now          // the poller's clock, a var so cadence tests pin it
 	usageInterval = 300 * time.Second // the background poll, a var so tests don't wait on its tick
 
-	usageWarnSty = waitSt // the amber warn colour
-	usageErrSty  = warnSt // the red error colour
+	usageWarnSty lipgloss.Style // the caution colour
+	usageErrSty  lipgloss.Style // the red error colour
 )
 
 // usageReader is claudecode.ReadUsage's shape: the token that last got a 401 in,
@@ -211,4 +212,27 @@ func (m Model) usageBand() string {
 		return dimSt.Render(s + " · as of " + m.usageAt.Format("15:04"))
 	}
 	return s
+}
+
+// backupFailed reports whether the latest backup.* event is backup.failed (D5). The digest
+// holds the whole log's backup events, so it survives a restart.
+func (m Model) backupFailed() bool {
+	for i := len(m.digest) - 1; i >= 0; i-- {
+		switch m.digest[i].Msg {
+		case "backup.failed":
+			return true
+		case "backup.pushed":
+			return false
+		}
+	}
+	return false
+}
+
+// backupMark is the tab bar's `backup failed (see Logs) · ` while the latest backup push
+// failed; the error is on the backup.failed event in Logs.
+func (m Model) backupMark() string {
+	if !m.backupFailed() {
+		return ""
+	}
+	return warnSt.Render("backup failed (see Logs)") + dimSt.Render(" · ")
 }

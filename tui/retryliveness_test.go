@@ -33,12 +33,3 @@ func TestRetryInFlightReadsLiveness(t *testing.T) {
 		})
 	}
 }
-
-func TestRecoverOptsAlwaysExcludesOwnSession(t *testing.T) {
-	m, _ := actModel(t)
-	ownSession = func() (string, error) { return "tui-1", nil }
-	o, err := m.recoverOpts("b")(false)
-	if err != nil || o.ExcludeTUISession != "tui-1" {
-		t.Errorf("opts = %+v, %v", o, err)
-	}
-}

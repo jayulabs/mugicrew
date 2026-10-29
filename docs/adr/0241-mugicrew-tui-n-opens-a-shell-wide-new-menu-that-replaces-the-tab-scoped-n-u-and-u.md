@@ -93,6 +93,12 @@ ADR 0142's "no two ways" is cited, not amended: the old keys go with no alias.
   two exceptions.
 - **ADR 0229 §1, §3, §5.** §1: `n new` in nav, `u`/`U` gone. §3: `n new` pinned,
   `u`/`U` ranks gone. §5: the `n new ›` group.
+- **§1/§3, 2026-10-28 (Spec mc-6giio, Retrospective starts from the New menu's `t`
+  row).** The menu's rows read `s j i u r t d`, with `t New retrospective` between
+  `r` and `d`. Like the `r` row it is hidden, not refused: it shows only when the
+  selection pinned at open (the focus view's cursor row counts) is a Signal, Chart,
+  Spec, Checkpoint or Initiative. Firing it runs the retrospective flow on that
+  pinned bead.
 
 Wording notes, not amendments: ADR 0149, ADR 0171, ADR 0172, ADR 0178 and ADR 0180
 (Ideate hint rows ending `n new`), ADR 0164 and ADR 0165 (Graph/Ideate hint

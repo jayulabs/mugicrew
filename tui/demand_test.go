@@ -34,7 +34,7 @@ func landReveal(t *testing.T, m Model, id string) (Model, func(Model) Model) {
 
 func TestRevealUnloadedClosedBeadLandsCursorUnderAncestors(t *testing.T) {
 	stubAncestors(t)
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindTask}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindErrand}})
 	m, land := landReveal(t, m, "old")
 	if g := m.tabAt(tabGraph).(graphTab); m.tab != tabGraph || !g.searching || g.want != "old" {
 		t.Fatalf("in flight: tab %d searching %v want %q", m.tab, g.searching, g.want)
@@ -59,7 +59,7 @@ func TestRevealUnloadedClosedBeadLandsCursorUnderAncestors(t *testing.T) {
 
 func TestRevealParksCursorAndMoveCancels(t *testing.T) {
 	stubAncestors(t)
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindTask}, {ID: "b", Status: "open", Title: "Open b", Kind: contract.KindTask}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindErrand}, {ID: "b", Status: "open", Title: "Open b", Kind: contract.KindErrand}})
 	m, land := landReveal(t, m, "old")
 	m = press(t, m, runeKey("j")) // any move cancels the memory
 	if g := m.tabAt(tabGraph).(graphTab); g.want != "" {
@@ -72,7 +72,7 @@ func TestRevealParksCursorAndMoveCancels(t *testing.T) {
 }
 
 func TestGraphLostCursorWithNothingInFlightFollowsNeighbour(t *testing.T) {
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindTask}, {ID: "b", Status: "open", Kind: contract.KindTask}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindErrand}, {ID: "b", Status: "open", Kind: contract.KindErrand}})
 	m.tab = tabGraph
 	g := m.tabAt(tabGraph).(graphTab).rebuild()
 	g.sel = "gone"
@@ -125,7 +125,7 @@ func TestGotoMenuStreamsInUnloadedDependents(t *testing.T) {
 	var asked []string
 	seam(t, &listByID, func(ids []string) ([]bd.Bead, error) {
 		asked = ids
-		return []bd.Bead{{ID: "old-dep", Status: "closed", Title: "Closed dependent", Kind: contract.KindTask, BlockedBy: []string{"a"}}}, nil
+		return []bd.Bead{{ID: "old-dep", Status: "closed", Title: "Closed dependent", Kind: contract.KindErrand, BlockedBy: []string{"a"}}}, nil
 	})
 	m.tab = tabGraph
 	g := m.tabAt(tabGraph).(graphTab).rebuild()
@@ -166,7 +166,7 @@ func TestGotoMenuStreamsInUnloadedOffshoot(t *testing.T) {
 
 func TestRecentsJumpFetchesUnloadedBead(t *testing.T) {
 	stubAncestors(t)
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindTask}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Open", Kind: contract.KindErrand}})
 	os.WriteFile(recentsPath(), []byte(`["old"]`), 0o644) // a Recents row: the Recents claim holds it
 	m.recents = []string{"old"}
 	m, cmd := m.recentsJump("old")
@@ -180,8 +180,8 @@ func TestRecentsJumpFetchesUnloadedBead(t *testing.T) {
 }
 
 func TestGraphEntryAfterSAnyParksEvictedCursorAndReturns(t *testing.T) {
-	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindTask}}
-	old := bd.Bead{ID: "old", Status: "closed", Kind: contract.KindTask}
+	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindErrand}}
+	old := bd.Bead{ID: "old", Status: "closed", Kind: contract.KindErrand}
 	def := []bd.Bead{}
 	claimStubs(t, &open, &def, nil, nil)
 	m := sized(t, 120, 30)
@@ -203,11 +203,11 @@ func TestGraphEntryAfterSAnyParksEvictedCursorAndReturns(t *testing.T) {
 }
 
 func TestStaleGotoFetchDoesNotReplaceNewerMenusClaim(t *testing.T) {
-	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Opened one", Kind: contract.KindTask, Parent: "p"}})
+	m := demandModel(t, []bd.Bead{{ID: "a", Status: "open", Title: "Opened one", Kind: contract.KindErrand, Parent: "p"}})
 	calls := 0
 	seam(t, &listByID, func([]string) ([]bd.Bead, error) {
 		calls++
-		return []bd.Bead{{ID: []string{"", "first", "second"}[calls], Status: "closed", Title: "Closed", Kind: contract.KindTask}}, nil
+		return []bd.Bead{{ID: []string{"", "first", "second"}[calls], Status: "closed", Title: "Closed", Kind: contract.KindErrand}}, nil
 	})
 	m.tab = tabGraph
 	g := m.tabAt(tabGraph).(graphTab).rebuild()
@@ -237,7 +237,7 @@ func TestFoldDemandErrorKeepsFailureStatus(t *testing.T) {
 // A load already in flight when Graph is entered predates the request: landing it does
 // not end the entry's parked cursor; the load the next tick starts does.
 func TestGraphEntryDuringInFlightLoadKeepsCursorParkedUntilEntryLoad(t *testing.T) {
-	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindTask}}
+	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindErrand}}
 	def := []bd.Bead{}
 	claimStubs(t, &open, &def, nil, nil)
 	m := sized(t, 120, 30)
@@ -257,7 +257,7 @@ func TestGraphEntryDuringInFlightLoadKeepsCursorParkedUntilEntryLoad(t *testing.
 	if g := m.tabAt(tabGraph).(graphTab); !g.searching || g.want != "old" || !m.slowWant {
 		t.Fatalf("stale load ended the entry: searching %v want %q slowWant %v", g.searching, g.want, m.slowWant)
 	}
-	def = append(def, bd.Bead{ID: "old", Status: "closed", Kind: contract.KindTask})
+	def = append(def, bd.Bead{ID: "old", Status: "closed", Kind: contract.KindErrand})
 	m, cmd = send(t, m, tickMsg{})
 	for _, msg := range flatten(cmd()) {
 		m, _ = send(t, m, msg)
@@ -270,7 +270,7 @@ func TestGraphEntryDuringInFlightLoadKeepsCursorParkedUntilEntryLoad(t *testing.
 // s any picked while a slow load without the claim is in flight: that load must not
 // clear slowWant or the marker, so the all-closed read still runs on the next tick.
 func TestSAnyDuringInFlightSlowLoadStillReadsAll(t *testing.T) {
-	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindTask}}
+	open := []bd.Bead{{ID: "a", Status: "open", Kind: contract.KindErrand}}
 	def := []bd.Bead{}
 	claimStubs(t, &open, &def, nil, nil)
 	m := sized(t, 120, 30)

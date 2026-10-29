@@ -91,7 +91,7 @@ func (t execTab) rowText(r eRow) string {
 			return r.title + "\n\nThe Initiative groups.\n\nenter does nothing here (space folds)."
 		}
 		if r.init == nil {
-			return r.title + "\n\nThe Checkpoints and Specs with no Initiative parent, and the Tasks and Pivots that wait on them.\n\nenter does nothing here (space folds)."
+			return r.title + "\n\nThe Checkpoints and Specs with no Initiative parent, and the Errands and Pivots that wait on them.\n\nenter does nothing here (space folds)."
 		}
 		return g.sbrn(r.init, r.title, true, 0) + "\n\nenter does nothing on an Initiative row (space folds).\n\n" + g.beadBody(r.init, true)
 	case ePlace: // no bead: a launch can park the cursor here
@@ -123,6 +123,14 @@ func (t execTab) rowText(r eRow) string {
 	if r.kind == eMR {
 		if url := git.RecordedMRLink(b.Description); url != "" { // read through the helper only: never derived from the iid, path or host
 			field("MR link", url)
+		}
+		if r.cp.Unclosed() {
+			for _, f := range parseMRFacts(b.Description).fields() {
+				field(f[0], f[1])
+			}
+		}
+		if v := g.stabilizingField(r.cp); v != "" {
+			field("stabilizing", v)
 		}
 	}
 	kind := r.kind

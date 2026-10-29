@@ -48,7 +48,7 @@ func TestSubtreeClaimKeepsClosedBeadsAcrossLoads(t *testing.T) {
 		"bare":   func(g graphTab) graphTab { return g },
 		"words":  func(g graphTab) graphTab { g.q.words = "done"; return g },
 		"status": func(g graphTab) graphTab { g.q.status = "open"; return g },
-		"kind":   func(g graphTab) graphTab { g.q.kind = contract.KindTask; return g },
+		"kind":   func(g graphTab) graphTab { g.q.kind = contract.KindErrand; return g },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := subtreeModel(t)

@@ -115,6 +115,8 @@ type Context struct {
 	Path string
 	Repo string
 	Gate string
+	// GateCommand is the context's own land-gate shell command; exclusive with Gate.
+	GateCommand string `toml:"gate_command"`
 }
 
 type contextLayer struct {
@@ -157,7 +159,8 @@ func Repos(root string) map[string]string {
 }
 
 type gateLayer struct {
-	Gate string
+	Gate        string
+	GateCommand string `toml:"gate_command"`
 }
 
 // Gate is the top-level gate = "<attr>", the flake attribute a Workspace-root land
@@ -170,6 +173,53 @@ func Gate(root string) string {
 		}
 	}
 	return ""
+}
+
+// GateKind is which kind of land gate a scope sets.
+type GateKind int
+
+const (
+	GateNone    GateKind = iota // neither key: the land is ungated
+	GateNix                     // gate = "<attr>": a nix build of the composed squash
+	GateCommand                 // gate_command = "<shell string>": sh -c at the repo root
+)
+
+// GateSpec is one scope's resolved land gate. Err is set when the scope sets both
+// keys; it names the scope and a gated land treats it as infra.
+type GateSpec struct {
+	Kind  GateKind
+	Value string // the flake attribute (GateNix) or the shell string (GateCommand)
+	Err   error
+}
+
+func resolveScope(scope, attr, cmd string) GateSpec {
+	switch {
+	case attr != "" && cmd != "":
+		return GateSpec{Err: fmt.Errorf("%s sets both gate and gate_command; set only one", scope)}
+	case attr != "":
+		return GateSpec{Kind: GateNix, Value: attr}
+	case cmd != "":
+		return GateSpec{Kind: GateCommand, Value: cmd}
+	}
+	return GateSpec{}
+}
+
+// ResolveGate is the top-level scope's gate: the first layer (local, then shared)
+// that sets either key is the one read.
+func ResolveGate(root string) GateSpec {
+	for _, path := range []string{LocalPath(root), SharedPath(root)} {
+		var l gateLayer
+		if Decode(path, &l) == Set && (l.Gate != "" || l.GateCommand != "") {
+			return resolveScope("the top level", l.Gate, l.GateCommand)
+		}
+	}
+	return GateSpec{}
+}
+
+// ResolveContextGate is context name's own gate; the top level never leaks into it.
+func ResolveContextGate(root, name string) GateSpec {
+	c := Contexts(root)[name]
+	return resolveScope("context "+name, c.Gate, c.GateCommand)
 }
 
 // ContextGate is context name's own gate = "<attr>", "" when it sets none: the top
@@ -399,36 +449,6 @@ func InitiativesSetting(root string) Initiatives {
 			} else {
 				out.Required, out.ExternalRef = t.Required, t.ExternalRef
 			}
-		}
-	}
-	return out
-}
-
-// Approvals is the resolved [approvals] setting (ADR 0020 amendment).
-type Approvals struct {
-	AutoApprove bool   // [approvals] auto_approve: the crew approves Approvals itself
-	Unusable    bool   // the table was malformed or mistyped (warned config.unusable)
-	Path        string // the shared config file read
-}
-
-type approvalsLayer struct {
-	Approvals *struct {
-		AutoApprove bool `toml:"auto_approve"`
-	}
-}
-
-// AutoApproveSetting reads [approvals] auto_approve from the shared layer only, as
-// InitiativesSetting does, and re-reads on every call. A missing file, table or key
-// reads off; a decode error or mistyped table warns config.unusable and reads off.
-func AutoApproveSetting(root string) Approvals {
-	out := Approvals{Path: SharedPath(root)}
-	var l approvalsLayer
-	switch Decode(out.Path, &l) {
-	case Unusable:
-		out.Unusable = true
-	case Set:
-		if t := l.Approvals; t != nil {
-			out.AutoApprove = t.AutoApprove
 		}
 	}
 	return out

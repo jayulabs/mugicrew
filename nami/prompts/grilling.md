@@ -28,11 +28,11 @@ skipping its Claim step: the TUI claimed this bead when it launched you.
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
    A step the work will need in the external world (outside the bead graph and
-   the code) may be drafted as a Task, never a Chart child (no
-   --parent), its body in crew doc task-body.md's format, blocked on the Chart or
+   the code) may be drafted as an Errand, never a Chart child (no
+   --parent), its body in crew doc errand-body.md's format, blocked on the Chart or
    Spec it waits for. Carry copies that edge onto the Checkpoint when it is cut:
 
-       mugicrew task new --drafted-by %[1]s --after <chartID> \
+       mugicrew errand new --drafted-by %[1]s --after <chartID> \
          --title "..." --description "<its ## Steps body>"
 
 5. **Record, integrate and close**: run `mugicrew integrate` in this tree.

@@ -1,6 +1,6 @@
 # ADR 0346: mugicrew an Approval is AFK while Workspace auto-approve is on
 
-Status: Accepted
+Status: Accepted (§2/§3 amended by ADR 0382 (under-gitlab-the-un-draft…))
 Date: 2026-10-22
 
 Amends: ADR 0020 (mugicrew-luffy-approval-crewmate) §1 and its Consequences line

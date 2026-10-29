@@ -10,7 +10,7 @@ import (
 func TestCrewDocLifts(t *testing.T) {
 	docs := promptguard.Docs(t)
 	for doc, wants := range map[string][]string{
-		"signal-filing.md": {"Some filings are human-only", "Rollback", "mugicrew rebase", "Surgery", "Task mid-work"},
+		"signal-filing.md": {"Some filings are human-only", "Rollback", "mugicrew rebase", "Surgery", "Errand mid-work"},
 		"defog-session.md": {"Never edit an Initiative's body"},
 	} {
 		text := strings.Join(strings.Fields(docs[doc]), " ")

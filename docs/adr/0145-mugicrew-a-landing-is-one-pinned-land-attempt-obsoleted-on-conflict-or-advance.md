@@ -2,6 +2,7 @@
 
 Status: Accepted (amended by ADR 0185)
 Date: 2026-10-12
+Amended by ADR 0388 (a-chart-lands-through-an-approval-carrying-a-chart-packet) (§1: a Chart's gate respawns an Approval, not a Landing, when the branch advances).
 
 Chart mc-9kvd (Landing bead kind with pluggable landing strategies). Settles
 grilling mc-9kvd.3 on the Landing's lifecycle beyond the happy path. It builds on

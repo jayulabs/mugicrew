@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -139,5 +140,90 @@ func TestChartAppendConcurrentLosesNothing(t *testing.T) {
 		if line := fmt.Sprintf("- mc-c.%d: d", 10+i); !strings.Contains(*body, line+"\n") {
 			t.Errorf("lost %q:\n%s", line, *body)
 		}
+	}
+}
+
+// ADR 0357: chart finish stamps only a Chart whose own claimed Survey settled it;
+// each refusal is loud and writes nothing, and a re-run on a stamped Chart is a no-op.
+func TestFinishChart(t *testing.T) {
+	const body = "## Destination\n\nShip X.\n\n## Decisions-so-far\n\n- gist (mc-s)\n\n## Not-yet-specified\n\n## Out-of-scope\n"
+	type row struct {
+		name   string
+		mutate func(chart, survey, other map[string]any)
+		other  bool // a third child exists
+		want   string
+	}
+	rows := []row{
+		{name: "stamps"},
+		{name: "already stamped", mutate: func(c, _, _ map[string]any) { c["labels"] = []string{"kind:chart", "chart:defogged"} }},
+		{name: "foreign survey", mutate: func(_, s, _ map[string]any) { s["parent"] = "mc-other" }, want: "not a child"},
+		{name: "not a survey", mutate: func(_, s, _ map[string]any) { s["labels"] = []string{"kind:grilling"} }, want: "not a survey"},
+		{name: "unclaimed survey", mutate: func(_, s, _ map[string]any) { s["assignee"] = "" }, want: "claimed"},
+		{name: "survey not in progress", mutate: func(_, s, _ map[string]any) { s["status"] = "open" }, want: "claimed"},
+		{name: "closed chart", mutate: func(c, _, _ map[string]any) { c["status"] = "closed" }, want: "open chart"},
+		{name: "unclosed child", other: true, want: "unclosed children"},
+		{name: "unclosed draft", other: true, mutate: func(_, _, o map[string]any) { o["status"] = "deferred" }, want: "unclosed children"},
+		{name: "fog written", mutate: func(c, _, _ map[string]any) {
+			c["description"] = strings.Replace(body, "## Not-yet-specified\n", "## Not-yet-specified\n\n- how?\n", 1)
+		}, want: "Not-yet-specified"},
+		{name: "empty notes", mutate: func(_, s, _ map[string]any) { s["notes"] = " " }, want: "no notes"},
+		{name: "no decision line", mutate: func(c, _, _ map[string]any) { c["description"] = strings.Replace(body, "(mc-s)", "", 1) }, want: "Decisions-so-far"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			repo := t.TempDir()
+			if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v %s", err, out)
+			}
+			t.Chdir(repo)
+			chart := map[string]any{"id": "mc-c", "status": "open", "labels": []string{"kind:chart"}, "description": body}
+			survey := map[string]any{"id": "mc-s", "status": "in_progress", "assignee": "nami", "parent": "mc-c", "labels": []string{"kind:survey"}, "notes": "settled"}
+			other := map[string]any{"id": "mc-o", "status": "open", "parent": "mc-c", "labels": []string{"kind:grilling"}}
+			if r.mutate != nil {
+				r.mutate(chart, survey, other)
+			}
+			kids := []map[string]any{survey}
+			if r.other {
+				kids = append(kids, other)
+			}
+			var writes [][]string
+			orun := run
+			t.Cleanup(func() { run = orun })
+			run = func(args ...string) (string, error) {
+				var v any
+				switch {
+				case args[0] == "show" && args[1] == "mc-c":
+					v = []any{chart}
+				case args[0] == "show" && args[1] == "mc-s":
+					v = []any{survey}
+				case args[0] == "list" || args[0] == "children":
+					v = kids
+				default:
+					writes = append(writes, args)
+					return "", nil
+				}
+				j, _ := json.Marshal(v)
+				return string(j), nil
+			}
+			err := FinishChart("mc-c", "mc-s")
+			if r.want != "" {
+				if err == nil || !strings.Contains(err.Error(), r.want) {
+					t.Fatalf("FinishChart = %v, want an error containing %q", err, r.want)
+				}
+				if len(writes) != 0 {
+					t.Errorf("a refusal wrote %q", writes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.name == "stamps" && !slices.Equal(slices.Concat(writes...), []string{"update", "mc-c", "--add-label", "chart:defogged"}) {
+				t.Errorf("writes = %q, want one add-label chart:defogged", writes)
+			}
+			if r.name == "already stamped" && len(writes) != 0 {
+				t.Errorf("an already-stamped Chart wrote %q", writes)
+			}
+		})
 	}
 }

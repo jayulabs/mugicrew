@@ -4,7 +4,7 @@ Keep one body file outside the repo, in a session temp directory, e.g.
 ${TMPDIR:-/tmp}/mugicrew-%[1]s/packet.md, and write the doc to it. Close the
 Approval History section with its last line exactly:
 
-    auto-approved (AFK, Workspace auto-approve on)
+    %[6]s
 
 Write the description from that file, so what you wrote is what lands:
 

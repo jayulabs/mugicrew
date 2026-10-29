@@ -2,9 +2,11 @@ package brook
 
 import (
 	"errors"
+	"fmt"
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/jira"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +34,7 @@ type stubCtx struct{ h contract.Harness }
 
 func (c stubCtx) Harness() contract.Harness { return c.h }
 
-// launch renders Brook's Task session as the TUI does: through WithClosingLine.
+// launch renders Brook's Errand session as the TUI does: through WithClosingLine.
 func launch(t *testing.T, kind contract.Kind) (*stubHarness, error) {
 	t.Helper()
 	h := &stubHarness{}
@@ -40,21 +42,21 @@ func launch(t *testing.T, kind contract.Kind) (*stubHarness, error) {
 	return h, err
 }
 
-// Launch(task) is one agent session anchored to the Task (Spec D2).
-func TestLaunchTaskComposesSession(t *testing.T) {
-	h, err := launch(t, contract.KindTask)
+// Launch(errand) is one agent session anchored to the Errand (Spec D2).
+func TestLaunchErrandComposesSession(t *testing.T) {
+	h, err := launch(t, contract.KindErrand)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	if h.inv.BeadID != "ws-task" {
-		t.Errorf("Invocation must anchor to the Task id, got %q", h.inv.BeadID)
+		t.Errorf("Invocation must anchor to the Errand id, got %q", h.inv.BeadID)
 	}
 }
 
-// Brook owns only task: any other kind is a loud error, as in Franky.
-func TestLaunchNonTaskIsLoudError(t *testing.T) {
+// Brook owns only errand: any other kind is a loud error, as in Franky.
+func TestLaunchNonErrandIsLoudError(t *testing.T) {
 	for _, k := range contract.Kinds {
-		if k == contract.KindTask {
+		if k == contract.KindErrand {
 			continue
 		}
 		if _, err := launch(t, k); err == nil {
@@ -63,18 +65,39 @@ func TestLaunchNonTaskIsLoudError(t *testing.T) {
 	}
 }
 
-// Task is HITL-only: the loop never runs one (FR19).
+// Errand is HITL-only: the loop never runs one (FR19).
 func TestRunIsLoudHITLError(t *testing.T) {
-	if err := (Brook{}).Run(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-task", Kind: contract.KindTask}); err == nil {
-		t.Fatal("Run of a Task must return a loud error, got nil")
+	if err := (Brook{}).Run(stubCtx{&stubHarness{}}, contract.Bead{ID: "ws-errand", Kind: contract.KindErrand}); err == nil {
+		t.Fatal("Run of an Errand must return a loud error, got nil")
+	}
+}
+
+// Spec D1: the guide closes an Errand completed, and an Errand Go already
+// closed is done at resume (step 0) and at Done (re-read, no second close).
+func TestErrandPromptClosesCompletedAndHandlesClosed(t *testing.T) {
+	h, err := launch(t, contract.KindErrand)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	p := h.inv.Prompt
+	for _, want := range []string{
+		"bd close ws-task --reason completed",
+		"0. Run `bd show ws-task` first. If the Errand is already closed",
+		"say no step needs walking, and end the session\n   without writing any record",
+		"re-read it with `bd show ws-task`. If it is already closed, say\n   so, name its close reason",
+		"do not close it again",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("Errand prompt missing %q", want)
+		}
 	}
 }
 
 // The rendered guide prompt pins the settled behaviour (Spec D3): the
 // bead, the closing line, the three markers, the shell-agnostic hidden prompt,
 // the pass/stuck/amended comment shapes and the never-record list (FR 32).
-func TestTaskPromptPinsGuide(t *testing.T) {
-	h, err := launch(t, contract.KindTask)
+func TestErrandPromptPinsGuide(t *testing.T) {
+	h, err := launch(t, contract.KindErrand)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -89,8 +112,9 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		`bd comments add ws-task "step N amended: <why>"`,
 		"Never record a secret value, token, password, private key, credentialed URL or raw check output",
 		"signal-filing.md",
+		"filed with\n--order none",
 		"bd close ws-task",
-		"crew doc task-body.md",
+		"crew doc errand-body.md",
 		"`r` on that Chart's or Checkpoint's row in the TUI",
 		"Never run the mugicrew rebase verb yourself",
 		"never merge or rebase a container branch by hand",
@@ -100,7 +124,7 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		"mugicrew pivot raise ws-task",
 		"git diff main...checkpoint/<id>", "git show checkpoint/<id>:<path>",
 		"unsure: Signal",
-		"Raised by Task ws-task, step N (<title>)", "Unblocks Task ws-task step N",
+		"Raised by Errand ws-task, step N (<title>)", "Unblocks Errand ws-task step N",
 		"*raise*", "*file an offshoot Signal instead*", "*neither*",
 		"freezes the whole Checkpoint",
 		"raised pivot <id> + Critique <id> on Checkpoint <id>, wait for Critique <id> to close",
@@ -111,10 +135,10 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 		"enter on its row resumes it",
 		"pivot <id> dismissed", "amended:",
 		"`X` in the TUI, or `mugicrew withdraw ws-task`, never a hand\n`bd close`",
-		"withdrawing the Task releases that Checkpoint's land",
+		"withdrawing the Errand releases that Checkpoint's land",
 	} {
 		if !strings.Contains(p, want) {
-			t.Errorf("Task prompt missing %q", want)
+			t.Errorf("Errand prompt missing %q", want)
 		}
 	}
 	if strings.Contains(p, "read -p") && !strings.Contains(p, "bash -c 'read") {
@@ -125,13 +149,13 @@ func TestTaskPromptPinsGuide(t *testing.T) {
 	}
 }
 
-// Spec D6 over the rendered Task prompt: no skill call, no ADR
+// Spec D6 over the rendered Errand prompt: no skill call, no ADR
 // citation, no kind-prefixed title, every crew-doc reference resolves.
-func TestTaskPromptSkillFree(t *testing.T) {
-	got := taskPrompt("mc-x")
+func TestErrandPromptSkillFree(t *testing.T) {
+	got := errandPrompt("mc-x")
 	promptguard.Check(t, "task", got)
-	if refs := promptguard.CrewDocRefs(got); !slices.Contains(refs, "task-body.md") {
-		t.Errorf("Task prompt reads no crew doc task-body.md (refs %q)", refs)
+	if refs := promptguard.CrewDocRefs(got); !slices.Contains(refs, "errand-body.md") {
+		t.Errorf("Errand prompt reads no crew doc errand-body.md (refs %q)", refs)
 	}
 }
 
@@ -171,7 +195,7 @@ func TestLatchOrphanClosesWithoutJiraRead(t *testing.T) {
 
 func TestLatchDoneClosesWithReason(t *testing.T) {
 	err, pub, _, _ := latchRun(t, watches, true, jira.Item{Key: "ABC-1", Status: "Closed", Category: "done"}, nil)
-	if err != nil || len(pub) != 1 || pub[0] != "jira ABC-1 reached Closed (Done)" {
+	if err != nil || len(pub) != 1 || pub[0] != "completed: jira ABC-1 reached Closed (Done)" {
 		t.Fatalf("err=%v published=%q", err, pub)
 	}
 }
@@ -184,9 +208,14 @@ func TestLatchNotDoneStaysOpen(t *testing.T) {
 }
 
 func TestLatchReadErrorIsReturned(t *testing.T) {
-	err, pub, _, _ := latchRun(t, watches, true, jira.Item{}, errors.New("boom"))
-	if err == nil || len(pub) != 0 {
-		t.Fatalf("err=%v published=%q", err, pub)
+	err, pub, direct, _ := latchRun(t, watches, true, jira.Item{}, errors.New("boom"))
+	if err == nil || len(pub)+len(direct) != 0 {
+		t.Fatalf("err=%v published=%q direct=%q", err, pub, direct)
+	}
+	for _, want := range []string{"jira ABC-1 could not be read", "boom", "gone", "forbidden", "unreachable", "mugicrew withdraw ws-l"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
 	}
 }
 
@@ -209,7 +238,7 @@ func TestLatchClosesDirectlyWithoutPublisher(t *testing.T) {
 }
 
 func TestRunStillErrorsForOtherKinds(t *testing.T) {
-	for _, k := range []contract.Kind{contract.KindTask, contract.KindBuild} {
+	for _, k := range []contract.Kind{contract.KindErrand, contract.KindBuild} {
 		if err := (Brook{}).Run(stubCtx{}, contract.Bead{ID: "x", Kind: k}); err == nil {
 			t.Errorf("Run(%q) must error", k)
 		}
@@ -218,10 +247,18 @@ func TestRunStillErrorsForOtherKinds(t *testing.T) {
 
 const mrWatches = "Watches: mr gitlab.com/grp/sub/proj!7\nhttps://gitlab.com/grp/sub/proj/-/merge_requests/7\n\ntitle"
 
-func mrRun(t *testing.T, openBlocked bool, state string, rerr error) (err error, published []string, reads int) {
+// mrRun drives Run over an MR latch carrying labels; it returns the Run error, the
+// published closes and the pause/unpause calls ("pause unmet", "unpause unmet").
+func mrRun(t *testing.T, openBlocked bool, state string, rerr error, labels ...string) (err error, published, writes []string, reads int) {
 	t.Helper()
 	latchRun(t, mrWatches, openBlocked, jira.Item{}, nil) // installs the bd fakes
-	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: mrWatches}, nil }
+	oPause, oUnpause, oRead := pauseBead, unpauseBead, readMR
+	t.Cleanup(func() { pauseBead, unpauseBead, readMR = oPause, oUnpause, oRead })
+	pauseBead = func(id, c string) error { writes = append(writes, "pause "+c); return nil }
+	unpauseBead = func(id, c string) error { writes = append(writes, "unpause "+c); return nil }
+	showBead = func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Kind: contract.KindLatch, Description: mrWatches, Labels: labels}, nil
+	}
 	readMR = func(p forge.Project, iid int) (*forge.MR, error) {
 		reads++
 		if p.Path() != "grp/sub/proj" || iid != 7 {
@@ -234,26 +271,63 @@ func mrRun(t *testing.T, openBlocked bool, state string, rerr error) (err error,
 }
 
 func TestMRLatch(t *testing.T) {
-	err, pub, _ := mrRun(t, true, forge.StateMerged, nil)
-	if err != nil || len(pub) != 1 || pub[0] != "mr grp/sub/proj!7 merged" {
-		t.Fatalf("merged: %v %v", err, pub)
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name       string
+		state      string
+		rerr       error
+		labels     []string
+		wantErr    string
+		wantClosed []string
+		wantWrites []string
+		wantCause  string // cause= on the event
+		wantEvent  string // effort.paused / effort.resumed
+		wantAttrs  []string
+	}{
+		{name: "merged", state: forge.StateMerged, wantClosed: []string{"completed: mr grp/sub/proj!7 merged"}},
+		{name: "opened", state: forge.StateOpened},
+		{name: "opened lifts unmet", state: forge.StateOpened, labels: []string{"paused:unmet"}, wantWrites: []string{"unpause unmet"}, wantCause: "unmet", wantEvent: "effort.resumed"},
+		{name: "closed pauses unmet", state: forge.StateClosed, wantWrites: []string{"pause unmet"}, wantCause: "unmet", wantEvent: "effort.paused", wantAttrs: []string{"grp/sub/proj!7", "state=closed"}},
+		{name: "not found pauses unmet", rerr: fmt.Errorf("get: %w", forge.ErrNotFound), wantWrites: []string{"pause unmet"}, wantCause: "unmet", wantEvent: "effort.paused", wantAttrs: []string{"grp/sub/proj!7", "state=not-found"}},
+		{name: "other state", state: "locked", wantErr: "unexpected state"},
+		{name: "other read error", rerr: boom, wantErr: "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evs := captureEvents(t)
+			err, pub, writes, _ := mrRun(t, true, tc.state, tc.rerr, tc.labels...)
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err=%v, want %q", err, tc.wantErr)
+			}
+			if !slices.Equal(pub, tc.wantClosed) || !slices.Equal(writes, tc.wantWrites) {
+				t.Fatalf("closed=%q writes=%q, want %q %q", pub, writes, tc.wantClosed, tc.wantWrites)
+			}
+			if tc.wantCause != "" && !strings.Contains(evs.String(), "cause="+tc.wantCause) {
+				t.Errorf("events %q lack cause=%s", evs.String(), tc.wantCause)
+			}
+			if tc.wantEvent != "" && !strings.Contains(evs.String(), tc.wantEvent) {
+				t.Errorf("events %q lack %s", evs.String(), tc.wantEvent)
+			}
+			for _, w := range tc.wantAttrs {
+				if !strings.Contains(evs.String(), w) {
+					t.Errorf("events %q lack %q", evs.String(), w)
+				}
+			}
+		})
 	}
-	if err, pub, _ = mrRun(t, true, forge.StateOpened, nil); err != nil || len(pub) != 0 {
-		t.Fatalf("opened: %v %v", err, pub)
-	}
-	if err, pub, _ = mrRun(t, true, forge.StateClosed, nil); err == nil || !strings.Contains(err.Error(), "closed") || len(pub) != 0 {
-		t.Fatalf("closed: %v %v", err, pub)
-	}
-	if err, _, _ = mrRun(t, true, "locked", nil); err == nil {
-		t.Fatal("other state must error")
-	}
-	if err, _, _ = mrRun(t, true, "", errors.New("boom")); err == nil || err.Error() != "boom" {
-		t.Fatalf("read error: %v", err)
-	}
-	err, pub, reads := mrRun(t, false, forge.StateMerged, nil)
+	err, pub, _, reads := mrRun(t, false, forge.StateMerged, nil)
 	if err != nil || reads != 0 || len(pub) != 1 || pub[0] != "orphaned: no open bead waits on mr grp/sub/proj!7" {
 		t.Fatalf("orphan: %v %v %d", err, pub, reads)
 	}
+}
+
+// captureEvents routes slog to the returned buffer for the test.
+func captureEvents(t *testing.T) *strings.Builder {
+	t.Helper()
+	buf := &strings.Builder{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return buf
 }
 
 func TestWatchesParse(t *testing.T) {

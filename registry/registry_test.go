@@ -9,7 +9,7 @@ import (
 
 // Lookup is the total owner-from-kind function (spec §4.2). These cases are the
 // ticket's acceptance criteria: Nami's kinds resolve, an unknown kind is a
-// loud error. (ADR 0013 dropped task from the defog set; ADR 0115 gives it to Brook.)
+// loud error. (ADR 0013 dropped errand from the defog set; ADR 0115 gives it to Brook.)
 func TestLookupResolvesKinds(t *testing.T) {
 	cases := []struct {
 		kind contract.Kind
@@ -38,7 +38,7 @@ func TestLookupResolvesKinds(t *testing.T) {
 		{contract.KindMRWatch, Entry{Owner: "jinbe", Mode: AFK, Container: false, Mechanical: true}},   // Spec D4: Jinbe's every-tick MR read
 		{contract.KindLatch, Entry{Owner: "brook", Mode: AFK, Container: false, Mechanical: true}},     // Spec mc-8ymw.9 D1: Brook's Jira latch check
 		{contract.KindSurgery, Entry{Owner: "franky", Mode: HITL, Container: false}},                   // ADR 0092: human-filed HITL leaf, never an AFK candidate
-		{contract.KindTask, Entry{Owner: "brook", Mode: HITL, Container: false}},                       // ADR 0115: human-launched guide, never an AFK candidate
+		{contract.KindErrand, Entry{Owner: "brook", Mode: HITL, Container: false}},                     // ADR 0115: human-launched guide, never an AFK candidate
 		{contract.KindDiscussion, Entry{Owner: "robin", Mode: HITL, Container: false, ReadOnly: true}}, // ADR 0194: read-only human-launched Robin session
 		{contract.KindInitiative, Entry{Owner: "luffy", Mode: HITL, Container: true}},                  // ADR 0128: branchless HITL container above the spine
 	}
@@ -66,8 +66,8 @@ func TestLookupUnknownKindIsLoudError(t *testing.T) {
 func TestSessionKindsSortedAndExcludesMechanical(t *testing.T) {
 	want := []contract.Kind{
 		"approval", "build", "chart", "chart-conflict", "checkup", "conflict", "critique", "discussion",
-		"forge-review", "grilling", "initiative", "pivot", "prototype", "research", "review",
-		"signal", "spec", "surgery", "survey", "task",
+		"errand", "forge-review", "grilling", "initiative", "pivot", "prototype", "research", "review",
+		"signal", "spec", "surgery", "survey",
 	}
 	got := SessionKinds()
 	if len(got) != len(want) {
@@ -132,7 +132,7 @@ func TestModeOfApprovalFollowsAutoApproveSnapshot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			SetAutoApprove(tc.on)
-			t.Cleanup(ResetAutoApprove)
+			t.Cleanup(ResetModeSnapshots)
 			if got := ModeOf(tc.kind, tc.labels); got != tc.want {
 				t.Errorf("ModeOf(%s, %v) = %s, want %s", tc.kind, tc.labels, got, tc.want)
 			}
@@ -142,7 +142,7 @@ func TestModeOfApprovalFollowsAutoApproveSnapshot(t *testing.T) {
 
 func TestModeOfUnknownKindIsHITL(t *testing.T) {
 	SetAutoApprove(true)
-	t.Cleanup(ResetAutoApprove)
+	t.Cleanup(ResetModeSnapshots)
 	if got := ModeOf("nope", nil); got != HITL {
 		t.Errorf("ModeOf(unknown) = %s, want hitl", got)
 	}
@@ -150,7 +150,7 @@ func TestModeOfUnknownKindIsHITL(t *testing.T) {
 
 func TestLookupStaysStaticWhileAutoApproveIsOn(t *testing.T) {
 	SetAutoApprove(true)
-	t.Cleanup(ResetAutoApprove)
+	t.Cleanup(ResetModeSnapshots)
 	e, err := Lookup(contract.KindApproval)
 	if err != nil || e.Mode != HITL {
 		t.Errorf("Lookup(approval) = %+v, %v; want static HITL", e, err)
@@ -163,5 +163,34 @@ func TestIsModeUnknownKindIsInNoMode(t *testing.T) {
 	}
 	if !IsMode(contract.KindResearch, nil, AFK) || IsMode(contract.KindResearch, nil, HITL) {
 		t.Error("IsMode(research) should be AFK only")
+	}
+}
+
+// Under gitlab an Approval is AFK whether or not auto-approve is on, and HITL while
+// marked auto-approve:failed; local stays as auto-approve alone decides.
+func TestModeOfApprovalUnderGitlabIsAFKUnlessMarked(t *testing.T) {
+	cases := []struct {
+		name   string
+		auto   bool
+		gitlab bool
+		labels []string
+		want   Mode
+	}{
+		{"gitlab auto on", true, true, nil, AFK},
+		{"gitlab auto off", false, true, nil, AFK},
+		{"gitlab auto off marked", false, true, []string{AutoApproveFailedLabel}, HITL},
+		{"gitlab auto on marked", true, true, []string{AutoApproveFailedLabel}, HITL},
+		{"local auto off", false, false, nil, HITL},
+		{"local auto on", true, false, nil, AFK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			SetAutoApprove(tc.auto)
+			SetGitlab(tc.gitlab)
+			t.Cleanup(ResetModeSnapshots)
+			if got := ModeOf(contract.KindApproval, tc.labels); got != tc.want {
+				t.Errorf("ModeOf = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }

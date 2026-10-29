@@ -1,20 +1,17 @@
 package tui
 
-// r on a finished Signal, Chart, Spec, Checkpoint or Initiative starts a Robin
+// n t on a finished Signal, Chart, Spec, Checkpoint or Initiative starts a Robin
 // retrospective (Spec mc-4ryp.7 D2, ADR 0281).
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 )
-
-var keyRetro = verbKey("r", "retrospective")
 
 // The spine read and the related edge, vars so tests touch no live bd.
 var (
@@ -33,23 +30,7 @@ func canRetro(b *bd.Bead) bool {
 	return false
 }
 
-// retroKeys is r where it is bound: hinted on an eligible row, answering elsewhere on
-// any row. History and Logs do not bind it, nor does Graph's typing filter.
-func (m Model) retroKeys() (hinted, extra []key.Binding) {
-	if m.capturing() || (m.focus.id == "" && m.tab > tabInits) {
-		return nil, nil
-	}
-	b := m.selection()
-	switch {
-	case b == nil:
-		return nil, []key.Binding{keyRetro}
-	case canRetro(b):
-		return []key.Binding{keyRetro}, nil
-	}
-	return nil, []key.Binding{keyRetro}
-}
-
-// retrospective is r: the kind check is inline; the spine read runs off the event
+// retrospective is the New menu's t row: the kind check is inline; the spine read runs off the event
 // loop under the bead's pending guard, then the confirm dialog opens.
 func (m Model) retrospective(b *bd.Bead) (tea.Model, tea.Cmd) {
 	if b == nil {
@@ -70,7 +51,7 @@ func (m Model) retrospective(b *bd.Bead) (tea.Model, tea.Cmd) {
 			case open:
 				m.setStatus(target.ID + "'s spine still has open beads")
 			case len(m.modals) > 0: // never stack on a dialog the human opened meanwhile
-				m.setStatus(target.ID + "'s spine is closed; press r again")
+				m.setStatus(target.ID + "'s spine is closed; press n t again")
 			default:
 				return m.push(confirmDialog("Start a retrospective on "+target.Title+"?", nil, target.ID, func(m Model, d dialog) (Model, tea.Cmd) {
 					return into(m.retroStart(target, ids))

@@ -155,7 +155,7 @@ func TestFocusDrawerShowsSectionsAndFetchesComments(t *testing.T) {
 			bs[i].Description = "" // the fixture body would scroll the sections off the drawer
 		}
 	}
-	m, _ := focusModel(t, 160, 40, bs, nil, map[string]bool{})
+	m, _ := focusModel(t, 160, 42, bs, nil, map[string]bool{})
 	f := press(t, ideaFocus(t, m), runeKey("d"))
 	if !slices.Contains(calls, "ini") {
 		t.Fatalf("Focus drawer did not fetch comments: %v", calls)

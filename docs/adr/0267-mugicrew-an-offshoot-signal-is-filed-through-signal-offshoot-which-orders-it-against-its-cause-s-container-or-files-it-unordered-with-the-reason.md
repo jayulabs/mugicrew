@@ -1,5 +1,7 @@
 # An offshoot Signal is filed through `signal offshoot`, which orders it against its cause's container or files it unordered with the reason
 
+Amended by ADR 0375 (an-offshoot-whose-cause-is-in-an-initiative-is-born-as-its-member…): the unordered fallbacks still climb.
+
 Amends: crew doc signal-filing.md's Offshoot form ("The `discovered-from` edge, set on the create, is its only edge").
 
 An offshoot Signal had `discovered-from` as its only edge, so it recorded no order with the work it was found from. The Chart "Offshoot Signals record a blocking order with the work they were discovered from" settled that the order targets the cause's container (its Checkpoint, or its Chart for a defog cause), never the cause bead, and that a mugicrew verb records it, not a hand-written `--deps` in each prompt (docs/research/offshoot-blocking-edge-bd-mechanics.md, docs/research/offshoot-signal-filing-sites-and-cause-containers.md). The grilling "Surface of the offshoot-ordering verb" settled the surface:

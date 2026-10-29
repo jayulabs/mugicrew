@@ -128,17 +128,61 @@ func (m Model) loopMenuBody(width int) []string {
 	return body
 }
 
-// loopOptsLine is the options line, dimmed while a restart is out.
-func (m Model) loopOptsLine() string {
-	parts := []string{}
+// loopOptSpan is one key label segment of the options line: its row (from the line's
+// first) and columns [x0, x1) from the line's start, and the key it presses (esc for esc
+// close).
+type loopOptSpan struct {
+	row, x0, x1 int
+	key         string
+}
+
+// loopOptCells is a Loop menu option's screen columns [x0, x1) and the key it presses.
+type loopOptCells struct {
+	x0, x1 int
+	key    string
+}
+
+// loopOptPad is the columns the box's border and padding put before the options line.
+const loopOptPad = 2
+
+// loopOptsInner is the Loop menu's inner width, the options line's wrap width.
+func (m Model) loopOptsInner() int { return m.dialogWidth() - 4 }
+
+// loopOptsLineSpans is the options line laid out in width columns, dimmed while a
+// restart is out, and the row and columns of each option label segment, esc close
+// included. The line breaks only at the · gaps, never inside a label; the separators are
+// gaps.
+func (m Model) loopOptsLineSpans(width int) (string, []loopOptSpan) {
+	var rows []string
+	var spans []loopOptSpan
+	var cur string
+	x := 0
+	sep := " · "
+	add := func(k, label string) {
+		n := lipgloss.Width(label)
+		if cur != "" && x+lipgloss.Width(sep)+n > width {
+			rows = append(rows, cur)
+			cur, x = "", 0
+		}
+		if cur != "" {
+			cur += sep
+			x += lipgloss.Width(sep)
+		}
+		spans = append(spans, loopOptSpan{len(rows), x, x + n, k})
+		cur += label
+		x += n
+	}
 	for _, o := range m.loopOpts() {
-		parts = append(parts, o.key+" "+o.label)
+		add(o.key, o.key+" "+o.label)
 	}
-	line := strings.Join(append(parts, "esc close"), " · ")
+	add("esc", "esc close")
+	rows = append(rows, cur)
 	if m.loopRestarting {
-		return dimSt.Render(line)
+		for i, r := range rows {
+			rows[i] = dimSt.Render(r)
+		}
 	}
-	return line
+	return strings.Join(rows, "\n"), spans
 }
 
 // openLoopMenu is o.
@@ -206,6 +250,11 @@ func (m Model) runLoopVerb(pending string, args ...string) (tea.Model, tea.Cmd) 
 		if stoppable(m.loopFrom) {
 			if st, err := readLoop(); err == nil && !stoppable(st) && st.State == looplock.Draining {
 				return loopDoneMsg{draining: &st}
+			}
+		}
+		if args[0] == "start" { // a start takes work: refuse while kind:task beads remain (ADR 0355)
+			if err := refuseLegacy(); err != nil {
+				return loopDoneMsg{err: err}
 			}
 		}
 		_, err := loopVerb(args...)

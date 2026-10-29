@@ -398,25 +398,143 @@ func (m Model) editSignal(d dialog, v sigVals) (tea.Model, tea.Cmd) {
 	})
 }
 
+// formField is where one form field is drawn, in rows of the box's content (below its
+// top border): row is its first row (the label), text the row its one-line text sits on
+// (-1 for the description and priority, which a click only focuses), col and w the text's
+// start column within the content and the width it renders in.
+type formField struct {
+	field, row, rows, text, col, w int
+}
+
+// textField is the layout of a one-line field drawn by fieldRow(w, …, label, …) as rows
+// rows from row.
+func textField(id, w int, label string, row, rows int) formField {
+	ff := formField{field: id, row: row, rows: rows, text: row + rows - 1, col: 2, w: w - 2 - 2}
+	if !stacked(w) {
+		ff.col += lipgloss.Width(label + " ")
+		ff.w -= lipgloss.Width(label + " ")
+	}
+	return ff
+}
+
+// formLayout is the drawn form box: its screen origin and size, and each field's rows.
+type formLayout struct {
+	x, y, w, h int
+	fields     []formField
+}
+
+// fieldAt is the field whose rows hold screen row y, if any.
+func (lay formLayout) fieldAt(y int) (formField, bool) {
+	for _, f := range lay.fields {
+		if r := y - lay.y - 1 - f.row; r >= 0 && r < f.rows {
+			return f, true
+		}
+	}
+	return formField{}, false
+}
+
 // formLines are the form's body rows inside the box, w wide.
 func (m Model) formLines(f signalForm, w int) []string {
+	ls, _ := m.formRows(f, w)
+	return ls
+}
+
+// formRows are formLines with where each field sits among them (row 0 is the first line).
+func (m Model) formRows(f signalForm, w int) ([]string, []formField) {
 	f = m.fitForm(f)
 	msg := f.err
 	if m.formClosed(f) {
 		msg = f.id + " was closed: ctrl+s is refused, esc to leave"
 	}
-	ls := fieldRow(w, f.field == fieldTitle, "title:", f.title.render)
-	if f.withRef {
-		ls = append(ls, fieldRow(w, f.field == fieldRef, "ref:", f.ref.render)...)
+	var ls []string
+	var fs []formField
+	add := func(id int, label string, field func(int) string, oneLine bool) {
+		rows := fieldRow(w, f.field == id, label, field)
+		ff := formField{field: id, row: len(ls), rows: len(rows), text: -1}
+		if oneLine {
+			ff = textField(id, w, label, len(ls), len(rows))
+		}
+		ls, fs = append(ls, rows...), append(fs, ff)
 	}
-	ls = append(ls, fieldRow(w, f.field == fieldPrio, "priority:", func(int) string { return prio(f.prio) })...)
+	add(fieldTitle, "title:", f.title.render, true)
+	if f.withRef {
+		add(fieldRef, "ref:", f.ref.render, true)
+	}
+	add(fieldPrio, "priority:", func(int) string { return prio(f.prio) }, false)
+	desc := formField{field: fieldDesc, row: len(ls), text: -1}
 	ls = append(ls, focusMark(f.field == fieldDesc)+dimSt.Render("description:"))
 	for _, l := range strings.Split(f.desc.View(), "\n") {
 		ls = append(ls, strings.Repeat(" ", descIndent)+l)
 	}
+	desc.rows = len(ls) - desc.row
+	fs = append(fs, desc)
 	ls = append(ls, ansi.Truncate(warnSt.Render(msg), w-2, "…"))
 	if m.h-formChrome-stackedRows(w)-m.formHintH(w) < 1 {
-		return ls // ponytail: too short for even one description row, so the footnote goes
+		return ls, fs // ponytail: too short for even one description row, so the footnote goes
 	}
-	return append(ls, dimSt.Render("labels and deps: E after saving"))
+	return append(ls, dimSt.Render("labels and deps: E after saving")), fs
+}
+
+// formMouse is the open form's mouse path: a left press focuses the field under it, as tab
+// does, and puts the cursor of a one-line field or the description on the cell it lands on;
+// the wheel over the description scrolls it. It never edits: keys, saves, the dirty check
+// and esc stay on the dialog's key path. Everything else is consumed.
+func (m Model) formMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	wheel := isWheel(msg)
+	if !wheel && (msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft) {
+		return m, nil
+	}
+	d := m.modals[len(m.modals)-1]
+	lay := m.dialogLayout(d)
+	if msg.X < lay.x || msg.X >= lay.x+lay.w || msg.Y < lay.y || msg.Y >= lay.y+lay.h {
+		return m, nil
+	}
+	ff, ok := lay.fieldAt(msg.Y)
+	if !ok {
+		return m, nil
+	}
+	col := -1
+	if msg.Y-lay.y-1 == ff.text {
+		col = msg.X - lay.x - 2 - ff.col
+	}
+	if d.kind != form {
+		if wheel {
+			return m, nil
+		}
+		d.field = ff.field
+		if col >= 0 {
+			d.inputs = slices.Clone(d.inputs)
+			d.inputs[ff.field] = d.inputs[ff.field].at(col, ff.w)
+		}
+		return m.setTopModal(d), nil
+	}
+	f := m.fitForm(d.sf)
+	r := msg.Y - lay.y - 1 - ff.row - 1 // the description's drawn row under the pointer
+	if wheel {
+		if ff.field == fieldDesc && r >= 0 {
+			f.desc = taScroll(f.desc, wheelDelta(msg))
+			d.sf = f
+			return m.setTopModal(d), nil
+		}
+		return m, nil
+	}
+	f.field = ff.field
+	if f.field == fieldDesc {
+		f.desc.Focus()
+	} else {
+		f.desc.Blur()
+	}
+	if ff.field == fieldDesc && r >= 0 {
+		f.desc = taClick(f.desc, r, msg.X-lay.x-2-descIndent)
+	}
+	if col >= 0 {
+		switch ff.field {
+		case fieldTitle:
+			f.title = f.title.at(col, ff.w)
+		case fieldRef:
+			f.ref = f.ref.at(col, ff.w)
+		}
+	}
+	d.sf = f
+	return m.setTopModal(d), nil
 }

@@ -31,7 +31,8 @@ type focus struct {
 	sel  string
 	flip map[string]bool
 	open bool
-	off  int // the drawer's scroll offset
+	off  int      // the drawer's scroll offset
+	lv   listView // the list's viewport (ADR 0374)
 }
 
 var (
@@ -75,7 +76,7 @@ type fRow struct {
 	leaf    bool     // an open HITL leaf in a queue section: blocked and paused refuse
 	cp      *bd.Bead // Execute: the Checkpoint a member sits under or a side row waits on
 	rel     string   // Execute: member, gates, before land, after land
-	side    bool     // Execute: a Task or Pivot outside any Checkpoint
+	side    bool     // Execute: an Errand or Pivot outside any Checkpoint
 }
 
 // fSection is what one section lists: its open rows, how many beads head them, and
@@ -204,7 +205,7 @@ func (r fRow) defogRow() dRow {
 }
 
 // execSection lists the open member Checkpoints (unfolded: cpKids, then their closed
-// fold), the Specs, then the side Tasks and Pivots that gate or wait on any Checkpoint
+// fold), the Specs, then the side Errands and Pivots that gate or wait on any Checkpoint
 // and belong here by the shared initiativeOf rule; closed Checkpoints and Specs fold.
 func (f focus) execSection(g graphData) (s fSection) {
 	cps, closedCPs := f.members(g, contract.KindCheckpoint)
@@ -496,22 +497,12 @@ func (m Model) focusKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			vp.HalfPageDown()
 		}
 		m.focus.off = vp.YOffset
-	case key.Matches(k, keyCheckup) && r.b != nil && (r.kind == fBead || r.kind == fHead) && canCheckup(r.b):
-		next, cmd := m.checkupKey(*r.b)
-		return next, cmd, true
 	case key.Matches(k, keyLaunch), key.Matches(k, keyBg):
 		if r.b == nil {
 			m.setStatus(g.rowEnterWhy(nil, false))
 			return m, nil, true
 		}
 		return m.focusAction(k, r)
-	case r.kind == fHead && key.Matches(k, keyWithdrawKey): // X on the Initiative's own row cancels it
-		return m.actionKey(k)
-	case r.kind == fBead && r.sec == secIdeate:
-		return m.focusIdeateKey(k)
-	case r.kind == fBead:
-		next, cmd, _ := m.queueRowKey(k, r.b, r.leaf) // x, +/- and E as on the tab
-		return next, cmd, true
 	}
 	return m, nil, true
 }
@@ -526,20 +517,6 @@ func (m Model) focusAction(k tea.KeyMsg, r fRow) (tea.Model, tea.Cmd, bool) {
 	}
 	next, cmd, _ := m.queueRowKey(k, r.b, r.leaf)
 	return next, cmd, true
-}
-
-// focusIdeateKey is an Ideate Signal's keys beyond enter and b: p, x, +/-, e and z
-// over the shared action and form paths. a, A and n are Ideate's alone.
-func (m Model) focusIdeateKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
-	switch {
-	case key.Matches(k, keyPrio), key.Matches(k, keyPauseKey), key.Matches(k, keyDropKey) && m.gateData().xHint(m.focusBead()) != "": // unhinted x does nothing
-		return m.actionKey(k)
-	case key.Matches(k, keyWithdrawKey):
-		return m.actionKey(k)
-	case key.Matches(k, keyEdit), key.Matches(k, keyReject):
-		return m.graphKey(k)
-	}
-	return m, nil, true
 }
 
 // hasDetail is whether d opens a drawer on the row.
@@ -602,13 +579,6 @@ func (m Model) focusBindings() []key.Binding {
 				bs = append(bs, keyBg)
 			}
 		}
-	case r.kind == fBead && r.sec == secExec && g.rowEnterWhy(r.b, r.leaf) == "":
-		if v := g.enterVerb(r.b); v != "" {
-			bs = append(bs, verbKey("enter", v))
-			if g.rowBgShown(r.b, r.leaf) {
-				bs = append(bs, keyBg)
-			}
-		}
 	}
 	if r.foldable() {
 		bs = append(bs, keyFold)
@@ -619,34 +589,9 @@ func (m Model) focusBindings() []key.Binding {
 	case r.hasDetail():
 		bs = append(bs, keyDetail)
 	}
-	if r.kind == fBead && r.sec == secIdeate {
-		if rejectable(*r.b) {
-			bs = append(bs, keyReject)
-		}
-		if r.b.Unclosed() {
-			bs = append(bs, verbKey("p", pauseLabel(r.b)))
-		}
-		if l := g.xHint(r.b); l != "" {
-			bs = append(bs, verbKey("x", l))
-		}
-		bs = append(bs, keyEdit, keyPrio)
-	}
-	if r.kind == fBead && (r.sec == secDefog || r.sec == secExec) {
-		if r.b.Unclosed() {
-			bs = append(bs, verbKey("p", pauseLabel(r.b)))
-		}
-		if l := g.xHint(r.b); l != "" {
-			bs = append(bs, verbKey("x", l))
-		}
-		if r.b.Unclosed() {
-			bs = append(bs, keyPrio)
-		}
-	}
-	if r.b != nil && (r.kind == fBead || r.kind == fHead) && g.xOffers(r.b) {
-		bs = append(bs, xBinding(r.b))
-	}
-	if r.b != nil && (r.kind == fBead || r.kind == fHead) && canCheckup(r.b) {
-		bs = append(bs, keyCheckup)
+	if r.b != nil && (r.kind == fBead || r.kind == fHead) {
+		hinted, _ := beadVerbBindings(g, r.b, m.focusRole(r))
+		bs = append(bs, hinted...)
 	}
 	if r.b != nil { // t acts on any bead row, right after x (else p)
 		at := len(bs)
@@ -661,11 +606,21 @@ func (m Model) focusBindings() []key.Binding {
 	return append(bs, keyBack)
 }
 
+// focusRole is the verbs a focus row hints: a closed member under '▸ N closed' hints c,
+// every other bead row (the header included) the full set.
+func (m Model) focusRole(r fRow) rowRole {
+	if r.kind == fBead && r.b.Status == "closed" {
+		return roleClosed
+	}
+	return roleFull
+}
+
 // focusExtra is moving and section jumps, then the verbs the row handles but does not hint (enter's and
 // b's refusals): shown in ? alone.
 func (m Model) focusExtra() []key.Binding {
-	if _, ok := m.focusSel(); !ok {
-		return nil
+	if _, ok := m.focusSel(); !ok { // the Initiative left the graph: the bead verbs answer "nothing selected"
+		_, verbs := beadVerbBindings(m.gateData(), nil, roleFull)
+		return verbs
 	}
 	out := []key.Binding{keyMove, keySection}
 	shown := map[string]bool{}
@@ -673,19 +628,32 @@ func (m Model) focusExtra() []key.Binding {
 		shown[b.Keys()[0]] = true
 	}
 	r, _ := m.focusSel()
-	cand := []key.Binding{keyLaunch, keyBg}
-	if r.kind == fBead && r.sec == secIdeate {
-		cand = append(cand, keyReject, keyPauseKey) // z answers with a status line where it is not hinted
-	}
-	if r.kind == fBead && (r.sec == secDefog || r.sec == secExec) {
-		cand = append(cand, keyPauseKey, keyDropKey, keyWithdrawKey, keyPrio)
-	}
-	for _, b := range cand {
+	for _, b := range []key.Binding{keyLaunch, keyBg} {
 		if !shown[b.Keys()[0]] {
 			out = append(out, b)
 		}
 	}
+	_, verbs := beadVerbBindings(m.gateData(), r.b, m.focusRole(r))
+	out = append(out, verbs...)
 	return out
+}
+
+// focusParts is what focusView and focusHit share about the rows: the cursor row's index,
+// the bead the cursor row stands for, its blocker footer and the linked blockers of its rows.
+func (m Model) focusParts(rows []fRow, w int) (sel int, b *bd.Bead, footer, links func(off, lh int) []string) {
+	sel, b = m.focus.index(rows), m.focusBead()
+	if b != nil {
+		g := m.gateData()
+		ids := make([]string, len(rows))
+		for i, r := range rows {
+			if r.b != nil {
+				ids[i] = r.b.ID
+			}
+		}
+		bl := g.openBlockers(b)
+		footer, links = blockerFooter(g, bl, ids, w), blockerLinks(bl, ids)
+	}
+	return sel, b, footer, links
 }
 
 // focusView is the body: the rows over the detail drawer, or the left-the-graph line.
@@ -695,27 +663,74 @@ func (m Model) focusView(w, h int) string {
 		return dimSt.Render("  the Initiative left the graph — esc returns")
 	}
 	g := m.gateData()
-	sel := m.focus.index(rows)
+	sel, b, footer, _ := m.focusParts(rows, w)
 	tagW := 0 // Execute's bead rows share one kind-badge column
 	for _, r := range rows {
 		if r.kind == fBead && r.sec == secExec && r.b.Kind != contract.KindCheckpoint {
 			tagW = max(tagW, kindTagW(r.b))
 		}
 	}
-	b := m.focusBead()
 	blockers := g.blockerSet(b)
 	line := func(i int) (string, string) { return m.focusLine(g, rows[i], tagW, blockers) }
-	var footer func(off, lh int) []string
-	if b != nil {
-		ids := make([]string, len(rows))
-		for i, r := range rows {
-			if r.b != nil {
-				ids[i] = r.b.ID
-			}
-		}
-		footer = blockerFooter(g, g.openBlockers(b), ids, w)
+	return drawerWin(len(rows), func(i int) string { return fitRow(line, w, sel, i) }, sel, m.focus.open, w, h, m.focusDetailVP(rows[sel]), footer, m.focus.lv.offsets(m.focusGeom(rows, w, h).keys))
+}
+
+// focusHit is the pointer's view of body line y of the focus view's w by h body: a gap is
+// inert, a placeholder row is a stop like any other.
+func (m Model) focusHit(w, h, y int) hitTarget {
+	rows := m.focusRows()
+	if len(rows) == 0 {
+		return hitTarget{caret: -1}
 	}
-	return drawerWin(len(rows), func(i int) string { return fitRow(line, w, sel, i) }, sel, m.focus.open, w, h, m.focusDetailVP(rows[sel]), footer)
+	return m.focusGeom(rows, w, h).hit(m.focus.lv, y)
+}
+
+// focusGeom is what focusView and the pointer share about a w by h body over rows.
+func (m Model) focusGeom(rows []fRow, w, h int) listGeom {
+	sel, _, footer, links := m.focusParts(rows, w)
+	keys := make([]string, len(rows))
+	for i, r := range rows {
+		if r.kind != fGap {
+			keys[i] = r.key
+		}
+	}
+	return listGeom{n: len(rows), sel: sel, h: h, open: m.focus.open, footer: footer, links: links, keys: anchorKeys(keys),
+		at: func(k int) hitTarget {
+			if rows[k].kind == fGap {
+				return hitTarget{}
+			}
+			return stopTarget(rows[k].key, rows[k].b != nil)
+		}}
+}
+
+// focusWheel scrolls the focus view's list, or its drawer, by delta lines.
+func (m Model) focusWheel(w, h, y, delta int) Model {
+	rows := m.focusRows()
+	if len(rows) == 0 {
+		return m
+	}
+	g := m.focusGeom(rows, w, h)
+	if g.hit(m.focus.lv, y).kind == hitDrawer {
+		sel, _, _, _ := m.focusParts(rows, w)
+		m.focus.off = wheelDrawer(m.focusDetailVP(rows[sel]), delta)
+		return m
+	}
+	m.focus.lv = g.wheeled(m.focus.lv, delta)
+	return m
+}
+
+// focusSnap snaps the focus view's list back to following the selection after a key.
+func (m Model) focusSnap(w, h int) Model {
+	if rows := m.focusRows(); len(rows) > 0 {
+		m.focus.lv = m.focusGeom(rows, w, h).snapped(m.focus.lv)
+	}
+	return m
+}
+
+// focusSelectKey moves the focus cursor to a row key as j/k would.
+func (m Model) focusSelectKey(key string) Model {
+	m.focus.sel, m.focus.off = key, 0
+	return m
 }
 
 // focusLine is a row's left part and right-edge suffix, in its source tab's anatomy;

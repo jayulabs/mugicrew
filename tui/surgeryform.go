@@ -253,9 +253,9 @@ func (m Model) surgerySubmit(d dialog) (tea.Model, tea.Cmd) {
 }
 
 var (
-	sgPickSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("114")).Bold(true)
-	sgStandSt = lipgloss.NewStyle().Foreground(lipgloss.Color("213"))
-	sgHintSt  = lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("15"))
+	sgPickSt  lipgloss.Style
+	sgStandSt lipgloss.Style
+	sgHintSt  lipgloss.Style
 )
 
 // surgeryRow draws r in inner columns: SBRN with kind tags padded to kw, a refused
@@ -286,11 +286,19 @@ func (m Model) surgeryRow(r sgRow, kw, inner int) string {
 // surgeryView draws the form. Its height depends only on the terminal and the list, so
 // the box never resizes as the pick moves or a message comes and goes.
 func (m Model) surgeryView(d dialog) string {
+	box, _ := m.surgeryBox(d)
+	return m.placeBox(box)
+}
+
+// surgeryBox draws d's box; its one field is the title line, the target list takes no mouse.
+func (m Model) surgeryBox(d dialog) (string, []formField) {
 	styleW := min(max(m.dialogWidth(), min(m.w-8, 100)), m.w-4) - 2
 	inner := styleW - 2
 	hint := lipgloss.NewStyle().Width(inner).Render(flatHints(d.bindings(), inner))
 	ls := []string{brand.Render(d.title), ""}
-	ls = append(ls, fieldRow(styleW, d.field == 0, "title:", d.inputs[0].render)...)
+	titleRows := fieldRow(styleW, d.field == 0, "title:", d.inputs[0].render)
+	fs := []formField{textField(0, styleW, "title:", len(ls), len(titleRows))}
+	ls = append(ls, titleRows...)
 	ls = append(ls, focusMark(d.field == 1)+dimSt.Render("target:"))
 	rows := d.sg.rows
 	// the chrome below the list: two borders, a blank and the message, a blank, the hints
@@ -337,5 +345,5 @@ func (m Model) surgeryView(d dialog) string {
 		msg = warnSt.Render(ansi.Truncate(string(r.why), inner, "…"))
 	}
 	ls = append(ls, "", msg, "", hint)
-	return m.placeBox(refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)))
+	return refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)), fs
 }

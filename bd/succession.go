@@ -62,6 +62,7 @@ type Bead struct {
 	Started        time.Time // bd started_at: when it was claimed — age-since-claim, never liveness (ADR 0025); zero if unclaimed
 	Container      bool      // bd epic (a container kind, ADR 0002) → a Graph group head
 	BlockedBy      []string  // Ordering edges: depends_on_id of each blocks / conditional-blocks dependency, in edge order
+	CondBlockedBy  []string  // the conditional-blocks subset of BlockedBy: the eligibility verdict's blocks-only filter drops these
 	Related        []string  // depends_on_id of each related edge, in edge order: a Rollback's target rides here (ADR 0047 §3)
 	CausedBy       string    // depends_on_id of the caused-by edge: the predecessor, linking an Initiative's member chains in the Graph (Spec D10)
 	DiscoveredFrom []string  // depends_on_id of each discovered-from edge, oldest edge first, ties by target id (bd's array order is a hash order)
@@ -122,7 +123,7 @@ func ParseSweptReason(reason string) (SweptReason, bool) {
 }
 
 // NothingToLandReason prefixes the close reason of a Checkpoint whose Spec laid
-// Tasks and no Builds: there is nothing to land. It deliberately does not start
+// Errands and no Builds: there is nothing to land. It deliberately does not start
 // with ObsoleteReason, which drives retireStragglers' cascade and the backstop's
 // swept-parent handling.
 const NothingToLandReason = "nothing to land:"
@@ -421,7 +422,7 @@ func CreateDraft(predID string, s Successor, extraDeps ...string) (string, error
 }
 
 // CreateRaiseDraft creates a Draft by creator that is not its successor: no caused-by
-// edge, only the given "type:target" deps (a Task's raise is discovered-from the Task,
+// edge, only the given "type:target" deps (an Errand's raise is discovered-from the Errand,
 // ADR 0326 §5). The Parent, DraftedBy and Metadata of s apply as in CreateDraft.
 func CreateRaiseDraft(s Successor, deps ...string) (string, error) {
 	return run(successorCreateArgs("", s, deps...)...)
@@ -475,7 +476,8 @@ func updateMetadata(id string, change func(Meta) bool) error {
 }
 
 // CarrySkip names a dependent a Carry left out and why: closed | hierarchy |
-// cycle | type-clash. The json tags are the carry event's skipped attr shape.
+// cycle | type-clash | initiative (a Latch onto an Initiative successor, which the
+// carry guard produces, ADR 0348 §8). The json tags are the carry event's skipped attr shape.
 type CarrySkip struct {
 	Bead   string `json:"bead"`
 	Reason string `json:"reason"`
@@ -549,6 +551,9 @@ func CarryOrdering(pred, succ string) (moved []string, skipped []CarrySkip, err 
 // carryLatches also lists pred's incoming blockers and blocks succ with each open
 // kind:latch among them (Spec D6; ADR 0223 §3), so a Jira wait outlives pred's
 // close. Same add-only, idempotent, skip-classified rules as the outgoing carry.
+// An Initiative successor takes none: each open Latch is skipped as initiative,
+// since a Latch blocking an Initiative freezes its members (ADR 0348 §8). The
+// successor's kind is read once, on the first open Latch; a failed read fails the carry.
 func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]string, []CarrySkip, error) {
 	out, err := run("dep", "list", pred, "--direction=down", "-t", "blocks", "--json")
 	if err != nil {
@@ -562,8 +567,20 @@ func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]str
 	if err := json.Unmarshal([]byte(out), &deps); err != nil {
 		return moved, skipped, fmt.Errorf("bd: parse dep list: %w", err)
 	}
+	initiative, read := false, false
 	for _, d := range deps {
 		if d.Status == "closed" || !slices.Contains(d.Labels, "kind:"+string(contract.KindLatch)) {
+			continue
+		}
+		if !read {
+			b, err := Show(succ)
+			if err != nil {
+				return moved, skipped, err
+			}
+			initiative, read = b.Kind == contract.KindInitiative, true
+		}
+		if initiative {
+			skipped = append(skipped, CarrySkip{d.ID, "initiative"})
 			continue
 		}
 		if _, err := run("dep", "add", succ, d.ID, "-t", "blocks"); err != nil {
@@ -656,13 +673,13 @@ func SpawnChildIfAbsent(parentID string, s Successor) (id string, created bool, 
 	return id, true, nil
 }
 
-// SpawnBlockingTaskIfAbsent files a Brook-owned HITL Task that blocks containerID
-// (the land hold), unless one of its open blocking Tasks already carries key in its
-// body: idempotent on (container, key), whatever the existing Task's parent. It joins the
+// SpawnBlockingErrandIfAbsent files a Brook-owned HITL Errand that blocks containerID
+// (the land hold), unless one of its open blocking Errands already carries key in its
+// body: idempotent on (container, key), whatever the existing Errand's parent. It joins the
 // Initiative of the container it holds (a Rollback climbs through the Checkpoint it
 // undoes) and is born outside, with the reason in its body, when there is none (ADR 0348).
-func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string, created bool, err error) {
-	open, err := OpenBlockersOfKind(containerID, contract.KindTask)
+func SpawnBlockingErrandIfAbsent(containerID, key, title, body string) (id string, created bool, err error) {
+	open, err := OpenBlockersOfKind(containerID, contract.KindErrand)
 	if err != nil {
 		return "", false, err
 	}
@@ -671,18 +688,18 @@ func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string,
 			return t.ID, false, nil
 		}
 	}
-	parent, line, err := taskPlacement(TaskFiling{Before: []string{containerID}})
+	parent, line, err := errandPlacement(ErrandFiling{Before: []string{containerID}})
 	if err != nil {
 		return "", false, err
 	}
-	// --deps is atomic with the create: no orphan Task that blocks nothing
-	s := Successor{Kind: contract.KindTask, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindTask)), Description: withFactLine(body, line)}
+	// --deps is atomic with the create: no orphan Errand that blocks nothing
+	s := Successor{Kind: contract.KindErrand, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindErrand)), Description: withFactLine(body, line)}
 	id, err = run(successorCreateArgs("", s, "blocks:"+containerID)...)
 	if err != nil {
 		return "", false, err
 	}
-	// a hold that outlives its closed Task re-files related to it (ADR 0338);
-	// the new body and the closed Task stay untouched
+	// a hold that outlives its closed Errand re-files related to it (ADR 0338);
+	// the new body and the closed Errand stay untouched
 	if prev, ok, err := latestClosedWithKey(containerID, key); err != nil {
 		return id, true, err
 	} else if ok {
@@ -692,7 +709,7 @@ func SpawnBlockingTaskIfAbsent(containerID, key, title, body string) (id string,
 	return id, true, nil
 }
 
-// latestClosedWithKey is the id of the most recently closed Task blocking
+// latestClosedWithKey is the id of the most recently closed Errand blocking
 // containerID whose body carries key.
 func latestClosedWithKey(containerID, key string) (string, bool, error) {
 	targets, err := depTargets(containerID, "down", "blocks")
@@ -702,7 +719,7 @@ func latestClosedWithKey(containerID, key string) (string, bool, error) {
 	var best Bead
 	found := false
 	for _, t := range targets {
-		if t.Kind != contract.KindTask || t.Open() || !strings.Contains(t.Description, key) {
+		if t.Kind != contract.KindErrand || t.Open() || !strings.Contains(t.Description, key) {
 			continue
 		}
 		if !found || t.Closed.After(best.Closed) {
@@ -765,6 +782,13 @@ func SpawnChild(parentID string, s Successor) (string, error) {
 // the same object shape) to Beads: kind read from the kind:* label, the rest
 // straight through.
 func parseBeads(listJSON []byte) ([]Bead, error) {
+	beads, _, err := parseBeadRows(listJSON)
+	return beads, err
+}
+
+// parseBeadRows is parseBeads plus each row's top-level dependency_type, which only
+// `bd dep list` rows carry (empty elsewhere), so Edges reads the blob once.
+func parseBeadRows(listJSON []byte) ([]Bead, []string, error) {
 	var arr []struct {
 		ID          string    `json:"id"`
 		Title       string    `json:"title"`
@@ -787,6 +811,7 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 		Design      string    `json:"design"`
 		Acceptance  string    `json:"acceptance_criteria"`
 		Comments    int       `json:"comment_count"`
+		DepType     string    `json:"dependency_type"`
 		Deps        []struct {
 			DependsOn string    `json:"depends_on_id"`
 			Type      string    `json:"type"`
@@ -794,10 +819,12 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 		} `json:"dependencies"`
 	}
 	if err := json.Unmarshal(listJSON, &arr); err != nil {
-		return nil, fmt.Errorf("bd: parse json: %w", err)
+		return nil, nil, fmt.Errorf("bd: parse json: %w", err)
 	}
 	beads := make([]Bead, len(arr))
+	types := make([]string, len(arr))
 	for i, b := range arr {
+		types[i] = b.DepType
 		beads[i] = Bead{
 			ID: b.ID, Kind: kindFromLabels(b.Labels), Status: b.Status, Title: b.Title, Description: b.Description, Labels: b.Labels,
 			Parent: b.Parent, Priority: b.Priority, Created: b.Created, Updated: b.Updated, Assignee: b.Assignee, Started: b.Started, Closed: b.Closed,
@@ -813,6 +840,9 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 			}
 			if d.Type == "blocks" || d.Type == "conditional-blocks" { // Ordering edges; related and caused-by kept apart below, membership ignored
 				beads[i].BlockedBy = append(beads[i].BlockedBy, d.DependsOn)
+				if d.Type == "conditional-blocks" {
+					beads[i].CondBlockedBy = append(beads[i].CondBlockedBy, d.DependsOn)
+				}
 			}
 			if d.Type == "related" {
 				beads[i].Related = append(beads[i].Related, d.DependsOn)
@@ -828,7 +858,7 @@ func parseBeads(listJSON []byte) ([]Bead, error) {
 			beads[i].DiscoveredFrom = append(beads[i].DiscoveredFrom, d.id)
 		}
 	}
-	return beads, nil
+	return beads, types, nil
 }
 
 // dfEdge is a discovered-from edge: its target and the edge's created_at (Spec D1).
@@ -863,16 +893,9 @@ func kindFromLabels(labels []string) contract.Kind {
 // OpenBlocked reports whether any bead that id blocks is still unclosed; a
 // deferred Draft counts (it is still being set up, as Open does).
 func OpenBlocked(id string) (bool, error) {
-	out, err := run("dep", "list", id, "--direction=up", "--json")
+	deps, err := core.Edges(id, Up, "")
 	if err != nil {
 		return false, err
-	}
-	var deps []struct {
-		Status string `json:"status"`
-		Type   string `json:"dependency_type"`
-	}
-	if err := json.Unmarshal([]byte(out), &deps); err != nil {
-		return false, fmt.Errorf("bd: parse dep list: %w", err)
 	}
 	for _, d := range deps {
 		if (d.Type == "blocks" || d.Type == "conditional-blocks") && d.Status != "closed" {
@@ -882,27 +905,17 @@ func OpenBlocked(id string) (bool, error) {
 	return false, nil
 }
 
-// IsNotFound reports whether err is bd's "not found" for a missing bead.
-func IsNotFound(err error) bool { return err != nil && strings.Contains(err.Error(), "not found") }
+// IsNotFound reports whether err is bd's refusal of a missing bead: show says "not found",
+// update and unclaim say "no issue found matching".
+func IsNotFound(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no issue found matching"))
+}
 
 // Show reads a bead (spec §3.1 reads use --json).
-func Show(id string) (Bead, error) {
-	out, err := run("show", id, "--json")
-	if err != nil {
-		return Bead{}, err
-	}
-	return parseShow([]byte(out))
-}
+func Show(id string) (Bead, error) { return core.Show(id) }
 
 // Close closes a bead, optionally with a reason (the reject path, §7.3).
-func Close(id, reason string) error {
-	args := []string{"close", id}
-	if reason != "" {
-		args = append(args, "--reason", reason)
-	}
-	_, err := run(args...)
-	return err
-}
+func Close(id, reason string) error { return core.Close([]string{id}, reason, false) }
 
 // AddBlocker makes blocked wait on blocker through a plain blocks edge; bd refuses a cycle.
 func AddBlocker(blocked, blocker string) error {
@@ -919,8 +932,12 @@ func RemoveBlocker(blocked, blocker string) error {
 // Ready lists the open, unblocked frontier (`bd ready`, spec §6.1). The loop
 // fences these to the registry itself; this returns them all with their kind
 // and labels so the fence stays in Go (registry is the source of truth).
-func Ready() ([]Bead, error) {
-	out, err := run("ready", "--json")
+func Ready() ([]Bead, error) { return core.Ready() }
+
+// ReadyAll is Ready without bd's default cap (`bd ready -n 0`): the exact frontier, which
+// the TUI's row hint widens itself rather than deriving it from its snapshot.
+func ReadyAll() ([]Bead, error) {
+	out, err := run("ready", "--json", "-n", "0")
 	if err != nil {
 		return nil, err
 	}
@@ -931,40 +948,27 @@ func Ready() ([]Bead, error) {
 // list the loop's frontier re-admit reads (Spec D6), since bd ready hides
 // a blocked Checkpoint and its members both.
 func OpenList() ([]Bead, error) {
-	out, err := run("list", "--status", "open,in_progress,deferred", "-n", "0", "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{Status: []string{"open", "in_progress", "deferred"}})
 }
 
 // InProgress lists every in_progress bead — the loop's busy-count source, from
 // which the AFK pool's inflight is re-derived each tick (spec §6.2/§6.4, ADR 0003
 // stateless).
 func InProgress() ([]Bead, error) {
-	out, err := run("list", "--status", "in_progress", "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
+	return core.List(Query{Status: []string{"in_progress"}, Limit: defaultListCap})
 }
 
 // childBeads reads a container's children (`bd children`, includes closed) — the
 // one shell-out both the drained-Chart count and the open-child idempotency guard
 // share (ADR 0011), split out so neither re-spells the read.
-func childBeads(id string) ([]Bead, error) {
-	out, err := run("children", id, "--json")
-	if err != nil {
-		return nil, err
-	}
-	return parseBeads([]byte(out))
-}
+func childBeads(id string) ([]Bead, error) { return core.List(Query{Parent: id, All: true}) }
 
 // OpenChildren counts a container's still-open children — the drained-Chart test
 // (§8.4: 0 open children AND chart:defogged). `bd children` includes closed
 // children, so the open filter is applied here. A closed child still holding
-// effort/<child> counts as open (Spec D7): its work is not on the container.
-func OpenChildren(id string, efforts map[string]bool) (int, error) {
+// effort/<child> not yet integrated counts as open (Spec D7, amended by ADR 0394
+// (a-closed-effort-whose-tip-is-its-cut-ref…)): its work is not on the container.
+func OpenChildren(id string, efforts *git.EffortSet) (int, error) {
 	open, held, err := DrainBlockers(id, efforts)
 	return open + len(held), err
 }
@@ -977,14 +981,14 @@ var effortRefs = EffortRefsAcross
 // dir's (Spec D8): a nested leaf's closed-but-unintegrated effort lives in its child.
 // With no repo declared it is today's single for-each-ref, after one config read.
 // The loop resolves it once per tick and hands it to the drain gates.
-func EffortRefsAcross() (map[string]bool, error) {
+func EffortRefsAcross() (*git.EffortSet, error) {
 	refs, _, err := RefsAcross()
 	return refs, err
 }
 
 // RefsAcross is EffortRefsAcross plus the checkpoint/<id> branch tips (id → sha),
 // each Checkpoint's from the repo that declares it: the TUI's one ref read per refresh.
-func RefsAcross() (map[string]bool, map[string]string, error) {
+func RefsAcross() (*git.EffortSet, map[string]string, error) {
 	refs, tips, err := git.Repo("").BranchRefs()
 	repos := cfglayer.Repos(".")
 	if err != nil || len(repos) == 0 {
@@ -1003,7 +1007,7 @@ func RefsAcross() (map[string]bool, map[string]string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		maps.Copy(refs, kidRefs)
+		refs.Merge(kidRefs)
 		maps.Copy(tips, kidTips)
 	}
 	return refs, tips, nil
@@ -1011,7 +1015,7 @@ func RefsAcross() (map[string]bool, map[string]string, error) {
 
 // childrenAndEfforts is the drain gates' shared read: id's children and the
 // effort-ref set the caller passed (nil reads EffortRefsAcross itself).
-func childrenAndEfforts(id string, efforts map[string]bool) ([]Bead, map[string]bool, error) {
+func childrenAndEfforts(id string, efforts *git.EffortSet) ([]Bead, *git.EffortSet, error) {
 	kids, err := childBeads(id)
 	if err != nil {
 		return nil, nil, err
@@ -1023,10 +1027,12 @@ func childrenAndEfforts(id string, efforts map[string]bool) ([]Bead, map[string]
 }
 
 // DrainBlockers is what keeps a container from draining (Spec D7): its
-// open children, and held, its closed children still holding effort/<child>.
+// open children, and held, its closed children still holding unintegrated
+// work on effort/<child> (ADR 0394 (a-closed-effort-whose-tip-is-its-cut-ref…): an
+// effort at its cut ref holds none).
 // efforts is the caller's effort-ref set (the loop's per-tick union); nil reads it
 // once here. Never one git call per child.
-func DrainBlockers(id string, efforts map[string]bool) (open int, held []Bead, err error) {
+func DrainBlockers(id string, efforts *git.EffortSet) (open int, held []Bead, err error) {
 	kids, efforts, err := childrenAndEfforts(id, efforts)
 	if err != nil {
 		return 0, nil, err
@@ -1036,17 +1042,17 @@ func DrainBlockers(id string, efforts map[string]bool) (open int, held []Bead, e
 }
 
 // DrainBlockersOver is DrainBlockers over an already-read graph, as the TUI
-// does at refresh: kids' open count, and the closed ones whose id is in efforts
-// (the git.EffortRefs set). An open Landing is skipped: a Chart's own Landing
+// does at refresh: kids' open count, and the closed ones still holding an unintegrated effort branch
+// (the git.EffortSet). An open Landing is skipped: a Chart's own Landing
 // never undrains it (ADR 0145), nor does a child closed ContainerLandedReason
 // (ADR 0201): its kept branch is carried by a Signal. An open MR Watch is skipped too.
-func DrainBlockersOver(kids []Bead, efforts map[string]bool) (open int, held []Bead) {
+func DrainBlockersOver(kids []Bead, efforts *git.EffortSet) (open int, held []Bead) {
 	for _, k := range kids {
 		switch {
 		case k.Open() && k.Kind.PacedLeaf():
 		case k.Open():
 			open++
-		case efforts[k.ID] && !strings.HasPrefix(k.CloseReason, ContainerLandedReason):
+		case efforts.Held(k.ID) && !strings.HasPrefix(k.CloseReason, ContainerLandedReason):
 			held = append(held, k)
 		}
 	}
@@ -1060,7 +1066,7 @@ func DrainBlockersOver(kids []Bead, efforts map[string]bool) (open int, held []B
 // (approvedAtHead, git.ApprovedAtHead's shape, asked of checkpoint/<id>). A
 // stale or rework/obsolete-closed Approval doesn't count, so a tip moved past it
 // gets a fresh Review. One children read, one effort-ref read and one pivot read.
-func ReviewDue(checkpointID string, efforts map[string]bool, approvedAtHead func(approvalBody, branch string) bool) (bool, error) {
+func ReviewDue(checkpointID string, efforts *git.EffortSet, approvedAtHead func(approvalBody, branch string) bool) (bool, error) {
 	kids, efforts, err := childrenAndEfforts(checkpointID, efforts)
 	if err != nil {
 		return false, err
@@ -1075,8 +1081,8 @@ func ReviewDue(checkpointID string, efforts map[string]bool, approvedAtHead func
 }
 
 // ReviewDueOver is ReviewDue over an already-read graph: the Checkpoint's
-// children, the git.EffortRefs set and its open pivots.
-func ReviewDueOver(kids []Bead, efforts map[string]bool, pivots []Bead, atHead func(approvalBody string) bool) bool {
+// children, the git.EffortSet and its open pivots.
+func ReviewDueOver(kids []Bead, efforts *git.EffortSet, pivots []Bead, atHead func(approvalBody string) bool) bool {
 	if len(pivots) > 0 || !MembersDrainedOver(kids, efforts) {
 		return false
 	}
@@ -1094,9 +1100,9 @@ func ReviewDueOver(kids []Bead, efforts map[string]bool, pivots []Bead, atHead f
 
 // MembersDrained reports whether a Checkpoint's members are drained (Spec
 // D7, FR 28): no Build, Critique, Conflict, Surgery or Review open or
-// still holding effort/<id>. Both the Review spawn and the approved land gate on
+// still holding unintegrated work on effort/<id> (ADR 0394). Both the Review spawn and the approved land gate on
 // it, so neither runs without a member's work.
-func MembersDrained(checkpointID string, efforts map[string]bool) (bool, error) {
+func MembersDrained(checkpointID string, efforts *git.EffortSet) (bool, error) {
 	kids, efforts, err := childrenAndEfforts(checkpointID, efforts)
 	if err != nil {
 		return false, err
@@ -1105,9 +1111,9 @@ func MembersDrained(checkpointID string, efforts map[string]bool) (bool, error) 
 }
 
 // MembersDrainedOver is MembersDrained over an already-read graph.
-func MembersDrainedOver(kids []Bead, efforts map[string]bool) bool {
+func MembersDrainedOver(kids []Bead, efforts *git.EffortSet) bool {
 	for _, k := range kids {
-		if IsMember(k.Kind) && (k.Open() || efforts[k.ID]) {
+		if IsMember(k.Kind) && (k.Open() || efforts.Held(k.ID)) {
 			return false
 		}
 	}
@@ -1140,10 +1146,7 @@ func HeldHint(held []Bead) string {
 // loop and run-now share one bd actor, so an idempotent claim let both win. Only
 // an open bead moves; any other status — even our own claim — fails with nothing
 // written, and callers skip and record claim.failed. No lease is stamped.
-func Claim(id string) error {
-	_, err := run("update", id, "--if-status", "open", "--status", "in_progress", "--assignee", actor())
-	return classifyClaim(err)
-}
+func Claim(id string) error { return core.Claim(id, "open") }
 
 // ErrClaimedSince is Claim's refusal when this actor already holds the bead (bd
 // exits 13, a status CAS mismatch): the caller's snapshot was stale.
@@ -1178,49 +1181,85 @@ func classifyClaim(err error) error {
 	return err
 }
 
-// actor is the bd actor resolved once, so the CAS assignee is what a human's
-// plain `bd unclaim` sees as "you" (ADR 0052 §2; bd has no whoami). A var so a
-// test can pin it without racing the once-cache.
-var actor = sync.OnceValue(func() string {
-	return actorFrom(os.Getenv("BEADS_ACTOR"), func() string {
-		name, _ := git.UserName() // unset → "", falls through to $USER
+// resolved is the bd actor read from bd once per process, so the CAS assignee is
+// what a human's plain `bd unclaim` sees as "you" (ADR 0376 §3, amending ADR 0052
+// §2). A var so a test can pin it without racing the cache. A degraded read (bd
+// down) is cached for the process lifetime on purpose: one actor per process, so
+// a claim made under the bare name never turns foreign when bd comes back, and a
+// render or ClaimedElsewhere check never re-runs bd in an outage. Restart after
+// fixing bd.
+var resolved = cachedActor()
+
+func cachedActor() func() (string, bool) { return sync.OnceValues(readActor) }
+
+// actor is the accessor Claim and ClaimedElsewhere share; a var so a test in this
+// package can pin it.
+var actor = func() string { name, _ := resolved(); return name }
+
+// Actor is the bd actor this process claims as, and whether bd could not be read
+// so it is the bare-name fallback (a degraded read). The doctor rows read this
+// same value, so they report what the claim CAS writes.
+func Actor() (name string, degraded bool) { return resolved() }
+
+// readActor asks bd for its effective actor. bd 1.3.0 has no whoami,
+// `bd context --json` omits the actor, and `bd config get actor` reports only the
+// config.yaml step and ignores $BEADS_ACTOR. The narrowest surface that reports
+// the full effective actor ($BEADS_ACTOR, config.yaml actor:, git user.name,
+// $USER) is `bd create --dry-run --json`, whose created_by is that actor; it
+// writes nothing but needs a resolvable Bead Graph (BEADS_DIR or a .beads
+// above the cwd); outside one bd errors "no beads database found" and the read
+// degrades (verified in a scratch graph and HOME with actor: me@box in
+// config.yaml; $BEADS_ACTOR=zed@dev overrides it). If bd can't be read the bare
+// name falls back, so a degraded bd never blocks a claim.
+// The probe is --type chore, which has no required description sections: a
+// Workspace with validation.on-create=error rejects the dry-run of a task
+// ("missing required sections"), which would silently degrade to the bare name.
+func readActor() (name string, degraded bool) {
+	out, err := run("create", "--dry-run", "--json", "--title", "actor probe", "--type", "chore")
+	if err == nil {
+		var probe struct {
+			CreatedBy string `json:"created_by"`
+		}
+		if json.Unmarshal([]byte(out), &probe) == nil && probe.CreatedBy != "" {
+			return probe.CreatedBy, false
+		}
+	}
+	return bareActor(), true
+}
+
+// bareActor is the degraded-read fallback only, never a substitute for asking bd:
+// the bare name an unreadable bd would most likely have given.
+func bareActor() string {
+	if env := os.Getenv("BEADS_ACTOR"); env != "" {
+		return env
+	}
+	if name, _ := git.UserName(); name != "" {
 		return name
-	}, os.Getenv("USER"))
-})
+	}
+	return os.Getenv("USER")
+}
 
 // PinActor makes this process's bd actor name, for a test outside the package; it
 // returns the restore.
 func PinActor(name string) (restore func()) {
-	old := actor
-	actor = func() string { return name }
-	return func() { actor = old }
+	old := resolved
+	resolved = func() (string, bool) { return name, false }
+	return func() { resolved = old }
 }
 
 // ClaimedElsewhere is whether assignee names another bd actor than this one; an
 // empty assignee is nobody's, so not elsewhere (ADR 0240).
 func ClaimedElsewhere(assignee string) bool { return assignee != "" && assignee != actor() }
 
-// actorFrom is bd's resolution order: $BEADS_ACTOR, then git user.name, then
-// $USER. git is a func so it is only shelled out when $BEADS_ACTOR is unset.
-func actorFrom(beadsActor string, gitName func() string, unixUser string) string {
-	if beadsActor != "" {
-		return beadsActor
-	}
-	if g := gitName(); g != "" {
-		return g
-	}
-	return unixUser
-}
-
 // Unclaim releases a claim: it clears the assignee and resets status to open, the
 // inverse of Claim. A non-terminal handler (one that neither closes nor promotes
 // the bead to a further status — the drained-Chart promote-or-stamp branch) calls
 // it so the released bead re-enters `bd ready` and the next tick re-dispatches it;
 // without it the bead sits in_progress, which `bd ready` excludes, forever.
-func Unclaim(id string) error {
-	_, err := run("unclaim", id)
-	return err
-}
+//
+// The CAS guard stays in here (ADR 0380): bd unclaim --if-assignee this actor, so a release
+// never clears a claim someone else took in the window.
+func Unclaim(id string) error { return core.Unclaim(id, Mine()) }
 
 // LandingsOf reads a container's Landings, in any status.
 func LandingsOf(id string) ([]Bead, error) { return ChildrenOfKind(id, contract.KindLanding) }
@@ -1268,4 +1307,11 @@ func SubtreeIDs(id string) ([]string, error) {
 		out = append(append(out, k.ID), sub...)
 	}
 	return out, nil
+}
+
+// AwaitingUndraft reports whether the bead is an Approval waiting on the human's un-draft
+// of its GitLab Draft MR (Spec FR 9): open, kind approval and its body records an MR:
+// line, whatever its parent's kind. The MR: line is the one fact; no label mirrors it.
+func AwaitingUndraft(b Bead) bool {
+	return b.Kind == contract.KindApproval && b.Open() && git.RecordedMR(b.Description) > 0
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fakeLocks points lockDir at a fresh temp dir for the test.
@@ -68,7 +69,9 @@ func TestHoldHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stdout.WriteString(strconv.Itoa(child.Process.Pid) + "\n")
-	select {}
+	// A pending timer keeps the runtime's deadlock check quiet (select {} would
+	// crash the helper and free the lock); the bound matches the sleep child.
+	time.Sleep(time.Minute)
 }
 
 // A SIGKILLed holder frees its lock at once, and the child it spawned (which
@@ -84,17 +87,25 @@ func TestSigkilledHolderFreesLockDespiteOrphan(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { cmd.Process.Kill() })
 	line, err := bufio.NewReader(out).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
 	}
-	childPid, _ := strconv.Atoi(strings.TrimSpace(line))
+	childPid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || childPid <= 0 {
+		// Never reach the kill cleanup with pid 0: it would signal our process group.
+		t.Fatalf("helper's first line %q is not a positive pid (err %v)", line, err)
+	}
 	t.Cleanup(func() { syscall.Kill(childPid, syscall.SIGKILL) })
 	if !Held("e1") {
 		t.Fatal("helper's hold must read alive")
 	}
 	cmd.Process.Kill()
 	cmd.Wait()
+	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Fatalf("helper must end by the test's SIGKILL, got %v", cmd.ProcessState)
+	}
 	if Held("e1") {
 		t.Error("lock still held after holder SIGKILL; orphaned child inherited it")
 	}
@@ -161,5 +172,43 @@ func TestHoldHandedToChild(t *testing.T) {
 	child.Wait()
 	if Held("e1") {
 		t.Error("lock still held after the child exited")
+	}
+}
+
+func TestHoldsEffort(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"/bin/mugicrew", "reconcile", "b1"}, true},
+		{[]string{"/bin/mugicrew", "-C", "/x", "run", "b1", "--lock-fd=3"}, true},
+		{[]string{"/bin/mugicrew", "transcript", "b1"}, false},
+		{[]string{"/bin/mugicrew", "reconcile", "b10"}, false},
+		{[]string{"claude", "--name", "b1"}, true},
+		{nil, false},
+	} {
+		if got := HoldsEffort(c.argv, "b1"); got != c.want {
+			t.Errorf("HoldsEffort(%v) = %v, want %v", c.argv, got, c.want)
+		}
+	}
+}
+
+// Holding is true from Acquire (or Adopt) until Release, and only for the hold's own
+// id: a write serialized by the dispatcher hold names it through this.
+func TestHoldingSpansTheHold(t *testing.T) {
+	t.Setenv("BEADS_DIR", t.TempDir())
+	if Holding("mc-h") {
+		t.Fatal("Holding before Acquire")
+	}
+	h, err := Acquire("mc-h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Holding("mc-h") || Holding("mc-other") {
+		t.Errorf("Holding(mc-h) = %v, Holding(mc-other) = %v; want true, false", Holding("mc-h"), Holding("mc-other"))
+	}
+	h.Release()
+	if Holding("mc-h") {
+		t.Error("Holding after Release")
 	}
 }

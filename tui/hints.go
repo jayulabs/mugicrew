@@ -21,12 +21,12 @@ const (
 
 // hintRank is the shared drop rank (ADR 0229 §3; Spec D2): lower drops later. It is
 // keyed by the help key; hintOf tells apart the verbs that share one.
-var hintRank = map[string]int{
-	"enter": 0, "esc": 1, "d": 2, "space": 3, "b": 4, "x": 5, "t": 6, "p": 7, "/": 8,
-	"z": 9, "s": 10, "f": 11, "c": 12, "e": 13, "a/A": 14, "a": 14, "A": 14, "B": 14, "U": 14, "r": 15, "u": 16, "+/-": 19,
+var hintRank = map[string]float64{
+	"enter": 0, "esc": 1, "d": 2, "space": 3, "b": 4, "w": 4.5, "x": 5, "X": 5.5, "t": 6, "p": 7, "/": 8,
+	"z": 9, "s": 10, "f": 11, "c": 12, "e": 13, "a/A": 14, "a": 14, "A": 14, "B": 14, "U": 14, "u": 16, "+/-": 19,
 }
 
-const tabExtraRank = 12 // v, e errors, w, b group by, +/- stage, and any verb with no rank
+const tabExtraRank = 12.0 // v, e errors, w, b group by, +/- stage, and any verb with no rank
 
 // offBar are the moving keys the bar never lists; ? keeps them (FR7).
 var offBar = []string{"j/k", "J/K", "pgup/pgdn"}
@@ -34,9 +34,10 @@ var offBar = []string{"j/k", "J/K", "pgup/pgdn"}
 // hintItem is a hint binding with the placement the shared table gives it.
 type hintItem struct {
 	key.Binding
-	sec, rank int
-	pinned    bool
-	short     bool // key-only: rendered as just its key (FR10)
+	sec    int
+	rank   float64
+	pinned bool
+	short  bool // key-only: rendered as just its key (FR10)
 }
 
 // hintOf resolves where b sits on the bar from its verb: the help key and, where one
@@ -68,8 +69,12 @@ func hintOf(b key.Binding) hintItem {
 		if desc == "save" {
 			it.sec = secTabHint
 		}
-	case "/", "s", "f", "v", "w":
+	case "/", "s", "f", "v":
 		it.sec = secTabHint
+	case "w": // open MR is a bead verb; Stats' w is its window
+		if desc == "window" {
+			it.sec, it.rank = secTabHint, tabExtraRank
+		}
 	case "e":
 		if desc == "errors" || desc == "all" {
 			it.sec, it.rank = secTabHint, tabExtraRank
@@ -94,7 +99,7 @@ func hintOf(b key.Binding) hintItem {
 }
 
 // mergeAdopt folds Graph's separate a adopt and A release into one a/A item labelled
-// with whichever halves apply (FR9); Ideate already offers the merged binding.
+// with whichever halves apply (FR9).
 func mergeAdopt(bs []key.Binding) []key.Binding {
 	a := slices.IndexFunc(bs, func(b key.Binding) bool { return b.Help().Key == "a" })
 	r := slices.IndexFunc(bs, func(b key.Binding) bool { return b.Help().Key == "A" })
@@ -124,7 +129,7 @@ func sectionedBar(bs []key.Binding, w int, refLive bool) string {
 	line := func() string { return " " + sectionedView(items) }
 	fits := func() bool { return lipgloss.Width(line()) <= w }
 	// shorten one item at a time, highest rank first; pins and ? keys last; enter keeps its verb
-	shortKey := func(it hintItem) int {
+	shortKey := func(it hintItem) float64 {
 		if it.pinned {
 			return -2
 		}

@@ -8,6 +8,7 @@ package tui
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -73,6 +74,7 @@ type logsTab struct {
 	sel         eventlog.Key
 	open        bool // d: the detail pane is open
 	off         int  // the detail viewport's scroll offset
+	lv          listView
 	memo        *logsMemo
 	scan        logsScan
 }
@@ -525,6 +527,83 @@ func (l logsTab) detailVP() viewport.Model {
 	return drawerVP(l.open, l.w, l.bodyH(), l.detailText(), l.off)
 }
 
+// hit is the pointer's view of body line y of a w by h body (pointable): the filter or scope
+// line is inert, and the events sit under it, below the empty-state line when there are none.
+func (l logsTab) hit(w, h, y int) hitTarget {
+	g, top := l.geom(w, h)
+	t := g.hit(l.lv, y-top)
+	t.line += top
+	return t
+}
+
+// lineKeys names the lines of the list: pre empty-state lines, then the events by their own keys.
+func (l logsTab) lineKeys(rows []int, pre int) []string {
+	keys := make([]string, pre+len(rows))
+	for k := range pre {
+		keys[k] = "pre/" + strconv.Itoa(k)
+	}
+	for i, r := range rows {
+		keys[pre+i] = fmt.Sprint(l.ev(r).Key())
+	}
+	return keys
+}
+
+// geom is what the pointer shares with list about a w by h body: the list's geometry and the
+// body lines above it. It leaves l with its size and a fresh memo set.
+func (l *logsTab) geom(w, h int) (g listGeom, top int) {
+	l.w, l.h = w, h
+	l.memo = &logsMemo{}
+	if l.header(w) != "" {
+		top = 1
+	}
+	rows := l.rows()
+	pre := 0
+	if l.err != nil || len(rows) == 0 {
+		pre = 1
+	}
+	sel, _ := l.current()
+	at := 0
+	if sel >= 0 {
+		at = pre + sel
+	}
+	return listGeom{n: pre + len(rows), sel: at, h: l.bodyH(), open: l.open, keys: l.lineKeys(rows, pre), at: func(k int) hitTarget {
+		if k < pre {
+			return hitTarget{}
+		}
+		return hitTarget{kind: hitRow, key: strconv.Itoa(k - pre)}
+	}}, top
+}
+
+// selectKey selects an event as j/k would. An event's own key is opaque (time, pid, msg), so
+// hit names an event by its position among the rows; the model is unchanged between the two.
+func (l logsTab) selectKey(key string) component {
+	rows := l.rows()
+	if i, err := strconv.Atoi(key); err == nil && i >= 0 && i < len(rows) {
+		l.sel, l.off = l.ev(rows[i]).Key(), 0
+	}
+	return l
+}
+
+func (l logsTab) wheel(w, h, y, delta int) component {
+	c := l // geom sets a size and a memo on the tab it runs on: not the one kept
+	g, top := c.geom(w, h)
+	if g.hit(l.lv, y-top).kind == hitDrawer {
+		l.off = wheelDrawer(c.detailVP(), delta)
+		return l
+	}
+	l.lv = g.wheeled(l.lv, delta)
+	return l
+}
+
+func (l logsTab) snap(w, h int) component {
+	c := l
+	g, _ := c.geom(w, h)
+	l.lv = g.snapped(l.lv)
+	return l
+}
+
+func (l logsTab) unscroll() component { l.lv = listView{}; return l }
+
 func (l logsTab) view(w, h int) string {
 	l.w, l.h = w, h
 	l.memo = &logsMemo{}
@@ -569,7 +648,7 @@ func (l logsTab) list(cw, h int) string {
 	if sel >= 0 {
 		at = pre + sel
 	}
-	return drawerWin(pre+len(rows), line, at, l.open, cw, h, l.detailVP(), nil)
+	return drawerWin(pre+len(rows), line, at, l.open, cw, h, l.detailVP(), nil, l.lv.offsets(l.lineKeys(rows, pre)))
 }
 
 // pickLogKind opens the Logs kind picker: any, then each kind the events name.

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/dispatch"
@@ -170,5 +171,68 @@ func TestRunStatusLiftFailed(t *testing.T) {
 	want := "run X done; lifting paused:failing failed — clear it by hand\n" + last
 	if got != want {
 		t.Errorf("status = %q, want %q", got, want)
+	}
+}
+
+// The run-now host's argv reads as the bead's effort holder under liveness's scan,
+// so changing the verb off liveness's effort-verb list fails here. The command is
+// built, never started.
+func TestRunHostCmdReadsAliveUnderLiveness(t *testing.T) {
+	cmd := runHostCmd("/bin/mugicrew", "mc-r", nil, nil)
+	if !liveness.HoldsEffort(cmd.Args, "mc-r") {
+		t.Errorf("argv %v reads dead under liveness: add its verb to liveness's effort verbs", cmd.Args)
+	}
+}
+
+// run-now claims through dispatch.Claim, so the bead's lock reads held when the bd
+// claim is written, still held when the host is started with it, and the TUI's
+// copy is the one released (Spec D11). A fake bd on PATH blocks inside the claim
+// so the test can read the lock at that moment.
+func TestRunNowClaimHoldsTheLockFromBeforeTheClaim(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BEADS_DIR", dir)
+	bin := t.TempDir()
+	started, release := filepath.Join(bin, "started"), filepath.Join(bin, "release")
+	script := "#!/bin/sh\ntouch " + started + "\nwhile [ ! -e " + release + " ]; do sleep 0.01; done\n"
+	if err := os.WriteFile(filepath.Join(bin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	type result struct {
+		hold *liveness.Hold
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() { h, err := claimBead(bd.Bead{ID: "mc-r"}); done <- result{h, err} }()
+	for i := 0; ; i++ {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if i > 500 {
+			t.Fatal("bd claim never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !liveness.HeldIn(dir, "mc-r") {
+		t.Error("lock free while the bd claim was being written")
+	}
+	os.WriteFile(release, nil, 0o644)
+	r := <-done
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	t.Cleanup(r.hold.Release)
+
+	origCommon, origStart := commonDir, startHost
+	t.Cleanup(func() { commonDir, startHost = origCommon, origStart })
+	commonDir = func() (string, error) { return t.TempDir(), nil }
+	var heldAtStart bool
+	startHost = func(*exec.Cmd) error { heldAtStart = liveness.HeldIn(dir, "mc-r"); return nil }
+	if _, _, err := spawnRunHost(dispatch.Inflight{ID: "e1", Bead: bd.Bead{ID: "mc-r"}, Hold: r.hold}); err != nil {
+		t.Fatal(err)
+	}
+	if !heldAtStart {
+		t.Error("lock free when the run host was started")
 	}
 }

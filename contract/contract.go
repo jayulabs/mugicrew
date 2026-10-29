@@ -26,7 +26,7 @@ type Kind string
 // Signal is Luffy's to triage (ADR 0129), the rest Nami's. Plus kinds other
 // crewmates own: Spec (Zoro's) — the terminal artifact a drained Chart
 // spawns in succession (§8.4); Prototype (Sanji's), an Inbox HITL kind (§9.2);
-// and Task (Brook's), a HITL walk-through of external-world steps, a direct
+// and Errand (Brook's), a HITL walk-through of external-world steps, a direct
 // Initiative child when ordered against a member, else outside (ADR 0352;
 // ADR 0115; ADR 0013 had removed it from the defog set and reserved the name).
 const (
@@ -39,12 +39,12 @@ const (
 	KindSpec          Kind = "spec"
 	KindCheckpoint    Kind = "checkpoint" // Zoro-cut container, handled by Jinbe (registry row); BranchName/TrailerFor name the kind from this one const (FR27)
 	KindPrototype     Kind = "prototype"  // Sanji's defog kind; named here for the TUI's HITL filter (§9.2)
-	KindTask          Kind = "task"       // Brook-owned HITL leaf: a human-launched guide through external-world steps (ADR 0113/0115); not a defog kind (ADR 0013)
+	KindErrand        Kind = "errand"     // Brook-owned HITL leaf: a human-launched guide through external-world steps (ADR 0113/0115); not a defog kind (ADR 0013)
 	KindPivot         Kind = "pivot"      // Zoro-owned HITL leaf: a Spec flaw a Checkpoint effort raised; its Checkpoint blocks on it (ADR 0043)
 	KindRollback      Kind = "rollback"   // human-filed, Jinbe-owned AFK leaf undoing a landed Checkpoint; a successor Checkpoint is caused-by it (ADR 0047/0048)
 	KindSurgery       Kind = "surgery"    // human-filed, Franky-owned HITL leaf: dictated code on a Checkpoint: a fresh one it files, or an existing one it joins (ADR 0091/0092)
 	KindInitiative    Kind = "initiative" // Luffy-owned HITL container above the spine: branchless, no land; member chains are its children (ADR 0128, 0135)
-	KindDiscussion    Kind = "discussion" // Robin-owned HITL leaf: a human-started read-only session that explains the Workspace and drafts Signals (ADR 0194)
+	KindDiscussion    Kind = "discussion" // Robin-owned HITL leaf: a human-started read-only session that explains the Workspace and drafts Signals and bodyless Initiatives (ADR 0194, ADR 0381 (robin-may-draft-a-bodyless-initiative…))
 	KindCheckup       Kind = "checkup"    // Chopper-owned HITL leaf: a human-started session that diagnoses and repairs one broken bead (ADR 0272)
 )
 
@@ -81,7 +81,7 @@ const KindLatch Kind = "latch"
 // it, so a new Kind must be added here to join the title backstop (ADR 0097).
 var Kinds = []Kind{
 	KindSignal, KindGrilling, KindResearch, KindChart, KindSurvey, KindChartConflict, KindSpec,
-	KindCheckpoint, KindPrototype, KindTask, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup,
+	KindCheckpoint, KindPrototype, KindErrand, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup,
 	KindBuild, KindReview, KindForgeReview, KindCritique, KindConflict, KindApproval, KindLanding, KindMRWatch, KindLatch,
 }
 
@@ -105,7 +105,7 @@ func (k Kind) PacedLeaf() bool { return k == KindLanding || k == KindMRWatch }
 // any other kind freezes the whole Checkpoint. Shared by loop.Readmit and the TUI.
 func (k Kind) AdmitsLandOnlyHold() bool {
 	switch k {
-	case KindTask, KindSignal, KindChart, KindSpec, KindCheckpoint, KindInitiative:
+	case KindErrand, KindSignal, KindChart, KindSpec, KindCheckpoint, KindInitiative:
 		return true
 	}
 	return false
@@ -143,8 +143,10 @@ const WayfinderMapFields = "Destination / Notes / Decisions-so-far / Not-yet-spe
 const ChartPlaceholderBody = "Chart body — to be written by the charting session as a wayfinder map (" + WayfinderMapFields + ")."
 
 // SurveyBody is every Survey's body (Spec mc-r832 D1): a pointer to its parent
-// Chart, so the bead holds no content to keep in sync.
-const SurveyBody = "Survey of its parent Chart: a HITL charting session that maps the Chart's fog with a human. The map lives on the Chart (crew doc chart-body.md), not here; this bead holds no content and is closed by mugicrew when the session exits cleanly."
+// Chart. The map lives on the Chart; a Survey that finishes its Chart in place
+// carries the decisions it settled in its notes (ADR 0357). Existing Surveys
+// keep their old text.
+const SurveyBody = "Survey of its parent Chart: a HITL charting session that maps the Chart's fog with a human. The map lives on the Chart (crew doc chart-body.md), not here; a Survey that finishes its Chart in place carries the decisions it settled in its notes. mugicrew closes it when the session exits cleanly."
 
 // DraftedBy is the label that marks a Draft and names its creator — the effort's
 // or session's own bead (ADR 0059 §2). Publish and cleanup select on it, so two
@@ -160,7 +162,7 @@ func DraftInstruction(creator string) string {
 - Add every edge between your Drafts, and from them to existing beads, before you exit.
 - Create every Draft before you close your own bead.
 - Never publish: do not set a Draft's status to open and do not remove its %[1]s label.
-- A bead that must wait on a Jira ticket: run `+"`mugicrew latch jira <KEY> --blocks <bead> --drafted-by %[2]s`"+` (it files the latch as your Draft).`, DraftedBy(creator), creator)
+- A bead that must wait on the outside world: run `+"`mugicrew latch jira <KEY> --blocks <bead> --drafted-by %[2]s`"+` for a Jira ticket, or `+"`mugicrew latch mr <ref> --blocks <bead> --drafted-by %[2]s`"+` for a GitLab merge request (GitLab-landing Workspaces only); it files the latch as your Draft.`, DraftedBy(creator), creator)
 }
 
 // Render executes an embedded prompt template over data. The templates are

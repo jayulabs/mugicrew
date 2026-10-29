@@ -7,6 +7,7 @@ Amended by ADR 0171 (§3: no hitl label; §8: ●N counts only waiting sessions)
 Amended by ADR 0241 (n is no longer unbound: it opens the New menu).
 Amended by Spec mc-j3mw8 (§1: a defogged Chart with an open child stays listed).
 Amended by ADR 0258 (§7: E raw is removed from the Defog tab; E is a shell key opening $EXPLORER).
+Amended by Spec mc-w2a8c (Bead verbs offered wherever a bead row appears): §7's per-row key lists — every row offers the shared bead verbs (z e a A c B U +/- p x X w) by its bead's state, the Initiative header being its Initiative's bead row; an MR row hints w (plus x while a session runs) and a Finished in last 24h row hints c (plus x), the rest ?-only (ADR 0360).
 Date: 2026-10-13
 
 Chart mc-lu2x.9 (Defog tab for the v2 TUI). Settles grilling mc-lu2x.9.4,

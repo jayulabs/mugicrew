@@ -81,6 +81,36 @@ func parseLsofCwd(out []byte) map[int]string {
 	return cwds
 }
 
+// procTable is argvTable's sysctl argv read plus, when wantCwd, one
+// `lsof -a -d cwd -F pn` run joined by pid. A missing or unstartable lsof is an
+// error returned with the argv rows, hasCwd false on each. A var so tests make a platform that can't read cwds.
+var procTable = func(wantCwd bool) ([]procRow, error) {
+	var out []procRow
+	for _, p := range argvTable() {
+		out = append(out, procRow{pid: p.pid, argv: p.argv})
+	}
+	if !wantCwd {
+		return out, nil
+	}
+	cmd := exec.Command(lsofPath, "-a", "-d", "cwd", "-F", "pn")
+	cmd.Dir = "/"
+	raw, err := cmd.Output()
+	if _, ran := err.(*exec.ExitError); err != nil && !ran {
+		// The argv rows stay: they still prove a repo-root bead alive. No row has a cwd.
+		return out, fmt.Errorf("liveness: cannot read process cwds: %w", err)
+	}
+	cwds := parseLsofCwd(raw)
+	for i := range out {
+		out[i].cwd, out[i].hasCwd = cwds[out[i].pid]
+	}
+	for pid, cwd := range cwds { // a pid lsof saw but sysctl couldn't read argv for
+		if !slices.ContainsFunc(out, func(r procRow) bool { return r.pid == pid }) {
+			out = append(out, procRow{pid: pid, cwd: cwd, hasCwd: true})
+		}
+	}
+	return out, nil
+}
+
 // InTree is the pid of every process, whatever its argv, whose cwd lies in tree
 // (ADR 0127 §2), from one `lsof -a -d cwd -F pn` run. tree is resolved through
 // symlinks first, as lsof's paths are. lsof exits non-zero when it can't read

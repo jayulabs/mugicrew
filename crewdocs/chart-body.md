@@ -1,4 +1,4 @@
-<!-- hand-kept · summarises ADR 0006 (offshoot Signals), ADR 0008 and ADR 0013 (a Chart charts toward exactly one Spec), ADR 0059 (Drafts), ADR 0088 (this doc's split) -->
+<!-- hand-kept · summarises ADR 0006 (offshoot Signals), ADR 0008 and ADR 0013 (a Chart charts toward exactly one Spec), ADR 0059 (Drafts), ADR 0088 (this doc's split), ADR 0357 (mugicrew-a-survey-with-no-fog-finishes…) -->
 
 # The Chart
 
@@ -6,7 +6,8 @@ A Chart is one bead on the beads graph, labelled kind:chart: the shared map
 charting a Signal toward exactly one Spec, and the canonical artifact of its
 charting branch (chart/<chart-id>). Its defog beads are its child beads
 (membership). The Chart is an **index**, not a store: a decision lives in
-exactly one place, its defog bead, so the Chart body only gists it and links.
+exactly one place, its defog bead, or the Survey that settled it, so the Chart
+body only gists it and links.
 
 ## The Chart body
 
@@ -19,7 +20,8 @@ The whole Chart at low resolution, in five sections:
   for this effort.
 - **Decisions-so-far**: the index: one line per closed defog bead, enough to
   judge relevance, then follow the link for the detail. Empty at charting;
-  filled as defog beads close.
+  filled as defog beads close. A Survey that finishes the Chart in place fills
+  it at charting, with lines linking the Survey.
 - **Not-yet-specified**: in-scope fog you can't bead yet (see Fog of war).
 - **Out-of-scope**: work ruled beyond the Spec (see Out of scope).
 
@@ -78,7 +80,7 @@ question precisely now, not whether you can answer it:
 Resolving a defog bead clears the fog ahead of it, graduating whatever's now
 specifiable into fresh defog beads, and clearing those patches from
 Not-yet-specified; that happens in later sessions. A charting session only
-seeds Not-yet-specified.
+seeds Not-yet-specified, except when it finishes the Chart in place (no fog).
 
 ## Out of scope
 

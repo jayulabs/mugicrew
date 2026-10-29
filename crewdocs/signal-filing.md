@@ -15,10 +15,11 @@ a Draft, as your prompt's Drafts block says. In the commands below,
 
 ## Offshoot form
 
-A Signal for work you found, not a member of any container:
+A Signal for work you found. It is born in its cause's Initiative unless you
+opt out:
 
     mugicrew signal offshoot --from <the bead that found it> --drafted-by <your bead id> \
-      --order follow-up|prerequisite|none \
+      --order follow-up|prerequisite|none [--outside "<why>"] \
       --title "<the work, no kind prefix>" --description "<what and why; Sources: …>"
 
 Pick the order and say why in the description:
@@ -26,14 +27,21 @@ Pick the order and say why in the description:
 - prerequisite: what you were working on can't land until this work lands;
 - none: separable work with no order either way.
 
+Opt out with --outside only when the work does nothing toward the Initiative's
+Done when, and say so in the description too. When you suspect that, run the
+same command with --dry-run first: it shows the climbed Initiative and its Done
+when, and files nothing.
+
 In a HITL session, include the order in your chat proposal. The verb finds the
 container, records the order, and prints the new id. If the order can't apply
 (no container, a closed one, or a pair bd refuses), it files the Signal
-unordered and says why on stdout and in the body. Don't add edges yourself.
+unordered and says why on stdout and in the body. It prints and records both
+the Order: and the Initiative: lines in the body, where the Initiative: line
+says where the Signal was born and, if outside, why. Don't add edges yourself.
 
 Some filings are human-only. A crewmate never files a Rollback, never runs
 mugicrew rebase or rebases a container by hand, never files a Surgery, and
-never files a Task mid-work. Each one is suggested by an offshoot Signal
+never files an Errand mid-work. Each one is suggested by an offshoot Signal
 instead, and the human decides.
 
 ## Ordering on an earlier stage

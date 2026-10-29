@@ -168,7 +168,7 @@ func TestPublishRerouteRecheckFailuresKeepTheSignalOpen(t *testing.T) {
 		"open Landing":  func(g *rr) { g.landings = []bd.Bead{{ID: "ws-l", Kind: contract.KindLanding, Status: "open"}} },
 		"landed":        func(g *rr) { g.landed = true },
 		"two hosts":     func(g *rr) { g.drafts[1].Parent = "ws-other" },
-		"not a checkpt": func(g *rr) { g.host.Kind = contract.KindTask },
+		"not a checkpt": func(g *rr) { g.host.Kind = contract.KindErrand },
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRR(t)
@@ -291,30 +291,30 @@ func TestDropDraftsClearsRerouteMerges(t *testing.T) {
 	}
 }
 
-// taskRaise fakes a Task creator ws-task whose raise Drafts carry no caused-by edge: the
+// errandRaise fakes an Errand creator ws-errand whose raise Drafts carry no caused-by edge: the
 // gate keys on the pivot's raise_checkpoint metadata alone (ADR 0326 §4).
-func taskRaise(t *testing.T) *rr {
+func errandRaise(t *testing.T) *rr {
 	g := newRR(t)
-	g.sig = bd.Bead{ID: "ws-task", Kind: contract.KindTask, Status: "in_progress"}
+	g.sig = bd.Bead{ID: "ws-errand", Kind: contract.KindErrand, Status: "in_progress"}
 	return g
 }
 
-func taskPivot(id string) bd.Bead {
+func errandPivot(id string) bd.Bead {
 	p := pivotDraft(id)
 	p.CausedBy = ""
 	return p
 }
 
-func taskCritique(id string) bd.Bead {
+func errandCritique(id string) bd.Bead {
 	c := critiqueDraft(id)
 	c.CausedBy = ""
 	return c
 }
 
-func TestPublishTaskRaiseHandsGateAndNoClose(t *testing.T) {
-	g := taskRaise(t)
-	g.drafts = []bd.Bead{taskPivot("ws-p1"), taskCritique("ws-c1")}
-	if err := PublishDrafts("ws-task", nil); err != nil {
+func TestPublishErrandRaiseHandsGateAndNoClose(t *testing.T) {
+	g := errandRaise(t)
+	g.drafts = []bd.Bead{errandPivot("ws-p1"), errandCritique("ws-c1")}
+	if err := PublishDrafts("ws-errand", nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"ws-cp>ws-p1:blocks", "ws-p1>ws-spec:related"}
@@ -322,14 +322,14 @@ func TestPublishTaskRaiseHandsGateAndNoClose(t *testing.T) {
 		t.Errorf("edges = %v, want %v", got, want)
 	}
 	if g.closing != nil || g.sig.Status != "in_progress" {
-		t.Errorf("closing = %+v status = %s, want the Task left in_progress", g.closing, g.sig.Status)
+		t.Errorf("closing = %+v status = %s, want the Errand left in_progress", g.closing, g.sig.Status)
 	}
 }
 
-func TestPublishTaskCritiqueOnlyRaiseHandsNoGate(t *testing.T) {
-	g := taskRaise(t)
-	g.drafts = []bd.Bead{taskCritique("ws-c1")}
-	if err := PublishDrafts("ws-task", nil); err != nil {
+func TestPublishErrandCritiqueOnlyRaiseHandsNoGate(t *testing.T) {
+	g := errandRaise(t)
+	g.drafts = []bd.Bead{errandCritique("ws-c1")}
+	if err := PublishDrafts("ws-errand", nil); err != nil {
 		t.Fatal(err)
 	}
 	if !g.published || len(g.edges) != 0 || g.closing != nil {
@@ -337,9 +337,9 @@ func TestPublishTaskCritiqueOnlyRaiseHandsNoGate(t *testing.T) {
 	}
 }
 
-func TestPublishTaskMergeIsDiscoveredFromAndCommentedOnce(t *testing.T) {
-	g := taskRaise(t)
-	g.drafts = []bd.Bead{taskCritique("ws-c1")}
+func TestPublishErrandMergeIsDiscoveredFromAndCommentedOnce(t *testing.T) {
+	g := errandRaise(t)
+	g.drafts = []bd.Bead{errandCritique("ws-c1")}
 	g.merge("ws-old")
 	posts := 0
 	swapSeam(t, &addComment, func(id, text string) error {
@@ -348,19 +348,19 @@ func TestPublishTaskMergeIsDiscoveredFromAndCommentedOnce(t *testing.T) {
 		g.posted[id] = text
 		return nil
 	})
-	if err := PublishDrafts("ws-task", nil); err != nil {
+	if err := PublishDrafts("ws-errand", nil); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"ws-old>ws-task:discovered-from"}; !slices.Equal(edgeStrings(g.edges), want) {
+	if want := []string{"ws-old>ws-errand:discovered-from"}; !slices.Equal(edgeStrings(g.edges), want) {
 		t.Errorf("edges = %v, want %v", edgeStrings(g.edges), want)
 	}
 	if g.closing != nil {
 		t.Errorf("closing = %+v, want none", g.closing)
 	}
-	if !strings.HasPrefix(g.posted["ws-old"], "Raised by Task ws-task\n") {
-		t.Errorf("comment = %q, want the Raised by Task marker", g.posted["ws-old"])
+	if !strings.HasPrefix(g.posted["ws-old"], "Raised by Errand ws-errand\n") {
+		t.Errorf("comment = %q, want the Raised by Errand marker", g.posted["ws-old"])
 	}
-	if err := PublishDrafts("ws-task", nil); err != nil {
+	if err := PublishDrafts("ws-errand", nil); err != nil {
 		t.Fatal(err)
 	}
 	if posts != 1 {
@@ -368,24 +368,24 @@ func TestPublishTaskMergeIsDiscoveredFromAndCommentedOnce(t *testing.T) {
 	}
 }
 
-func TestPublishTaskRaiseRecheckFailureKeepsDraftsDeferred(t *testing.T) {
-	g := taskRaise(t)
-	g.drafts = []bd.Bead{taskPivot("ws-p1"), taskCritique("ws-c1")}
+func TestPublishErrandRaiseRecheckFailureKeepsDraftsDeferred(t *testing.T) {
+	g := errandRaise(t)
+	g.drafts = []bd.Bead{errandPivot("ws-p1"), errandCritique("ws-c1")}
 	g.landings = []bd.Bead{{ID: "ws-l", Kind: contract.KindLanding, Status: "open"}}
-	if err := PublishDrafts("ws-task", nil); err == nil {
+	if err := PublishDrafts("ws-errand", nil); err == nil {
 		t.Error("publish succeeded, want the Landing failure")
 	}
 	if g.published || g.sig.Status != "in_progress" {
-		t.Errorf("published = %v status = %s, want Drafts deferred and the Task in_progress", g.published, g.sig.Status)
+		t.Errorf("published = %v status = %s, want Drafts deferred and the Errand in_progress", g.published, g.sig.Status)
 	}
 }
 
-func TestDropDraftsClearsTaskRaiseMerges(t *testing.T) {
+func TestDropDraftsClearsErrandRaiseMerges(t *testing.T) {
 	var cleared []string
 	swapSeam(t, &deleteDrafts, func(string) ([]string, []bd.BranchOutcome, error) { return nil, nil, nil })
 	swapSeam(t, &clearMetadata, func(id, key string) error { cleared = append(cleared, id+"/"+key); return nil })
 	eventlogtest.Capture(t)
-	if err := DropDrafts(bd.Bead{ID: "ws-task", Kind: contract.KindTask}); err != nil || !slices.Equal(cleared, []string{"ws-task/raise_merges"}) {
+	if err := DropDrafts(bd.Bead{ID: "ws-errand", Kind: contract.KindErrand}); err != nil || !slices.Equal(cleared, []string{"ws-errand/raise_merges"}) {
 		t.Errorf("cleared %v (err %v), want raise_merges cleared", cleared, err)
 	}
 }

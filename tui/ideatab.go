@@ -2,8 +2,8 @@ package tui
 
 // The Ideate tab (Spec mc-lu2x.6): open and in-triage Signals grouped under their
 // Initiative, a detail pane and a ●N badge of triage sessions waiting on the human.
-// Its action keys (enter, n, e, z, E, +/-, a/A) go through the shared launch, action
-// and form paths over the selected Signal (ideaKey).
+// Its enter and b go through the shared launch path over the selected Signal (ideaKey);
+// every bead verb goes through the shared router (beadVerbRoute).
 
 import (
 	"cmp"
@@ -219,7 +219,7 @@ func (t ideaTab) shaded(f ideaFrame, sel int) map[int]bool {
 	// No Initiative and Backlog start folded, so unfold them for the twin lookup.
 	open := map[string]bool{"i:": true, backlogKey: true}
 	full := slices.Concat(f.exp[:1], t.gate.ideaActionable(t.flip), f.live, ideaTree(f.exp[1:], open))
-	set := shadeSet(t.gate.parentOf, f.rows, sel, full, ideaRow.shadeIn)
+	set := shadeSet(t.gate.beadByID, f.rows, sel, full, ideaRow.shadeIn)
 	// shadeSet tracks only the nearest header, so a member nested in a Backlog group
 	// also lights the Backlog header, which is a section above its group (ADR 0179 §5).
 	bi := slices.IndexFunc(f.rows, func(r ideaRow) bool { return r.key == backlogKey })
@@ -514,6 +514,7 @@ type ideaTab struct {
 	sel  string
 	open bool
 	off  int
+	lv   listView
 	flip map[string]bool // header keys flipped from ideaFolded's default, kept in path
 	peek map[string]bool // keys a Recents jump flipped, with their pre-jump value: never saved
 	path string          // the fold file
@@ -810,7 +811,6 @@ var (
 	keyNewRow = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "new"))
 	keyCut    = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "cut"))
 	keyAttach = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "attach"))
-	keyAdoptA = key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("a/A", "adopt/release"))
 )
 
 // bindings are the hints (placement and drop rank: ADR 0229): only the verbs the selection
@@ -872,38 +872,17 @@ func (t ideaTab) bindingsAt(c ideaRow) []key.Binding {
 	if t.open {
 		bs = append(bs, keyShut, keyScroll)
 	}
-	if b == nil {
-		if c.init != nil { // an Initiative row: +/- bumps the Initiative, X cancels it
-			bs = append(bs, keyPrio)
-			if isOpenInitiative(c.init) {
-				bs = append(bs, keyCancelKey)
-			}
-		}
-		return append(bs, keySection)
+	hinted, _ := beadVerbBindings(t.gate, cmp.Or(b, c.init), roleFull)
+	// hintOf (ADR 0229) picks each verb's section; this order is the in-section order on the bar and in ?.
+	at := slices.IndexFunc(hinted, func(kb key.Binding) bool { return !slices.Contains([]string{"p", "x", "X"}, kb.Keys()[0]) })
+	if at < 0 {
+		at = len(hinted)
 	}
-	if rejectable(*b) {
-		bs = append(bs, keyReject)
+	bs = append(bs, hinted[:at]...)
+	if b != nil {
+		bs = append(bs, keyTranscript)
 	}
-	if b.Unclosed() {
-		bs = append(bs, verbKey("p", pauseLabel(b)))
-	}
-	if l := t.gate.xHint(b); l != "" {
-		bs = append(bs, verbKey("x", l))
-	}
-	if t.gate.xOffers(b) {
-		bs = append(bs, xBinding(b))
-	}
-	bs = append(bs, keyTranscript)
-	bs = append(bs, keyEdit, keyPrio)
-	adopt, release := canAdopt(t.beads, b), canRelease(t.beads, b)
-	switch {
-	case adopt && release:
-		bs = append(bs, keyAdoptA)
-	case adopt:
-		bs = append(bs, keyAdopt)
-	case release:
-		bs = append(bs, keyRelease)
-	}
+	bs = append(bs, hinted[at:]...)
 	return append(bs, keySection)
 }
 
@@ -926,19 +905,21 @@ func (t ideaTab) extra() []key.Binding {
 		out = append(out, keyFold) // folds the header; not hinted on the row itself
 	}
 	if c.b == nil {
-		return append(out, keyBg)
-	}
-	for _, b := range []key.Binding{keyTriage, keyBg, keyReject, keyPauseKey, keyAdopt, keyRelease} {
-		if !shown[b.Keys()[0]] {
-			out = append(out, b)
+		out = append(out, keyBg)
+	} else {
+		for _, b := range []key.Binding{keyTriage, keyBg} {
+			if !shown[b.Keys()[0]] {
+				out = append(out, b)
+			}
 		}
 	}
-	return out
+	_, verbs := beadVerbBindings(t.gate, cmp.Or(c.b, c.init), roleFull)
+	return append(out, verbs...)
 }
 
-// ideaKey routes the action keys through the shared paths over the selected Signal;
-// ok is false for any other key. The create row takes enter and n alone, and u, b, t
-// and x are Graph's; p toggles the Signal's manual pause.
+// ideaKey routes the exempt keys: fold, enter and b over the selected Signal, with the
+// create row and the cut session's own cases; ok is false for any other key. The bead
+// verbs are the shared router's.
 func (m Model) ideaKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	t := m.tabAt(m.tab).(ideaTab)
 	c := t.cursorIn(t.rows())
@@ -970,21 +951,10 @@ func (m Model) ideaKey(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	case b == nil && key.Matches(k, keyBg):
 		m.setStatus("nothing to launch here")
 		return m, nil, true
-	case b == nil && c.init != nil && key.Matches(k, keyPrio): // Initiative rows carry no Signal
-		next, cmd := m.bumpPriority(*c.init, prioDir(k))
-		return next, cmd, true
-	case b == nil && c.init != nil && key.Matches(k, keyWithdrawKey):
-		return m.actionKey(k)
 	case b == nil:
 		return m, nil, false
-	case key.Matches(k, keyLaunch), key.Matches(k, keyBg), key.Matches(k, keyPrio), key.Matches(k, keyPauseKey):
+	case key.Matches(k, keyLaunch), key.Matches(k, keyBg):
 		return m.actionKey(k)
-	case key.Matches(k, keyDropKey) && m.gateData().xHint(b) != "": // unhinted x does nothing
-		return m.actionKey(k)
-	case key.Matches(k, keyWithdrawKey):
-		return m.actionKey(k)
-	case key.Matches(k, keyEdit), key.Matches(k, keyReject), key.Matches(k, keyAdopt), key.Matches(k, keyRelease):
-		return m.graphKey(k)
 	}
 	return m, nil, false
 }
@@ -1231,16 +1201,11 @@ func (t ideaTab) line(r ideaRow, blockers map[string]bool) (string, string) {
 	return l, strings.TrimLeft(g.rowSuffix(b), " ")
 }
 
-func (t ideaTab) view(w, h int) string {
-	f := t.frame()
-	rows := f.rows
-	sel := t.selIndex(rows)
-	cur := rows[sel]
-	blockers := t.gate.blockerSet(cur.b)
-	row := func(i int) (string, string) { return t.line(rows[i], blockers) }
-	shade := t.shaded(f, sel)
-	lines, selRow := make([]string, len(rows)), sel
-	ids := make([]string, len(rows))
+// gapped is the Ideate rows as drawRows takes them: each line's row number as text ("" for a
+// gap), its bead id for the blocker footer, and the selected row's line. View and hit share it.
+func (t ideaTab) gapped(rows []ideaRow, sel int) (lines, ids []string, at int) {
+	lines, at = make([]string, len(rows)), sel
+	ids = make([]string, len(rows))
 	liveAt, treeAt, noInitAt, backlogAt := 0, 0, 0, 0 // the section headers that get a blank line above
 	for i, r := range rows {
 		lines[i] = strconv.Itoa(i)
@@ -1258,17 +1223,66 @@ func (t ideaTab) view(w, h int) string {
 			backlogAt = i
 		}
 	}
-	lines, ids, sel = gapAt(lines, ids, sel, backlogAt) // a blank line above each section header
-	lines, ids, sel = gapAt(lines, ids, sel, noInitAt)
-	lines, ids, sel = gapAt(lines, ids, sel, treeAt)
-	lines, ids, sel = gapAt(lines, ids, sel, liveAt)
-	lines, ids, sel = gapAt(lines, ids, sel, 1) // and one under '+ New Signal'
+	lines, ids, at = gapAt(lines, ids, at, backlogAt) // a blank line above each section header
+	lines, ids, at = gapAt(lines, ids, at, noInitAt)
+	lines, ids, at = gapAt(lines, ids, at, treeAt)
+	lines, ids, at = gapAt(lines, ids, at, liveAt)
+	lines, ids, at = gapAt(lines, ids, at, 1) // and one under '+ New Signal'
+	return lines, ids, at
+}
+
+func (t ideaTab) view(w, h int) string {
+	f := t.frame()
+	rows := f.rows
+	sel := t.selIndex(rows)
+	cur := rows[sel]
+	blockers := t.gate.blockerSet(cur.b)
+	row := func(i int) (string, string) { return t.line(rows[i], blockers) }
+	shade := t.shaded(f, sel)
+	lines, ids, at := t.gapped(rows, sel)
 	var footer func(off, lh int) []string
 	if b := cur.b; b != nil {
 		footer = blockerFooter(t.gate, t.gate.openBlockers(b), ids, w)
 	}
-	return drawRows(lines, row, shade, sel, selRow, t.open, w, h, t.detailVP(cur), footer)
+	return drawRows(lines, row, shade, at, sel, t.open, w, h, t.detailVP(cur), footer, t.lv.offsets(t.geom(rows, w, h).keys))
 }
+
+// geom is what View and the pointer share about a w by h body over rows.
+func (t ideaTab) geom(rows []ideaRow, w, h int) listGeom {
+	sel := t.selIndex(rows)
+	lines, ids, at := t.gapped(rows, sel)
+	var footer, links func(off, lh int) []string
+	if b := rows[sel].b; b != nil {
+		bl := t.gate.openBlockers(b)
+		footer, links = blockerFooter(t.gate, bl, ids, w), blockerLinks(bl, ids)
+	}
+	return queueGeom(lines, at, t.open, h, footer, links, func(i int) string { return rows[i].key }, func(i int) (string, bool, bool) {
+		return rows[i].key, rows[i].b != nil, rows[i].selectable()
+	})
+}
+
+// hit is the pointer's view of body line y of a w by h body (pointable).
+func (t ideaTab) hit(w, h, y int) hitTarget { return t.geom(t.rows(), w, h).hit(t.lv, y) }
+
+// selectKey selects the row key as j/k would.
+func (t ideaTab) selectKey(key string) component { t.sel, t.off = key, 0; return t }
+
+func (t ideaTab) wheel(w, h, y, delta int) component {
+	g := t.geom(t.rows(), w, h)
+	if g.hit(t.lv, y).kind == hitDrawer {
+		t.off = wheelDrawer(t.detailVP(t.cursor()), delta)
+		return t
+	}
+	t.lv = g.wheeled(t.lv, delta)
+	return t
+}
+
+func (t ideaTab) snap(w, h int) component {
+	t.lv = t.geom(t.rows(), w, h).snapped(t.lv)
+	return t
+}
+
+func (t ideaTab) unscroll() component { t.lv = listView{}; return t }
 
 func (t ideaTab) drawerOpen() bool { return t.open }
 

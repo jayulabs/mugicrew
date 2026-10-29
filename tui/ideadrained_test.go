@@ -150,11 +150,11 @@ func TestIdeateDrainedHints(t *testing.T) {
 			t.Errorf("hints\n got %q\nwant %q", got, s)
 		}
 	}
-	want(ideaAt(t, m, "i:d"), "enter cut · space fold · d detail · +/- prio · X cancel · J/K section")
-	want(ideaAt(t, m, "h:d"), "enter cut · d detail · +/- prio · X cancel · J/K section")
+	want(ideaAt(t, m, "i:d"), "enter cut · space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
+	want(ideaAt(t, m, "h:d"), "enter cut · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
 	m, _ = drainedModel(t, drainedBeads(), map[string]session.Info{"d": {State: session.Exited}})
-	want(ideaAt(t, m, "i:d"), "enter attach · space fold · d detail · +/- prio · X cancel · J/K section")
-	want(ideaAt(t, m, "i:us"), "space fold · d detail · +/- prio · X cancel · J/K section")
+	want(ideaAt(t, m, "i:d"), "enter attach · space fold · d detail · p pause · x drop · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
+	want(ideaAt(t, m, "i:us"), "space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section")
 	for _, id := range []string{"i:d", "h:d"} {
 		checkCoverage(t, "Ideate "+id, ideaAt(t, m, id), true, "1", "J", "K", "ctrl+down", "ctrl+up")
 	}
@@ -221,10 +221,10 @@ func TestIdeateListsCutSessionInitiative(t *testing.T) {
 func TestIdeateCutSessionHeaderEnterHintsAndDetail(t *testing.T) {
 	sess := map[string]session.Info{"ua": {State: session.Alive}, "us": {State: session.Alive}}
 	m, calls := drainedModel(t, drainedBeads(), sess)
-	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · +/- prio · X cancel · J/K section"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "i:ua")), "enter attach · d detail · p pause · x drop · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section"; got != want {
 		t.Errorf("no Signals hints %q, want %q", got, want)
 	}
-	if got, want := hintsOf(ideaAt(t, m, "i:us")), "enter attach · space fold · d detail · +/- prio · X cancel · J/K section"; got != want {
+	if got, want := hintsOf(ideaAt(t, m, "i:us")), "enter attach · space fold · d detail · p pause · x drop · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section"; got != want {
 		t.Errorf("Signals hints %q, want %q", got, want)
 	}
 	if v := ansi.Strip(press(t, ideaAt(t, m, "i:ua"), runeKey("d")).View()); !strings.Contains(v, "SESSION — enter attaches") { // Graph's preview for a session

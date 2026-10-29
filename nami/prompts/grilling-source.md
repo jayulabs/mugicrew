@@ -10,7 +10,8 @@ It may be a question or a request for a change. Decide which, with the human:
   on your effort branch, commit (as `docs(<bead-id>): <subject>`), and integrate onto the chart branch as usual.
   Close it `accepted:`. Append a Decisions-so-far line on the Chart only if a
   decision changed.
-- **Valid, but carried elsewhere:** file an offshoot Signal discovered-from
+- **Valid, but carried elsewhere:** file an offshoot Signal (crew doc
+  signal-filing.md's Offshoot form) discovered-from
   this grilling, and close it `deferred:`.
 
 Edit only when a change is asked. The close reason is relayed whole (up to 2000

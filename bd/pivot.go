@@ -23,15 +23,15 @@ import (
 // type when typ is "") — "down" is what id depends on, "up" is what depends on id.
 // `bd dep list --json` rows share the bead object shape, so parseBeads reads them.
 func depTargets(id, direction, typ string) ([]Bead, error) {
-	args := []string{"dep", "list", id, "--direction=" + direction, "--json"}
-	if typ != "" {
-		args = append(args, "-t", typ)
-	}
-	out, err := run(args...)
+	rows, err := core.Edges(id, Dir(direction), typ)
 	if err != nil {
 		return nil, err
 	}
-	return parseBeads([]byte(out))
+	beads := make([]Bead, len(rows))
+	for i, r := range rows {
+		beads[i] = r.Bead
+	}
+	return beads, nil
 }
 
 // depAddArgsIfAbsent is the pure argv for `from depends-on to` of type typ, or nil
@@ -368,10 +368,7 @@ func ForceClose(id, reason string) error {
 // ForceCloseAll is ForceClose over ids in one bd close: the loop's straggler
 // backstop retiring a swept Checkpoint's late children, and a swept member's
 // tail retiring its non-Signal Drafts (ADR 0124).
-func ForceCloseAll(ids []string, reason string) error {
-	_, err := run(append(append([]string{"close"}, ids...), "--force", "--reason", reason)...)
-	return err
-}
+func ForceCloseAll(ids []string, reason string) error { return core.Close(ids, reason, true) }
 
 // OrderEdges is id's blocks edges both ways: blockedBy is what id waits on (a
 // follow-up's container), blocks is what waits on id (a prerequisite's container).
@@ -389,3 +386,17 @@ func OrderEdges(id string) (blockedBy, blocks []Bead, err error) {
 func DiscoveredFromSources(id string) ([]Bead, error) {
 	return depTargets(id, "down", "discovered-from")
 }
+
+// BlockersOfKind is id's blocks targets of kind in any status: a Checkpoint's gate
+// pivots, closed ones included (the re-approval rule reads their close reasons).
+func BlockersOfKind(id string, kind contract.Kind) ([]Bead, error) {
+	targets, err := depTargets(id, "down", "blocks")
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(targets, func(b Bead) bool { return b.Kind != kind }), nil
+}
+
+// Blocking is the beads that wait on id through a blocks edge, closed ones included
+// (`bd dep list --direction=up -t blocks`): a Hold Errand's blocked bead, however far it got.
+func Blocking(id string) ([]Bead, error) { return depTargets(id, "up", "blocks") }

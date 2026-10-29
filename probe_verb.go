@@ -37,7 +37,7 @@ const probeUsage = "usage: mugicrew probe mr (<ref> | --branch <b>) | pipeline <
 
 // runProbe is `mugicrew probe <subverb>` (ADR 0336): a read-only read of Forge state
 // that prints one word and returns nil whenever the read succeeded, whatever the
-// word, so a Hold Task's Check tells a fail (still running) from an error.
+// word, so a Hold Errand's Check tells a fail (still running) from an error.
 func runProbe(argv []string, w io.Writer) error {
 	if len(argv) == 0 {
 		return errors.New(probeUsage)

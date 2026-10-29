@@ -384,21 +384,27 @@ func TestHitlRunClosesChartedSignalOnPublish(t *testing.T) {
 // (fog seeded); otherwise it leaves it for settle to release back to the Inbox
 // (Spec mc-r832 D8, FR 15–17). A failed graph read fails the publish.
 func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
-	origRun, origRelease, origDelete := runAgent, releaseClaim, deleteBranch
-	defer func() { runAgent, releaseClaim, deleteBranch = origRun, origRelease, origDelete }()
+	origRun, origRelease, origDelete, origUpdate := runAgent, releaseClaim, deleteBranch, updateBead
+	defer func() {
+		runAgent, releaseClaim, deleteBranch, updateBead = origRun, origRelease, origDelete, origUpdate
+	}()
 	pre := []string{"closing /s,1,2 %7", "return /s,1,2 %7"}
 	for _, tc := range []struct {
 		name    string
 		chart   string   // the parent Chart's status
+		labels  []string // the parent Chart's labels
 		parents []string // the Survey's Drafts' parents
 		readErr error
 		rc      int
 		steps   []string
 	}{
-		{"pushed-back Chart closes the Survey", "closed", nil, nil, 0, append(slices.Clip(pre), "publish s1 close s1", "delete chart/ch1")},
-		{"seeded fog closes the Survey", "open", []string{"", "ch1"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
-		{"no fog leaves the Survey for settle", "open", []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1", "release s1")},
-		{"failed Chart read keeps the session", "open", nil, errors.New("bd: locked"), 1, pre},
+		{"pushed-back Chart closes the Survey", "closed", nil, nil, nil, 0, append(slices.Clip(pre), "publish s1 close s1", "delete chart/ch1")},
+		{"seeded fog closes the Survey", "open", nil, []string{"", "ch1"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
+		{"open Chart, stamped, no fog", "open", []string{contract.LabelDefogged}, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
+		{"stamped, fog Drafted", "open", []string{contract.LabelDefogged}, []string{"", "ch1"}, nil, 0,
+			append(slices.Clip(pre), "notes s1 stamp removed at settle: fog seeded", "unstamp ch1", "publish s1 close s1")},
+		{"no fog leaves the Survey for settle", "open", nil, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1", "release s1")},
+		{"failed Chart read keeps the session", "open", nil, nil, errors.New("bd: locked"), 1, pre},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eventlogtest.Capture(t)
@@ -414,7 +420,7 @@ func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
 			}
 			showBead = func(id string) (bd.Bead, error) {
 				if id == "ch1" {
-					return bd.Bead{ID: id, Kind: contract.KindChart, Status: tc.chart}, tc.readErr
+					return bd.Bead{ID: id, Kind: contract.KindChart, Status: tc.chart, Labels: tc.labels}, tc.readErr
 				}
 				return bd.Bead{ID: id, Kind: contract.KindSurvey, Status: status, Parent: "ch1"}, nil
 			}
@@ -427,6 +433,14 @@ func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
 			}
 			releaseClaim = func(id string) error { *steps = append(*steps, "release "+id); return nil }
 			deleteBranch = func(name string) error { *steps = append(*steps, "delete "+name); return nil }
+			updateBead = func(id string, args []string) error {
+				if args[0] == "--remove-label" {
+					*steps = append(*steps, "unstamp "+id)
+				} else {
+					*steps = append(*steps, "notes "+id+" "+strings.TrimSpace(args[1]))
+				}
+				return nil
+			}
 			runAgent = func([]string, <-chan struct{}) error { return nil }
 			if rc := HitlRun([]string{"--bead=s1", "--session=s", argvArg(t, "claude")}, meter(t)); rc != tc.rc {
 				t.Errorf("rc = %d, want %d", rc, tc.rc)
@@ -435,6 +449,51 @@ func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
 				t.Errorf("steps = %q, want %q", *steps, tc.steps)
 			}
 		})
+	}
+}
+
+// A retry after a failed unstamp converges: the stamp is still there, the notes
+// line already written is not repeated, and the unstamp lands (Spec mc-65hpp FR 16).
+func TestSurveyDoneRetryConverges(t *testing.T) {
+	origShow, origList, origUpdate := showBead, listDrafts, updateBead
+	defer func() { showBead, listDrafts, updateBead = origShow, origList, origUpdate }()
+	const line = "stamp removed at settle: fog seeded"
+	stamped, notes, failUnstamp := true, "", true
+	var steps []string
+	showBead = func(id string) (bd.Bead, error) {
+		b := bd.Bead{ID: id, Kind: contract.KindChart, Status: "open"}
+		if stamped {
+			b.Labels = []string{contract.LabelDefogged}
+		}
+		return b, nil
+	}
+	listDrafts = func(string) ([]bd.Bead, error) { return []bd.Bead{{Parent: "ch1"}}, nil }
+	updateBead = func(id string, args []string) error {
+		if args[0] == "--remove-label" {
+			if failUnstamp {
+				return errors.New("bd: locked")
+			}
+			stamped = false
+			steps = append(steps, "unstamp")
+			return nil
+		}
+		notes = args[1]
+		steps = append(steps, "notes")
+		return nil
+	}
+	if _, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes}); err == nil {
+		t.Fatal("first attempt: want the unstamp's error")
+	}
+	failUnstamp = false
+	done, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes})
+	if err != nil || !done {
+		t.Fatalf("retry = %v, %v; want true, nil", done, err)
+	}
+	if want := []string{"notes", "unstamp"}; !slices.Equal(steps, want) {
+		t.Errorf("steps = %q, want %q", steps, want)
+	}
+	if !bd.HasBodyLine(notes, line) || stamped {
+		t.Errorf("notes %q, stamped %v: want the line recorded and the stamp gone", notes, stamped)
 	}
 }
 
@@ -494,7 +553,7 @@ func TestHitlRunSettlesChartOnCleanExit(t *testing.T) {
 
 // A clean exit releases the session's bead if it is still in_progress after the
 // publish, so a premature quit (a double Ctrl+C mid-triage) strands no claim
-// (Spec mc-rjvx FR 1–2): every kind but Task (it stays claimed and idle for l),
+// (Spec mc-rjvx FR 1–2): every kind but Errand (it stays claimed and idle for l),
 // Surgery (claimed at filing) and Discussion (left claimed for a rejoin). An
 // Initiative is released here too (FR 5–7). A bead the
 // session closed keeps its status (FR 3). A Chart is never a session bead, so a
@@ -520,7 +579,7 @@ func TestHitlRunSettlesOnCleanExit(t *testing.T) {
 		{"in_progress grilling bead is released", contract.KindGrilling, "in_progress", false, false, nil, 0, 0, append(slices.Clip(pub), "release c1")},
 		{"closed Signal is not released", contract.KindSignal, "closed", false, false, nil, 0, 0, pub},
 		{"closed grilling bead keeps its chart", contract.KindGrilling, "closed", false, false, nil, 0, 0, pub},
-		{"in_progress Task keeps its claim", contract.KindTask, "in_progress", false, false, nil, 0, 0, pub},
+		{"in_progress Errand keeps its claim", contract.KindErrand, "in_progress", false, false, nil, 0, 0, pub},
 		{"in_progress Surgery keeps its claim", contract.KindSurgery, "in_progress", false, false, nil, 0, 0, pub},
 		{"in_progress Discussion keeps its claim", contract.KindDiscussion, "in_progress", false, false, nil, 0, 0, pub},
 		{"in_progress Checkup keeps its claim", contract.KindCheckup, "in_progress", false, false, nil, 0, 0, pub},
@@ -1042,9 +1101,6 @@ func TestSessionsNoServer(t *testing.T) {
 	if _, err := Sessions(); err == nil {
 		t.Error("an unreadable socket must be an error, not an empty table")
 	}
-	if _, err := TUIAlive(""); err == nil {
-		t.Error("TUIAlive: an unreadable socket must be an error, not no TUI")
-	}
 }
 
 // With tmux off PATH, Start refuses before placing anything (ADR 0036 §6).
@@ -1227,61 +1283,6 @@ func TestMarkClosingRealTmux(t *testing.T) {
 	}
 	if closing() {
 		t.Error("unmarked session still reads Closing")
-	}
-}
-
-// TUIAlive reads the repo's private server (ADR 0127 §2): any tui-* session but
-// the caller's own is a TUI alive; bead sessions don't count, and no server is none.
-func TestTUIAliveRealTmux(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not on PATH")
-	}
-	sock := stubServer(t)
-	t.Cleanup(func() { tmuxCmd(sock, "kill-server").Run() })
-	alive := func(exclude string) bool {
-		t.Helper()
-		ok, err := TUIAlive(exclude)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ok
-	}
-	if alive("") {
-		t.Error("no server reads as a TUI alive")
-	}
-	if out, err := tmuxCmd(sock, "-f", "/dev/null", "new-session", "-d", "-s", "mc-a_1").CombinedOutput(); err != nil {
-		t.Fatalf("tmux new-session: %v: %s", err, out)
-	}
-	if alive("") {
-		t.Error("a bead session reads as a TUI alive")
-	}
-	if out, err := tmuxCmd(sock, "new-session", "-d", "-s", "tui-7").CombinedOutput(); err != nil {
-		t.Fatalf("tmux new-session: %v: %s", err, out)
-	}
-	if !alive("") || !alive("tui-8") {
-		t.Error("tui-7 present does not read as a TUI alive")
-	}
-	if alive("tui-7") {
-		t.Error("the caller's own tui-7 counts as a TUI alive")
-	}
-
-	// OwnSession names the TUI's own session from $TMUX_PANE; outside a pane, none.
-	pane, err := tmuxCmd(sock, "display-message", "-p", "-t", "=tui-7:", "#{pane_id}").Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMUX_PANE", strings.TrimSpace(string(pane)))
-	t.Setenv("TMUX", "/elsewhere,1,0")
-	if s, err := OwnSession(); err != nil || s != "" {
-		t.Errorf("OwnSession in another server's pane = %q, %v; want none", s, err)
-	}
-	t.Setenv("TMUX", sock+",1,0")
-	if s, err := OwnSession(); err != nil || s != "tui-7" {
-		t.Errorf("OwnSession = %q, %v; want tui-7", s, err)
-	}
-	t.Setenv("TMUX_PANE", "")
-	if s, err := OwnSession(); err != nil || s != "" {
-		t.Errorf("OwnSession outside a pane = %q, %v; want none", s, err)
 	}
 }
 
@@ -1552,11 +1553,11 @@ func assertUnmarks(t *testing.T, args []string) {
 // discussion keeps its Robin form via the text the TUI hands in.
 func TestBarsArgsSkipsArmed(t *testing.T) {
 	armed := map[string]Info{"mc-b.1": {State: Alive, AutoExit: time.Unix(1760000000, 0)}, "mc-a": {State: Alive}}
-	left := map[string]string{"mc-b.1": "◐ TASK P2 · B #1 · mc-b.1", "mc-a": "Why? · Robin discussion"}
+	left := map[string]string{"mc-b.1": "◐ ERRAND P2 · B #1 · mc-b.1", "mc-a": "Why? · Robin discussion"}
 	got := strings.Join(barsArgs(map[string]bool{"mc-b.1": true, "mc-a": false}, left, armed), " ")
 	want := "set-option -t =mc-a: status-left Why? · Robin discussion ; " +
 		"set-option -t =mc-a: status-right F1 help · F6 back to TUI · /exit to finish ; " +
-		"set-option -t =mc-b_1: status-left ◐ TASK P2 · B ##1 · mc-b.1"
+		"set-option -t =mc-b_1: status-left ◐ ERRAND P2 · B ##1 · mc-b.1"
 	if got != want {
 		t.Errorf("barsArgs =\n %q\nwant\n %q", got, want)
 	}
@@ -1903,8 +1904,8 @@ func TestCheckupBar(t *testing.T) {
 // The launch-time bar is the launched bead's plain SBRN, no dot slot, its own
 // status glyph.
 func TestLaunchBarIsPlainSBRN(t *testing.T) {
-	got := plainSBRN(bd.Bead{ID: "mc-a.2", Kind: contract.KindTask, Title: "Fix it", Status: "in_progress", Priority: 1})
-	if want := "◐ TASK P1 · Fix it · mc-a.2"; got != want {
+	got := plainSBRN(bd.Bead{ID: "mc-a.2", Kind: contract.KindErrand, Title: "Fix it", Status: "in_progress", Priority: 1})
+	if want := "◐ ERRAND P1 · Fix it · mc-a.2"; got != want {
 		t.Errorf("plainSBRN = %q, want %q", got, want)
 	}
 }
@@ -1919,7 +1920,7 @@ func TestBeadSplitQuotesExe(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("beadSplit %s = %q, want it to contain %q", name, got, want)
 		}
-		for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | less -R", "set-option -p @beadpane 1", "set-option -p remain-on-exit off", "-l 40%"} {
+		for _, w := range []string{`#{pane_width}`, `#{@bead}`, "2>&1 | LESSHISTFILE=- less -R", "set-option -p @beadpane 1", "set-option -p remain-on-exit off", "-l 40%"} {
 			if !strings.Contains(got, w) {
 				t.Errorf("beadSplit %s lacks %q: %q", name, w, got)
 			}
@@ -2056,5 +2057,30 @@ func TestMenuMouseFrom(t *testing.T) {
 		if got := menuMouseFrom(c.out, c.err); got != c.want {
 			t.Errorf("menuMouseFrom(%q, %v) = %v, want %v", c.out, c.err, got, c.want)
 		}
+	}
+}
+
+// A Discussion's clean exit publishes its Drafts, an Initiative Draft among them,
+// and closes nothing: the publish carries no Closing.
+func TestHitlRunDiscussionPublishesInitiativeDraft(t *testing.T) {
+	origRun := runAgent
+	defer func() { runAgent = origRun }()
+	eventlogtest.Capture(t)
+	steps := stubDrafts(t, nil)
+	stubBackstop(t, steps, 0, false, "in_progress", "open", "")
+	t.Setenv("TMUX", "/s,1,2")
+	t.Setenv("TMUX_PANE", "%7")
+	showBead = func(id string) (bd.Bead, error) {
+		return bd.Bead{ID: id, Kind: contract.KindDiscussion, Status: "in_progress"}, nil
+	}
+	listDrafts = func(string) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "ini", Kind: contract.KindInitiative, Status: "deferred"}, {ID: "sig", Kind: contract.KindSignal, Status: "deferred"}}, nil
+	}
+	runAgent = func([]string, <-chan struct{}) error { return nil }
+	if rc := HitlRun([]string{"--bead=c1", "--session=s", argvArg(t, "claude")}, meter(t)); rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if want := []string{"closing /s,1,2 %7", "return /s,1,2 %7", "publish c1"}; !slices.Equal(*steps, want) {
+		t.Errorf("steps = %q, want %q", *steps, want)
 	}
 }

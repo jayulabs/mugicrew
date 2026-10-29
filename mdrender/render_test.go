@@ -411,3 +411,17 @@ func TestCellLinesPathAtExactFloorBreaksOnlyAtSeparators(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func TestSetPalette(t *testing.T) {
+	t.Cleanup(func() { SetPalette(Palette{Accent: "212", Muted: "244", Code: "180", Link: "111"}) })
+	SetPalette(Palette{Accent: "1", Muted: "2", Code: "3", Link: "4"})
+	out := Render("# H\n\n`c` [l](http://x)\n\n> q", 40)
+	for _, want := range []string{"38;5;1m", "38;5;2m", "38;5;3m", "38;5;4m"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %q", want, out)
+		}
+	}
+	if strings.Contains(out, "38;5;212m") {
+		t.Errorf("default accent leaked: %q", out)
+	}
+}

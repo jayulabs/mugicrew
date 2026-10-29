@@ -118,9 +118,9 @@ func TestBarStatsDistInTabSection(t *testing.T) {
 func TestHintOfSplitsUByVerb(t *testing.T) {
 	u := func(desc string) hintItem { return hintOf(key.NewBinding(key.WithKeys("u"), key.WithHelp("u", desc))) }
 	if it := u("undo"); it.sec != secRowHint || it.rank != 16 {
-		t.Errorf("u undo = sec %d rank %d, want row section rank 16", it.sec, it.rank)
+		t.Errorf("u undo = sec %d rank %v, want row section rank 16", it.sec, it.rank)
 	}
 	if it := u("5h/wk"); it.sec != secTabHint || it.rank != tabExtraRank {
-		t.Errorf("u 5h/wk = sec %d rank %d, want tab section rank %d", it.sec, it.rank, tabExtraRank)
+		t.Errorf("u 5h/wk = sec %d rank %v, want tab section rank %v", it.sec, it.rank, tabExtraRank)
 	}
 }

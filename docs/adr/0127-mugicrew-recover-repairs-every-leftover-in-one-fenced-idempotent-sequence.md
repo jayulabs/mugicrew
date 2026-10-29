@@ -3,6 +3,10 @@
 Status: Accepted
 Date: 2026-10-11
 
+Amended by: ADR 0391 (an-afk-claim-no-live-host-reads-is-an-orphan…) replaces the
+§2 verdict table's AFK rows below; the loop lock and the TUI-alive read no longer
+decide any AFK verdict.
+
 Amends: ADR 0126 §5–6 (what reads alive and what reads ambiguous), ADR 0059 §6
 (who deletes a crashed creator's Drafts), ADR 0082 §4 (who lifts
 `paused:abandoned`).
@@ -39,17 +43,19 @@ Decided on grilling bead mc-yr7o.4 (Chart mc-yr7o).
    | Holder | Verdict |
    |---|---|
    | AFK, probe alive, **or any process whose `/proc/<pid>/cwd` lies in the bead's tree** | alive: refuse, naming `mugicrew abort` |
-   | AFK worktree/detached route, probe dead, `paused:abandoned` | dead |
-   | AFK in-process route (Spec, Review, Rollback), probe dead, `paused:abandoned` | ambiguous, always `--force`: a hostless claude or its orphaned tools may still be writing |
-   | AFK, probe dead, not abandoned | ambiguous |
+   | AFK, held per-effort flock (ADR 0155) | alive: refuse, naming `mugicrew abort`, even with `--force` |
+   | AFK worktree/detached route, an Orphaned claim (flock free, probe dead, no cwd in the tree), abandoned or not | dead (ADR 0391) |
+   | AFK in-process route (Spec, Review, Rollback), an Orphaned claim, no `--force` | ambiguous: a hostless claude or its orphaned tools may still be writing |
+   | AFK in-process route, an Orphaned claim, `--force` | forced, with the loop on or off (ADR 0391) |
    | HITL session Alive or Closing | alive: refuse |
    | HITL session Exited (resumable, ADR 0037) | refuse, naming the TUI drop: recover never discards a resumable session |
    | HITL session gone, and the table read succeeded | dead |
    | tmux table read error | refuse: an error is never read as gone |
 
-   The not-abandoned ambiguous row counts as dead only when the loop lock is
-   free and no TUI is alive (ADR 0126 §6).
-   The abandoned in-process row never resolves that way. After a force stop, a
+   Since ADR 0391 the loop lock and the TUI-alive read decide no AFK verdict:
+   a claim no probe, cwd or flock holds is an Orphaned claim, and `--force` no
+   longer needs the loop off for it. A HITL bead's `--force` still does.
+   The in-process row never resolves without `--force`. After a force stop, a
    hostless npm claude (argv wiped, cwd the repo root) or a tool grandchild
    orphaned by a SIGKILLed claude passes both checks while still writing
    (docs/research/live-holders-that-read-dead-under-recover-verdict-rule.md §7
@@ -57,8 +63,7 @@ Decided on grilling bead mc-yr7o.4 (Chart mc-yr7o).
    claude or its tools may still be writing and to check `pgrep -a claude` and
    the human's own shells first. A TUI calling recover always excludes its own
    session (a run-now effort is a `mugicrew run <id>` host, found by `Probe` and
-   the flock, ADR 0330). Otherwise the human needs `--force`, which is
-   refused while the loop is on. Liveness covers **this host only**.
+   the flock, ADR 0330). Otherwise the human needs `--force`. Liveness covers **this host only**.
    Multi-host recovery is out of scope.
 3. **Mid-rebase tree.** Recover finds it through
    `.git/worktrees/*/rebase-merge/head-name` naming `refs/heads/effort/<id>`, then
@@ -93,7 +98,7 @@ Decided on grilling bead mc-yr7o.4 (Chart mc-yr7o).
    - 2: a step failed, `paused:recovering` stays, and the message says to re-run.
 10. **Events.** Detection logs nothing, because the listing is a view (ADR 0033).
     A repair logs one of:
-    - `recover.done`: bead, verdict (`dead`, `ambiguous-resolved` or `forced`),
+    - `recover.done`: bead, verdict (`dead` or `forced`),
       rebase aborted, tree path, discarded, Draft ids, unclaimed, lifted causes,
       remaining pauses;
     - `recover.refused`: bead, reason;
@@ -106,7 +111,7 @@ Decided on grilling bead mc-yr7o.4 (Chart mc-yr7o).
     leftovers. It takes the inventory at key press, not at refresh, and recover
     re-checks liveness at `y`. The hint is `x recover`. There is no new row
     colour. The TUI never forces: an ambiguous row's hint names
-    `mugicrew recover --force` and the loop. `x` already chooses between drop and
+    `mugicrew recover --force`. `x` already chooses between drop and
     abort by liveness, so abort and recover stay separate jobs (ADR 0126 §8).
 
 ## Considered Options

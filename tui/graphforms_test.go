@@ -356,7 +356,7 @@ func blockModel(t *testing.T) Model {
 			bs[i].BlockedBy = []string{"claimed"}
 		}
 	}
-	bs = append(bs, bd.Bead{ID: "draft", Kind: contract.KindTask, Status: "deferred", Title: "A draft", Created: epoch})
+	bs = append(bs, bd.Bead{ID: "draft", Kind: contract.KindErrand, Status: "deferred", Title: "A draft", Created: epoch})
 	m, _ = send(t, m, loadedMsg{beads: bs, live: map[string]bool{}, sessions: map[string]session.Info{}})
 	return m
 }
@@ -402,10 +402,10 @@ func TestAddBlockerRefusalsAndHints(t *testing.T) {
 	if h := hints(selectBead(t, m, "sig")); !strings.Contains(h, "B add blocker") {
 		t.Errorf("hints %q", h)
 	}
-	for id, why := range map[string]string{"oldb": "closed beads can't be blocked", "draft": "Drafts can't be blocked"} {
+	for id, why := range map[string]string{"oldb": "closed beads can't be blocked", "draft": "Drafts publish when their creator exits"} {
 		facet := "any"
 		if id == "draft" {
-			facet = "deferred"
+			facet = "draft"
 		}
 		s := selectBead(t, pick(t, m, "s", facet), id)
 		if strings.Contains(hints(s), "add blocker") {
@@ -542,7 +542,7 @@ func TestNewMenuRowOrderIncludesRebase(t *testing.T) {
 	for _, k := range o.modals[0].rowKeys {
 		got = append(got, k[0])
 	}
-	if want := "s,i,u,r,d"; strings.Join(got, ",") != want {
+	if want := "s,i,u,r,t,d"; strings.Join(got, ",") != want {
 		t.Errorf("rows %v, want %s", got, want)
 	}
 }
@@ -574,13 +574,13 @@ func TestNewMenuRebaseFlashPerOutcome(t *testing.T) {
 	}
 }
 
-// ADR 0349: under Require Initiatives A still releases a member Task.
-func TestReleaseTaskPassesWhenRequired(t *testing.T) {
+// ADR 0349: under Require Initiatives A still releases a member Errand.
+func TestReleaseErrandPassesWhenRequired(t *testing.T) {
 	var released string
 	seam(t, &releaseChain, func(h string) error { released = h; return nil })
 	m := formModel(t)
 	m.initiatives.Required = true
-	m, _ = send(t, m, loadedMsg{beads: append(stubBeads(), bd.Bead{ID: "tk", Kind: contract.KindTask, Status: "open", Parent: "ini", Created: epoch}), live: map[string]bool{}, sessions: map[string]session.Info{}})
+	m, _ = send(t, m, loadedMsg{beads: append(stubBeads(), bd.Bead{ID: "tk", Kind: contract.KindErrand, Status: "open", Parent: "ini", Created: epoch}), live: map[string]bool{}, sessions: map[string]session.Info{}})
 	press(t, selectBead(t, m, "tk"), runeKey("A"))
 	if released != "tk" {
 		t.Errorf("released %q", released)

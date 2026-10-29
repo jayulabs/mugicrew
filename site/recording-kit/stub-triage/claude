@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Scripted stand-in for the claude CLI, used only by the first-signal tape: a
+# live triage session needs a signed-in account and real plan usage. It shows
+# the triage verdict (accept) and the state the Signal moves to. The tape puts
+# this directory first on PATH. Arguments are ignored.
+printf '\n  \033[1mTriage\033[0m  Add a health-check endpoint\n\n'
+printf '  Verdict: \033[32maccept\033[0m\n'
+printf '  Small, clear and testable. Chartable as is.\n\n'
+printf '  Signal closed as charted; a Chart now opens to defog it.\n\n'
+sleep 600

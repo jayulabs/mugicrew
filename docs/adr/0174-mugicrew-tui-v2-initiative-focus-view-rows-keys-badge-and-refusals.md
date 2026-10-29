@@ -1,6 +1,6 @@
 # ADR 0174: v2 Initiative focus view rows, keys and badge; `i` enters from any row in an Initiative, and each section keeps its source tab's keys
 
-Status: Accepted; §1 amended and the no-tab reasoning set aside by ADR 0181; §5 hint order superseded by ADR 0229 (…hints-bar-and-key-reference…) (membership kept)
+Status: Accepted; §1 amended and the no-tab reasoning set aside by ADR 0181; §5 hint order superseded by ADR 0229 (…hints-bar-and-key-reference…) (membership kept). Amended by Spec Bead verbs offered wherever a bead row appears (mc-w2a8c): "Graph keeps the structure edits" no longer holds; §3's p, +/- and x unbound on the header, and §5's a/A exclusion, are lifted — the focus view runs on the shared bead-verb router, so the header and every member offer each verb their bead allows, closed members under ▸ N closed hint c alone (x while a session runs), and no bead verb is swallowed
 
 Amended by ADR 0228 (§1: the i entry key becomes g f in the goto menu).
 Amended by ADR 0241 (§5: n opens the New menu in the focus view; a and A stay unbound).

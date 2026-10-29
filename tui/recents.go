@@ -97,6 +97,18 @@ func (m Model) recordRecent(id string) tea.Cmd {
 // keyRecording runs k, recording the bead whose detail drawer it opened: the
 // drawer-open act of every tab and the focus view, caught in one place.
 func (m Model) keyRecording(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	tab := m.tab
+	if !m.noSnap {
+		m = m.snapLists()
+	}
+	next, cmd := m.keyRecorded(k)
+	if nm, ok := next.(Model); ok && nm.tab != tab { // a tab switch drops any scrolled offset
+		next = nm.unscrollAll()
+	}
+	return next, cmd
+}
+
+func (m Model) keyRecorded(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !key.Matches(k, keyDetail) || len(m.modals) > 0 || m.ref || m.capturing() || m.drawerOpen() {
 		return m.key(k)
 	}

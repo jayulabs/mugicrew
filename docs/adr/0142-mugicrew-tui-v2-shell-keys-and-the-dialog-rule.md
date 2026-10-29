@@ -65,3 +65,5 @@ rule widens from "destructive" to "destructive or out of order".
   named exception or with no dialog.** Rejected. The human wants the blocked-launch
   guard (ADR 0026), and a stated rule gives the per-tab mapping a test to apply
   rather than a list of exceptions.
+
+Amended 2026-10-29 (Spec Retrospective starts from the New menu's t row, mc-6giio): the parenthetical on `r` in the `f5` line is stale: `r` is no longer `r retrospective`; it is unbound on the bead tabs and the focus view, and a retrospective starts from `n t`.

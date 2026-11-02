@@ -27,7 +27,7 @@ func TestOrphanedClaimsShownApart(t *testing.T) {
 	var pool string
 	for _, r := range m.settingRows() {
 		if r.name == poolKey {
-			pool = r.value
+			pool = r.text()
 		}
 	}
 	if !strings.HasSuffix(pool, "1 in flight · 2 orphaned") {
@@ -35,8 +35,8 @@ func TestOrphanedClaimsShownApart(t *testing.T) {
 	}
 	m, _ = send(t, m, loadedMsg{beads: beads, live: map[string]bool{"livea": true}})
 	for _, r := range m.settingRows() {
-		if r.name == poolKey && strings.Contains(r.value, "orphaned") {
-			t.Errorf("pool readout %q names orphans when there are none", r.value)
+		if r.name == poolKey && strings.Contains(r.text(), "orphaned") {
+			t.Errorf("pool readout %q names orphans when there are none", r.text())
 		}
 	}
 

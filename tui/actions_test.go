@@ -389,7 +389,7 @@ func TestGraphHintsListApplicableVerbs(t *testing.T) {
 		{"pz", "enter launch · b bg · d detail · " + find + "p unpause · X withdraw · t transcript · z reject · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"done", "d detail · " + find + "t transcript · " + edit + " · c checkup"},
 		{"ini", "enter launch · b bg · d detail · " + find + "p pause · X cancel · t transcript · " + edit + " · +/- prio · c checkup · B add blocker"},
-		{"res", "enter run · d detail · " + find + "p pause · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
+		{"res", "enter run · d detail · " + find + "p pause · X withdraw · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"sess", "enter attach · d detail · " + find + "p pause · x drop · X withdraw · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"live", "d detail · " + find + "p pause · x abort · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},
 		{"dead", "d detail · " + find + "p pause · x recover · t transcript · " + edit + " · +/- prio · c checkup · a adopt · B add blocker"},

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
@@ -99,6 +100,13 @@ func stubBackstop(t *testing.T, did *[]string, exit int, rebasing bool, status, 
 	})
 	origF, origSig, origC := landedFacts, fileStranded, closeBead
 	t.Cleanup(func() { landedFacts, fileStranded, closeBead = origF, origSig, origC })
+	origRem, origStrat := remnantOf, landStrategy
+	t.Cleanup(func() { remnantOf, landStrategy = origRem, origStrat })
+	origK := conflictKids
+	t.Cleanup(func() { conflictKids = origK })
+	conflictKids = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
+	landStrategy = func() (string, error) { return git.LandStrategyLocal, nil }
+	remnantOf = func(string) (bd.Bead, bool, error) { return bd.Bead{}, false, nil }
 	landedFacts = func(b bd.Bead, _ *Child) (strandedInfo, error) {
 		if sweep == "facts" {
 			return strandedInfo{}, errors.New("no facts")
@@ -345,5 +353,353 @@ func TestBackstopOffPin(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A running child refused ExitLanded under a container with a Remnant appends its
+// Kept:/Child: lines (once), closes carried by the Remnant, files no Signal, keeps
+// effort/<id> and logs the remnant on effort.stranded; a missing cut ref still lists the
+// branch, marked "(no cut ref)".
+func TestBackstopLandedCarriesToRemnant(t *testing.T) {
+	for _, cut := range []string{"c1", ""} {
+		t.Run("cut="+cut, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			var did []string
+			stubBackstop(t, &did, 3, false, "in_progress", "open", "")
+			origH, origK := headIn, keptLine
+			t.Cleanup(func() { headIn, keptLine = origH, origK })
+			headIn = func(ref string) (string, error) {
+				switch ref {
+				case "refs/mugicrew/cut/mc-b":
+					if cut == "" {
+						return "", git.ErrMissingRef
+					}
+					return cut, nil
+				case "refs/heads/effort/mc-b":
+					return "h1", nil
+				}
+				return "", errors.New("unexpected " + ref)
+			}
+			remnantOf = func(id string) (bd.Bead, bool, error) {
+				if id != "ws-cp" {
+					t.Errorf("remnantOf(%q)", id)
+				}
+				return bd.Bead{ID: "mc-rem", Status: "open"}, true, nil
+			}
+			body := ""
+			origA := appendLines
+			t.Cleanup(func() { appendLines = origA })
+			appendLines = func(id string, lines ...string) error {
+				for _, l := range lines {
+					if !strings.Contains(body, l) { // idempotent per line, as bd.AppendLines
+						body += l + "\n"
+					}
+				}
+				return nil
+			}
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Title: "T", Parent: "ws-cp"}
+			for range 2 {
+				stranded, kept := Backstop(b, "/wt", false, func() {}, io.Discard)
+				if stranded || !kept {
+					t.Fatalf("stranded, kept = %v, %v", stranded, kept)
+				}
+			}
+			want := "Child: mc-b build T — obsolete: container landed; carried by mc-rem\n"
+			if cut != "" {
+				want = "Kept: effort/mc-b c1..h1\n" + want
+			} else {
+				want = "Kept: effort/mc-b h1 (no cut ref)\n" + want
+			}
+			if body != want {
+				t.Errorf("remnant body %q, want %q", body, want)
+			}
+			for _, d := range did {
+				if strings.HasPrefix(d, "signal") || strings.HasPrefix(d, "delete") {
+					t.Errorf("did %q", did)
+				}
+			}
+			if !slices.Contains(did, "close mc-b obsolete: container landed; carried by mc-rem") {
+				t.Errorf("did %q: no carried close", did)
+			}
+			var found bool
+			for _, e := range *evs {
+				if e.Name == "effort.stranded" {
+					found = true
+					if e.Attrs["remnant"] != "mc-rem" || e.Attrs["signal"] != nil {
+						t.Errorf("attrs %v: want remnant mc-rem and no signal", e.Attrs)
+					}
+				}
+			}
+			if !found {
+				t.Error("no effort.stranded event")
+			}
+		})
+	}
+}
+
+// A closed Remnant takes nothing: the late child files today's per-child Signal and
+// appends no line to it.
+func TestBackstopLandedClosedRemnantYieldsTheSignal(t *testing.T) {
+	var did []string
+	stubBackstop(t, &did, 3, false, "in_progress", "open", "")
+	remnantOf = func(string) (bd.Bead, bool, error) {
+		return bd.Bead{ID: "mc-rem", Status: "closed"}, true, nil
+	}
+	origA := appendLines
+	t.Cleanup(func() { appendLines = origA })
+	appendLines = func(id string, _ ...string) error {
+		t.Errorf("appended to %s", id)
+		return nil
+	}
+	b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Title: "T", Parent: "ws-cp"}
+	Backstop(b, "/wt", false, func() {}, io.Discard)
+	if !slices.Contains(did, "signal mc-b") || !slices.Contains(did, "close mc-b obsolete: container landed; carried by mc-sig") {
+		t.Errorf("did %q: want the per-child Signal and its carried close", did)
+	}
+}
+
+// A child refused ExitLanded under an open Workspace Checkpoint on gitlab whose
+// Remnant isn't filed yet files no Signal and isn't closed: it pauses, so it is
+// Running when closeLanded files the Remnant and holds it. Any other parent (a Chart,
+// a closed Checkpoint, another strategy) keeps the per-child Signal.
+func TestBackstopLandedBeforeRemnantPauses(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		kind     contract.Kind
+		status   string
+		strategy string
+		pauses   bool
+	}{
+		{"open gitlab checkpoint", contract.KindCheckpoint, "open", git.LandStrategyGitlab, true},
+		{"chart member", contract.KindChart, "open", git.LandStrategyGitlab, false},
+		{"closed checkpoint", contract.KindCheckpoint, "closed", git.LandStrategyGitlab, false},
+		{"local strategy", contract.KindCheckpoint, "open", git.LandStrategyLocal, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			eventlogtest.Capture(t)
+			var did []string
+			stubBackstop(t, &did, 3, false, "in_progress", c.status, "")
+			landStrategy = func() (string, error) { return c.strategy, nil }
+			origS, origCm := showBead, commentBead
+			t.Cleanup(func() { showBead, commentBead = origS, origCm })
+			commentBead = func(id, text string) error { did = append(did, "comment "+id+" "+text); return nil }
+			showBead = func(id string) (bd.Bead, error) {
+				if id == "ws-cp" {
+					return bd.Bead{ID: id, Kind: c.kind, Status: c.status, CloseReason: "landed"}, nil
+				}
+				return bd.Bead{ID: id, Status: "in_progress", Parent: "ws-cp"}, nil
+			}
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp"}
+			stranded, kept := Backstop(b, "/wt", false, func() {}, io.Discard)
+			signalled := slices.Contains(did, "signal mc-b")
+			if c.pauses != (stranded && !signalled && slices.Contains(did, "pause mc-b integrate-conflict")) || !kept || c.pauses == signalled {
+				t.Errorf("stranded, kept = %v, %v; did %q; want pause %v", stranded, kept, did, c.pauses)
+			}
+			if got := slices.Contains(did, "comment mc-b "+remnantPendingNote); got != c.pauses {
+				t.Errorf("hold comment = %v, want %v; did %q", got, c.pauses, did)
+			}
+		})
+	}
+}
+
+// A Build reporting "Behind mainline:" whose integrate left no trailer pauses
+// behind-mainline and reopens only when mainline has commits the Checkpoint lacks;
+// a failed check, an errored one or a newer Not built: pause not-built (ADR 0420).
+func TestBackstopPausesBehindMainline(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		report   string
+		ancestor bool
+		tipErr   error
+		ancErr   error
+		want     []string
+		cause    string
+	}{
+		{"confirmed", "no helper", false, nil, nil, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}, bd.PausedBehindMainline},
+		{"mainline already in tip", "no helper", true, nil, nil, []string{"integrate", "teardown", "pause mc-b not-built", "reopen mc-b"}, bd.PausedNotBuilt},
+		{"check errors", "no helper", false, errors.New("git down"), nil, []string{"integrate", "teardown", "pause mc-b not-built", "reopen mc-b"}, bd.PausedNotBuilt},
+		{"ancestry read errors", "no helper", false, nil, errors.New("exit 128"), []string{"integrate", "teardown", "pause mc-b not-built", "reopen mc-b"}, bd.PausedNotBuilt},
+		{"not built newer", "", false, nil, nil, []string{"integrate", "teardown", "pause mc-b not-built", "reopen mc-b"}, bd.PausedNotBuilt},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			var did []string
+			stubBackstop(t, &did, 0, false, "closed", "open", "")
+			origR, origT, origA := behindReport, containerTip, containsCommit
+			t.Cleanup(func() { behindReport, containerTip, containsCommit = origR, origT, origA })
+			trailerCount = func(git.Repo, string, string) (int, error) { return 0, nil }
+			behindReport = func(string) string { return c.report }
+			containerTip = func(_ git.Repo, container string) (string, error) {
+				if container != "checkpoint/ws-cp" {
+					t.Errorf("tip of %q", container)
+				}
+				return "tip", c.tipErr
+			}
+			containsCommit = func(git.Repo, string, string) (bool, error) { return c.ancestor, c.ancErr }
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp"}
+			stranded, kept := Backstop(b, "/wt", false, func() { did = append(did, "teardown") }, io.Discard)
+			if !stranded || !kept || !slices.Equal(did, c.want) {
+				t.Errorf("stranded, kept = %v, %v; did %q, want %q", stranded, kept, did, c.want)
+			}
+			for _, e := range *evs {
+				if e.Name != "effort.paused" {
+					continue
+				}
+				if e.Attrs["cause"] != c.cause || (c.cause == bd.PausedBehindMainline && e.Attrs["note"] != c.report) {
+					t.Errorf("attrs %v", e.Attrs)
+				}
+			}
+		})
+	}
+}
+
+// A confirmed Behind mainline: report with a requested rebase, rebase-conflict or
+// number-clash Conflict open on the Checkpoint edges the Build behind it and
+// reopens it unpaused; another variant or a closed Conflict leaves the pause.
+func TestBackstopWaitsOnStandingRewrite(t *testing.T) {
+	conflict := func(id, status, variant string) bd.Bead {
+		return bd.Bead{ID: id, Kind: contract.KindConflict, Status: status, Description: "variant: " + variant}
+	}
+	for _, c := range []struct {
+		name string
+		kids []bd.Bead
+		want []string
+	}{
+		{"requested", []bd.Bead{conflict("mc-r", "open", "requested")}, []string{"integrate", "teardown", "edge mc-b mc-r", "reopen mc-b"}},
+		{"rebase-conflict", []bd.Bead{conflict("mc-r", "in_progress", "rebase-conflict")}, []string{"integrate", "teardown", "edge mc-b mc-r", "reopen mc-b"}},
+		{"number-clash", []bd.Bead{conflict("mc-r", "open", "number-clash")}, []string{"integrate", "teardown", "edge mc-b mc-r", "reopen mc-b"}},
+		{"other variant", []bd.Bead{conflict("mc-r", "open", "replay")}, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}},
+		{"land conflict", []bd.Bead{{ID: "mc-r", Kind: contract.KindConflict, Status: "open"}}, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}},
+		{"closed", []bd.Bead{conflict("mc-r", "closed", "requested")}, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}},
+		{"none", nil, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			var did []string
+			stubBackstop(t, &did, 0, false, "closed", "open", "")
+			origR, origT, origA, origK, origE := behindReport, containerTip, containsCommit, conflictKids, addBlocker
+			t.Cleanup(func() {
+				behindReport, containerTip, containsCommit, conflictKids, addBlocker = origR, origT, origA, origK, origE
+			})
+			trailerCount = func(git.Repo, string, string) (int, error) { return 0, nil }
+			behindReport = func(string) string { return "no helper" }
+			containerTip = func(git.Repo, string) (string, error) { return "tip", nil }
+			containsCommit = func(git.Repo, string, string) (bool, error) { return false, nil }
+			conflictKids = func(id string, k contract.Kind) ([]bd.Bead, error) {
+				if id != "ws-cp" || k != contract.KindConflict {
+					t.Errorf("children of %q kind %v", id, k)
+				}
+				return c.kids, nil
+			}
+			addBlocker = func(blocked, blocker string) error { did = append(did, "edge "+blocked+" "+blocker); return nil }
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp"}
+			stranded, kept := Backstop(b, "/wt", false, func() { did = append(did, "teardown") }, io.Discard)
+			if !stranded || !kept || !slices.Equal(did, c.want) {
+				t.Errorf("stranded, kept = %v, %v; did %q, want %q", stranded, kept, did, c.want)
+			}
+			// ADR 0029: no new event name; the wait rides effort.paused with the rewrite as blocker.
+			for _, e := range *evs {
+				if e.Name == "effort.waiting" {
+					t.Errorf("logged new event name %q", e.Name)
+				}
+			}
+			if strings.HasPrefix(c.want[2], "edge") {
+				found := false
+				for _, e := range *evs {
+					found = found || e.Name == "effort.paused" && e.Attrs["cause"] == bd.PausedBehindMainline && e.Attrs["blocker"] == "mc-r"
+				}
+				if !found {
+					t.Errorf("no effort.paused with blocker mc-r; events %v", eventlogtest.Names(*evs))
+				}
+			}
+		})
+	}
+}
+
+// A failed edge write must not release the Build: it falls back to the behind-mainline pause.
+func TestBackstopPausesWhenRewriteEdgeFails(t *testing.T) {
+	var did []string
+	stubBackstop(t, &did, 0, false, "closed", "open", "")
+	origR, origT, origA, origK, origE := behindReport, containerTip, containsCommit, conflictKids, addBlocker
+	t.Cleanup(func() {
+		behindReport, containerTip, containsCommit, conflictKids, addBlocker = origR, origT, origA, origK, origE
+	})
+	trailerCount = func(git.Repo, string, string) (int, error) { return 0, nil }
+	behindReport = func(string) string { return "no helper" }
+	containerTip = func(git.Repo, string) (string, error) { return "tip", nil }
+	containsCommit = func(git.Repo, string, string) (bool, error) { return false, nil }
+	conflictKids = func(string, contract.Kind) ([]bd.Bead, error) {
+		return []bd.Bead{{ID: "mc-r", Kind: contract.KindConflict, Status: "open", Description: "variant: requested"}}, nil
+	}
+	addBlocker = func(string, string) error { return errors.New("dolt down") }
+	b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp"}
+	Backstop(b, "/wt", false, func() { did = append(did, "teardown") }, io.Discard)
+	if want := []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b"}; !slices.Equal(did, want) {
+		t.Errorf("did %q, want %q", did, want)
+	}
+}
+
+// A re-run that integrates lifts paused:behind-mainline, logging effort.resumed.
+func TestBackstopLiftsBehindMainline(t *testing.T) {
+	evs := eventlogtest.Capture(t)
+	var did []string
+	stubBackstop(t, &did, 0, false, "closed", "open", "")
+	origU := unpause
+	t.Cleanup(func() { unpause = origU })
+	unpause = func(id, cause string) error { did = append(did, "unpause "+id+" "+cause); return nil }
+	b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Labels: []string{"paused:" + bd.PausedBehindMainline}}
+	Backstop(b, "/wt", false, func() { did = append(did, "teardown") }, io.Discard)
+	if want := []string{"integrate", "teardown", "unpause mc-b behind-mainline", "delete effort/mc-b"}; !slices.Equal(did, want) {
+		t.Errorf("did %q, want %q", did, want)
+	}
+	resumed := false
+	for _, e := range *evs {
+		resumed = resumed || e.Name == "effort.resumed" && e.Attrs["cause"] == bd.PausedBehindMainline
+	}
+	if !resumed {
+		t.Error("no effort.resumed")
+	}
+}
+
+// A Build first paused not-built that now reports Behind mainline: has the stale
+// paused:not-built lifted once its pause or edge is written, so the rebase's close frees it.
+func TestBackstopLiftsStaleNotBuiltOnBehindMainline(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		kids []bd.Bead
+		want []string
+	}{
+		{"pause", nil, []string{"integrate", "teardown", "pause mc-b behind-mainline", "reopen mc-b", "unpause mc-b not-built"}},
+		{"edge", []bd.Bead{{ID: "mc-r", Kind: contract.KindConflict, Status: "open", Description: "variant: requested"}},
+			[]string{"integrate", "teardown", "edge mc-b mc-r", "reopen mc-b", "unpause mc-b not-built"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			evs := eventlogtest.Capture(t)
+			var did []string
+			stubBackstop(t, &did, 0, false, "closed", "open", "")
+			origR, origT, origA, origK, origE, origU := behindReport, containerTip, containsCommit, conflictKids, addBlocker, unpause
+			t.Cleanup(func() {
+				behindReport, containerTip, containsCommit, conflictKids, addBlocker, unpause = origR, origT, origA, origK, origE, origU
+			})
+			trailerCount = func(git.Repo, string, string) (int, error) { return 0, nil }
+			behindReport = func(string) string { return "no helper" }
+			containerTip = func(git.Repo, string) (string, error) { return "tip", nil }
+			containsCommit = func(git.Repo, string, string) (bool, error) { return false, nil }
+			conflictKids = func(string, contract.Kind) ([]bd.Bead, error) { return c.kids, nil }
+			addBlocker = func(blocked, blocker string) error { did = append(did, "edge "+blocked+" "+blocker); return nil }
+			unpause = func(id, cause string) error { did = append(did, "unpause "+id+" "+cause); return nil }
+			b := bd.Bead{ID: "mc-b", Kind: contract.KindBuild, Parent: "ws-cp", Labels: []string{"paused:" + bd.PausedNotBuilt}}
+			Backstop(b, "/wt", false, func() { did = append(did, "teardown") }, io.Discard)
+			if !slices.Equal(did, c.want) {
+				t.Errorf("did %q, want %q", did, c.want)
+			}
+			resumed := false
+			for _, e := range *evs {
+				resumed = resumed || e.Name == "effort.resumed" && e.Attrs["cause"] == bd.PausedNotBuilt
+			}
+			if !resumed {
+				t.Error("no effort.resumed not-built")
+			}
+		})
 	}
 }

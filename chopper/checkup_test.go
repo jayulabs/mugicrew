@@ -1,6 +1,7 @@
 package chopper
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -75,14 +76,19 @@ func TestLaunchCheckupComposesEditableSession(t *testing.T) {
 		"Never, whatever the human says",
 		"mugicrew abort <bead>",
 		"offshoot Signal",
-		`--reason "repaired:`,
-		`--reason "not a bead fault:`,
-		"--remove-label paused:checkup",
+		`mugicrew checkup close ws-chk --reason "repaired:`,
+		`mugicrew checkup close ws-chk --reason "not a bead fault:`,
+		"lifts the fence",
 		contract.DraftInstruction("ws-chk"),
 		contract.ClosingLine(),
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
+		}
+	}
+	for _, banned := range []string{"--remove-label paused:checkup", "bd close ws-chk"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("prompt still carries %q", banned)
 		}
 	}
 	if n := len(p); n > 16<<10 {
@@ -140,4 +146,43 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// closing scripts CloseCheckup's seams: held names the targets another open Checkup holds.
+func closing(held map[string]bool, closeErr error) (CheckupClosing, *[]string) {
+	var calls []string
+	return CheckupClosing{
+		Close: func(id, r string) error { calls = append(calls, "close "+id+" "+r); return closeErr },
+		OpenOn: func(t string) (bd.Bead, bool, error) {
+			return bd.Bead{ID: "other"}, held[t], nil
+		},
+		Unpause: func(id, cause string) error { calls = append(calls, "unpause "+id+" "+cause); return nil },
+	}, &calls
+}
+
+func TestCloseCheckup(t *testing.T) {
+	ck := bd.Bead{ID: "ck", Related: []string{"a", "b"}}
+	for _, c := range []struct {
+		name     string
+		ck       bd.Bead
+		held     map[string]bool
+		closeErr error
+		want     string
+	}{
+		{"sole Checkup lifts the fence", bd.Bead{ID: "ck", Related: []string{"a"}}, nil, nil, "close ck repaired: x;unpause a " + bd.PausedCheckup},
+		{"a second open Checkup keeps it", bd.Bead{ID: "ck", Related: []string{"a"}}, map[string]bool{"a": true}, nil, "close ck repaired: x"},
+		{"only the free target lifts", ck, map[string]bool{"a": true}, nil, "close ck repaired: x;unpause b " + bd.PausedCheckup},
+		{"a failed close lifts nothing", ck, nil, errors.New("boom"), "close ck repaired: x"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			x, calls := closing(c.held, c.closeErr)
+			err := CloseCheckup(x, c.ck, "repaired: x")
+			if (err != nil) != (c.closeErr != nil) {
+				t.Errorf("err = %v", err)
+			}
+			if got := strings.Join(*calls, ";"); got != c.want {
+				t.Errorf("calls = %q, want %q", got, c.want)
+			}
+		})
+	}
 }

@@ -19,7 +19,7 @@ For each bead kind: how it is born (creation doors), how it ends (closure outcom
 
 **Born-with marks**: ✓ the door creates the expected edge; ✗ it does not; n/a the edge does not apply to that door.
 
-**Close-reason convention.** A close reason is lowercase `<outcome>[: <detail>]`: a fixed outcome word, then an optional detail after a colon and a space (`landed: …`, `obsolete: …`, `withdrawn: …`, `cleared: …`). Reasons that follow it can be classified by prefix; the spine kinds' bd-default `Closed` (entry 3) is meant to follow it too.
+**Close-reason convention.** A close reason is lowercase `<outcome>[: <detail>]`: a fixed outcome word, then an optional detail after a colon and a space (`landed: …`, `obsolete: …`, `withdrawn: …`, `cleared: …`). Reasons that follow it can be classified by prefix. The spine kinds follow it under ADR 0399 (mugicrew-every-spine-close-names-its-outcome…): `charted:`, `specced:`, `initiative:`, `rejected`, `duplicate:`, `sliced:`, `landed:` and `built` (entry 3). Beads closed before that carry `Closed` or an empty reason, which readers treat as legacy.
 
 Each kind section has a plain lead line (what it is · owner · leaf/container), then the three tables and a **Gaps found** line naming the entries in [Gaps](#gaps), the one numbered index of every finding and its Signal (entry 38 applies to every kind). Doors are numbered D1, D2, … within each table, the Door type cell holds exactly one legend type, and the Born-with columns are headed by those door ids.
 
@@ -29,22 +29,24 @@ An intake into the factory: the head of the spine, and with Rollback one of two 
 
 ### Creation doors
 
+The two Initiative-member doors are one rule, not two inconsistent paths. D5 files *found* work: it has a cause to cite and the cause's container may be open and in need of ordering. D6 files a *planned* phase member: Luffy cuts it, it has no finder, and it is cut only once the Initiative is drained, so there is nothing open to order it against. A human puts a Signal of their own into an Initiative in two steps: file a Signal (D1 TUI `n` then `s`, or D4 `mugicrew signal new`), then adopt it (TUI Graph tab `a`, or `mugicrew initiative adopt <head> <initiative>`).
+
 D5–D9 are Drafts: born `deferred` with a `drafted-by:<creator>` label until the creator's session publishes them (`bd.Publish`, ADR 0059 (mugicrew-drafts…)).
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
 | TUI key | D1 `n` then `s` (New Signal form); also `enter` on the Ideas tab's create row | the human | none: an open, unparented task | `tui.newOpts`, `tui.openNewSignal`, `tui.createSignal` → `bd.NewSignal`; `tui.ideaTab` key handler |
-| TUI key | D2 `n` then `j` (New Signal from a Jira issue; shown only with a `[jira]` site) | the human | none; carries `external_ref` `jira-<KEY>`; a re-intake of a live ref supersedes the new Signal onto the carrier | `tui.newOpts`, `tui.fileJira` → `jira.Intake` → `bd.NewSignalWithRef`, `bd.Supersede` |
+| TUI key | D2 `n` then `j` (New Signal from a Jira issue; shown only with a `[jira]` site) | the human | none; carries `external_ref` `jira-<KEY>`; a re-intake of a live ref closes the new Signal `duplicate: <carrier id>` through the reason-first door, which adds the supersedes edge onto the carrier | `tui.newOpts`, `tui.fileJira` → `jira.Intake` → `bd.NewSignalWithRef`, `bd.Retire` |
 | CLI verb | D3 `mugicrew intake jira <KEY>` | the human | as D2 | `main.runIntakeJira`, `jira.Intake` |
 | CLI verb | D4 `mugicrew signal new --title --description` | the human; a Chopper checkup session may run it on the human's yes | none: an open, unparented task | `main.runSignalNew` → `bd.NewSignal`; Chopper prompt `chopper/prompts/checkup.md` |
-| CLI verb | D5 `mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up\|prerequisite\|none` | any crewmate session that finds work (Franky, Usopp, Nami's charting session for Split and Hand back, Zoro, Sanji, Brook, Luffy) | `discovered-from` the cause; with an order, `blocked-by` (follow-up) or `blocks` (prerequisite) the cause's open Checkpoint or Chart; with an order, `parent` is that container's Initiative; unorderable falls back to unordered with the reason in the body | `main.runSignalOffshoot` (`offshoot.go`), `bd.NewOffshoot`; crew doc `signal-filing.md` Offshoot form; `nami/prompts/charting.md` |
+| CLI verb | D5 `mugicrew signal offshoot --from <cause> --drafted-by <bead> --order follow-up\|prerequisite\|none` | any crewmate session that finds work (Franky, Usopp, Nami's charting session for Split and Hand back, Zoro, Sanji, Brook, Luffy) | `discovered-from` the cause; with an order, `blocked-by` (follow-up) or `blocks` (prerequisite) the cause's open Checkpoint or Chart; `parent` is the cause's open Initiative whatever the order, unless `--outside "<why>"` opts out (ADR 0371 (an-offshoot-filer-opts-out-of-its-cause-s-initiative-with-outside…)); unorderable falls back to unordered with the reason in the body | `main.runSignalOffshoot` (`offshoot.go`), `bd.NewOffshoot`; crew doc `signal-filing.md` Offshoot form; `nami/prompts/charting.md` |
 | crewmate session | D6 Luffy's triage INITIATIVE step and cut session: raw `bd create --type task -s deferred --no-inherit-labels -l kind:signal,drafted-by:<bead> --parent <initiative>` | Luffy | `parent` Initiative only | crew doc `signal-filing.md` Initiative member form; `luffy/prompts/triage.md` INITIATIVE step 5; `luffy.go` cut text |
 | crewmate session | D7 Robin's discussion session: a Signal Draft on the human's explicit yes, filed in the offshoot form | Robin | `discovered-from` the Discussion | `robin/prompts/discussion.md` Signals |
 | crewmate session | D8 Chopper's checkup session: an offshoot Signal for a defect or fault it finds | Chopper | `discovered-from` the checkup | `chopper/prompts/checkup.md` |
 | crewmate session | D9 Brook's client dry-run Errand, step Filing blockers: raw `bd create -l kind:signal,drafted-by:<Errand id> --deps discovered-from:<dry-run Signal>` | Brook | `discovered-from` the dry-run Signal | `docs/client-dry-run-runbook.md` Filing blockers |
-| loop | D10 Jinbe's and Nami's Landing reconcile files the stale-pin Signal when a landed squash drops a pinned commit (gitlab) | the loop | `discovered-from` the Landing; open, not a Draft | `nami.FlagStalePin`, `bd.SpawnOffshootSignalIfAbsent` |
-| loop | D11 the dispatch backstop files the stranded-commits Signal when integrate is refused because the container landed | the loop | `discovered-from` the stranded bead; open, not a Draft | `session.strandedSignal`, `bd.SpawnOffshootSignalTitledIfAbsent` |
-| loop | D12 Jinbe's MR Watch files the abandoned close-out Signal | the loop | `discovered-from` the MR Watch; open, not a Draft | `jinbe.fileAbandoned` (`mrwatch.go`), `bd.SpawnOffshootSignalTitledIfAbsent` |
+| loop | D10 Jinbe's and Nami's Landing reconcile files the stale-pin Signal when a landed squash drops a pinned commit (gitlab) | the loop | `discovered-from` the Landing; open, not a Draft; a direct child of the cause's open Initiative, else unparented; body ends `Order: none` then the verb's `Initiative:` line | `nami.FlagStalePin`, `bd.SpawnOffshootSignalIfAbsent` |
+| loop | D11 the dispatch backstop files the stranded-commits Signal when integrate is refused because the container landed | the loop | `discovered-from` the stranded bead; open, not a Draft; a direct child of the cause's open Initiative, else unparented; body ends `Order: none` then the verb's `Initiative:` line | `session.strandedSignal`, `bd.SpawnOffshootSignalTitledIfAbsent` |
+| loop | D12 Jinbe's MR Watch files the abandoned close-out Signal | the loop | `discovered-from` the MR Watch; open, not a Draft; a direct child of the cause's open Initiative, else unparented; body ends `Order: none` then the verb's `Initiative:` line | `jinbe.fileAbandoned` (`mrwatch.go`), `bd.SpawnOffshootSignalTitledIfAbsent` |
 
 No reconcile door and no doctor fix creates a Signal. A triage reroute files Pivots and Critiques, not a Signal (it is a closure, below): `luffy.SeedReroute`, `session.raiseSession`.
 
@@ -52,12 +54,12 @@ No reconcile door and no doctor fix creates a Signal. A triage reroute files Piv
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| accepted (charted) | none given: bd's default `Closed` (`bd.DefaultCloseReason`) | Luffy's triage session; closed by the clean-exit publish (`hitl-run`) in the batch that opens the Chart and Survey Drafts | Carry: `luffy.carryOrdering` re-points the Signal's blocks dependents to the Chart before the close | `session.sessionPlan` / `signalCharted`; `luffy.reconcileSignal` |
-| fast-laned (Spec) | as accepted | as accepted | Carry to the Spec; the Spec Draft is published after its `Anchor:` pin is written | `session.signalCharted`; `luffy.reconcileFastLane` |
-| opened an Initiative | as accepted | as accepted (`mugicrew reconcile <signal> --initiative`) | Carry to the Initiative; Initiative and phase-1 member Drafts published | `luffy.SeedInitiative`; `session.signalCharted` |
+| accepted (charted) | `charted: <chart id>` (`bd.ChartedReason`) | Luffy's triage session; closed by the clean-exit publish (`hitl-run`) in the batch that opens the Chart and Survey Drafts | Carry: `luffy.carryOrdering` re-points the Signal's blocks dependents to the Chart before the close | `session.sessionPlan` / `signalCharted`; `luffy.reconcileSignal` |
+| fast-laned (Spec) | `specced: <spec id>` (`bd.SpeccedReason`) | as accepted: the clean-exit publish writes the reason from the successor it found | Carry to the Spec; the Spec Draft is published after its `Anchor:` pin is written | `session.signalCharted`; `luffy.reconcileFastLane` |
+| opened an Initiative | `initiative: <initiative id>` (`bd.InitiativeReason`) | as accepted: the clean-exit publish writes the reason (`mugicrew reconcile <signal> --initiative`) | Carry to the Initiative; Initiative and phase-1 member Drafts published | `luffy.SeedInitiative`; `session.signalCharted` |
 | rerouted | `rerouted: <pivot and Critique ids>` | Luffy's triage session; closed by the clean-exit publish after `mugicrew reconcile <signal> --checkpoint` | publishes the Pivot and Critique Drafts and the gate edges (host Checkpoint blocks the Pivot, Pivot related to the Spec); Carry splits ordering onto the host and the caused-by successor | `session.raiseSession`; `luffy.SeedReroute`; `bd.CarryTargets` |
-| rejected | free text: Luffy's `bd close <id> --reason "<why>"`; the TUI's `z` writes the typed reason, else `rejected from TUI` | Luffy's triage session; the human by TUI `z` (open, unclaimed Signals only) | no successor; no Carry: closing releases what the Signal gated | `luffy/prompts/triage.md` REJECT; `tui.reject`, `tui.rejectDefault`, `tui.rejectable` |
-| duplicate (superseded) | bd's own text from `bd supersede <dup> --with <original>` (not written by mugicrew; its shape is in the succession test fixture) | Luffy's triage DUPLICATE and sibling merge; `jira.Intake` on a re-intake | a `supersedes` edge keeps lineage; no Carry runs, and the Signal's outgoing blocks edges drop | `luffy/prompts/triage.md` DUPLICATE; `luffy.memberSection`; `bd.Supersede`, `jira.Intake`; `bd/succession_test.go` fixture |
+| rejected | `rejected: <why>`, or bare `rejected` (a blank TUI reason): Luffy's `bd close <id> --reason "rejected: <why>"`; the TUI's `z` writes `rejected: <typed>`, or bare `rejected` for a blank reason | Luffy's triage session; the human by TUI `z` (open, unclaimed Signals only) | no successor; no Carry: closing releases what the Signal gated | `luffy/prompts/triage.md` REJECT; `bd.RejectedReason`; `tui.reject`, `tui.rejectDefault`, `tui.rejectable` |
+| duplicate | `duplicate: <original id>` (`bd.DuplicateReason`), written by the door before it adds the edge | Luffy's triage DUPLICATE and sibling merge through `mugicrew duplicate <dup> <original>`; `jira.Intake` on a re-intake | a `supersedes` edge keeps lineage; before it closes, the Signal's ordering (and open Latches) is carried onto the original's live head (`bd.LiveHead`, `bd.Carry`, ADR 0085); when that chain has ended, nothing is carried and the dependents are released (carry.done at Warn, skip reason `ended`) | `luffy/prompts/triage.md` DUPLICATE; `luffy.memberSection`; `main.runDuplicate`; `bd.Retire`; `jira.Intake` |
 | parked | `later: <title> (phase line on <initiative>)` | Luffy's triage of a member Signal | stays under its Initiative and never holds the drain; the cut session refiles it as a fresh member | `luffy.memberSection`; `luffy.go` cut text; `GLOSSARY.md` Initiative |
 | withdrawn | `withdrawn` for a chain head; `cancelled: <initiative>` when an Initiative cancel sweeps it | the human: TUI `X`, `mugicrew withdraw <head>`, `mugicrew initiative cancel` | releases the chain's held edges; cleanup inventory; Errands ordered after it close `withdrawn: <target>` | `withdraw.Withdraw`, `withdraw.Cancel`; `main.runWithdraw`; `tui.keyWithdrawKey` |
 
@@ -65,14 +67,14 @@ No reconcile door and no doctor fix creates a Signal. A triage reroute files Piv
 
 | Expected edge | Why | D1–D4 | D5 | D6 | D7 | D8 | D9 | D10–D12 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `discovered-from` the finder | provenance of an offshoot; the key the spawn helpers use to stay idempotent (`SignalsFrom`, `CarriersFrom`) | n/a | ✓ | n/a | ✓ | ✓ | ✓ | ✓ |
-| `parent` the cause's Initiative | members include the ordered offshoots filed against a member (`GLOSSARY.md` Initiative) | n/a | ✓ when ordered, else n/a | ✓ | n/a | n/a | n/a | n/a |
-| `blocked-by` / `blocks` the cause's container | a follow-up waits for its container to land, a prerequisite gates it (`signal-filing.md`) | n/a | ✓ when orderable, else unordered with a stated reason | n/a | ✓ if filed by the verb | ✓ if filed by the verb | ✗ | ✗ |
-| Draft status (`deferred` + `drafted-by`) | a crewmate's find stays invisible until its session publishes (ADR 0059 (mugicrew-drafts…)) | n/a (human action) | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| `discovered-from` the finder | provenance of an offshoot; the key the spawn helpers use to stay idempotent (`SignalsFrom`, `CarriersFrom`) | n/a | ✓ | n/a: a planned phase line has no finder | ✓ | ✓ | ✓ | ✓ |
+| `parent` the cause's Initiative | members include the ordered offshoots filed against a member (`GLOSSARY.md` Initiative) | n/a | ✓ in the cause's open Initiative whatever the order, unless `--outside "<why>"` (ADR 0371 (an-offshoot-filer-opts-out-of-its-cause-s-initiative-with-outside…)); else n/a | ✓ | n/a | n/a | n/a | ✓ when the cause's Initiative is open |
+| `blocked-by` / `blocks` the cause's container | a follow-up waits for its container to land, a prerequisite gates it (`signal-filing.md`) | n/a | ✓ when orderable, else unordered with a stated reason | n/a: a phase is cut only once the Initiative is drained, so no open member container exists to order it against | ✓ if filed by the verb | ✓ if filed by the verb | ✗ | n/a: the cause's container has already landed or closed, so there is nothing to gate or wait on |
+| Draft status (`deferred` + `drafted-by`) | a crewmate's find stays invisible until its session publishes (ADR 0059 (mugicrew-drafts…)) | n/a (human action) | ✓ | ✓ | ✓ | ✓ | ✓ | n/a: no session publishes a loop Draft |
 
 ### Gaps found
 
-Entries 1, 2, 3, 4, 5 in [Gaps](#gaps).
+Entries 1, 2, 3, 4, 5 in [Gaps](#gaps). Entry 1 is resolved by the Spec "Loop-filed offshoot Signals are born in their cause's Initiative with the verb's Order and Initiative lines".
 
 ## chart
 
@@ -91,11 +93,11 @@ Both doors create the Chart as a Draft (by the Signal or the pivot) with its Sur
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| defogged and landed (the Chart's Spec authored) | none given: bd's default `Closed` | the loop-dispatched Nami reconcile, by `closeOnPublish`, once the Spec body is authored | the Chart's Approval closed approved and the Landing closes `landed: <sha>`; Carry re-points the Chart's blocks dependents to the Spec; the Spec Draft is published in the same batch; a renumber Checkpoint may be minted first | `nami.reconcileChart`, `bd.CloseLandings`, `nami.carryOrdering` |
+| defogged and landed (the Chart's Spec authored) | `specced: <spec id>` | the loop-dispatched Nami reconcile, by `closeOnPublish`, once the Spec body is authored | the Chart's Approval closed approved and the Landing closes `landed: <sha>`; Carry re-points the Chart's blocks dependents to the Spec; the Spec Draft is published in the same batch; a renumber Checkpoint may be minted first | `nami.reconcileChart`, `bd.CloseLandings`, `nami.carryOrdering` |
 | handed back | `handed back: <why>` | Nami's charting (Survey) session, `bd close <chart> --force --reason`, after filing an offshoot Signal | the Survey closes on exit; the pushed-back `chart/<id>` branch is deleted when the session ends | `nami/prompts/charting.md` Hand back; `session.settle`; `tui.chartOutcome` |
-| rejected | free text `<why>` | the charting session, on the human's explicit assent | as handed back | `nami/prompts/charting.md` Reject; `tui.chartOutcome` reads prefix `rejected` |
-| duplicate (superseded) | bd's own text from `bd supersede <chart> --with <original>` | the charting session, on the human's assent | a `supersedes` edge keeps lineage; no Carry | `nami/prompts/charting.md` duplicate |
-| superseded by escalation | bd's own text from bd's supersede | `mugicrew pivot escalate` | the fresh Chart takes the Checkpoint's Carry | `zoro.Escalate`, `bd.Supersede(old, new)` |
+| rejected | `rejected: <why>`; a sub-reason goes in the detail, never a prefix of its own | the charting session, on the human's explicit assent, by `bd close <chart> --force --reason` | as handed back | `nami/prompts/charting.md` Reject; `tui.chartOutcome` reads prefix `rejected` |
+| duplicate (superseded) | `duplicate: <original id>` | the charting session, on the human's assent, through `mugicrew duplicate <chart> <original id>` (`main.runDuplicate` → `bd.Retire`), which writes the reason before the edge | a `supersedes` edge keeps lineage; before it closes, the Chart's ordering (and open Latches) is carried onto the original's live head (`bd.LiveHead`, `bd.Carry`, ADR 0085); when that chain has ended, nothing is carried and the dependents are released (carry.done at Warn, skip reason `ended`) | `nami/prompts/charting.md` duplicate; `tui.chartOutcome` reads prefix `duplicate:` |
+| superseded by escalation | `superseded: <new id>` (`bd.SupersededReason`), written by `bd.Retire` before the edge; an already-closed old Chart keeps its reason | `mugicrew pivot escalate` | the fresh Chart takes the Checkpoint's Carry | `zoro.Escalate`, `bd.Retire(old, new, reason)` |
 | withdrawn | `withdrawn`; `cancelled: <initiative>` | the human: `X`, `mugicrew withdraw`, `initiative cancel` (chain head with nothing caused by it) | releases held edges; `chart/<id>` branch cleanup | `withdraw.Withdraw`, `withdraw.Cancel` |
 | retired Draft | `obsolete: <id> of <parent> was retired` | the dispatch tail, when the creating effort's bead was swept | the Draft's publish opens only Signals | `dispatch.effort.retire` |
 
@@ -133,13 +135,16 @@ Both doors are idempotent: `bd.SpawnSurveyIfAbsent` returns an existing Survey i
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed (fog seeded) | none given, so bd records `Closed` (`bd.DefaultCloseReason`) | mugicrew, on the Survey session's clean exit: `hitl-run` publish (`session.sessionPlan` with `surveyDone` true when the session's Drafts include a child of the Chart) | The session's Drafts publish in the same batch (defog beads, offshoot Signals); the Chart can drain | `session.sessionPlan`, `session.surveyDone`, `bd.Closing`, `bd.publishScript`; `GLOSSARY.md` Survey Operations |
-| completed (Chart pushed back) | none given, so `Closed` | as above; `surveyDone` is true when the parent Chart is closed (handed back, rejected or superseded by the session) | A Chart closed with no Spec successor has its `chart/<id>` branch deleted once the session tree is down | `session.surveyDone`, `session.settle`, `session.HitlRun`; `nami/prompts/charting.md` Push back |
+| completed (fog seeded) | `seeded: <chart id>` (`bd.SeededReason`) | mugicrew, on the Survey session's clean exit: `hitl-run` publish (`session.sessionPlan` with `surveyDone` true when the session's Drafts include a child of the Chart, on a stamped Chart too: the stamp is removed and a notes line written before the batch) | The session's Drafts publish in the same batch (defog beads, offshoot Signals); the Chart can drain | `session.sessionPlan`, `session.surveyDone`, `bd.Closing`, `bd.publishScript`; `GLOSSARY.md` Survey Operations |
+| completed (defogged) | `defogged: <chart id>` (`bd.DefoggedReason`) | as above; `surveyDone` is true when the Chart is stamped `chart:defogged` and the session drafted no fog (finished in place, ADR 0357 (mugicrew-a-survey-with-no-fog-finishes…)) | The session's other Drafts publish in the same batch; the Chart can drain | `session.surveyDone`; `nami/prompts/charting.md` |
+| completed (Chart pushed back) | `pushed back: <chart id>` (`bd.PushedBackReason`) | as above; `surveyDone` is true when the parent Chart is closed (handed back, rejected, duplicate or superseded by the session); the Chart's own close reason says how | A Chart closed with no Spec successor has its `chart/<id>` branch deleted once the session tree is down | `session.surveyDone`, `session.settle`, `session.HitlRun`; `nami/prompts/charting.md` Push back |
 | returned (not a closure) | n/a | `session.settle` on a clean exit with nothing seeded and the Chart open: releases the claim, so the Survey is open and unassigned again | Back in the Inbox for another session | `session.settle`; `GLOSSARY.md` Survey Operations |
 | withdrawn | `withdrawn` | the human's Withdraw of the Chart's chain head (TUI `X`, `mugicrew withdraw`): the Survey is in the head's unclosed subtree | Closed leaves first with the rest of the subtree | `withdraw.Withdraw`, `bd.WithdrawSet` |
 | cancelled | `cancelled: <initiative>` | the human's Cancel of the owning Initiative | as withdrawn | `withdraw.Cancel`, `bd.CancelSet` |
 
-No Survey is closed `obsolete:`, `superseded` or `rejected`. Those outcomes exist only on the Chart (`tui.graphData.chartOutcome` reads `handed back:`, `rejected`, empty), never on its Survey.
+No door retires a lone Survey, by design: a Survey retires only with its Chart, through a chain withdraw or a session that pushes the Chart back. Closing an open Chart's Survey alone would drain a Chart with no fog and no stamp. Surveys closed before the reasons above keep `Closed` (no backfill, as in ADR 0399).
+
+No Survey is closed `obsolete:`, `superseded` or `rejected`. Those outcomes exist only on the Chart (`tui.graphData.chartOutcome` reads `handed back:`, `rejected`, `duplicate:` and `superseded:` (both shown as superseded), and an empty reason), never on its Survey.
 
 ### Born-with ordering
 
@@ -163,41 +168,44 @@ A defog bead resolved by interviewing a human · owner Nami · leaf. Source: `GL
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, `bd dep add` in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey. `blocks` only if the session runs the separate `bd dep add` of step 6. | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
-| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved. No `blocks`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
-| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype. No `blocks`. | `sanji/prompts/prototype.md` |
+| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, ordering in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey; `discovered-from` the Survey. `blocks` only if the session adds `blocked-by:` to the same create's `--deps` (step 6). | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
+| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved; `discovered-from` that grilling. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
+| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype; `discovered-from` the prototype. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `sanji/prompts/prototype.md` |
 | crewmate session | D4 Nami's promote-or-stamp session on a drained Chart, PROMOTE or ESCALATE (raw `bd create`; ESCALATE files exactly one grilling) | Nami, AFK through the loop | `parent` to the Chart; `drafted-by:` the Chart itself. No `blocks`. | `nami/prompts/promote-or-stamp.md`; `nami.Nami.Reconcile` via `reconcileChart` |
-| crewmate session | D5 Nami's chart-conflict session, `Escalate: <title>` outcome (Go, not a raw `bd create`) | Nami, AFK through the loop | `parent` to the Chart; `drafted-by:` the chart-conflict; plus `blocks`: the chart-conflict waits on the grilling, handed to the publish batch. No `discovered-from`. | `nami.escalateChartConflict` (`bd.SpawnChild`), `nami.runChartConflict`; `GLOSSARY.md` Chart Conflict Operations |
+| crewmate session | D5 Nami's chart-conflict session, `Escalate: <title>` outcome (Go, not a raw `bd create`) | Nami, AFK through the loop | `parent` to the Chart; `drafted-by:` the chart-conflict; plus `blocks`: the chart-conflict waits on the grilling, handed to the publish batch; `discovered-from` the chart-conflict, born with the create. | `nami.escalateChartConflict` (`bd.SpawnChild`), `nami.runChartConflict`; `GLOSSARY.md` Chart Conflict Operations |
 | crewmate session | D6 Usopp's Forge Review session on a Chart (raw `bd create`, `kind:` the container's filed kind, which is grilling for a Chart) | Usopp, AFK through the loop | `parent` to the Chart; `drafted-by:` the Forge Review; `discovered-from` the Forge Review. No `blocks`. | `usopp/prompts/forge-review.md` Filing a bead; `contract.FiledKind`; `usopp.forgeArgs` |
+| CLI verb | D7 `mugicrew approval rework <approval> --grilling <file>…` on a Chart's Approval files the rework grilling beads as Drafts of the Approval and publishes them with the Approval's close | Luffy's HITL approval session, on the human's OK | `parent` to the Chart; `discovered-from` the Approval, born with the create (a crash-recovered re-run adds it to an adopted Draft); `drafted-by:` the Approval. No `blocks`. | `bd.ReworkApproval`, `luffy/prompts/approval_hitl_tail.md` |
 
-No TUI key, CLI verb, reconcile leg, loop step or doctor row creates a defog bead (searched `tui/`, `main.go`, `luffy/`, `doctor*.go`); the human's only handle is launching the session that resolves one.
+No TUI key, reconcile leg, loop step or doctor row creates a defog bead (searched `tui/`, `luffy/`, `doctor*.go`); the human's handles are launching the session that resolves one and the CLI verb in D7.
 
 ### Closure outcomes
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
 | completed | `answered: <one-line summary>` | Nami's grilling session, after `mugicrew integrate` exits 0 (the human launches it with the TUI launch key) | Decisions captured as docs on `effort/<id>`, integrated onto `chart/<id>`; a Decisions-so-far line appended to the Chart; may draft more defog beads | `nami.Nami.Launch` (`grillingPromptClosing`, `nami.go:275`); `nami/prompts/grilling.md`; crew doc `defog-session.md` step 6 |
-| completed (chart-conflict escalation) | none prescribed: the body says only "Answer each numbered question in this bead's notes … then close it" | the human, by raw `bd close` | The chart-conflict's `blocks` edge on it clears, the conflict returns to `bd ready` and the AFK resolve applies the answers | `nami.escalateChartConflict`; `nami/prompts/chart-conflict.md` (reads closed `kind:grilling`) |
-| completed (Forge Review) | none prescribed | not stated; resolved as any grilling | none stated | `usopp/prompts/forge-review.md` |
+| completed (chart-conflict escalation) | `answered: <one-line summary>` | Nami's grilling session through the TUI launch key (the body points there, not to `bd close`); the answers go in the notes under the questions' numbers, the Chart branch and the chart-conflict untouched | The chart-conflict's `blocks` edge on it clears, the conflict returns to `bd ready` and the AFK resolve applies the answers | `nami.escalateChartConflict`; `nami/prompts/grilling-escalation-close.md`; `nami/prompts/chart-conflict.md` (binds only a grilling closed `answered:`) |
+| completed (Forge Review) | `answered: <one-line summary>` | Nami's grilling session through the launch, with the verdict reasons `accepted:`, `rejected:` and `deferred:` for the close-out reply (ADR 0339 (mugicrew-a-close-out-reply-reads-its-verdict…)) | as completed | `usopp/prompts/forge-review.md`; `nami.Nami.Launch` |
 | withdrawn | `withdrawn` | the human's Withdraw of the Chart's chain head (TUI `X`, `mugicrew withdraw`): the defog bead is in the head's unclosed subtree | Closed leaves first with the rest of the subtree | `withdraw.Withdraw`, `bd.WithdrawSet` |
+| withdrawn (lone leaf) | `withdrawn` | the human's Withdraw of this one unclosed defog bead (TUI `X` on its row, `mugicrew withdraw <bead>`); refused for an escalation grilling while its chart-conflict is open, and for a live session | Closes alone, sweeping nothing | `withdraw.Withdraw` |
 | cancelled | `cancelled: <initiative>` | the human's Cancel of the owning Initiative | as withdrawn | `withdraw.Cancel`, `bd.CancelSet` |
-| obsoleted or superseded | none prescribed (the doc says "close or supersede them") | the session that made the decision invalidating it, by raw `bd close` or `bd supersede` | Leaves the frontier | crew doc `defog-session.md` Obsolete the stale |
+| obsolete | `obsolete: <decider id>` | `mugicrew obsolete <bead> --by <decider>`, run by the grilling, research or prototype session (or Survey) whose decision made it moot; refused for a target that is not an unclosed grilling, research or prototype, for a missing, self or non-decider `--by`, and for an escalation grilling while its chart-conflict is open | Leaves the frontier; no Decisions-so-far line | `bd.ObsoleteReason`; crew doc `defog-session.md` Obsolete the stale |
+| superseded | `superseded: <new id>` | `mugicrew supersede <bead> --with <new>` (also the door for a duplicate defog bead), with the same target refusals; a re-run adds only the missing edge | Adds the `supersedes` edge through `bd.Retire`; leaves the frontier | `bd.SupersededReason`; crew doc `defog-session.md` Obsolete the stale |
 
 No grilling is closed `rejected` or `landed`: TUI reject (`z`) takes only an open, unclaimed Signal (`tui.rejectable`).
 
 ### Born-with ordering
 
-| Expected edge | Why | D1 | D2 | D3 | D4 | D5 | D6 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `parent` to the Chart | membership: undrains the Chart until resolved | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `drafted-by:` its creator | so the creator's publish takes it (`contract.DraftInstruction`) | ✓ | ✓ | ✓ | ✓ (the Chart) | ✓ (the conflict) | ✓ |
-| `blocks` from the defog it depends on | the frontier: takeable only when blockers close (`chart-body.md`) | ✗ (a later optional `bd dep add`) | ✗ | ✗ | ✗ | n/a | n/a |
+| Expected edge | Why | D1 | D2 | D3 | D4 | D5 | D6 | D7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `parent` to the Chart | membership: undrains the Chart until resolved | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `drafted-by:` its creator | so the creator's publish takes it (`contract.DraftInstruction`) | ✓ | ✓ | ✓ | ✓ (the Chart) | ✓ (the conflict) | ✓ | ✓ |
+| `blocks` from the defog it depends on | the frontier: takeable only when blockers close (`chart-body.md`) | optional, written in the same create | optional, written in the same create | optional, written in the same create | ✗ | n/a | n/a | ✗ |
 | conflict `blocks` on this grilling | the conflict leaves `bd ready` until the human answers (ADR 0079) | n/a | n/a | n/a | n/a | ✓ | n/a |
-| `discovered-from` its creator | lineage to the bead that graduated it | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
+| `discovered-from` its creator | lineage to the bead that graduated it | ✓ | ✓ | ✓ | n/a (its drafter is the parent) | ✓ | ✓ | ✓ |
 
 ### Gaps found
 
-Entries 8, 9 in [Gaps](#gaps).
+Entries 8, 9 in [Gaps](#gaps). Entry 9 is resolved by the Spec "Every defog bead is born discovered-from the bead that raised it".
 
 ## research
 
@@ -209,12 +217,13 @@ A defog bead resolved by autonomous agent investigation · owner Nami · leaf (A
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, `bd dep add` in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey. `blocks` only if the session runs the separate `bd dep add` of step 6. | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
-| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved. No `blocks`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
-| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype. No `blocks`. | `sanji/prompts/prototype.md` |
+| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, ordering in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey; `discovered-from` the Survey. `blocks` only if the session adds `blocked-by:` to the same create's `--deps` (step 6). | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
+| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved; `discovered-from` that grilling. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
+| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype; `discovered-from` the prototype. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `sanji/prompts/prototype.md` |
 | crewmate session | D4 Nami's promote-or-stamp session on a drained Chart, PROMOTE or ESCALATE (raw `bd create`; ESCALATE files exactly one grilling) | Nami, AFK through the loop | `parent` to the Chart; `drafted-by:` the Chart itself. No `blocks`. | `nami/prompts/promote-or-stamp.md`; `nami.Nami.Reconcile` via `reconcileChart` |
+| CLI verb | D5 `mugicrew approval rework <approval> --research <file>…` on a Chart's Approval files the rework research beads as Drafts of the Approval and publishes them with the Approval's close | Luffy's HITL approval session, on the human's OK | `parent` to the Chart; `discovered-from` the Approval, born with the create (a crash-recovered re-run adds it to an adopted Draft); `drafted-by:` the Approval. No `blocks`. | `bd.ReworkApproval`, `luffy/prompts/approval_hitl_tail.md` |
 
-No TUI key, CLI verb, reconcile leg, loop step or doctor row creates a defog bead (searched `tui/`, `main.go`, `luffy/`, `doctor*.go`); the human's only handle is launching the session that resolves one.
+No TUI key, reconcile leg, loop step or doctor row creates a defog bead (searched `tui/`, `luffy/`, `doctor*.go`); the human's handles are launching the session that resolves one and the CLI verb in D5.
 
 The research session itself files nothing: `nami/prompts/research.md` has no `bd create`.
 
@@ -222,25 +231,27 @@ The research session itself files nothing: `nami/prompts/research.md` has no `bd
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | the agent's last line, which must start `Wrote docs/research/` (e.g. `Wrote docs/research/<slug>.md: <summary>`) | Nami's research run, through the loop; Go closes, the agent never does | One doc under `docs/research/` committed and integrated onto `chart/<id>`; the close is `Open()`-guarded | `nami.runResearch`, `nami.researchDocPointer`; `nami/prompts/research.md` |
+| completed | the agent's last line, which must start `Wrote docs/research/` (e.g. `Wrote docs/research/<slug>.md: <summary>`) | Nami's research run, through the loop; Go closes, the agent never does | One doc under `docs/research/` committed and integrated onto `chart/<id>`; when no primary source answers the question the doc is a negative finding (sources searched, none answers, the question under Open questions / gaps) and the gist starts "no primary source answers:"; the close is `Open()`-guarded | `nami.runResearch`, `nami.researchDocPointer`; `nami/prompts/research.md` |
 | withdrawn | `withdrawn` | the human's Withdraw of the Chart's chain head (TUI `X`, `mugicrew withdraw`): the defog bead is in the head's unclosed subtree | Closed leaves first with the rest of the subtree | `withdraw.Withdraw`, `bd.WithdrawSet` |
+| withdrawn (lone leaf) | `withdrawn` | the human's Withdraw of this one unclosed defog bead (TUI `X` on its row, `mugicrew withdraw <bead>`); refused for an escalation grilling while its chart-conflict is open, and for a live session | Closes alone, sweeping nothing | `withdraw.Withdraw` |
 | cancelled | `cancelled: <initiative>` | the human's Cancel of the owning Initiative | as withdrawn | `withdraw.Cancel`, `bd.CancelSet` |
-| obsoleted or superseded | none prescribed (the doc says "close or supersede them") | the session that made the decision invalidating it, by raw `bd close` or `bd supersede` | Leaves the frontier | crew doc `defog-session.md` Obsolete the stale |
+| obsolete | `obsolete: <decider id>` | `mugicrew obsolete <bead> --by <decider>`, run by the grilling, research or prototype session (or Survey) whose decision made it moot; refused for a target that is not an unclosed grilling, research or prototype, for a missing, self or non-decider `--by`, and for an escalation grilling while its chart-conflict is open | Leaves the frontier; no Decisions-so-far line | `bd.ObsoleteReason`; crew doc `defog-session.md` Obsolete the stale |
+| superseded | `superseded: <new id>` | `mugicrew supersede <bead> --with <new>` (also the door for a duplicate defog bead), with the same target refusals; a re-run adds only the missing edge | Adds the `supersedes` edge through `bd.Retire`; leaves the frontier | `bd.SupersededReason`; crew doc `defog-session.md` Obsolete the stale |
 
-A final line without the pointer (for example "Unable to find primary sources") closes nothing and leaves the bead open for re-dispatch (`nami.runResearch`).
+A final line without the pointer (for example "Unable to find primary sources") fails the effort: the bead stays open and the run counts toward the failure pause (ADR 0078 (mugicrew-failure-pause)) (`nami.runResearch`).
 
 ### Born-with ordering
 
-| Expected edge | Why | D1 | D2 | D3 | D4 |
-| --- | --- | --- | --- | --- | --- |
-| `parent` to the Chart | membership: undrains the Chart until resolved | ✓ | ✓ | ✓ | ✓ |
-| `drafted-by:` its creator | so the creator's publish takes it | ✓ | ✓ | ✓ | ✓ (the Chart) |
-| `blocks` from the defog it depends on | the frontier (`chart-body.md`) | ✗ (a later optional `bd dep add`) | ✗ | ✗ | ✗ |
-| `discovered-from` its creator | lineage to the bead that graduated it | ✗ | ✗ | ✗ | ✗ |
+| Expected edge | Why | D1 | D2 | D3 | D4 | D5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `parent` to the Chart | membership: undrains the Chart until resolved | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `drafted-by:` its creator | so the creator's publish takes it | ✓ | ✓ | ✓ | ✓ (the Chart) | ✓ |
+| `blocks` from the defog it depends on | the frontier (`chart-body.md`) | optional, written in the same create | optional, written in the same create | optional, written in the same create | ✗ | ✗ |
+| `discovered-from` its creator | lineage to the bead that graduated it | ✓ | ✓ | ✓ | n/a (its drafter is the parent) | ✓ |
 
 ### Gaps found
 
-Entries 8, 9, 10 in [Gaps](#gaps).
+Entries 8, 9, 10 in [Gaps](#gaps). Entry 9 is resolved by the Spec "Every defog bead is born discovered-from the bead that raised it".
 
 ## prototype
 
@@ -252,9 +263,9 @@ A defog bead resolved by a high-fidelity prototype that validates interface desi
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, `bd dep add` in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey. `blocks` only if the session runs the separate `bd dep add` of step 6. | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
-| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved. No `blocks`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
-| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype. No `blocks`. | `sanji/prompts/prototype.md` |
+| crewmate session | D1 Nami's Survey charting session, `charting.md` step 5 (raw `bd create`, ordering in step 6) | Nami, with the human | `parent` to the Chart; `drafted-by:` the Survey; `discovered-from` the Survey. `blocks` only if the session adds `blocked-by:` to the same create's `--deps` (step 6). | `nami/prompts/charting.md`; crew doc `chart-body.md` Creating a defog bead |
+| crewmate session | D2 Nami's grilling session, `grilling.md` step 4 (raw `bd create`) | Nami, with the human | `parent` to the Chart; `drafted-by:` the grilling being resolved; `discovered-from` that grilling. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `nami/prompts/grilling.md`; crew doc `defog-session.md` Graduate fog |
+| crewmate session | D3 Sanji's prototype session, `prototype.md` step 5 (raw `bd create`) | Sanji, with the human | `parent` to the Chart; `drafted-by:` the prototype; `discovered-from` the prototype. `blocks` only if the session adds `blocked-by:` to the same create's `--deps`. | `sanji/prompts/prototype.md` |
 | crewmate session | D4 Nami's promote-or-stamp session on a drained Chart, PROMOTE or ESCALATE (raw `bd create`; ESCALATE files exactly one grilling) | Nami, AFK through the loop | `parent` to the Chart; `drafted-by:` the Chart itself. No `blocks`. | `nami/prompts/promote-or-stamp.md`; `nami.Nami.Reconcile` via `reconcileChart` |
 
 No TUI key, CLI verb, reconcile leg, loop step or doctor row creates a defog bead (searched `tui/`, `main.go`, `luffy/`, `doctor*.go`); the human's only handle is launching the session that resolves one.
@@ -265,8 +276,10 @@ No TUI key, CLI verb, reconcile leg, loop step or doctor row creates a defog bea
 | --- | --- | --- | --- | --- |
 | completed | `prototyped: <one-line verdict>` | Sanji's prototype session, after `mugicrew integrate` exits 0 (the human launches it with the TUI launch key) | Decisions committed on `effort/<id>` and integrated onto `chart/<id>`; the throwaway stays on `refs/mugicrew/prototypes/<chart-id>` and never merges; a Decisions-so-far line appended to the Chart | `sanji/prompts/prototype.md` step 6; `sanji.Sanji.Launch`; `GLOSSARY.md` Prototype Notes |
 | withdrawn | `withdrawn` | the human's Withdraw of the Chart's chain head (TUI `X`, `mugicrew withdraw`): the defog bead is in the head's unclosed subtree | Closed leaves first with the rest of the subtree | `withdraw.Withdraw`, `bd.WithdrawSet` |
+| withdrawn (lone leaf) | `withdrawn` | the human's Withdraw of this one unclosed defog bead (TUI `X` on its row, `mugicrew withdraw <bead>`); refused for an escalation grilling while its chart-conflict is open, and for a live session | Closes alone, sweeping nothing | `withdraw.Withdraw` |
 | cancelled | `cancelled: <initiative>` | the human's Cancel of the owning Initiative | as withdrawn | `withdraw.Cancel`, `bd.CancelSet` |
-| obsoleted or superseded | none prescribed (the doc says "close or supersede them") | the session that made the decision invalidating it, by raw `bd close` or `bd supersede` | Leaves the frontier | crew doc `defog-session.md` Obsolete the stale |
+| obsolete | `obsolete: <decider id>` | `mugicrew obsolete <bead> --by <decider>`, run by the grilling, research or prototype session (or Survey) whose decision made it moot; refused for a target that is not an unclosed grilling, research or prototype, for a missing, self or non-decider `--by`, and for an escalation grilling while its chart-conflict is open | Leaves the frontier; no Decisions-so-far line | `bd.ObsoleteReason`; crew doc `defog-session.md` Obsolete the stale |
+| superseded | `superseded: <new id>` | `mugicrew supersede <bead> --with <new>` (also the door for a duplicate defog bead), with the same target refusals; a re-run adds only the missing edge | Adds the `supersedes` edge through `bd.Retire`; leaves the frontier | `bd.SupersededReason`; crew doc `defog-session.md` Obsolete the stale |
 
 A withdraw or cancel of a prototype whose throwaway tree holds work needs `--discard` (`withdraw/inventory.go` counts the throwaway tree).
 
@@ -276,12 +289,12 @@ A withdraw or cancel of a prototype whose throwaway tree holds work needs `--dis
 | --- | --- | --- | --- | --- | --- |
 | `parent` to the Chart | membership: undrains the Chart until resolved | ✓ | ✓ | ✓ | ✓ |
 | `drafted-by:` its creator | so the creator's publish takes it | ✓ | ✓ | ✓ | ✓ (the Chart) |
-| `blocks` from the defog it depends on | the frontier; a prototype that needs a research fact is `chart-body.md`'s own example | ✗ (a later optional `bd dep add`) | ✗ | ✗ | ✗ |
-| `discovered-from` its creator | lineage to the bead that graduated it | ✗ | ✗ | ✗ | ✗ |
+| `blocks` from the defog it depends on | the frontier; a prototype that needs a research fact is `chart-body.md`'s own example | optional, written in the same create | optional, written in the same create | optional, written in the same create | ✗ |
+| `discovered-from` its creator | lineage to the bead that graduated it | ✓ | ✓ | ✓ | n/a (its drafter is the parent) |
 
 ### Gaps found
 
-Entries 8, 9 in [Gaps](#gaps).
+Entries 8, 9 in [Gaps](#gaps). Entry 9 is resolved by the Spec "Every defog bead is born discovered-from the bead that raised it".
 
 ## spec
 
@@ -295,15 +308,15 @@ All three doors create the Spec as a Draft (by the Chart, Signal or pivot), publ
 | --- | --- | --- | --- | --- |
 | reconcile | D1 the loop-dispatched `mugicrew reconcile <chart>` once the Chart is drained, stamped and landed | the loop (Nami) | `caused-by` the Chart; `parent` the Chart's Initiative while unclosed; `drafted-by` the Chart; `context:` and `repo:` copied; placeholder body until the speccing session authors it; Carry of the Chart's blocks dependents to the Spec | `nami.specSuccessor`, `nami.reconcileChart`, `nami.carryOrdering` |
 | reconcile | D2 `mugicrew reconcile <signal> --spec <body-file> [--title]` (fast lane) | Luffy's triage session | `caused-by` the Signal; `parent` the Signal's Initiative; `drafted-by` the Signal; `context:`; an `Anchor:` pin written on the bead afterwards; Carry of the Signal's blocks dependents to the Spec | `luffy.SeedSpec`, `luffy.specFastLaneSuccessor`, `luffy.reconcileFastLane`, `bd.Anchor` |
-| CLI verb | D3 `mugicrew pivot confirm <pivot> --spec <body-file> [--title] [--carries <ids>]` | Zoro's pivot-triage session | `caused-by` the old Spec's predecessor (its Chart, else its Signal); `discovered-from` the pivot; `parent` the swept Checkpoint's Initiative; `context:` and `repo:` copied; `drafted-by` the pivot; `Anchor:` pin when fast-laned; `supersedes` the old Spec; `discovered-from` each carried Critique; Carry of the Checkpoint's blocks dependents to the new Spec | `zoro.Confirm`, `zoro.spawnCorrectedSpec`, `bd.Supersede` |
+| CLI verb | D3 `mugicrew pivot confirm <pivot> --spec <body-file> [--title] [--carries <ids>]` | Zoro's pivot-triage session | `caused-by` the old Spec's predecessor (its Chart, else its Signal); `discovered-from` the pivot; `parent` the swept Checkpoint's Initiative; `context:` and `repo:` copied; `drafted-by` the pivot; `Anchor:` pin when fast-laned; `supersedes` the old Spec; `discovered-from` each carried Critique; Carry of the Checkpoint's blocks dependents to the new Spec | `zoro.Confirm`, `zoro.spawnCorrectedSpec`, `bd.Retire` |
 
 ### Closure outcomes
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| sliced (succession to the Checkpoint) | none given: bd's default `Closed` | the loop-dispatched Zoro reconcile, by `closeOnPublish`, once Builds exist and the Checkpoint is still open | Carry re-points the Spec's blocks dependents to the Checkpoint; the Build and Errand Drafts publish in the same batch | `zoro.reconcileSpec`, `zoro.carryOrdering` |
-| sliced into Errands only | the Spec closes with bd's default `Closed`; its Checkpoint closes `nothing to land: <kind>-only Spec <id>` | as sliced | Carry first; the Checkpoint's branch goes; Errand edges release | `zoro.reconcileSpec`, `bd.NothingToLandReason` |
-| superseded (pivot confirm) | bd's own text from `bd supersede <old> --with <new>` | `mugicrew pivot confirm` | the old Spec is normally already closed, so supersede adds the edge only; the Checkpoint and members are swept obsolete | `bd.Supersede`; `zoro.Confirm` |
+| sliced (succession to the Checkpoint) | `sliced: <checkpoint id>` | the loop-dispatched Zoro reconcile, by `closeOnPublish`, once Builds exist and the Checkpoint is still open | Carry re-points the Spec's blocks dependents to the Checkpoint; the Build and Errand Drafts publish in the same batch | `zoro.reconcileSpec`, `zoro.carryOrdering` |
+| sliced into Errands only | the Spec closes `sliced: <checkpoint id>`; its Checkpoint closes `nothing to land: <kind>-only Spec <id>` | as sliced | Carry first; the Checkpoint's branch goes; Errand edges release | `zoro.reconcileSpec`, `bd.NothingToLandReason` |
+| superseded (pivot confirm) | `superseded: <new id>` through `bd.Retire`; the old Spec is normally already closed (`sliced:` or `specced:`) and keeps its reason | `mugicrew pivot confirm` | the door adds the edge only; the Checkpoint and members are swept obsolete | `bd.Retire`; `zoro.Confirm` |
 | withdrawn | `withdrawn`; `cancelled: <initiative>` | the human: `X`, `mugicrew withdraw`, `initiative cancel` (an unclosed Spec with nothing caused by it) | releases held edges | `withdraw.Withdraw`, `withdraw.Cancel` |
 | retired Draft | `obsolete: <id> of <parent> was retired` | the dispatch tail when the creating effort's bead was swept | none | `dispatch.effort.retire` |
 
@@ -325,13 +338,13 @@ Entries 3, 4 in [Gaps](#gaps).
 
 ### Amendment
 
-A decision appended to a Spec that replaces one FR's mechanism and keeps its intent · owner Zoro (writes it at triage) · not a bead: a marked comment on the Spec. Sources: `GLOSSARY.md` Amendment; `zoro/prompts/pivot.md` Amend.
+A decision appended to a Spec that replaces one FR's mechanism and keeps its intent · owner Zoro (writes it at triage) · not a bead: a marked comment on the Spec. Sources: `GLOSSARY.md` Amendment; `zoro.Amend`; `zoro/prompts/pivot.md` Amend.
 
 #### Creation doors
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 Zoro's pivot-triage session, Amend: `bd comments add <Spec> "AMENDMENT (<pivotID>): <FR> — <decision> — rejected: <options>"`, only if no comment starting `AMENDMENT (<pivotID>):` exists | Zoro (with the human) | none: a comment on the Spec; a Critique is refiled copying the FR and decision, and the pivot closes `amended: <gist>` | `zoro/prompts/pivot.md` Amend |
+| CLI verb | D1 `mugicrew pivot amend <pivot> --gist <g> --amendment "<FR> — <decision> — rejected: <options>" --drafted-by <lead>` appends `AMENDMENT (<pivotID>): <amendment>` to the Spec, skipped when a comment starting `AMENDMENT (<pivotID>):` exists | Zoro's pivot-triage session (with the human) | none: a comment on the Spec and on every Ask Critique; a Critique is refiled when the pivot has no Ask, and the pivot closes `amended: <gist>` | `zoro.Amend`, `zoro.amendmentComment`, `zoro/prompts/pivot.md` Amend |
 
 #### Closure outcomes
 
@@ -369,7 +382,7 @@ A candidate for the Workspace's next mainline state; concretely the build branch
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| landed | none given: bd's default `Closed`, after the Landing closes `landed: <sha>` | the loop (Jinbe), `closeIfOpen` | the Landing closes first; MR Watches close `container closed`; a renumber Checkpoint may be minted first | `jinbe.closeLanded`, `bd.CloseLandings` |
+| landed | `landed: <sha>`, the sha its Landing closes with, after the Landing closes | the loop (Jinbe), `closeIfOpen` | the Landing closes first; MR Watches close `completed: container closed`; a renumber Checkpoint may be minted first | `jinbe.closeLanded`, `bd.CloseLandings` |
 | nothing to land | `nothing to land: <kind>-only Spec <id>` | the loop-dispatched Zoro reconcile | Carry first; the branch goes; the Spec closes after | `zoro.reconcileSpec`, `bd.NothingToLandReason` |
 | obsoleted (pivot confirmed) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` | `mugicrew pivot confirm`, forced | every open member except an MR Watch closes with the same reason; open sibling pivots close `superseded: <pivot>`; Carry to the new Spec first | `bd.ObsoleteSuperseded`, `zoro.closeOut` |
 | obsoleted (pivot escalated) | `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | `mugicrew pivot escalate`, forced | as confirmed, Carry to the fresh Chart | `bd.ObsoleteEscalated`, `zoro.closeOut` |
@@ -406,7 +419,7 @@ A Spec-less Checkpoint filed on a landed gitlab container's reconcile pass when 
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| landed | as a Checkpoint: bd's default `Closed` after the Landing's `landed: <sha>` | the loop (Jinbe) | runs the full Review, Approval, Landing and Forge merge path | `GLOSSARY.md` Renumber Checkpoint; `jinbe.closeLanded` |
+| landed | as a Checkpoint: `landed: <sha>` after the Landing's `landed: <sha>` | the loop (Jinbe) | runs the full Review, Approval, Landing and Forge merge path | `GLOSSARY.md` Renumber Checkpoint; `jinbe.closeLanded` |
 | other | as a Checkpoint: obsoleted, withdrawn | as a Checkpoint | as a Checkpoint | the Checkpoint closure table above |
 
 #### Born-with ordering
@@ -438,12 +451,12 @@ A unit of implementation work sliced from the Spec: a slice inside a Checkpoint 
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| built | none given: bd's default `Closed` | Franky's loop-dispatched build session, in the effort tail, after integrate | none: Jinbe spawns the Review once the Checkpoint drains | `franky.finish`, `franky.runImplement` |
+| built | `built` | Franky's loop-dispatched build session, in the effort tail, after integrate | none: Jinbe spawns the Review once the Checkpoint drains | `franky.finish`, `franky.runImplement` |
 | pivoted | `pivoted: <pivot ids>` | Franky's build session, via `bd.RaisePivot` in the publish batch | publishes the Pivot Drafts; the Checkpoint gains `blocks` edges to each pivot, each pivot `related` to the Spec, so the Checkpoint freezes | `bd.RaisePivot`, `bd.GateEdges`; `franky/prompts/build.md` |
 | obsoleted (pivot confirmed or escalated) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | `mugicrew pivot confirm` / `escalate`, forced | Drafts a swept member's effort created close `obsolete: <id> of <parent> was retired` | `zoro.closeOut`, `dispatch.effort.retire` |
 | container landed | `obsolete:<sp>container landed<sp>; carried by <signal>` (`<sp>` is a space: the reason is `bd.ContainerLandedReason` + `; carried by ` + the Signal) | the dispatch backstop, when integrate is refused because the Checkpoint already landed | the stranded-commits Signal is filed (the signal section's D11); the `effort/<id>` branch is kept | `session.strandedSignal`, `bd.ContainerLandedReason` |
 | cancelled | `cancelled: <initiative>` | the human: `initiative cancel` sweeps the whole member tree | held edges released | `withdraw.Cancel` |
-| (not built) | none: the Build stays open and the backstop adds the label `paused:not-built` after a `Not built: <why>` comment | the effort backstop | none | `session.pauseNotBuilt`, `bd.PausedNotBuilt`; `franky/prompts/build.md` |
+| (not built) | none: the Build stays open and the backstop adds the label `paused:not-built` after a `Not built: <why>` comment, or `paused:behind-mainline` after a newer `Behind mainline: <what's missing>` comment once mainline is confirmed ahead of the Checkpoint (with an open requested, rebase-conflict or number-clash Conflict on the Checkpoint it instead edges the Build behind that Conflict and reopens it unpaused) | the effort backstop | none | `session.pauseNotBuilt`, `bd.PausedNotBuilt`; `franky/prompts/build.md` |
 
 ### Born-with ordering
 
@@ -465,7 +478,8 @@ One review pass over a Checkpoint's built slice, at the Checkpoint branch tip ·
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| loop | D1 Jinbe's Checkpoint reconcile spawns a bare Review once the members are drained and no Approval is at head | Jinbe, each tick | parent → Checkpoint only; no `Commit:` pin in the body (Usopp pins `git.Head` himself) | `jinbe.spawnReviewIfDue`, `jinbe.reviewSuccessor`, `bd.SpawnChildIfAbsent`, `bd.childCreateArgs`, `bd.ReviewDue` |
+| loop | D1 Jinbe's Checkpoint reconcile spawns a bare Review once the members are drained and no Approval is at head | Jinbe, each tick | parent → Checkpoint only; no `Commit:` pin in the body at birth (Usopp writes it at review start, see D2) | `jinbe.spawnReviewIfDue`, `jinbe.reviewSuccessor`, `bd.SpawnChildIfAbsent`, `bd.childCreateArgs`, `bd.ReviewDue` |
+| crewmate session | D2 Usopp's dispatch writes the Checkpoint branch pin (the context's child repo head for a repo-context Checkpoint) onto the Review as one `Commit: <sha>` body line, before the review agent forks. A re-dispatch replaces the line; at the same pin no write happens; every other line stays in order | Usopp, each dispatch | none (a whole-description write under the Review's claim) | `usopp.runReview`, `git.WithCommitPin`, `bd.SetDescription` |
 
 No crew doc or prompt prescribes a raw `bd create` of a Review.
 
@@ -473,23 +487,24 @@ No crew doc or prompt prescribes a raw `bd create` of a Review.
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed, clean | none: empty reason, which bd records as `Closed` | Usopp's Review session tail (crewmate session, loop-dispatched) | With zero open Critiques and zero open pivots: open Approvals pinned to another commit are closed first, then the Approval is spawned, then the Review's close and the agent's Critique Drafts publish together | `usopp.approveIfClean`, `usopp.obsoleteStaleApprovals`, `bd.CloseOnPublish`, `bd.DefaultCloseReason` |
-| completed, with Critiques | none: `Closed`, the same as clean | Usopp's Review session tail | The Critique Drafts publish with the close; no Approval is spawned; the open Critiques undrain the Checkpoint | `usopp.approveIfClean`, `bd.IsMember` |
+| completed, clean | `clean: <approval id>`, the Approval this pass spawned or the open one at head it reused | Usopp's Review session tail (crewmate session, loop-dispatched) | With zero open Critiques and zero open pivots: open Approvals pinned to another commit are closed first, then the Approval is spawned, then the Review's close and the agent's Critique Drafts publish together | `usopp.approveIfClean`, `usopp.reviewCloseReason`, `usopp.obsoleteStaleApprovals`, `bd.CloseOnPublish`, `bd.CleanReason` |
+| completed, with Critiques | `critiqued: <critique ids>`, comma-joined; also when an open pivot exists | Usopp's Review session tail | The Critique Drafts publish with the close; no Approval is spawned; the open Critiques undrain the Checkpoint | `usopp.approveIfClean`, `usopp.reviewCloseReason`, `bd.CloseOnPublish`, `bd.CritiquedReason` |
+| completed, held by a pivot | `held: pivot <pivot ids>`, comma-joined | Usopp's Review session tail, with no open Critiques and an open pivot on the Checkpoint | No Approval is spawned; the pivot holds the Checkpoint | `usopp.approveIfClean`, `usopp.reviewCloseReason`, `bd.CloseOnPublish`, `bd.HeldReason` |
 | pivoted | `pivoted: <pivot ids>` | Usopp's Review session tail, when a pivot is discovered-from the Review | Checkpoint blocks → pivot and pivot related → Spec edges publish with the close; no Approval | `usopp.runReview`, `bd.RaisePivot`, `bd.GateEdges` |
 | obsolete (Spec swept) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | Zoro's pivot triage session, through the CLI verbs `mugicrew pivot confirm` / `pivot escalate`, force-closing every open member | The Checkpoint closes with the same reason; a Review born after the sweep is force-closed by the loop with the Checkpoint's reason (`sweep.straggler`) | `zoro.closeOut`, `bd.ObsoleteSuperseded`, `bd.ObsoleteEscalated`, `loop.retireStragglers` |
 
-No outcome obsoletes a Review whose Checkpoint branch moved past the commit it was reviewing.
+No outcome obsoletes a Review whose Checkpoint branch moved past the commit it was reviewing. This is the documented decision: a pass against a commit the branch has left spawns an Approval behind the tip, the at-head gate rejects it, and the drained Checkpoint gets a fresh Review.
 
 ### Born-with ordering
 
 | Expected edge | Why | D1 |
 | --- | --- | --- |
 | parent → Checkpoint | Membership: an open Review keeps the Checkpoint undrained, so the land waits (`bd.MembersDrainedOver`) | ✓ |
-| `Commit:` pin of the reviewed commit (body line, not an edge) | `GLOSSARY.md` says a Review is pinned to the commit it reviewed | ✗ |
+| `Commit:` pin of the reviewed commit (body line, not an edge) | `GLOSSARY.md` says a Review is pinned to the commit it reviewed; written at review start (D2), not at birth | ✗ (D2 ✓) |
 
 ### Gaps found
 
-Entries 14, 15 in [Gaps](#gaps).
+Entries 14, 15 in [Gaps](#gaps). Entry 14 is resolved. Entry 15 is resolved by the Spec "Usopp and Franky close Reviews, Conflicts and reasonless Critiques with named outcomes that Jinbe's reply reads".
 
 ## critique
 
@@ -499,13 +514,13 @@ A finding raised against the work, fixed test-first · owner Franky · leaf, a C
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 Franky's Build/Critique session files a defect beyond its slice with a raw `bd create` (Draft by the Build) | Franky | parent → Checkpoint | `franky/prompts/build.md`, crew doc `checkpoint-rules.md` "Filing a Critique" |
-| crewmate session | D2 Usopp's Review session files one Critique per confirmed blocking finding, plus one aggregate nits-and-smells Critique when it filed a blocking one (raw `bd create`, Draft by the Review) | Usopp | parent → Checkpoint | `usopp/prompts/review.md`, crew doc `checkpoint-rules.md` |
-| crewmate session | D3 Zoro's pivot triage session refiles the unfinished FR on dismiss or amend (raw `bd create` unless one is already discovered-from the pivot) | Zoro | parent → Checkpoint; discovered-from pivot | `zoro/prompts/pivot.md` "Dismiss" |
+| crewmate session | D1 Franky's Build/Critique session files a defect beyond its slice with a raw `bd create` (Draft by the Build) | Franky | parent → Checkpoint; discovered-from the Build/Critique | `franky/prompts/build.md`, crew doc `checkpoint-rules.md` "Filing a Critique" |
+| crewmate session | D2 Usopp's Review session files one Critique per confirmed blocking finding, plus one aggregate nits-and-smells Critique when it filed a blocking one (raw `bd create`, Draft by the Review) | Usopp | parent → Checkpoint; discovered-from the Review | `usopp/prompts/review.md`, crew doc `checkpoint-rules.md` |
+| CLI verb | D3 `mugicrew pivot dismiss <pivot> --critique <file>` or `mugicrew pivot amend <pivot> --critique <file>` refiles the unfinished FR as a Draft of the lead pivot, unless a non-Ask Critique is already discovered-from the pivot; refused when the pivot has an Ask Critique | Zoro's pivot triage session | parent → Checkpoint; discovered-from pivot | `zoro.Dismiss`, `zoro.Amend`, `zoro.refile`, `bd.SpawnDiscoveredIfAbsent` |
 | crewmate session | D4 Usopp's Forge Review session files an actionable Merge Request note (raw `bd create` of `kind:critique` on a Checkpoint, Draft by the Forge Review) | Usopp | parent → Checkpoint; discovered-from the Forge Review | `usopp/prompts/forge-review.md`, `usopp.forgeArgs.FiledKind` |
 | loop | D5 Jinbe's gated land files a Critique when the pinned nix build fails, carrying `Base:`/`Tip:` pins | Jinbe | parent → Checkpoint; discovered-from the Landing | `jinbe.gateOutcome`, `jinbe.gateCritiqueBody` |
 | loop | D6 Jinbe's Forge pipeline mirror files a Critique when the Merge Request pipeline fails after one retry | Jinbe | parent → Checkpoint; discovered-from the Landing | `jinbe.pipelineFailed`, `jinbe.fileCritique` |
-| CLI verb | D7 `mugicrew approval rework <approval> --critique <file>…` files the rework Critiques as Drafts of the Approval and publishes them with the Approval's close | Luffy's HITL approval session, on the human's OK | parent → Checkpoint | `bd.ReworkApproval`, `luffy/prompts/approval_hitl_tail.md` |
+| CLI verb | D7 `mugicrew approval rework <approval> --critique <file>…` files the rework Critiques as Drafts of the Approval and publishes them with the Approval's close | Luffy's HITL approval session, on the human's OK | parent → Checkpoint; discovered-from the Approval | `bd.ReworkApproval`, `luffy/prompts/approval_hitl_tail.md` |
 | reconcile | D8 `mugicrew reconcile <signal> --checkpoint <cp> --critique <file>` files a Signal's reroute Critique (Draft by the Signal) | Luffy's triage session | parent → host Checkpoint; caused-by the Signal; discovered-from its pivot (the Ask) or the `--merge-into` target | `luffy.SeedReroute`, `bd.CreateDraft` |
 | CLI verb | D9 `mugicrew pivot raise <errand> --critique <file>` files an Errand's Critique (Draft by the Errand) | Brook's Errand session | parent → the held Checkpoint; discovered-from the Errand; discovered-from its pivot or merge target when paired | `luffy.RaiseFromErrand`, `bd.CreateRaiseDraft` |
 
@@ -513,13 +528,13 @@ A finding raised against the work, fixed test-first · owner Franky · leaf, a C
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | none: `Closed` | Franky's loop-dispatched session tail, no Rationale comment | The Checkpoint drains once no member is open; a Critique with `Source:` lines gets a close-out reply and resolve on its Merge Request thread | `franky.finish`, `jinbe.closeVerdict`, `jinbe.renderReply` |
+| completed | `completed` | Franky's loop-dispatched session tail, no Rationale comment | The Checkpoint drains once no member is open; a Critique with `Source:` lines gets a close-out reply and resolve on its Merge Request thread | `franky.finish`, `bd.Close`, `bd.CompletedReason`, `jinbe.parseVerdict`, `jinbe.renderReply` |
 | completed, with rationale | `accepted: <rationale>` | Franky's session tail, when the session left a `Rationale:` comment | As above; the reply reads accepted | `franky.finish`, `franky/prompts/build.md` |
 | rejected | `rejected: <why it is not needed>` | Franky's session, a raw `bd close` before integrate | Relayed whole to whoever filed it; nothing committed | `franky/prompts/build.md` "A Critique that needs no change", `jinbe.verdictPrefixes` |
 | accepted, already fixed | `accepted: <what already fixed it>` | Franky's session, a raw `bd close` | As rejected | `franky/prompts/build.md` |
 | deferred | `deferred: <why it is valid, and what carries it>` | Franky's session, a raw `bd close` | An offshoot Signal he filed carries the work | `franky/prompts/build.md` |
 | pivoted | `pivoted: <pivot ids>` | Franky's session tail, when a pivot is discovered-from the Critique | Gate edges publish with the close | `franky.runAndFinish`, `bd.RaiseIfPivoted`, `bd.RaisePivot` |
-| dismissed (Ask Critique) | `dismissed: <pivot id>` | Zoro's pivot triage session, a raw `bd close` on a pivot's Ask Critique | The Ask is dropped, the Signal is never reopened | `zoro/prompts/pivot.md` "Signal raisers" |
+| dismissed (Ask Critique) | `dismissed: <pivot id>` | Zoro's pivot triage session, through `mugicrew pivot dismiss` for each Ask not named in `--rewrite` | The Ask is dropped, the Signal is never reopened | `zoro.Dismiss`, `bd.DismissedCloseReason` |
 | obsolete (Spec swept) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | Zoro's session, through `mugicrew pivot confirm` / `escalate` | A `--carries` Critique first gets the new Spec or Chart discovered-from it (Carry of the obsoleted Checkpoint's ordering edges runs beside it); Jinbe's MR reply reads deferred if carried, closed if not | `zoro.closeOut`, `zoro.carryCritiques`, `zoro.carryCheckpoint`, `jinbe.sweptReply` |
 | obsolete (Draft retired) | `obsolete: <bead> of <checkpoint> was retired` | Dispatch tail | The Draft never publishes | `dispatch.effort.retire` |
 
@@ -528,13 +543,13 @@ A finding raised against the work, fixed test-first · owner Franky · leaf, a C
 | Expected edge | Why | D1 | D2 | D3 | D4 | D5 | D6 | D7 | D8 | D9 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | parent → Checkpoint | Membership: an open Critique undrains the Checkpoint and holds the land (`loop.CheckpointLandHold`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| discovered-from the bead that raised it | `GLOSSARY.md` calls it an offshoot, so the graph names what it was found from | ✗ | ✗ | n/a (pivot) | ✓ | ✓ | ✓ | ✗ | n/a (caused-by) | ✓ |
+| discovered-from the bead that raised it | `GLOSSARY.md` calls it an offshoot, so the graph names what it was found from | ✓ | ✓ | n/a (pivot) | ✓ | ✓ | ✓ | ✓ | n/a (caused-by) | ✓ |
 | caused-by the Signal | A reroute's Critique succeeds the Signal | n/a | n/a | n/a | n/a | n/a | n/a | n/a | ✓ | n/a |
 | discovered-from the pivot | A refiled FR or an Ask names its pivot | n/a | n/a | ✓ | n/a | n/a | n/a | n/a | ✓ (when paired) | ✓ (when paired) |
 
 ### Gaps found
 
-Entries 15, 16, 17 in [Gaps](#gaps).
+Entries 15, 16, 17 in [Gaps](#gaps). Entry 15 is resolved by the Spec "Usopp and Franky close Reviews, Conflicts and reasonless Critiques with named outcomes that Jinbe's reply reads".
 
 ## conflict
 
@@ -545,9 +560,9 @@ A rebase conflict or numbered-file clash on a Checkpoint, or a human's requested
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
 | loop | D1 Jinbe's pre-review probe finds a collision when it would spawn the Review and files the Conflict instead (body leads `Found before review:`) | Jinbe | parent → Checkpoint; supersedes edge from an unclaimed requested Conflict it replaced | `jinbe.spawnReviewIfDue`, `jinbe.fileConflict` (`preReview`), `jinbe.spawnConflict` |
-| loop | D2 Jinbe's Landing hits a rebase conflict or number clash while landing (also the MR-open `conflictArm`), files the Conflict and closes the Landing `obsolete: conflict` | Jinbe | parent → Checkpoint; supersedes edge as D1 | `jinbe.landed`, `jinbe.conflictArm`, `jinbe.fileConflict`, `jinbe.spawnConflict` |
+| loop | D2 Jinbe's Landing hits a rebase conflict or number clash while landing (also the MR-open `conflictArm`), files the Conflict and closes the Landing `obsolete: conflict` | Jinbe | parent → Checkpoint; `discovered-from` the Landing; supersedes edge as D1 | `jinbe.landed`, `jinbe.conflictArm`, `jinbe.fileConflict`, `jinbe.spawnConflict` |
 | TUI key | D3 The New menu's `r` row files a requested rebase of the selected open Chart or Checkpoint | the human | parent → Checkpoint | `tui.rebaseRequest`, `tui.canRebase`, `rebase.Request` |
-| CLI verb | D4 `mugicrew rebase <id>` files the same requested rebase | the human | parent → Checkpoint | `runRebase`, `rebase.Request` |
+| CLI verb | D4 `mugicrew rebase <id>` files the same requested rebase; refuses a crewmate session (`MUGICREW_EFFORT` or `MUGICREW_HITL_PANE` set) with exit 1, filing nothing | the human | parent → Checkpoint | `runRebase`, `rebase.Request` |
 
 All four go through `bd.SpawnChildIfAbsent`, so at most one Conflict is open per Checkpoint whatever its variant. Franky's `conflict.md` prescribes a raw `bd create` only for a pivot.
 
@@ -555,7 +570,7 @@ All four go through `bd.SpawnChildIfAbsent`, so at most one Conflict is open per
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| resolved | none: `Closed` | Franky's loop-dispatched session tail | The Checkpoint drains: Jinbe spawns a fresh Review (so the re-landed commit is re-reviewed and the stale Approval is obsoleted), or, for a D1 Conflict, re-probes and then spawns the first Review | `franky.runConflict`, `franky.finish`, `jinbe.spawnReviewIfDue` |
+| resolved | `resolved` | Franky's loop-dispatched session tail | The Checkpoint drains: Jinbe spawns a fresh Review (so the re-landed commit is re-reviewed and the stale Approval is obsoleted), or, for a D1 Conflict, re-probes and then spawns the first Review | `franky.runConflict`, `franky.finish`, `bd.Close`, `bd.ResolvedReason`, `jinbe.spawnReviewIfDue` |
 | pivoted | `pivoted: <pivot ids>` | Franky's session tail | Gate edges publish with the close | `franky.runAndFinish`, `bd.RaiseIfPivoted`, `bd.RaisePivot` |
 | superseded | `superseded: <conflict title>` (the new Conflict's title, e.g. `Checkpoint <id> conflicts with main`) | Jinbe, loop, only for an open unclaimed requested Conflict when D1 or D2 files a real one | The old Conflict gets a supersedes edge to the new one; a claimed requested one is kept and the new one is swallowed | `jinbe.spawnConflict`, `bd.Supersede` |
 | obsolete (Spec swept) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | Zoro's session, through `mugicrew pivot confirm` / `escalate` | Closes with its Checkpoint | `zoro.closeOut` |
@@ -566,11 +581,12 @@ All four go through `bd.SpawnChildIfAbsent`, so at most one Conflict is open per
 | --- | --- | --- | --- | --- | --- |
 | parent → Checkpoint | Membership: an open Conflict undrains the Checkpoint, so the loop stops re-dispatching the failing land (`loop.CheckpointLandHold`) | ✓ | ✓ | ✓ | ✓ |
 | supersedes old requested Conflict → new | A real Conflict replaces a human's unclaimed request | ✓ | ✓ | n/a | n/a |
+| `discovered-from` the Landing that hit it | Names the land attempt that raised it (ADR 0401) | n/a (pre-review) | ✓ | n/a (human-filed) | n/a (human-filed) |
 | `Base:` and `Tip:` pins (body lines, not edges) | Franky rebases onto the base and cuts his effort at the tip | ✓ | ✓ | ✓ | ✓ |
 
 ### Gaps found
 
-Entries 15, 18 in [Gaps](#gaps).
+Entries 15, 18 in [Gaps](#gaps). Entry 15 is resolved by the Spec "Usopp and Franky close Reviews, Conflicts and reasonless Critiques with named outcomes that Jinbe's reply reads". Entry 18 is resolved by the Spec "mugicrew rebase refuses a crewmate session".
 
 ## approval
 
@@ -580,7 +596,7 @@ The stamp that gates the land · owner Luffy · leaf, one per Checkpoint or Char
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| crewmate session | D1 The tail of Usopp's Review session spawns the Approval when the Review closes clean, carrying the `Commit:` pin of the reviewed commit and the Checkpoint's title | Usopp | parent → Checkpoint only | `usopp.approveIfClean`, `usopp.approvalSuccessor`, `bd.SpawnChildIfAbsent` |
+| crewmate session | D1 The tail of Usopp's Review session spawns the Approval when the Review closes clean, carrying the `Commit:` pin of the reviewed commit and the Checkpoint's title | Usopp | parent → Checkpoint; caused-by the clean Review (one create) | `usopp.approveIfClean`, `usopp.approvalSuccessor`, `bd.SpawnChildIfAbsent` |
 | loop | D2 Nami's Chart step spawns the Approval where it spawned the Landing: a drained, stamped Chart with no approved Approval at its head and no open blocker, titled as the Chart, `Commit: <chart/<id> head>` and `Patch-id:` pins; no Review; none for a Chart with nothing ahead of mainline | Nami | parent → Chart only | `nami.reconcileChart`, `nami.gateChart`, `bd.SpawnChildIfAbsent` |
 
 No crew doc or prompt prescribes a raw `bd create` of an Approval.
@@ -591,18 +607,18 @@ No crew doc or prompt prescribes a raw `bd create` of an Approval.
 | --- | --- | --- | --- | --- |
 | approved | `approved` | Luffy's HITL approval session, a raw `bd close <id> --reason=approved` on the human's explicit OK; or, under auto-approve, Go's AFK arm after the packet check | The sole land trigger: the Checkpoint is `approved`, and Jinbe's Landing is spawned in succession to it | `luffy/prompts/approval_hitl_tail.md`, `luffy.runApproval`, `bd.ApprovedReason`, `bd.Bead.ApprovedClosed`, `jinbe.checkpointApproval` |
 | rework | `rework: <critique ids>` | Luffy's HITL session, through the CLI verb `mugicrew approval rework` | The rework Critiques publish with the close; nothing lands. On a Chart, the findings are new grilling or research defog beads on the Chart, `chart:defogged` is removed, and the Chart re-defogs before a fresh Approval | `bd.ReworkApproval` |
-| obsoleted | `Approval obsoleted: pinned commit superseded by advanced HEAD` | Usopp's Review session tail, for an open Approval whose pin is not the reviewed HEAD | A fresh Approval is spawned off the new clean Review. A Chart's open Approval whose pin is no longer the `chart/<id>` head is obsoleted by Nami, which spawns a fresh one at the new head | `usopp.obsoleteStaleApprovals`, `nami.gateChart` |
+| obsoleted | `obsolete:<sp>branch advanced past the pinned commit` (`<sp>` is a space: `bd.ApprovalObsoletedReason`) | Usopp's Review session tail, for an open Approval whose pin is not the reviewed HEAD | A fresh Approval is spawned off the new clean Review. A Chart's open Approval whose pin is no longer the `chart/<id>` head is obsoleted by Nami, which spawns a fresh one at the new head | `bd.ApprovalObsoletedReason`, `usopp.obsoleteStaleApprovals`, `nami.gateChart` |
 | obsolete (Spec swept) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | Zoro's session, through `mugicrew pivot confirm` / `escalate` | Closes with its Checkpoint | `zoro.closeOut` |
 
 A rework or obsoleted Approval carries no ordering edge and lands nothing (`GLOSSARY.md` Approval).
 
 ### Born-with ordering
 
-| Expected edge | Why | D1 |
-| --- | --- | --- |
-| parent → Checkpoint or Chart | Membership: one Approval per container, so the derived `approved` state reads it (`bd.ReviewDueOver`) | ✓ |
-| caused-by the clean Review | `GLOSSARY.md`: spawned in succession to that Review, so it certifies that Review's commit | ✗ |
-| `Commit:` pin (body line, not an edge) | The land gate compares it to the branch tip (`approvedAtHead`) | ✓ |
+| Expected edge | Why | D1 | D2 |
+| --- | --- | --- | --- |
+| parent → Checkpoint or Chart | Membership: one Approval per container, so the derived `approved` state reads it (`bd.ReviewDueOver`) | ✓ | ✓ |
+| caused-by the clean Review | `GLOSSARY.md`: spawned in succession to that Review, so it certifies that Review's commit | ✓ | n/a (a Chart has no Review) |
+| `Commit:` pin (body line, not an edge) | The land gate compares it to the branch tip (`approvedAtHead`) | ✓ | ✓ |
 
 ### Gaps found
 
@@ -625,8 +641,8 @@ No crew doc prescribes a raw `bd create` of a Forge Review.
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| filed | `filed <n>, folded <n>, skipped <n>: read through note <id>` | Usopp's Forge Review session tail, when it filed or folded a note | Its Drafts publish with the priority of the container; a pending Landing closes `obsolete: review comment` if any Draft was filed; Jinbe awards the filed notes later | `usopp.forgeReviewTail`, `contract.ForgeReviewCounts`, `jinbe.awardDue` |
-| nothing actionable | `nothing actionable: read <n> notes through <id>` | Usopp's session tail | None | `usopp.forgeReviewTail` |
+| filed (completed) | `completed: filed <n>, folded <n>, skipped <n>; read through note <id>` | Usopp's Forge Review session tail, when it filed or folded a note | Its Drafts publish with the priority of the container; a pending Landing closes `obsolete: review comment` if any Draft was filed; Jinbe awards the filed notes later | `usopp.forgeReviewTail`, `contract.ForgeReviewCounts`, `jinbe.awardDue` |
+| nothing actionable (completed) | `completed: nothing actionable; read <n> notes through <id>` | Usopp's session tail | None | `usopp.forgeReviewTail` |
 | obsolete (Spec swept) | `obsolete: Spec <old> superseded by <new> (pivot <p> confirmed)` or `obsolete: Spec <old> escalated to Chart <new> (pivot <p> escalated)` | Zoro's session, through `mugicrew pivot confirm` / `escalate` | Closes with its Checkpoint | `zoro.closeOut` |
 
 ### Born-with ordering
@@ -654,10 +670,10 @@ The leaf that reads a container's open Merge Request every paced tick, so a comm
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| container closed | `container closed` | Jinbe, loop: when it lands the container, or on a Watch tick over a closed container with no MR recorded, a non-gitlab strategy, or nothing owed | None | `jinbe.closeMRWatches`, `jinbe.reconcileMRWatch`, `jinbe.lateMRWatch` |
-| MR merged | `obsolete: merge request merged` | Jinbe's Watch tick, once nothing is owed | Close-outs are answered before it closes | `jinbe.lateMRWatch`, `jinbe.mrWatchOwes` |
-| MR closed | `obsolete: merge request closed` | Jinbe's Watch tick, once nothing is owed | As merged | `jinbe.lateMRWatch` |
-| abandoned | `obsolete: close-out abandoned; carried by <signal id>` | Jinbe's Watch tick, 7 days after the container closed with close-outs still failing | Files an unparented Signal discovered-from the Watch first; the Watch keeps its lines | `jinbe.abandonMRWatch`, `bd.SpawnOffshootSignalTitledIfAbsent`, `jinbe.abandonAfter` |
+| container closed (completed) | `completed: container closed` | Jinbe, loop: when it lands the container, or on a Watch tick over a closed container with no MR recorded, a non-gitlab strategy, or nothing owed | None | `jinbe.closeMRWatches`, `jinbe.reconcileMRWatch`, `jinbe.lateMRWatch` |
+| MR merged (completed) | `completed: merge request merged` | Jinbe's Watch tick, once nothing is owed | Close-outs are answered before it closes | `jinbe.lateMRWatch`, `jinbe.mrWatchOwes` |
+| MR closed (completed) | `completed: merge request closed` | Jinbe's Watch tick, once nothing is owed | As merged | `jinbe.lateMRWatch` |
+| abandoned | `abandoned: close-outs still failing; carried by <signal id>` | Jinbe's Watch tick, 7 days after the container closed with close-outs still failing | Files an unparented Signal discovered-from the Watch first; the Watch keeps its lines | `jinbe.abandonMRWatch`, `bd.SpawnOffshootSignalTitledIfAbsent`, `jinbe.abandonAfter` |
 
 A Spec sweep does not close an MR Watch: `zoro.closeOut` and `loop.retireStragglers` spare it, and it later closes itself.
 
@@ -692,23 +708,27 @@ Work on a Checkpoint proves the Spec wrong for one FR · owner Zoro (triages) ·
 | --- | --- | --- | --- | --- |
 | confirmed | `confirmed` | Zoro's triage session, through the CLI verb `mugicrew pivot confirm` (last leg of the sweep) | The corrected Spec is drafted (caused-by the old Spec's Chart, else its Signal; discovered-from the pivot); the old Spec is superseded; the Checkpoint's ordering edges Carry to the new Spec; `--carries` Critiques get the new Spec discovered-from them; every open member and the Checkpoint close obsolete; sibling pivots close superseded | `zoro.Confirm`, `zoro.spawnCorrectedSpec`, `zoro.carryCheckpoint`, `bd.Carry`, `zoro.closeOut` |
 | escalated | `escalated` | Zoro's session, through `mugicrew pivot escalate` | A fresh Chart (caused-by the Signal) and its Survey are drafted and its branch cut; a charted old Chart is superseded; ordering edges Carry to the new Chart; members and the Checkpoint close obsolete | `zoro.Escalate`, `zoro.escalatedChartBody`, `zoro.carryCheckpoint` |
-| dismissed | `dismissed: <gist>` | Zoro's session, a raw `bd close`, after refiling the FR as a Critique | The Checkpoint unfreezes and Builds resume | `zoro/prompts/pivot.md` "Dismiss" |
-| amended | `amended: <gist>` | Zoro's session, a raw `bd close`, after the `AMENDMENT (<pivot>):` comment on the Spec and a refiled Critique | As dismissed; the Spec is not superseded | `zoro/prompts/pivot.md` "Amend" |
+| dismissed | `dismissed: <gist>` | Zoro's session, through the CLI verb `mugicrew pivot dismiss` (last leg), after refiling the FR as a Critique or rewriting and closing the Ask Critiques | The Checkpoint unfreezes and Builds resume; each raising Errand gets a comment | `zoro.Dismiss`, `bd.DismissedCloseReason` |
+| amended | `amended: <gist>` | Zoro's session, through the CLI verb `mugicrew pivot amend` (last leg), after the `AMENDMENT (<pivot>):` comment on the Spec and every Ask Critique, and a refiled Critique when there is no Ask | As dismissed; the Spec is not superseded | `zoro.Amend`, `bd.AmendedCloseReason` |
 | superseded (sibling) | `superseded: <lead pivot id>` | Zoro's sweep, for every other open pivot of the swept Checkpoint | None | `zoro.closeOut` |
 | superseded (gate closed) | `superseded: gated Checkpoint <ids> closed` | Loop, for a published pivot whose every gate target is closed | Logged `sweep.straggler` | `loop.retireStragglers` |
 | obsolete (Draft retired) | `obsolete: <bead> of <checkpoint> was retired` | Dispatch tail, for a pivot Draft of a swept member | The pivot never publishes | `dispatch.effort.retire` |
 
-No code or prompt writes a `rejected` pivot outcome: dismiss is the Zoro prompt's `dismissed:`.
+No code or prompt writes a `rejected` pivot outcome: dismiss is `mugicrew pivot dismiss`'s `dismissed:`.
 
 ### Born-with ordering
 
 | Expected edge | Why | D1 | D2 | D3 | D4 | D5 |
 | --- | --- | --- | --- | --- | --- | --- |
 | discovered-from the raiser | Provenance, and the key Go finds the raise by (`bd.PivotsDiscoveredFrom`) | ✓ | ✓ | ✓ | n/a (caused-by) | ✓ |
-| caused-by the Signal | A reroute pivot succeeds the Signal | n/a | n/a | n/a | ✓ | n/a |
-| host Checkpoint recorded | Go needs the host to gate it | n/a (the raiser's parent) | n/a | n/a | ✓ (metadata) | ✓ (metadata) |
+| caused-by the Signal | A reroute pivot succeeds the Signal, and replaces it, so it cannot also be discovered-from it: bd holds one edge per ordered pair | n/a | n/a | n/a | ✓ | n/a |
+| host Checkpoint recorded | Go needs the host to gate it; the host is the raiser's Checkpoint (ADR 0416 (mugicrew-a-pivot-s-host-is-its-raiser-s-checkpoint)) | ✓ (derived from the raiser's parent) | ✓ (derived) | ✓ (derived) | ✓ (`raise_checkpoint` metadata) | ✓ (`raise_checkpoint` metadata) |
 | Checkpoint blocks → pivot | A live pivot blocks the whole Checkpoint | ✗ at birth, ✓ at publish | ✗ / ✓ | ✗ / ✓ | ✗ / ✓ | ✗ / ✓ |
 | pivot related → Spec | Zoro resolves the Spec from it (`bd.PivotSpec`) | ✗ / ✓ | ✗ / ✓ | ✗ / ✓ | ✗ / ✓ | ✗ / ✓ |
+
+After publish the gate edge is the host record at every door (`bd.PivotCheckpoint`): D1–D3 get no `raise_checkpoint` stamp, so no second host record can drift.
+
+The doors follow one rule (ADR 0416 (mugicrew-a-pivot-s-host-is-its-raiser-s-checkpoint)): a pivot's host is the Checkpoint its raiser holds. For a member raiser (D1–D3) Go derives the host from the raiser's parent at the effort tail; for a non-member raiser (D4, D5) the Go verb that writes the Draft records it as `raise_checkpoint`, and the publish re-checks it. The gate (Checkpoint blocks → pivot, pivot related → Spec) goes out in the raiser's publish batch at every door: through `bd.RaisePivot` and `bd.CloseOnPublish` for D1–D3, and through `session.raiseSession` for D4 and D5. The raiser's own close follows its kind: `pivoted:` for D1–D3, `rerouted:` for a Signal, none for an Errand (ADR 0326 (mugicrew-a-task-raises-through-mugicrew-pivot-raise…) §6). The one provenance edge to the raiser is discovered-from for D1–D3 and D5 (ADR 0401 (mugicrew-a-landing-s-follow-up-is-born-discovered-from-it) §1) and caused-by the Signal for D4.
 
 ### Gaps found
 
@@ -731,13 +751,13 @@ A branch that advanced past the pin makes a Checkpoint's gate respawn a Landing 
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| landed | `landed: <sha>` | Jinbe via the loop, either on the Landing's own tick or from the container's reconcile (stranded Landing closes first) | Gitlab: stale-pin Signal flagged, final close-out, open MR closed, MR Watches closed `container closed`, renumber Checkpoint minted for a number clash; the container closes after | `jinbe.landed`, `landedClose`, `closeLanded`; `bd.CloseLandings`; `nami.reconcileChart`; GLOSSARY.md "Landing" |
-| conflict | `obsolete: conflict` | Jinbe via the loop | Files the container's conflict bead (Checkpoint: Conflict; Chart: Chart-conflict); the container undrains; a gitlab MR is left open | `jinbe.landed`, `conflictArm`, `fileConflict` |
+| landed | `landed: <sha>` | Jinbe via the loop, either on the Landing's own tick or from the container's reconcile (stranded Landing closes first) | Gitlab: stale-pin Signal flagged, final close-out, open MR closed, MR Watches closed `completed: container closed`, renumber Checkpoint minted for a number clash; the container closes after | `jinbe.landed`, `landedClose`, `closeLanded`; `bd.CloseLandings`; `nami.reconcileChart`; GLOSSARY.md "Landing" |
+| conflict | `obsolete: conflict` | Jinbe via the loop | Files the container's conflict bead (Checkpoint: Conflict; Chart: Chart-conflict), discovered-from the Landing; the container undrains; a gitlab MR is left open | `jinbe.landed`, `conflictArm`, `fileConflict` |
 | pending | none (stays open) | Jinbe via the loop | Under gitlab records `MR: !<iid>` and `MR link:`; spawns an MR Watch | `jinbe.reconcileLandingOnce` (`git.ErrLandPending`), `spawnMRWatch` |
 | branch advanced | `obsolete: branch advanced without landing` | Jinbe via the loop | A Checkpoint falls back to its Approval gate (new Review); a Chart's gate respawns an Approval, not a Landing | `jinbe.reconcileLandingOnce`, `gatedLand` |
 | build failed | `obsolete: build failed` | Jinbe via the loop (local strategy, gated land) | Files a Critique on the Checkpoint, discovered-from the Landing; none if one is open at that base and tip | `jinbe.gateOutcome`, `gatedLand` |
-| pipeline failed | `obsolete: pipeline failed` | Jinbe via the loop (gitlab, retried pipeline red) | Checkpoint: Critique discovered-from the Landing. Chart: HITL Errand blocking the Chart | `jinbe.pipelineFailed`, `fileCritique`, `holdErrand` |
-| merge request closed | `obsolete: merge request closed` | Jinbe via the loop (gitlab, MR closed on the Forge) | HITL Errand blocking the container: reopen or merge the MR, or withdraw | `jinbe.mirrorMR` (closed arm), `holdErrand` |
+| pipeline failed | `obsolete: pipeline failed` | Jinbe via the loop (gitlab, retried pipeline red) | Checkpoint: Critique discovered-from the Landing. Chart: HITL Errand blocking the Chart, discovered-from the Landing | `jinbe.pipelineFailed`, `fileCritique`, `holdErrand` |
+| merge request closed | `obsolete: merge request closed` | Jinbe via the loop (gitlab, MR closed on the Forge) | HITL Errand blocking the container, discovered-from the Landing: reopen or merge the MR, or withdraw | `jinbe.mirrorMR` (closed arm), `holdErrand` |
 
 No other close path writes a Landing: `mugicrew withdraw` refuses while a Landing is open (`withdraw.landingRefusals`), and a reroute refuses a landing or landed Checkpoint (ADR 0324 (mugicrew-a-reroute-refuses…)).
 
@@ -761,8 +781,8 @@ The Chart-land counterpart of Conflict: a collision stopping a Chart's Landing, 
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| loop | D1 A Chart Landing's rebase conflict or number clash files `<Chart title> conflicts with main`, body carries the base, tip and variant pins | the loop (Jinbe's Landing step) | parent (the Chart) | `jinbe.fileConflict`, `spawnConflict`, `nami.ChartConflictBody` |
-| CLI verb | D2 `mugicrew rebase <chart-id>` files the requested variant, pinned at the current mainline | the human | parent (the Chart) | `rebase.Request`, `runRebase` (`main.go`) |
+| loop | D1 A Chart Landing's rebase conflict or number clash files `<Chart title> conflicts with main`, body carries the base, tip and variant pins | the loop (Jinbe's Landing step) | parent (the Chart); `discovered-from` the Landing | `jinbe.fileConflict`, `spawnConflict`, `nami.ChartConflictBody` |
+| CLI verb | D2 `mugicrew rebase <chart-id>` files the requested variant, pinned at the current mainline; refuses a crewmate session (`MUGICREW_EFFORT` or `MUGICREW_HITL_PANE` set) with exit 1, filing nothing | the human | parent (the Chart) | `rebase.Request`, `runRebase` (`main.go`) |
 | TUI key | D3 `n` then `r` on a selected open Chart files the same requested variant | the human | parent (the Chart) | `tui.Model.newOpts`, `tui.rebaseRequest`, `rebase.Request` |
 
 All three go through `bd.SpawnChildIfAbsent`, so an open Chart-conflict of any variant swallows a second (`rebase.Request` reports `OpenConflict` or `AlreadyRequested`). When a Landing conflicts while an unclaimed requested one is open, `spawnConflict` closes the request first and links the new one with bd's supersede edge. Nami's escalation files a grilling Draft, not a Chart-conflict. No crew doc or prompt prescribes a raw `bd create` of one.
@@ -771,10 +791,11 @@ All three go through `bd.SpawnChildIfAbsent`, so an open Chart-conflict of any v
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | the agent's text after `Resolved:` (free-form) | Nami's AFK arm: Go closes on publish after the post-resolve check passes and `mugicrew integrate` exits 0 | The Chart re-drains and spawns a fresh Landing; no re-review | `nami.runChartConflict`, `bd.CloseOnPublish`; GLOSSARY.md "Chart-conflict" |
+| resolved | `resolved: <summary>` (Go prefixes the agent's `Resolved:` summary; an empty summary closes bare `resolved`; a roll-forward re-run's summary "already resolved" closes the same way) | Nami's AFK arm: Go closes on publish after the post-resolve check passes and `mugicrew integrate` exits 0 | The Chart re-drains and spawns a fresh Landing; no re-review | `nami.runChartConflict`, `bd.CloseOnPublish`; GLOSSARY.md "Chart-conflict"; ADR 0400 (a-chart-conflict-resolved-close…) |
 | superseded | `superseded: <title>` (title of the Chart-conflict that replaces it) | Jinbe via the loop, when a Landing's conflict meets an unclaimed requested one | The old bead links to the new one by bd's supersede edge | `jinbe.spawnConflict`; ADR 0261 (a-requested-rebase-defers…) |
 | moot | `moot: container already on base <base>` | the backstop after an off-pin integrate, when the Chart already descends from the Base | effort branch and tree torn down | `session.Backstop` (off-pin arm) |
 | withdrawn | `withdrawn` | the human via `mugicrew withdraw` of the Chart (swept as a member) | none beyond the Chart's withdrawal | `withdraw.run` |
+| cancelled | `cancelled: <initiative>` | the human via `mugicrew initiative cancel`, sweeping the Chart (and its Chart-conflict) as a member | none beyond the Initiative's cancellation | `withdraw.Cancel` / `withdraw.run` |
 
 An escalation leaves the bead open: a grilling Draft, drafted-by the Chart-conflict, is published with a blocks edge that holds the conflict until the human closes the grilling (`nami.escalateChartConflict`).
 
@@ -783,7 +804,7 @@ An escalation leaves the bead open: a grilling Draft, drafted-by the Chart-confl
 | Expected edge | Why | D1 | D2 | D3 |
 | --- | --- | --- | --- | --- |
 | parent → Chart | member of the Chart, so the open child undrains it and the loop stops re-dispatching the failing land (ADR 0011 (mugicrew-chart-conflict-policy)) | ✓ | ✓ | ✓ |
-| discovered-from or caused-by → the Landing that hit it | to tell which land attempt it came from (cf. a gate Critique's discovered-from the Landing) | ✗ | n/a (human-filed) | n/a (human-filed) |
+| `discovered-from` the Landing that hit it | to tell which land attempt it came from, as a gate Critique does (ADR 0401) | ✓ | n/a (human-filed) | n/a (human-filed) |
 | blocks | none at birth: an escalation adds a grilling that blocks it at publish | n/a | n/a | n/a |
 
 ### Gaps found
@@ -798,7 +819,7 @@ A human's request to undo one landed Checkpoint that broke main, and recover its
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| TUI key | D1 History tab `u` ("undo") on a rollbackable Checkpoint land, then the Rollback form (title, breakage evidence) | the human | related (→ target Checkpoint), added by a second `bd dep add` after the create; copies the target's `context:` and `repo:` when nested | `tui.rollbackForm`, `bd.NewRollback`, `bd.newRelated` |
+| TUI key | D1 History tab `u` ("undo") on a rollbackable Checkpoint land, then the Rollback form (title, breakage evidence) | the human | related (→ target Checkpoint), riding the create (`--deps related:`, one write); copies the target's `context:` and `repo:` when nested | `tui.rollbackForm`, `bd.NewRollback`, `bd.newRelated` |
 
 The key is refused for a plain commit, a revert, a Chart land, a Spec anchor, a pending Rollback and an already rolled-back land (`tui.refusal`). There is no CLI verb, and agents never file one (GLOSSARY.md "Rollback"). No crew doc or prompt prescribes a raw `bd create` of one.
 
@@ -806,8 +827,8 @@ The key is refused for a plain commit, a revert, a Chart land, a Spec anchor, a 
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed (handed off) | none (bd's default) | Jinbe via the loop, once the successor exists | Revert commit on main (`Reverts-Checkpoint:` trailer), successor Checkpoint cut at the revert and seeded with the reapply, with one Build carrying the evidence; under gitlab a still-open revert MR is closed first | `jinbe.reconcileRollbackOnce`, `handOff`, `closeRollback` |
-| fix-forward | `fix-forward: revert conflicted` | Jinbe via the loop | No revert; successor cut at main HEAD with no seed, its Build also carries the conflicted paths | `bd.FixForwardReason`, `jinbe.handOff`, `fixForwardRevert` |
+| completed (handed off) | `handed off: <successor id>` | Jinbe via the loop, once the successor exists | Revert commit on main (`Reverts-Checkpoint:` trailer), successor Checkpoint cut at the revert and seeded with the reapply, with one Build carrying the evidence; under gitlab a still-open revert MR is closed first | `jinbe.reconcileRollbackOnce`, `handOff`, `closeRollback`, `bd.HandedOffReason` |
+| fix-forward | `fix-forward: <successor id>` | Jinbe via the loop | No revert; successor cut at main HEAD with no seed, its Build also carries the conflicted paths | `bd.FixForwardCloseReason`, `jinbe.handOff`, `fixForwardRevert` |
 | invalid | `invalid: no related Checkpoint`, `invalid: <id> not landed`, `invalid: <id> has no land trailer` | Jinbe via the loop | Nothing written to main; a recorded revert MR is closed | `jinbe.reconcileRollbackOnce`, `closeInvalidRollback` |
 | abandoned | `abandoned: revert MR closed` | Jinbe via the loop (gitlab, a human closed the revert MR, no successor yet) | No successor | `jinbe.revertMRArms` |
 | withdrawn | `withdrawn` | the human via `mugicrew withdraw` (a chain head with nothing caused by it) | Refused while a recorded revert MR may be open | `withdraw.plan`, `landingRefusals` |
@@ -818,7 +839,7 @@ An already-reverted target skips the revert and still hands off (`git.Revert` is
 
 | Expected edge | Why | D1 |
 | --- | --- | --- |
-| related → target Checkpoint | names the one Checkpoint to undo; without it Jinbe closes the Rollback `invalid: no related Checkpoint` (ADR 0047 (mugicrew-rollback-kind-and-entry)) | ✓ (second write) |
+| related → target Checkpoint | names the one Checkpoint to undo; without it Jinbe closes the Rollback `invalid: no related Checkpoint` (ADR 0047 (mugicrew-rollback-kind-and-entry)) | ✓ (rides the create, one write) |
 | parent | none: a Rollback is unparented; the successor joins the target's open Initiative | n/a |
 | blocks | none expected | n/a |
 
@@ -826,7 +847,7 @@ The successor Checkpoint is born caused-by the Rollback, parented to the target'
 
 ### Gaps found
 
-Entries 25, 26 in [Gaps](#gaps).
+Entries 25, 26 in [Gaps](#gaps). Entry 26 is resolved by the Spec "Rollback closes name their outcome and successor, and the glossary lists every Rollback close and its TUI door".
 
 ## surgery
 
@@ -849,7 +870,7 @@ No crewmate session files a Surgery. Franky's surgery prompt tells him "only a h
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | none (empty reason) | Franky in the Surgery session, on the human's explicit word, CLI verb `mugicrew surgery end <id>`; refused unless the Surgery is open and under a Checkpoint. Only when this Surgery's `Surgery: <id>` trailered squashes are on the Checkpoint | Integrates `effort/<id>` first (a failure closes nothing); branch left; Jinbe spawns the Review once the Checkpoint drains. The Checkpoint stays open | `franky.EndSurgery`, `main.runSurgeryEnd`; `franky/prompts/surgery.md` "End"; GLOSSARY.md "Surgery" Operations |
+| completed | `ended` | Franky in the Surgery session, on the human's explicit word, CLI verb `mugicrew surgery end <id>`; refused unless the Surgery is open and under a Checkpoint. Only when this Surgery's `Surgery: <id>` trailered squashes are on the Checkpoint | Integrates `effort/<id>` first (a failure closes nothing); branch left; Jinbe spawns the Review once the Checkpoint drains. The Checkpoint stays open | `franky.EndSurgery`, `main.runSurgeryEnd`; `franky/prompts/surgery.md` "End"; GLOSSARY.md "Surgery" Operations |
 | abandoned | `abandoned: surgery ended with no commits` | Franky, same door, when the Surgery has no trailered squashes | Also closes its Checkpoint with the same reason, but only when nothing is ahead of main and the Surgery is the Checkpoint's only child | `franky.EndSurgery` |
 | withdrawn | `withdrawn` | Human, CLI verb `mugicrew withdraw <checkpoint>` (or the TUI withdraw): the open Surgery is in the unclosed subtree of the withdrawn Checkpoint. Refused while a session is open on it | Closed leaves first with its Checkpoint; branch and tree cleaned by `withdraw.cleanup`. A Surgery cannot be withdrawn alone (not a chain head) | `withdraw.Withdraw`, `bd.WithdrawSet`, `bd.IsChainHead` |
 | cancelled | `cancelled: <initiative>` | Human, `mugicrew initiative cancel` (fresh Surgery whose Checkpoint is an Initiative member) | Closed with the member Checkpoint's subtree | `withdraw.Cancel`, `bd.CancelSet` |
@@ -870,7 +891,7 @@ Sources: `bd.NewSurgery`, `bd.NewSurgeryOn`, `bd.Claim`; `loop.SurgeryHold`, ADR
 
 ### Gaps found
 
-Entries 27, 28 in [Gaps](#gaps).
+Entries 27, 28 in [Gaps](#gaps). Entry 28 is resolved by the Spec "A finished Surgery closes ended, and the glossary lists every Surgery close and how an idle one ends"; its idle-end half is by design under ADR 0095 (mugicrew-surgery-tui-and-cli-affordances) §5.
 
 ## discussion
 
@@ -888,7 +909,7 @@ No CLI verb, reconcile, loop or doctor fix files a Discussion ("only a human lau
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | none (empty reason) | Robin in the session, on the human's word: `bd update <id> --title "<the topic>" --notes "<summary>"` then `bd close <id>` | Drafts already published by `PublishDrafts` on the clean exit | `robin/prompts/discussion.md` "Done"; GLOSSARY.md "Discussion" Operations |
+| completed | `completed` | Robin in the session, on the human's word: `bd update <id> --title "<the topic>" --notes "<summary>"` then `bd close <id> --reason completed` | Drafts already published by `PublishDrafts` on the clean exit | `robin/prompts/discussion.md` "Done"; GLOSSARY.md "Discussion" Operations |
 | dropped | `dropped` | Human, TUI `x` on the row: `tui.discussionDrop` (no session) or the live-session drop in actions_io | Unpublished Drafts deleted first (`session.DropDrafts`) | `tui.discussionDrop`; ADR 0194 (mugicrew-a-robin-discussion-is…) |
 
 An early `/exit` is not a closure: the Discussion stays open and claimed for a rejoin (`session.settle`). A Discussion is not a chain head, so `withdraw` refuses it, and it is no Initiative member, so `cancel` never reaches it (`bd.IsWithdrawable`).
@@ -903,7 +924,7 @@ Sources: `bd.NewDiscussion`, `bd.unparentedArgs`; GLOSSARY.md "Discussion".
 
 ### Gaps found
 
-Entry 29 in [Gaps](#gaps).
+Entry 29 in [Gaps](#gaps), resolved by the Spec "Discussions close completed, and every Checkup close lifts its target's fence through one closer".
 
 ### Retrospective
 
@@ -913,29 +934,31 @@ A Discussion Robin runs on a finished target (a Signal, Chart, Spec, Checkpoint 
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| TUI key | D1 `r` on a row of an eligible kind, behind a confirm dialog and a closed-spine check; files "Retrospective <target title>" with `Target:` and `Spine:` key lines, then launches Robin with the retrospective framing | human | none from the create; then a `related` edge to the target in a separate write | `tui.retrospective`, `tui.retroStart`, `bd.NewDiscussion`, `bd.Related`; ADR 0281 (mugicrew-a-retrospective-s-spine…) |
+| TUI key | D1 `n t` (New menu, `t`) on a row of an eligible kind, behind a confirm dialog and a closed-spine check; files "Retrospective <target title>" with `Target:` and `Spine:` key lines, then launches Robin with the retrospective framing | human | a `related` edge to the target, riding the create | `tui.retrospective`, `tui.retroStart`, `bd.NewRetrospective`; ADR 0281 (mugicrew-a-retrospective-s-spine…) |
 
 No other door. A retrospective on an open spine is refused by the key; no CLI verb exists.
+
+A Retrospective is born unstamped (no `context:` or `repo:` label, even from a stamped target), while a Checkup and a Rollback copy their target's stamp: a stamp guards a bead that acts on a repo (ADR 0167 (one-workspace-many-repos…)), and a Retrospective only reads sessions and drafts Signals.
 
 #### Closure outcomes
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| completed | none (empty reason) | Robin in the session, on the human's word: `bd update <id> --notes "…"` (no `--title`: keeps its title) then `bd close <id>` | as a Discussion | `robin/prompts/retrospective.md` framing |
+| completed | `completed` | Robin in the session, on the human's word: `bd update <id> --notes "…"` (no `--title`: keeps its title) then `bd close <id> --reason completed` | as a Discussion | `robin/prompts/retrospective.md` framing |
 | dropped | `dropped` | Human, TUI `x`, as a Discussion | as a Discussion | `tui.discussionDrop` |
 
 #### Born-with ordering
 
 | Expected edge | Why | D1 |
 | --- | --- | --- |
-| `related` → target | Binds the retrospective to what it reviews; the Spine key lines read from the body | ✓ (second write) |
+| `related` → target | Binds the retrospective to what it reviews; the Spine key lines read from the body | ✓ |
 | no `parent` | Off the spine like any Discussion | n/a |
 
 Sources: `tui.retroStart`; GLOSSARY.md "Retrospective" Structure.
 
 #### Gaps found
 
-Entry 30 in [Gaps](#gaps).
+Entry 30 in [Gaps](#gaps), resolved.
 
 ## checkup
 
@@ -947,7 +970,7 @@ Both doors run the same find-or-file: refuse, reuse the target's open Checkup if
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| TUI key | D1 `c` on any bead row, with a one-line problem prompt (blank allowed); files "Repair <target title>" then launches Chopper | human | unparented; `related` → target (second write); target's `context:` and `repo:` labels copied when stamped; not a Draft; target labelled `paused:checkup` | `tui.checkupKey`, `tui.fileCheckup`, `chopper.FileCheckup`, `bd.NewCheckup`, `bd.newRelated`; ADR 0274 (mugicrew-a-checkup-launches-from…) |
+| TUI key | D1 `c` on any bead row, with a one-line problem prompt (blank allowed); files "Repair <target title>" then launches Chopper | human | unparented; `related` → target (rides the create, one write); target's `context:` and `repo:` labels copied when stamped; not a Draft; target labelled `paused:checkup` | `tui.checkupKey`, `tui.fileCheckup`, `chopper.FileCheckup`, `bd.NewCheckup`, `bd.newRelated`; ADR 0274 (mugicrew-a-checkup-launches-from…) |
 | CLI verb | D2 `mugicrew checkup <bead> [--problem "<one line>"]`; launches and attaches the terminal | human | as the TUI door | `main.runCheckup`, `main.checkup`, `chopper.FileCheckup`; ADR 0272 (mugicrew-a-chopper-checkup-is-a-hitl…) |
 
 No reconcile, loop, doctor fix or crewmate session files a Checkup; Chopper's prompt lists `signal new`/`offshoot` as the only filing verbs it may run (`chopper/prompts/checkup.md`). **Drafts on a clean exit:** Chopper may file offshoot Signal Drafts `discovered-from` the Checkup, published on a clean exit with no close, as for a Discussion (`session.sessionPlan`).
@@ -956,9 +979,11 @@ No reconcile, loop, doctor fix or crewmate session files a Checkup; Chopper's pr
 
 | Outcome | Close reason (exact) | Performed by / door | Side effects | Source |
 | --- | --- | --- | --- | --- |
-| repaired | `repaired: <what changed>` | Chopper in the session, on the human's word, after a repair plan ran | The last act lifts `paused:checkup` from the target (`bd update <target> --remove-label paused:checkup`) | `chopper/prompts/checkup.md` "Done"; GLOSSARY.md "Checkup" Operations |
-| not a bead fault | `not a bead fault: <why>` | Chopper, same door, when no change in its write surface fixes the symptom | Same fence lift; nothing written on the target | `chopper/prompts/checkup.md` "Done" |
-| dropped | `dropped` | Human, TUI `x`: `tui.discussionDrop` or the live-session drop | `tui.closeCheckup` lifts `paused:checkup` from each related target that no other open Checkup still holds; unpublished Drafts deleted first | `tui.closeCheckup`, `tui.discussionDrop` |
+| repaired | `repaired: <what changed>` | Chopper in the session, on the human's word, after a repair plan ran: `mugicrew checkup close <checkup> --reason "repaired: <what changed>"` | The shared closer closes the Checkup, then lifts `paused:checkup` from each related target that no other open Checkup still holds | `chopper.CloseCheckup`, `main.runCheckupClose`; `chopper/prompts/checkup.md` "Done"; GLOSSARY.md "Checkup" Operations |
+| not a bead fault | `not a bead fault: <why>` | Chopper, same door (`mugicrew checkup close <checkup> --reason "not a bead fault: <why>"`), when no change in its write surface fixes the symptom | Same shared closer and fence rule; nothing written on the target | `chopper.CloseCheckup`, `main.runCheckupClose`; `chopper/prompts/checkup.md` "Done" |
+| dropped | `dropped` | Human, TUI `x`: `tui.discussionDrop` or the live-session drop, through the shared closer | The same closer and fence rule; unpublished Drafts deleted first | `chopper.CloseCheckup`, `tui.closeCheckup`, `tui.discussionDrop` |
+
+The verb refuses with exit 1, a usage line and no writes a bead that is not a Checkup, a closed Checkup, `dropped` (the TUI's alone), a bare prefix with a blank detail, and any other reason.
 
 A Checkup whose every finding the human declined stays open (`chopper/prompts/checkup.md`). Not withdrawable or cancellable, as for a Discussion. `mugicrew recover` also lifts a stranded `paused:checkup` from a target with no session (`chopper.liftable`).
 
@@ -966,7 +991,7 @@ A Checkup whose every finding the human declined stays open (`chopper/prompts/ch
 
 | Expected edge | Why | D1 | D2 |
 | --- | --- | --- | --- |
-| `related` → target | Binds the Checkup to its target and makes "at most one open per target" findable | ✓ (second write) | ✓ (second write) |
+| `related` → target | Binds the Checkup to its target and makes "at most one open per target" findable | ✓ (rides the create) | ✓ (rides the create) |
 | `context:` / `repo:` stamp copied from target | A nested target's Checkup is held `paused:context` on drift like the target | ✓ | ✓ |
 | `paused:checkup` on the target (label, not an edge) | Fences the target from the loop while it is repaired | ✓ (after the create) | ✓ (after the create) |
 | no `parent` | Off the spine | n/a | n/a |
@@ -975,7 +1000,7 @@ Sources: `bd.NewCheckup`, `bd.newRelated`, `chopper.FileCheckup`, `bd.OpenChecku
 
 ### Gaps found
 
-Entries 29, 30 in [Gaps](#gaps).
+Entries 29, 30 in [Gaps](#gaps). Entry 29 is resolved by the Spec "Discussions close completed, and every Checkup close lifts its target's fence through one closer".
 
 ## initiative
 
@@ -1017,6 +1042,29 @@ An Initiative closes only `done: <how Done when holds>` or `cancelled: <why>`; t
 ### Gaps found
 
 Entries 31, 32, 33 in [Gaps](#gaps). Entry 32 is resolved by the Spec "An Initiative closes done or cancelled with its why, by every door".
+
+## remnant
+
+The in-flight work a Forge merge left off mainline when it landed a gitlab Checkpoint at an earlier approved pin · owner Zoro (HITL, never dispatched AFK) · leaf with no parent, related to the landed Checkpoint (`GLOSSARY.md` Remnant; `jinbe/remnant.go`, `bd/remnant.go`).
+
+### Creation doors
+
+| Door type | Door | Used by | Edges created | Source |
+| --- | --- | --- | --- | --- |
+| reconcile | D1 `closeLanded` files it for a landed gitlab Checkpoint, only when the branch head is past the landed squash's `Tip:` or an open child other than a Landing, MR Watch or AwaitingUndraft Approval remains; idempotent per Checkpoint | Jinbe | related → the landed Checkpoint; discovered-from the newest Landing in the same create when one exists; no parent | `jinbe.fileRemnant`, `bd.SpawnRemnantIfAbsent` |
+
+At filing, each unstarted open child (open or deferred, unassigned; Drafts included) is listed on the body as a `Child:` line and force-closed `obsolete: container landed; carried by <remnant>`; each running child and open pivot gets the Remnant blocked on it; a before-land Errand is listed as an `Errand:` line.
+
+### Closure outcomes
+
+`mugicrew remnant <id> drop|offshoot` (`remnant.Drop`, `remnant.Offshoot`) refuses unless the Remnant is open with no open blocker, sweeps any still-unstarted child of the landed Checkpoint onto it, then closes it: `dropped` (deletes `checkpoint/<landed>` and each `Kept:` effort branch with its cut ref; closes a carried before-land Errand `obsolete: dropped by <remnant>`) or `offshoot: <signal id>` (one offshoot Signal discovered-from the Remnant listing every `Child:`, its kept ref, the `Stranded:` range and any Renumber Checkpoint; closes a carried Errand `obsolete: offshoot by <remnant>`; refs kept). `mugicrew remnant <id> respin` (`remnant.Respin`) files a new Checkpoint re-filing the unstarted members and closes the Remnant `respun: <cp>`; a Renumber Checkpoint holds that exit until it lands (D7). No Renumber Checkpoint holds drop or offshoot.
+
+### Born-with ordering
+
+| Expected edge | Why | D1 |
+| --- | --- | --- |
+| related → landed Checkpoint | `bd.RemnantOf` finds the Remnant by it | ✓ |
+| discovered-from the newest Landing | Names the land attempt that stranded the work | ✓ when a Landing exists |
 
 ## latch
 
@@ -1091,7 +1139,7 @@ An interrupted or stuck Errand stays claimed and idle (never closed, never uncla
 | Expected edge | Why | D1, D2, D4–D6 | D7 (Hold Errand D1–D5) |
 | --- | --- | --- | --- |
 | `drafted-by:` the drafter | so the drafter's publish takes it | ✓ | ✗ by design (born open, not a Draft: Go files it with no session to publish it) |
-| `discovered-from` the drafter | lineage to the bead it was found from | ✓ | ✗ by design (`blocks` already takes the container's pair, bd keeps one edge per pair, and a hold may have no Landing) |
+| `discovered-from` the drafter | lineage to the bead it was found from | ✓ | ✓ for the Landing-raised holds (D1–D3 of Hold Errand, ADR 0401); n/a for the revert-pipeline and foreign-land holds (no Landing) |
 | `blocks` / `blocked-by` its order targets | an Errand is ordered only by edges (ADR 0113) | ✓ per `--after`/`--before`; ✗ when none given (then it is unordered and outside) | ✓ (`blocks` the container, atomic with the create) |
 | `parent` the Initiative of its order target | membership, decided once at filing (ADR 0352) | ✓ when one is open | ✓ when the container's is open |
 | `related` the closed predecessor | a hold that outlives its closed Errand re-files related to it (ADR 0338) | n/a | ✓ (a separate second write) |
@@ -1108,11 +1156,11 @@ An Errand Go files to block a container or Rollback until a Forge or mainline co
 
 | Door type | Door | Used by | Edges created | Source |
 | --- | --- | --- | --- | --- |
-| loop | D1 Jinbe's Landing tick: a closed MR (`Closed MR: !<iid>`) | Jinbe (Go) | `blocks` the Checkpoint (atomic with the create); `parent` the Checkpoint's open Initiative when there is one; later `related` to a closed Errand with the same key. No `drafted-by`, `discovered-from` or `caused-by`. | `jinbe.holdErrand`, `bd.SpawnBlockingErrandIfAbsent` |
-| loop | D2 Jinbe's Landing tick: a failed pipeline (`pipelineKey`), including the infra variant | Jinbe (Go) | as above | `jinbe.holdErrand` (lines naming `pipelineKey`) |
-| loop | D3 Jinbe's Landing tick: a merged MR whose trailer is missing (`Merged MR: !<iid>`) | Jinbe (Go) | as above | `jinbe.holdTrailerless` |
-| loop | D4 Jinbe's revert MR arms: a failed revert pipeline, blocking the Rollback | Jinbe (Go) | as above with `blocks` the Rollback; a Rollback's Initiative is found through the Checkpoint it undoes | `jinbe.revertMRArms`, `bd.initiativeOfTarget` |
-| loop | D5 the foreign-land check at land: `Foreign: <sha>` | the loop, Jinbe and Nami (`bd.HoldForeign` callers) | as above | `bd.HoldForeign` (`bd/bd.go`), `bd.SpawnBlockingErrand` |
+| loop | D1 Jinbe's Landing tick: a closed MR (`Closed MR: !<iid>`) | Jinbe (Go) | `blocks` the Checkpoint and `discovered-from` the Landing (both atomic with the create); `parent` the Checkpoint's open Initiative when there is one; later `related` to a closed Errand with the same key. No `drafted-by` or `caused-by`. | `jinbe.holdErrand`, `bd.SpawnBlockingErrandIfAbsent` |
+| loop | D2 Jinbe's Landing tick: a failed pipeline (`pipelineKey`), including the infra variant | Jinbe (Go) | as above, `discovered-from` the Landing | `jinbe.holdErrand` (lines naming `pipelineKey`) |
+| loop | D3 Jinbe's Landing tick: a merged MR whose trailer is missing (`Merged MR: !<iid>`) | Jinbe (Go) | as above, `discovered-from` the Landing | `jinbe.holdTrailerless` |
+| loop | D4 Jinbe's revert MR arms: a failed revert pipeline, blocking the Rollback | Jinbe (Go) | as D1 with `blocks` the Rollback and no `discovered-from` (no Landing raised it); a Rollback's Initiative is found through the Checkpoint it undoes | `jinbe.revertMRArms`, `bd.initiativeOfTarget` |
+| loop | D5 the foreign-land check at land: `Foreign: <sha>` | the loop, Jinbe and Nami (`bd.HoldForeign` callers) | as D4: `blocks` only, no `discovered-from` | `bd.HoldForeign` (`bd/bd.go`), `bd.SpawnBlockingErrand` |
 
 All five are idempotent on (container, key): an open blocking Errand whose body contains the key is returned. No TUI key, verb, reconcile leg or doctor row files one.
 
@@ -1128,12 +1176,13 @@ All five are idempotent on (container, key): an open blocking Errand whose body 
 
 #### Born-with ordering
 
-| Expected edge | Why | D1–D5 |
-| --- | --- | --- |
-| `blocks` the container | the hold exists to stop the land | ✓ |
-| `parent` the container's Initiative | membership (ADR 0352) | ✓ when open |
-| `drafted-by` / `discovered-from` | provenance to the Landing or MR that raised it | ✗ by design: born open with no session to publish it (`SpawnBlockingErrandIfAbsent` sets neither); the key line in the body is the identity, since an MR number or sha can't live on an edge |
-| `related` the closed predecessor | a re-filed hold keeps lineage (ADR 0338) | ✓ when one exists |
+| Expected edge | Why | D1–D3 | D4, D5 |
+| --- | --- | --- | --- |
+| `blocks` the container | the hold exists to stop the land | ✓ | ✓ |
+| `parent` the container's Initiative | membership (ADR 0352) | ✓ when open | ✓ when open |
+| `discovered-from` the Landing | provenance to the land attempt that raised the hold (ADR 0401), written in the same create as `blocks` | ✓ (D1–D3) | n/a (D4, D5: no Landing) |
+| `drafted-by` | so a publish takes it | ✗ by design: born open with no session to publish it (`SpawnBlockingErrandIfAbsent` sets none); the key line in the body is the identity, since an MR number or sha can't live on an edge | ✗ by design, as D1–D3 |
+| `related` the closed predecessor | a re-filed hold keeps lineage (ADR 0338) | ✓ when one exists | ✓ when one exists |
 
 #### Gaps found
 
@@ -1145,42 +1194,42 @@ Every finding of the audit, numbered, each traced to the Signal filed for it. Ea
 
 | # | Kind | Door or outcome | Problem | Signal |
 | --- | --- | --- | --- | --- |
-| 1 | signal | creation: code-filed offshoots (D10–D12) vs the offshoot verb (D5) | Code-filed offshoot Signals are born open with `discovered-from` and no order edge; the verb files a Draft with an order. | Code-filed offshoot Signals skip the Draft and order the offshoot verb applies |
-| 2 | signal | creation: Initiative member (D5 vs D6) | Two filing doors give a member Signal different edges: D6 `parent` only, D5 `parent`, `discovered-from` and an order edge. | Initiative member Signals have two filing doors with different edges |
-| 3 | signal, chart, spec, checkpoint, build | closure: accepted, completed, landed, built | The success closes of the spine kinds all carry bd's default `Closed`; reject is free text, duplicate is bd's own text, and the TUI reads an empty reason as superseded. _Related_ to entries 7, 15, 26, 28, 29, 37. | Spine closes lack distinguishable reasons |
+| 1 | signal | creation: code-filed offshoots (D10–D12) vs the offshoot verb (D5) | Resolved by the Spec "Loop-filed offshoot Signals are born in their cause's Initiative with the verb's Order and Initiative lines". Was: code-filed offshoot Signals were born open and unparented with only `discovered-from`, no Initiative parent and no `Order:` or `Initiative:` body lines; the Draft and order-edge gaps were not real, since the loop has no session to publish a Draft and the container has already landed or closed. | Code-filed offshoot Signals skip the Draft and order the offshoot verb applies |
+| 2 | signal | creation: Initiative member (D5 vs D6) | Two filing doors give a member Signal different edges: D6 `parent` only, D5 `parent`, `discovered-from` and an order edge. Justified at triage: the split is by design and now documented: D5 files found work (a cause to cite, a container to order against), D6 files a planned phase line (no finder, cut only once the Initiative is drained). | Initiative member Signals have two filing doors with different edges |
+| 3 | signal, chart, spec, checkpoint, build | closure: accepted, completed, landed, built | Resolved by the Spec "Spine closes write outcome-and-successor reasons, one reject prefix and a reason-first duplicate door", under ADR 0399 (mugicrew-every-spine-close-names-its-outcome…). Was: the success closes of the spine kinds all carried bd's default `Closed`; reject was free text, duplicate was bd's own text, and the TUI read an empty reason as superseded. The Chart's own reject and duplicate closes are unchanged (follow-up Signal). _Related_ to entries 7, 15, 26, 28, 29, 37. | Spine closes lack distinguishable reasons |
 | 4 | signal, chart, spec | closure: superseded, duplicate (Jira re-intake, Confirm, Escalate) | bd's supersede drops the superseded bead's outgoing `blocks` edges. Covered by an existing Initiative member; no new Signal. | Superseding a Signal drops its outgoing blocks edges and releases what it gated (existing Initiative member) |
 | 5 | signal | creation and closure: non-code outcomes | Whether Signal varieties need a kind of their own. Covered by an existing Initiative member; no new Signal. | New Signal Kind: Experiment? (existing Initiative member) |
 | 6 | chart, checkpoint, build | glossary Operations lines | The glossary's Operations lines for Chart, Checkpoint and Build disagree with the code (Chart close order, surgery Checkpoint creator, Build's omitted closes). | Glossary Operations lines disagree with the code for Chart, Checkpoint and Build |
-| 7 | survey | closure: completed | The fog-seeded and pushed-back closes both carry bd's default `Closed`, and no door retires a lone Survey. _Related_ to entry 3. | A Survey closes with bd's default reason whatever its session did |
-| 8 | grilling, research, prototype | closure: obsolete, superseded, withdrawn | No tool and no documented reason closes a moot defog bead. | A defog bead has no tool and no documented reason for closing obsolete, superseded or withdrawn |
-| 9 | grilling, research, prototype | creation: all doors | Defog beads are born with different edges depending on the door; ordering between them is left to a later `bd dep add`. | Defog beads are born with different edges depending on the door that creates them |
-| 10 | research | closure: no primary sources | A research run that finds no sources leaves the bead open for the loop to re-dispatch; no outcome exists for it. | A research bead that finds no primary sources has no closure path |
-| 11 | spec (Amendment) | creation: Amendment | The Amendment is a prompt-only `bd comments add` convention with no code door. | Amendment is a prompt-only comment convention with no code door |
+| 7 | survey | closure: completed | Resolved by the Spec "Every completed Survey close names its outcome and Chart: seeded, defogged or pushed back". Was: the fog-seeded, defogged and pushed-back closes all carried bd's default `Closed`, and nothing documented that no door retires a lone Survey (by design). _Related_ to entry 3. | A Survey closes with bd's default reason whatever its session did |
+| 8 | grilling, research, prototype | closure: obsolete, superseded, withdrawn | Resolved by ADR 0417 (mugicrew-every-defog-close-names-its-outcome…). Was: no tool and no documented reason closed a moot defog bead; each defog outcome now has one door and one exact reason (`obsolete:`, `superseded:`, `withdrawn`, `answered:`). | A defog bead has no tool and no documented reason for closing obsolete, superseded or withdrawn |
+| 9 | grilling, research, prototype | creation: all doors | Resolved by the Spec "Every defog bead is born discovered-from the bead that raised it" (ADR 0401 §1): every door but Nami's promote-or-stamp (its drafter is the Chart, already the parent) gains the edge in the same create, ordering between defog beads is written as `blocked-by:` in that create, and Chart Approval rework is a listed door. Was: defog beads were born with different edges depending on the door; ordering between them was left to a later `bd dep add`. Open defog beads lacking the edge are not migrated. | Defog beads are born with different edges depending on the door that creates them |
+| 10 | research | closure: no primary sources | Resolved by the Spec "A research run with no primary sources lands a negative finding, and a stray final line counts toward the failure pause". Was: a research run that finds no sources left the bead open for the loop to re-dispatch; no outcome existed for it. | A research bead that finds no primary sources has no closure path |
+| 11 | spec (Amendment) | creation: Amendment | Resolved by the Spec "mugicrew pivot dismiss and pivot amend verbs, with every pivot close reason a bd constant". Was: the Amendment is a prompt-only `bd comments add` convention with no code door. | Amendment is a prompt-only comment convention with no code door |
 | 12 | checkpoint | creation: surgery Checkpoint (D4, D5) | Born without the `context:` and `repo:` stamps the other doors copy. | Surgery Checkpoint is born without the context and repo stamps other Checkpoint doors copy |
 | 13 | build | closure: abandoned | No door closes a single abandoned Build; `withdraw` refuses it. | A single Build has no closure door for abandoned work |
-| 14 | review | creation and closure: pin, obsolete | A Review's pin and obsolete outcome are not on its bead; only the Approval is pinned and obsoleted. | A Review's pin and obsolete outcome are not on its bead |
-| 15 | review, conflict, critique | closure: completed, resolved | The completed closes write no reason. _Related_ to entry 3. | Review, Conflict and Critique completed closes write no reason |
-| 16 | critique | creation: D1, D2, D7 vs D4–D6, D8, D9 | The doors disagree on the offshoot edge to what raised the Critique. _Related_ to entries 21 and 23. | Critique doors disagree on the offshoot edge to what raised them |
-| 17 | critique, pivot | closure: dismissed, amended | The `dismissed:` and `amended` reasons exist only in the Zoro prompt. | Pivot dismissed and amended close reasons exist only in the Zoro prompt |
-| 18 | conflict | creation: D3, D4 (requested rebase) | The glossary's human-only rule is prose; neither door checks it. | A requested Conflict's human-only rule is prose, not enforced |
-| 19 | approval | creation: D1; closure: obsoleted | No `caused-by` edge to the Review, and an obsolete reason without the `obsolete:` prefix. | Approval is born without a caused-by edge to its Review and obsoletes with a non-obsolete reason |
-| 20 | forge-review, mr-watch | closure: filed, nothing actionable, container closed | The close reasons are in no glossary line and mix prefix conventions. | MR Watch and Forge Review close reasons are undocumented and mix prefix conventions |
-| 21 | pivot | creation: D1–D5 | Two ways to record the host and the raiser. _Related_ to entries 16 and 23. | Pivot doors record the host and the raiser differently |
+| 14 | review | creation and closure: pin, obsolete | **Resolved:** Usopp writes the pin onto the Review at review start, and no outcome obsoletes a Review whose branch moved past its pin, by decision (a stale pass spawns an Approval the at-head gate rejects). Was: a Review's pin and obsolete outcome are not on its bead; only the Approval is pinned and obsoleted. | A Review's pin and obsolete outcome are not on its bead |
+| 15 | review, conflict, critique | closure: completed, resolved | Resolved by the Spec "Usopp and Franky close Reviews, Conflicts and reasonless Critiques with named outcomes that Jinbe's reply reads". Was: the completed closes of a Review, a Conflict and a Critique with no Rationale wrote no reason. _Related_ to entry 3. | Review, Conflict and Critique completed closes write no reason |
+| 16 | critique | creation: D1, D2, D7 vs D4–D6, D8, D9 | Resolved by the Spec "Every Critique is born discovered-from the bead that raised it" (ADR 0401 §1): D1, D2 and D7 gain the edge, while D3 (discovered-from the pivot) and D8 (caused-by the Signal) keep their one provenance edge. Was: the doors disagreed on the offshoot edge to what raised the Critique. _Related_ to entries 21 and 23. | Critique doors disagree on the offshoot edge to what raised them |
+| 17 | critique, pivot | closure: dismissed, amended | Resolved by the Spec "mugicrew pivot dismiss and pivot amend verbs, with every pivot close reason a bd constant". Was: the `dismissed:` and `amended` reasons exist only in the Zoro prompt. | Pivot dismissed and amended close reasons exist only in the Zoro prompt |
+| 18 | conflict | creation: D3, D4 (requested rebase) | Resolved by the Spec "mugicrew rebase refuses a crewmate session": the CLI door refuses a crewmate session and the TUI door is human-only. Was: The glossary's human-only rule is prose; neither door checks it. | A requested Conflict's human-only rule is prose, not enforced |
+| 19 | approval | creation: D1; closure: obsoleted | Resolved by the Spec "Approval is born caused-by its clean Review and obsoletes with an obsolete: reason" (both halves are in the code). Was: no `caused-by` edge to the Review, and an obsolete reason without the `obsolete:` prefix. | Approval is born without a caused-by edge to its Review and obsoletes with a non-obsolete reason |
+| 20 | forge-review, mr-watch | closure: filed, nothing actionable, container closed | Resolved by the Spec "MR Watch and Forge Review closes name their outcome, and the glossary quotes every close". Was: the close reasons were in no glossary line and mixed prefix conventions. | MR Watch and Forge Review close reasons are undocumented and mix prefix conventions |
+| 21 | pivot | creation: D1–D5 | Resolved by the Spec "Pivot docs state one host-and-provenance rule for every door", under ADR 0416 (mugicrew-a-pivot-s-host-is-its-raiser-s-checkpoint): the split is by design. Was: two ways to record the host and the raiser. _Related_ to entries 16 and 23. | Pivot doors record the host and the raiser differently |
 | 22 | landing | closure: build failed, pipeline failed, merge request closed, branch advanced | Three reasons are undocumented and the glossary misquotes the branch-advanced reason. | A Landing's build failed, pipeline failed and merge request closed closes are undocumented, and the glossary misquotes the branch-advanced reason |
-| 23 | landing, chart-conflict, critique, errand | creation: follow-ups of a Landing | Follow-up beads link back to the Landing by different edges, and the Conflict beads by none. _Related_ to entries 16 and 21. | A Landing's follow-up beads link back to it by different edges, and its conflict beads by none |
-| 24 | chart-conflict | closure: resolved, moot, superseded | The reasons are free text or documented only in prose. | A Chart-conflict's resolved, moot and superseded closes are free-form or undocumented |
-| 25 | rollback | creation: filing | Filing is two writes; a tick between them closes the Rollback `invalid` before its `related` edge exists. _Related_ to entries 27, 30 and 34. | A Rollback is filed in two writes, so a tick can close it invalid before its related edge exists |
-| 26 | rollback | closure: completed, fix-forward, abandoned | The completed close writes no reason; the prefixes and the TUI-only door are not in the glossary. _Related_ to entry 3. | A Rollback's completed close writes no reason, and its fix-forward and abandoned prefixes and TUI-only door are not in the glossary |
+| 23 | landing, chart-conflict, critique, errand | creation: follow-ups of a Landing | Resolved by the Spec for one provenance rule (ADR 0401): every follow-up a Landing files is discovered-from it. Was: follow-up beads link back to the Landing by different edges, and the Conflict beads by none. _Related_ to entries 16 and 21. | A Landing's follow-up beads link back to it by different edges, and its conflict beads by none |
+| 24 | chart-conflict | closure: resolved, moot, superseded | Resolved by the Spec "A Chart-conflict resolved close writes resolved: <summary>, and the docs name all five close reasons". Was: The reasons are free text or documented only in prose. | A Chart-conflict's resolved, moot and superseded closes are free-form or undocumented |
+| 25 | rollback | creation: filing | Resolved by the Spec "Rollback and Checkup are filed with their related edge in one write". Was: filing is two writes; a tick between them closes the Rollback `invalid` before its `related` edge exists. _Related_ to entries 27, 30 and 34. | A Rollback is filed in two writes, so a tick can close it invalid before its related edge exists |
+| 26 | rollback | closure: completed, fix-forward, abandoned | Resolved by the Spec "Rollback closes name their outcome and successor, and the glossary lists every Rollback close and its TUI door". Was: the completed close writes no reason; the prefixes and the TUI-only door are not in the glossary. _Related_ to entry 3. | A Rollback's completed close writes no reason, and its fix-forward and abandoned prefixes and TUI-only door are not in the glossary |
 | 27 | surgery | creation: fresh doors, join door; the Critique hold | Filing is not atomic, and the hold on Critiques is a loop scan, not an edge. _Related_ to entries 25, 30 and 34. | Surgery filing is not atomic and its hold on Critiques is not an edge |
-| 28 | surgery | closure: completed, abandoned | Closes are undocumented, and an idle Surgery can end only through its own session. _Related_ to entry 3. | Surgery closes are undocumented and an idle Surgery can only end through its own session |
-| 29 | discussion, checkup | closure: completed, dropped, repaired, not a bead fault | Reasons are undocumented, and the two Checkup closers lift the target's fence differently. _Related_ to entry 3. | Discussion and Checkup closure reasons are undocumented, and Checkup closers lift the target's fence differently |
-| 30 | discussion (Retrospective), checkup | creation: TUI `r`, Checkup doors | Filed by different code with a second-write `related` edge; only Checkup stamps `context:` and `repo:`. _Related_ to entries 25, 27 and 34. | Retrospective and Checkup are filed by different code with a second-write related edge, and only Checkup stamps context and repo |
+| 28 | surgery | closure: completed, abandoned | Closes are undocumented, and an idle Surgery can end only through its own session. _Related_ to entry 3. Resolved by the Spec "A finished Surgery closes ended, and the glossary lists every Surgery close and how an idle one ends": the completed close is `ended` and the glossary lists every close. The idle-end half is by design under ADR 0095 (mugicrew-surgery-tui-and-cli-affordances) §5: ending stays in-session, and the human may run `mugicrew surgery end <id>` by hand. | Surgery closes are undocumented and an idle Surgery can only end through its own session |
+| 29 | discussion, checkup | closure: completed, dropped, repaired, not a bead fault | Resolved by the Spec "Discussions close completed, and every Checkup close lifts its target's fence through one closer". Was: reasons are undocumented, and the two Checkup closers lift the target's fence differently. _Related_ to entry 3. | Discussion and Checkup closure reasons are undocumented, and Checkup closers lift the target's fence differently |
+| 30 | discussion (Retrospective), checkup | creation: TUI `n t`, Checkup doors | Resolved by the Specs "Rollback and Checkup are filed with their related edge in one write" (Checkup) and "A Retrospective is born with its related edge in one write and stays unstamped" (Retrospective). Was: filed by different code with a second-write `related` edge, and only Checkup stamps `context:` and `repo:`; the Retrospective is unstamped on purpose (see its section). _Related_ to entries 25, 27 and 34. | Retrospective and Checkup are filed by different code with a second-write related edge, and only Checkup stamps context and repo |
 | 31 | initiative | creation: TUI key vs reconcile | The two doors give different edges and body. | Initiative is born with different edges and body by the TUI and by reconcile |
 | 32 | initiative | closure: done, cancelled | Resolved by the Spec "An Initiative closes done or cancelled with its why, by every door". Was: reasons differ by door, `done:` is undocumented, and no obsolete, superseded or rejected path exists. | Initiative closure reasons differ by door and done is undocumented |
 | 33 | initiative, latch | creation: reconcile Carry | Carry moves a converted Signal's `blocks` edges and Latches onto its Initiative, which the `latch` verb refuses. | Carry puts a converted Signal's blocks edges and Latches onto its Initiative (resolved: the Latch is skipped as `initiative`; the outgoing blocks carry is intended) |
 | 34 | latch | creation: both verbs | No prompt prescribes a door, and the create and the `blocks` edge are separate writes. _Related_ to entries 25, 27 and 30. | A Latch has no prompted door and is born without its blocks edge in the same write |
 | 35 | latch | closure: watched MR closed, target dropped | Resolved by the Spec "Latch closure outcomes: an unmet pause for a closed or missing MR, Withdraw for a Latch, and named close reasons". Was: no documented closure; Withdraw and Cancel cannot drop a Latch. | A Latch watching a closed merge request or a dropped target has no documented closure |
-| 36 | errand (Hold Errand) | creation: `errand new` vs the Hold doors | Different lineage: `drafted-by` and `discovered-from` against neither. Resolved as documented-by-design: see the Errand and Hold Errand Born-with tables. | Errand is born with different lineage by errand new and by the Hold doors |
+| 36 | errand (Hold Errand) | creation: `errand new` vs the Hold doors | Different lineage: `drafted-by` and `discovered-from` against neither. Amended by ADR 0401: provenance is ✓ for the Landing-raised holds (discovered-from the Landing), and only the `drafted-by` difference stays by design; see the Errand and Hold Errand Born-with tables. | Errand is born with different lineage by errand new and by the Hold doors |
 | 37 | errand (Hold Errand) | closure: completed, hold cleared | Resolved by the Spec "Go closes a cleared or moot Hold Errand, and every Errand close carries a named reason". Was: the reason is the default `Closed`, and no door closes a hold whose fact clears. _Related_ to entry 3. | Errand closure reasons are undocumented and no door closes a Hold Errand whose fact clears |
 | 38 | all kinds | doc upkeep | Nothing keeps this hand-kept doc in step with `contract.Kinds` or the close reasons it quotes. A cross-kind finding of the audit's final Build. | Nothing keeps the bead lifecycle reference in step with the code |
 

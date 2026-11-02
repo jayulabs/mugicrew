@@ -94,7 +94,7 @@ func TestRenumberRejectSpawnsReviewWithNote(t *testing.T) {
 
 func TestNoApprovedApprovalSpawnsPlainReview(t *testing.T) {
 	obsolete := approvedOld()
-	obsolete.CloseReason = "Approval obsoleted: tip moved"
+	obsolete.CloseReason = bd.ApprovalObsoletedReason
 	for name, kids := range map[string][]bd.Bead{"none": nil, "only obsoleted": {obsolete}} {
 		t.Run(name, func(t *testing.T) {
 			r := carryRec(kids...)

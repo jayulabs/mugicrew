@@ -18,8 +18,7 @@ to main; no push or bd/Dolt remote sync.
   if present. On coordination (bd, branches, no push, closing beads) your
   prompt wins; on how code is written, styled, built, tested the Workspace's
   docs win; you may run the build/test commands they give.
-- Read the Workspace's .mugicrew/CREW.md too if present: a human-authored brief
-  of its traps. Don't edit it; to change it, file a Signal.
+- Read .mugicrew/CREW.md too if present: a human-authored brief of its traps. Don't edit it; to change it, file a Signal.
 
 The spine: Signal → Chart (defog) → Spec → Checkpoint → Build. HITL is
 authorization, not authorship: the human approves, the crew writes.
@@ -37,5 +36,5 @@ Crew docs: Read by path from {{CREWDOCS}} when your prompt names one:
 - checkpoint-rules.md: Spec, Critiques, pivots
 - signal-filing.md: file a Signal
 - vocabulary.md: terms
-- sequence-renumber.md: renumbering
+- sequence-number.md, sequence-renumber.md: numbering
 - approval-body.md: Packet

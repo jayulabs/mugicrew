@@ -318,6 +318,28 @@ func (m Model) cancelDone(id, why string, res withdraw.Result, err error, p with
 
 // cancelView draws the rows page or the review page.
 func (m Model) cancelView(d dialog) string {
+	box, _ := m.cancelBox(d)
+	return m.placeBox(box)
+}
+
+// cancelHits is where the cancel dialog's mouse targets sit within the box's content: the
+// drawn lines of each chain (field is the chain index; the locked reason line is not one),
+// the choice labels of the chains drawn, and the why line's row (-1 when not drawn).
+type cancelHits struct {
+	fs      []formField
+	choices []choiceCols
+	why     int
+}
+
+// choiceCols is chain's choice line (row) and the columns [x0, x1) of its close and
+// release labels, from the content's start.
+type choiceCols struct {
+	chain, row                     int
+	closeX0, closeX1, relX0, relX1 int
+}
+
+// cancelBox is the cancel dialog's box, not yet drawn onto the frame, and its targets.
+func (m Model) cancelBox(d dialog) (string, cancelHits) {
 	styleW := m.xWidth() - 2
 	inner := styleW - 2
 	p, cs := d.xs.plan, d.xs.cancel
@@ -325,8 +347,9 @@ func (m Model) cancelView(d dialog) string {
 	if d.xs.barred {
 		head = append(head, m.refusedHead(p, withdraw.KindCancel, inner)...)
 	}
+	hits := cancelHits{why: -1}
 	var body, tail []string
-	hint := lipgloss.NewStyle().Width(styleW - 2).Render(flatHints(d.cancelBindings(), styleW-2))
+	hint, _ := hintLine(d.cancelBindings(), styleW-2)
 	switch {
 	case cs.review:
 		body = m.cancelReview(d, inner)
@@ -339,7 +362,9 @@ func (m Model) cancelView(d dialog) string {
 		for _, l := range cs.tally(p) {
 			head = append(head, wrapLines(l, inner)...)
 		}
-		head = append(head, "", m.whyLine(cs, inner), "")
+		head = append(head, "")
+		hits.why = len(head)
+		head = append(head, m.whyLine(cs, inner), "")
 	}
 	if d.xs.warn != "" && !d.xs.barred {
 		for _, l := range wrapLines(d.xs.warn, inner) {
@@ -354,10 +379,22 @@ func (m Model) cancelView(d dialog) string {
 	tail = append(tail, "", hint)
 	if !cs.review {
 		budget := max(m.h-2-len(head)-len(tail), 1)
-		body = m.cancelRows(d, inner, budget)
+		var lines []cancelLine
+		body, lines = m.cancelRows(d, inner, budget)
+		for i, l := range lines {
+			switch l.kind {
+			case lineChoice:
+				c := l.cols
+				c.chain, c.row = l.chain, len(head)+i
+				hits.choices = append(hits.choices, c)
+				fallthrough
+			case lineTitle:
+				hits.fs = append(hits.fs, formField{field: l.chain, row: len(head) + i, rows: 1})
+			}
+		}
 	}
 	ls := append(append(head, body...), tail...)
-	return m.placeBox(refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)))
+	return refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)), hits
 }
 
 const xCancelLead = "Closes the unclosed member chains, then the Initiative, as cancelled."
@@ -388,9 +425,10 @@ func (m Model) whyLine(cs *cancelState, inner int) string {
 // cancelRows draws the chains, windowed to budget lines with a k/N counter. Each chain
 // is a line (two under xChoiceNarrow inner columns), and the highlighted locked chain
 // has its reason under it.
-func (m Model) cancelRows(d dialog, inner, budget int) []string {
+func (m Model) cancelRows(d dialog, inner, budget int) ([]string, []cancelLine) {
 	p, cs := d.xs.plan, d.xs.cancel
 	var lines []string
+	var meta []cancelLine
 	var first, last []int
 	for i, c := range cs.chains {
 		first = append(first, len(lines))
@@ -402,18 +440,23 @@ func (m Model) cancelRows(d dialog, inner, budget int) []string {
 		choice := choiceOf(c, cs.release[i])
 		left := kindTag(&c.head) + " " + c.head.Title
 		var rows []string
+		cols := choiceColsOf(choice, 2)
 		if inner < xChoiceNarrow {
 			rows = []string{withTags(left, tagStr, inner), "  " + choice}
+			meta = append(meta, cancelLine{chain: i, kind: lineTitle}, cancelLine{chain: i, kind: lineChoice, cols: cols})
 		} else {
 			right := choice
 			if tagStr != "" {
 				right = tagStr + "  " + choice
 			}
 			rows = []string{withTags(left, right, inner)}
+			cols = choiceColsOf(choice, inner-lipgloss.Width(choice))
+			meta = append(meta, cancelLine{chain: i, kind: lineChoice, cols: cols})
 		}
 		if c.locked != "" && i == d.cur && !d.xs.barred {
 			for _, l := range wrapLines("🔒 "+c.locked, inner-2) {
 				rows = append(rows, "  "+warnSt.Render(l))
+				meta = append(meta, cancelLine{chain: i, kind: lineInert})
 			}
 		}
 		for j, r := range rows {
@@ -428,15 +471,40 @@ func (m Model) cancelRows(d dialog, inner, budget int) []string {
 		last = append(last, len(lines))
 	}
 	if len(lines) <= budget || len(cs.chains) == 0 {
-		return lines
+		return lines, meta
 	}
 	rows := max(budget-1, 1)
 	lo := followOffset(len(lines), rows, last[d.cur]-1)
 	if first[d.cur] < lo {
 		lo = first[d.cur]
 	}
-	out := slices.Clone(lines[lo:min(lo+rows, len(lines))])
-	return append(out, dimSt.Render(fmt.Sprintf("%d/%d", d.cur+1, len(cs.chains))))
+	hi := min(lo+rows, len(lines))
+	out := slices.Clone(lines[lo:hi])
+	shown := append(slices.Clone(meta[lo:hi]), cancelLine{kind: lineInert})
+	return append(out, dimSt.Render(fmt.Sprintf("%d/%d", d.cur+1, len(cs.chains)))), shown
+}
+
+// cancelLine says what a drawn line of cancelRows is for the mouse.
+type cancelLine struct {
+	chain int
+	kind  int
+	cols  choiceCols // for a lineChoice
+}
+
+const (
+	lineInert  = iota // the locked reason line and the k/N counter
+	lineTitle         // a chain's title line when its choice drops to the next (narrow)
+	lineChoice        // the line holding the chain's close and release labels
+)
+
+// choiceColsOf is where choice's labels sit when it starts at column at: "(●) close" and
+// "( ) release", or a locked chain's "🔒 locked" standing in for the release label.
+func choiceColsOf(choice string, at int) choiceCols {
+	const closeW, gap = 9, 2 // "(●) close" and the two spaces after it
+	return choiceCols{
+		closeX0: at, closeX1: at + closeW,
+		relX0: at + closeW + gap, relX1: at + lipgloss.Width(choice),
+	}
 }
 
 // cancelReview is page two: what closes with each chain's cost, what is released, and

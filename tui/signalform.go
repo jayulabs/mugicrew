@@ -128,6 +128,17 @@ func editSignalForm(b bd.Bead) dialog {
 	return signalFormDialog(b.ID, sigVals{b.Title, b.Priority, b.Description})
 }
 
+// stepPrio moves the priority one step: stepUp toward P0, stepDown toward P4, clamped.
+func (f signalForm) stepPrio(side int) signalForm {
+	switch side {
+	case stepUp:
+		f.prio = max(f.prio-1, 0)
+	case stepDown:
+		f.prio = min(f.prio+1, 4)
+	}
+	return f
+}
+
 func (f signalForm) vals() sigVals { return sigVals{f.title.text, f.prio, f.desc.Value()}.norm() }
 
 func (f signalForm) dirty() bool { return f.vals() != f.snap || strings.TrimSpace(f.ref.text) != "" }
@@ -217,12 +228,7 @@ func (m Model) formKey(d dialog, k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case f.field == fieldRef:
 		f.ref = f.ref.apply(k)
 	case f.field == fieldPrio:
-		switch stepOf(k.String()) {
-		case stepUp:
-			f.prio = max(f.prio-1, 0)
-		case stepDown:
-			f.prio = min(f.prio+1, 4)
-		}
+		f = f.stepPrio(stepOf(k.String()))
 	default:
 		f.desc, _ = f.desc.Update(k) // ponytail: the paste command is dropped
 	}
@@ -404,6 +410,8 @@ func (m Model) editSignal(d dialog, v sigVals) (tea.Model, tea.Cmd) {
 // start column within the content and the width it renders in.
 type formField struct {
 	field, row, rows, text, col, w int
+	stepped                        bool          // the field draws a ◀ P2 ▶ stepper on its last row, at col
+	steps                          [2]stepTarget // its ◀ and ▶, columns relative to col
 }
 
 // textField is the layout of a one-line field drawn by fieldRow(w, …, label, …) as rows
@@ -460,7 +468,22 @@ func (m Model) formRows(f signalForm, w int) ([]string, []formField) {
 	if f.withRef {
 		add(fieldRef, "ref:", f.ref.render, true)
 	}
-	add(fieldPrio, "priority:", func(int) string { return prio(f.prio) }, false)
+	stepping := f.field == fieldPrio && m.modalCaptured()
+	var prioSteps [2]stepTarget
+	add(fieldPrio, "priority:", func(int) string {
+		if !stepping {
+			return prio(f.prio)
+		}
+		var s string
+		s, prioSteps = stepper(prio(f.prio), f.prio == 0, f.prio == 4, m.hoverSide())
+		return s
+	}, false)
+	if stepping { // the same stepper call draws the arrows and lays out their targets
+		ff := &fs[len(fs)-1]
+		tf := textField(fieldPrio, w, "priority:", ff.row, ff.rows)
+		ff.steps = prioSteps
+		ff.stepped, ff.col = true, tf.col
+	}
 	desc := formField{field: fieldDesc, row: len(ls), text: -1}
 	ls = append(ls, focusMark(f.field == fieldDesc)+dimSt.Render("description:"))
 	for _, l := range strings.Split(f.desc.View(), "\n") {
@@ -475,11 +498,47 @@ func (m Model) formRows(f signalForm, w int) ([]string, []formField) {
 	return append(ls, dimSt.Render("labels and deps: E after saving")), fs
 }
 
+// stepAt is the priority arrow under screen cell (x, y) of the drawn form, if any.
+func (lay formLayout) stepAt(x, y int) (stepTarget, bool) {
+	for _, f := range lay.fields {
+		if !f.stepped || y-lay.y-1 != f.row+f.rows-1 {
+			continue
+		}
+		c := x - lay.x - 2 - f.col
+		for _, t := range f.steps {
+			if c >= t.hx0 && c < t.hx1 {
+				return t, true
+			}
+		}
+	}
+	return stepTarget{}, false
+}
+
+// formHover is the hover for a pointer at (x, y): set only over a live priority arrow, so
+// the motion filter passes just the motion that changes the shaded arrow.
+func (m Model) formHover(x, y int) hover {
+	d := m.modals[len(m.modals)-1]
+	if sp, ok := m.hintAt(x, y); ok {
+		return hover{set: true, x: x, y: y, opt: true, optSpan: sp}
+	}
+	if d.kind != form {
+		return hover{}
+	}
+	if t, ok := m.dialogLayout(d).stepAt(x, y); ok && !t.inert {
+		return hover{set: true, x: x, y: y, step: t.key}
+	}
+	return hover{}
+}
+
 // formMouse is the open form's mouse path: a left press focuses the field under it, as tab
 // does, and puts the cursor of a one-line field or the description on the cell it lands on;
 // the wheel over the description scrolls it. It never edits: keys, saves, the dirty check
 // and esc stay on the dialog's key path. Everything else is consumed.
 func (m Model) formMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action == tea.MouseActionMotion {
+		m.hover = m.formHover(msg.X, msg.Y)
+		return m, nil
+	}
 	wheel := isWheel(msg)
 	if !wheel && (msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft) {
 		return m, nil
@@ -489,8 +548,21 @@ func (m Model) formMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.X < lay.x || msg.X >= lay.x+lay.w || msg.Y < lay.y || msg.Y >= lay.y+lay.h {
 		return m, nil
 	}
+	if sp, ok := m.hintAt(msg.X, msg.Y); ok && !wheel { // an answering hint presses its key
+		return m.sendKey(keyMsgOf(sp.key))
+	}
 	ff, ok := lay.fieldAt(msg.Y)
 	if !ok {
+		return m, nil
+	}
+	if t, ok := lay.stepAt(msg.X, msg.Y); ok && !wheel && d.kind == form && d.sf.field == fieldPrio {
+		if !t.inert { // a press on a focused field's arrow steps it and keeps focus
+			f := d.sf
+			// the arrows point at the number, the keys at the priority: ◀ (key "-") lowers P, which + does
+			d.sf = f.stepPrio(stepOf(map[string]string{"-": "+", "+": "-"}[t.key]))
+			m = m.setTopModal(d)
+			m.hover = m.formHover(msg.X, msg.Y)
+		}
 		return m, nil
 	}
 	col := -1

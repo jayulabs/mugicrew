@@ -48,6 +48,10 @@ func TestParseVerdict(t *testing.T) {
 		{"wontfix: x", "wontfix: x", "", verdictClosed, false},
 		{"fixed: y", "fixed: y", "", verdictClosed, false},
 		{"Closed", "", "", verdictClosed, false},
+		{"completed", "", "", verdictClosed, false},
+		{"Completed", "", "", verdictClosed, false},
+		{"  COMPLETED ", "", "", verdictClosed, false},
+		{"completed: something", "completed: something", "", verdictClosed, false},
 		{"", "", "", verdictClosed, false},
 		{"  plain words ", "plain words", "", verdictClosed, false},
 	} {
@@ -69,6 +73,9 @@ func TestCloseVerdictFallback(t *testing.T) {
 		{"commit", bd.Bead{CloseReason: "Closed"}, "12345678", verdictAccepted, ""},
 		{"asks", bd.Bead{Title: "Reviewer asks why X", CloseReason: "Closed"}, "", verdictAnswered, ""},
 		{"asks in body", bd.Bead{Title: "T", Description: "Reviewer asks why", CloseReason: "because"}, "", verdictAnswered, "because"},
+		{"completed commit", bd.Bead{CloseReason: "completed"}, "12345678", verdictAccepted, ""},
+		{"completed asks", bd.Bead{Title: "Reviewer asks why X", CloseReason: "completed"}, "", verdictAnswered, ""},
+		{"completed neither", bd.Bead{Title: "T", CloseReason: "completed"}, "", verdictClosed, ""},
 		{"neither", bd.Bead{Title: "T"}, "", verdictClosed, ""},
 		{"commit beats asks", bd.Bead{Title: "Reviewer asks", CloseReason: "wontfix: x"}, "12345678", verdictAccepted, "wontfix: x"},
 		{"prefix wins", bd.Bead{CloseReason: "rejected: no"}, "12345678", verdictRejected, "no"},
@@ -77,6 +84,15 @@ func TestCloseVerdictFallback(t *testing.T) {
 		if v, why := closeVerdict(c.b, c.sha8); v != c.v || why != c.why {
 			t.Errorf("%s = %v %q, want %v %q", c.name, v, why, c.v, c.why)
 		}
+	}
+}
+
+func TestRenderReplyCompletedShowsNoRationale(t *testing.T) {
+	b := bd.Bead{ID: "ws-x", Title: "T", CloseReason: bd.CompletedReason}
+	v, why := closeVerdict(b, "12345678")
+	got := renderReply(b, "h", "n", v, "12345678", why, nil)
+	if strings.Contains(got, "ompleted") || strings.Contains(got, "Rationale") {
+		t.Errorf("reply shows completed as a rationale:\n%s", got)
 	}
 }
 

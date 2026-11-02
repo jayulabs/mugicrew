@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
@@ -85,11 +86,15 @@ func TestMRWatchHoldsAForgeRateLimit(t *testing.T) {
 func TestLandedContainerClosesItsMRWatch(t *testing.T) {
 	r := &jinbeSeamRec{threadKids: []bd.Bead{openWatch()}}
 	stubJinbeSeams(t, r)
-	if err := closeMRWatches("ws-cp", "container closed"); err != nil {
+	if err := closeLanded(openCheckpoint(), "checkpoint/ws-cp", "landsha"); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(r.closed, []string{"ws-watch"}) {
-		t.Errorf("closed %v, want the Watch", r.closed)
+	i := slices.Index(r.closed, "ws-watch")
+	if i < 0 {
+		t.Fatalf("closed %v, want the Watch", r.closed)
+	}
+	if r.reasons[i] != "completed: container closed" {
+		t.Errorf("reason %q, want completed: container closed", r.reasons[i])
 	}
 }
 
@@ -258,9 +263,9 @@ func landedLanding(sha string) bd.Bead {
 
 func TestMRWatchStaysOpenWhileAFiledBeadIsOwedThenClosesWithItsReason(t *testing.T) {
 	for _, c := range []struct{ status, state, reason string }{
-		{"closed", "opened", "container closed"},
-		{"open", "merged", "obsolete: merge request merged"},
-		{"open", "closed", "obsolete: merge request closed"},
+		{"closed", "opened", "completed: container closed"},
+		{"open", "merged", "completed: merge request merged"},
+		{"open", "closed", "completed: merge request closed"},
 	} {
 		open := filed("ws-a", "open", "", disc1+" 1")
 		r := &jinbeSeamRec{discussions: []forge.Discussion{thread(disc1, note(1, 5, "x"))}}
@@ -385,7 +390,7 @@ func TestMRWatchAbandonsAfterSevenDaysFilingOneSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(r.closed, []string{"ws-watch"}) || r.reasons[0] != "obsolete: close-out abandoned; carried by ws-aband0" {
+	if !slices.Equal(r.closed, []string{"ws-watch"}) || r.reasons[0] != "abandoned: close-outs still failing; carried by ws-aband0" {
 		t.Errorf("closed %v %v, want the Watch closed carried by the Signal", r.closed, r.reasons)
 	}
 	if len(r.abandons) != 1 {
@@ -408,7 +413,7 @@ func TestMRWatchAbandonsAfterSevenDaysFilingOneSignal(t *testing.T) {
 	if _, err := lateWatchBodies(t, r, cp, "opened", kid); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.abandons) != 1 || r.reasons[0] != "obsolete: close-out abandoned; carried by ws-aband0" {
+	if len(r.abandons) != 1 || r.reasons[0] != "abandoned: close-outs still failing; carried by ws-aband0" {
 		t.Errorf("abandons %q reasons %v, want still one Signal and the same carrier", r.abandons, r.reasons)
 	}
 }
@@ -668,5 +673,25 @@ func TestMRWatchHoldsAChartWithChartWordingWhenItsDraftMRIsClosed(t *testing.T) 
 	}
 	if len(r.closed) != 0 {
 		t.Errorf("closed %v, want the Approval and the Watch left open", r.closed)
+	}
+}
+
+// bd refuses a plain close of a landed Checkpoint over a running child; the Remnant it files
+// holds on that child and the container force-closes landed over it.
+func TestLandedContainerWithARunningChildClosesLandedOverIt(t *testing.T) {
+	r := &jinbeSeamRec{kids: []bd.Bead{{ID: "ws-run", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"}}}
+	stubJinbeSeams(t, r)
+	g := bdtest.New(t,
+		bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "in_progress"},
+		bd.Bead{ID: "ws-run", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"})
+	closeBead, forceClose = bd.Close, bd.ForceClose // the real closes, over the fake graph
+	if err := closeLanded(openCheckpoint(), "checkpoint/ws-cp", "landsha"); err != nil {
+		t.Fatalf("closeLanded = %v, want a force close over the running child", err)
+	}
+	if b, _ := g.Show("ws-cp"); b.Status != "closed" || b.CloseReason != "landed: landsha" {
+		t.Errorf("container %s %q, want closed landed: landsha", b.Status, b.CloseReason)
+	}
+	if !slices.Equal(r.rem.blocks, []string{"ws-rem <- ws-run"}) {
+		t.Errorf("blocks %v, want the Remnant held on the running child", r.rem.blocks)
 	}
 }

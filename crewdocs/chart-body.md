@@ -51,16 +51,22 @@ ready): a defog bead is takeable when every bead blocking it is closed.
 Each new defog bead is a Draft child of the Chart, drafted by your own bead:
 
     bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:<your bead id> \
-      --parent <chartID> --no-inherit-labels --title "..." --description "..."
+      --parent <chartID> --no-inherit-labels --deps discovered-from:<your bead id> \
+      --title "..." --description "..."
+
+`discovered-from:<your bead id>` records which bead's work raised the question,
+written in the same create. (Nami's promote-or-stamp session on a drained Chart
+omits it: its drafter is the Chart, already the parent.)
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 Always pass --no-inherit-labels and set kind explicitly: a child that inherits
 the Chart's kind:chart breaks one-kind routing. Wire ordering only where one
 defog bead genuinely depends on another's answer (e.g. a prototype that needs a
-research fact first), so bd ready shows the true frontier:
+research fact first), so bd ready shows the true frontier. Write the gate in
+the same create, so the bead is never published without it:
 
-    bd dep add <blocked-bead> <blocking-bead>
+    --deps discovered-from:<your bead id>,blocked-by:<blocking-bead>
 
 Most fog is independent: spawn flat and skip this when there's no real
 dependency.

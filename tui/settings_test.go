@@ -29,7 +29,10 @@ func settingsModel(t *testing.T) (Model, *[]string) {
 	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
 	var saved []string
 	origs := []any{savePool, saveAutoExit, saveKindProfile, saveAutoApprove, saveMouse, loop.ReadMouse}
+	origTheme, origReadTheme := saveTheme, loop.ReadTheme
 	t.Cleanup(func() {
+		saveTheme, loop.ReadTheme = origTheme, origReadTheme
+		applyTheme(darkPalette)
 		savePool, saveAutoExit, saveKindProfile, saveAutoApprove = origs[0].(func(int) error), origs[1].(func(time.Duration) error), origs[2].(func(string, string) error), origs[3].(func(*bool) error)
 		saveMouse, loop.ReadMouse = origs[4].(func(*bool) error), origs[5].(func() loop.Mouse)
 	})
@@ -42,6 +45,17 @@ func settingsModel(t *testing.T) (Model, *[]string) {
 			saved = append(saved, "mouse on")
 		default:
 			saved = append(saved, "mouse off")
+		}
+		return nil
+	}
+	// Theme saves would otherwise write the developer's real machine-local config.
+	theme := loop.Theme{Source: "default"}
+	loop.ReadTheme = func() loop.Theme { return theme }
+	saveTheme = func(v *string) error {
+		if v == nil {
+			saved = append(saved, "theme unset")
+		} else {
+			saved = append(saved, "theme "+*v)
 		}
 		return nil
 	}

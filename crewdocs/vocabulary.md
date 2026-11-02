@@ -44,15 +44,22 @@
 - **Landing** — one bead per attempt to land a container's branch on mainline,
   pinned (`Commit: <sha>`) to the base it will land. Its outcomes: _landed_
   closes it `landed: <sha>`; _conflict_ closes it `obsolete: conflict` and files
-  the container's conflict bead; _pending_ leaves it open; a branch that
-  advanced past its pin closes it `obsolete: branch advanced`.
+  the container's conflict bead; _pending_ leaves it open; _branch advanced_
+  closes it `obsolete: branch advanced without landing`;
+  _build failed_ closes it `obsolete: build failed` and files a Critique on the
+  Checkpoint; _pipeline failed_ closes it `obsolete: pipeline failed` and files
+  a Critique on a Checkpoint, or a hold Errand on a Chart; _merge request
+  closed_ closes it `obsolete: merge request closed` and holds the container on
+  an Errand.
   _Avoid:_ the act of landing, which is **Land**.
   - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
     container); AFK, Mechanical, no session
   - _Notes:_ The `<Kind>: <id>` trailer on mainline stays the durable landed
     fact; the Landing's close mirrors it. Only Checkpoint and Chart lands are
     Landings; other moves of main (Rollback reverts, and legacy Spec anchors)
-    stay bead-less.
+    stay bead-less. Every follow-up a Landing files
+    (Critique, Conflict, Chart-conflict, Hold Errand) is born discovered-from
+    it.
 - **Build** — a unit of implementation work sliced from the Spec: a slice
   inside a Checkpoint.
   - _Owner:_ Franky
@@ -68,4 +75,8 @@
   stays as lineage. A Spec's dependents therefore wait for its Checkpoint to
   **land**. A Checkpoint obsoleted by a confirmed or escalated **pivot** carries
   the same way, to the corrected Spec or the escalated Chart.
+  A bead closed as a duplicate carries the same way, onto its original's live head
+  (the original while unclosed, else the first unclosed bead along its succession);
+  when that chain has ended, its dependents are released and the event records them
+  skipped `ended`.
   _Avoid:_ "moving" edges (nothing is removed).

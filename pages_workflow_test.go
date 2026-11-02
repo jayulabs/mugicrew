@@ -55,6 +55,11 @@ func TestPagesWorkflowShape(t *testing.T) {
 	if !strings.Contains(push, "paths:") || !strings.Contains(push, "'site/**'") {
 		t.Errorf("pages.yml push trigger lacks paths with site/**:\n%s", push)
 	}
+	for _, want := range []string{"'site/**'", "'docs/install.md'", "'docs/configuration.md'", "'docs/gitlab.md'", "'docs/jira.md'", "'GLOSSARY.md'", "'main.go'", "'.github/workflows/pages.yml'"} {
+		if !strings.Contains(push, want) {
+			t.Errorf("pages.yml push paths lack %s:\n%s", want, push)
+		}
+	}
 	perms := block(t, doc, "permissions:")
 	for _, want := range []string{"pages: write", "id-token: write", "contents: read"} {
 		if !strings.Contains(perms, want) {

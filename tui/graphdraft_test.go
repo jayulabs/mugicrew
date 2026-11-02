@@ -357,3 +357,34 @@ func TestDraftWhyWording(t *testing.T) {
 		t.Fatalf("closed AFK creator state = %v; want gone", s)
 	}
 }
+
+// A Draft whose creator is a Remnant is its respin Checkpoint: the row and the drawer name the
+// respin re-run, never recover, which would delete it.
+func TestDraftWhyRemnantNamesRespinRerun(t *testing.T) {
+	for _, status := range []string{"open", "in_progress"} {
+		rem := dbead("rem", contract.KindRemnant, status, "", 2)
+		beads := []bd.Bead{dbead("dr", contract.KindCheckpoint, "deferred", "", 2, labeled(contract.DraftedBy("rem"))), rem}
+		g := graphData{beads: beads, w: 100, h: 40}
+		why := g.draftWhy(g.beadByID("dr"))
+		if !strings.Contains(why, "re-run the respin of") || strings.Contains(why, "recover") {
+			t.Errorf("%s: draftWhy = %q, want it to name the respin re-run and not recover", status, why)
+		}
+		if line := g.draftedByLine(g.beadByID("dr")); !strings.Contains(line, "re-run its respin") {
+			t.Errorf("%s: drafted by = %q, want the respin re-run", status, line)
+		}
+	}
+}
+
+// A closed Remnant's Draft is no respin to re-run (respin refuses a closed Remnant):
+// its row names recover, which deletes it.
+func TestDraftWhyClosedRemnantDoesNotNameRespinRerun(t *testing.T) {
+	rem := dbead("rem", contract.KindRemnant, "closed", "", 2)
+	beads := []bd.Bead{dbead("dr", contract.KindCheckpoint, "deferred", "", 2, labeled(contract.DraftedBy("rem"))), rem}
+	g := graphData{beads: beads, w: 100, h: 40}
+	if why := g.draftWhy(g.beadByID("dr")); strings.Contains(why, "respin") || !strings.Contains(why, "recover") {
+		t.Errorf("draftWhy = %q, want recover and no respin", why)
+	}
+	if line := g.draftedByLine(g.beadByID("dr")); strings.Contains(line, "respin") {
+		t.Errorf("drafted by = %q, want no respin", line)
+	}
+}

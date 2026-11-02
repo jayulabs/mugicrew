@@ -18,8 +18,12 @@ func TestChartOutcome(t *testing.T) {
 		extra                   []bd.Bead
 	}{
 		{"landed with Spec", "", "landed", "abcdef0123456789", []bd.Bead{spec, landing}},
+		{"specced with Spec", "specced: sp", "landed", "abcdef0123456789", []bd.Bead{spec, landing}},
+		{"specced without Spec", "specced: sp", "closed", "", nil},
 		{"handed back", "handed back: no", "handed back", "", nil},
 		{"rejected", "rejected by human", "rejected", "", nil},
+		{"duplicate", "duplicate: orig", "superseded", "", nil},
+		{"superseded", "superseded: new", "superseded", "", nil},
 		{"empty reason", "", "superseded", "", nil},
 		{"bare close, no Spec", "done", "closed", "", nil},
 	}

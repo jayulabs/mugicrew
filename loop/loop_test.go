@@ -261,7 +261,7 @@ func TestMain(m *testing.M) {
 	listChildren = func(string) ([]bd.Bead, error) { return nil, nil } // never read a real bd or git
 	effortRefsAcross = func() (*git.EffortSet, error) { return git.NewEffortSet(), nil }
 	headOf = func(string) (string, error) { return "", errors.New("headOf reached unstubbed") }
-	openBlockers = func(string) ([]bd.Bead, error) { return nil, nil }
+	splitBlockers = func(string) ([]bd.Bead, []bd.Bead, error) { return nil, nil, nil }
 	landedBase = func(string) (string, error) {
 		return "", errors.New("landedBase reached unstubbed: it would read the real repo")
 	}
@@ -450,10 +450,10 @@ func TestReadmittedCheckpointMembersAreCandidates(t *testing.T) {
 	listChildren = func(id string) ([]bd.Bead, error) {
 		return []bd.Bead{{ID: "ws-cp.1", Kind: contract.KindBuild, Status: "closed", Parent: id}}, nil
 	}
-	oBlockers := openBlockers
-	t.Cleanup(func() { openBlockers = oBlockers })
-	openBlockers = func(string) ([]bd.Bead, error) {
-		return []bd.Bead{{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}}, nil
+	oBlockers := splitBlockers
+	t.Cleanup(func() { splitBlockers = oBlockers })
+	splitBlockers = func(string) ([]bd.Bead, []bd.Bead, error) {
+		return []bd.Bead{{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"}}, nil, nil
 	}
 	open := []bd.Bead{
 		{ID: "ws-errand", Kind: contract.KindErrand, Status: "open"},
@@ -594,17 +594,18 @@ func TestSelectDispatchSkipsHeldContainer(t *testing.T) {
 	}
 }
 
-// Candidates dispatch by (own priority, nearest Checkpoint/Chart container's
-// priority), both ascending; input order breaks full ties. A bead with no
-// container, an Initiative parent, or a container absent from open uses its own
-// priority as the container key.
-func TestByContainerPriority(t *testing.T) {
+// Candidates dispatch by (effective priority, own priority), both ascending,
+// where effective is the most urgent of own and every open container ancestor's;
+// input order breaks full ties.
+func TestByEffectivePriority(t *testing.T) {
 	open := []bd.Bead{
 		{ID: "k0", Kind: contract.KindCheckpoint, Priority: 0},
-		{ID: "k3", Kind: contract.KindCheckpoint, Priority: 3},
 		{ID: "k4", Kind: contract.KindCheckpoint, Priority: 4},
 		{ID: "c1", Kind: contract.KindChart, Priority: 1},
 		{ID: "i0", Kind: contract.KindInitiative, Priority: 0},
+		{ID: "ki", Kind: contract.KindCheckpoint, Priority: 3, Parent: "i0"},
+		{ID: "loopA", Kind: contract.KindCheckpoint, Priority: 3, Parent: "loopB"},
+		{ID: "loopB", Kind: contract.KindCheckpoint, Priority: 3, Parent: "loopA"},
 	}
 	mk := func(id, parent string, p int) bd.Bead {
 		return bd.Bead{ID: id, Kind: contract.KindBuild, Status: "open", Parent: parent, Priority: p}
@@ -614,15 +615,16 @@ func TestByContainerPriority(t *testing.T) {
 		cands []bd.Bead
 		want  string
 	}{
-		{"container priority breaks a tie", []bd.Bead{mk("a", "k4", 2), mk("b", "k0", 2)}, "b,a"},
-		{"own priority beats container priority", []bd.Bead{mk("a", "k0", 2), mk("b", "k3", 0)}, "b,a"},
+		{"a P2 member of a P0 Checkpoint beats an unparented P1", []bd.Bead{mk("s", "", 1), mk("a", "k0", 2)}, "a,s"},
+		{"an Initiative's P0 lifts a Build under a Checkpoint inside it", []bd.Bead{mk("s", "", 1), mk("a", "ki", 2)}, "a,s"},
+		{"own priority ranks siblings within one effective level", []bd.Bead{mk("a", "k0", 2), mk("b", "k0", 0), mk("c", "k0", 1)}, "b,c,a"},
+		{"own priority beats a lower-priority container", []bd.Bead{mk("a", "k4", 2), mk("b", "k4", 0)}, "b,a"},
 		{"a Chart is a container", []bd.Bead{mk("a", "k4", 2), mk("b", "c1", 2)}, "b,a"},
-		{"containerless uses its own priority", []bd.Bead{mk("a", "k4", 2), mk("s", "", 2), mk("b", "k0", 2)}, "b,s,a"},
 		{"full ties keep input order", []bd.Bead{mk("a", "k0", 2), mk("b", "k0", 2), mk("c", "k0", 2)}, "a,b,c"},
-		{"an Initiative parent is ignored", []bd.Bead{mk("a", "k4", 2), mk("b", "i0", 2)}, "b,a"},
-		{"a missing container falls back to own priority", []bd.Bead{mk("a", "k4", 2), mk("b", "gone", 2)}, "b,a"},
+		{"a missing parent uses own priority", []bd.Bead{mk("a", "k4", 2), mk("b", "gone", 1)}, "b,a"},
+		{"a parent cycle neither stalls nor errors", []bd.Bead{mk("a", "loopA", 2), mk("b", "k0", 2)}, "b,a"},
 	} {
-		if got := strings.Join(bd.IDs(byContainerPriority(c.cands, open)), ","); got != c.want {
+		if got := strings.Join(bd.IDs(byEffectivePriority(c.cands, open)), ","); got != c.want {
 			t.Errorf("%s: order %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -2488,7 +2490,7 @@ func TestCandidatesSkipForeignLandedContainer(t *testing.T) {
 	oErrand := bd.SpawnBlockingErrand
 	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
 	var held []string
-	bd.SpawnBlockingErrand = func(container, key, _, _ string) (string, bool, error) {
+	bd.SpawnBlockingErrand = func(container, key, _, _, _ string) (string, bool, error) {
 		held = append(held, container+" "+strings.TrimSpace(key))
 		return "t", true, nil
 	}
@@ -2512,7 +2514,7 @@ func TestCandidatesForeignHoldErrandErrorFailsTick(t *testing.T) {
 	oErrand := bd.SpawnBlockingErrand
 	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
 	boom := errors.New("bd down")
-	bd.SpawnBlockingErrand = func(_, _, _, _ string) (string, bool, error) { return "", false, boom }
+	bd.SpawnBlockingErrand = func(_, _, _, _, _ string) (string, bool, error) { return "", false, boom }
 	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Description: "Destination: ship it"}
 	if _, err := (&Loop{}).candidates([]bd.Bead{cp}, nil); !errors.Is(err, boom) {
 		t.Errorf("candidates err = %v, want the Errand-filing error", err)

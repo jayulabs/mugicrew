@@ -131,12 +131,23 @@ func TestRejectOnlyOnOpenUnclaimedSignal(t *testing.T) {
 		t.Fatal("esc rejected")
 	}
 	m = press(t, typeText(t, press(t, m, runeKey("z")), "dup"), enter())
-	if id != "sig" || reason != "dup" || len(m.modals) != 0 {
+	if id != "sig" || reason != "rejected: dup" || len(m.modals) != 0 {
 		t.Errorf("reject %q %q", id, reason)
 	}
 	m = press(t, press(t, selectBead(t, m, "sig"), runeKey("z")), enter()) // blank reason
 	if reason != rejectDefault {
 		t.Errorf("blank reason %q", reason)
+	}
+}
+
+func TestRejectReason(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "rejected", "  ": "rejected", "dup": "rejected: dup",
+		"rejected: x": "rejected: x", "Rejected: X": "Rejected: X", "REJECTED": "REJECTED",
+	} {
+		if got := rejectReason(in); got != want {
+			t.Errorf("rejectReason(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -195,7 +206,7 @@ func TestRefreshKeepsFormTarget(t *testing.T) {
 	m, _ = send(t, m, loadedMsg{beads: append([]bd.Bead{{ID: "aaa", Kind: contract.KindSignal, Status: "open", Title: "First", Created: epoch.Add(-time.Hour)}}, stubBeads()...), live: map[string]bool{}, sessions: map[string]session.Info{}})
 	m, _ = send(t, m, loadedMsg{beads: append(stubBeads(), bd.Bead{ID: "sig", Kind: contract.KindSignal, Status: "open", Title: "A signal", Created: epoch}), live: map[string]bool{}, sessions: map[string]session.Info{}})
 	m = press(t, m, enter())
-	if id != "sig" || reason != "no" {
+	if id != "sig" || reason != "rejected: no" {
 		t.Errorf("closed %q %q", id, reason)
 	}
 }
@@ -557,7 +568,7 @@ func TestNewMenuRebaseFlashPerOutcome(t *testing.T) {
 		{"filed", rebase.Outcome{Result: rebase.Filed, ID: "k1", Title: "Rebase onto mainline"}, nil, "filed: Rebase onto mainline (k1)"},
 		{"requested", rebase.Outcome{Result: rebase.AlreadyRequested, ID: "k1", Title: "T"}, nil, "already requested: T (k1)"},
 		{"conflict", rebase.Outcome{Result: rebase.OpenConflict, ID: "k2", Title: "C", Base: "b4se"}, nil, "already being rebased by open conflict: C (k2) Base: b4se"},
-		{"on main", rebase.Outcome{Result: rebase.AlreadyOnMain, Base: "b4se"}, nil, "already on mainline: b4se"},
+		{"on main", rebase.Outcome{Result: rebase.AlreadyOnMain, Base: "b4se", MembersMayBePaused: true}, nil, "already on mainline: b4se — a Build still paused behind-mainline: bd label remove it"},
 		{"refused", rebase.Outcome{Result: rebase.Refused, Reason: "rcp has already landed"}, nil, "rebase: refused: rcp has already landed"},
 		{"mr warning", rebase.Outcome{Result: rebase.Filed, ID: "k1", Title: "T", Warning: "could not check for an open MR"}, nil, "filed: T (k1) — warning: could not check for an open MR"},
 		{"error", rebase.Outcome{}, errors.New("boom"), "rebase: boom"},
@@ -584,5 +595,43 @@ func TestReleaseErrandPassesWhenRequired(t *testing.T) {
 	press(t, selectBead(t, m, "tk"), runeKey("A"))
 	if released != "tk" {
 		t.Errorf("released %q", released)
+	}
+}
+
+func TestRebaseFlashReportsEdgedBuilds(t *testing.T) {
+	got := rebaseFlash(rebase.Outcome{Result: rebase.Filed, ID: "mc-n", Title: "t", Edged: []string{"mc-a", "mc-b"}}, nil)
+	if !strings.Contains(got, "2 build(s) now wait on it") {
+		t.Errorf("flash %q lacks the edged count", got)
+	}
+}
+
+// r is also offered on a Build that reads behind-mainline (computed) or carries
+// paused:behind-mainline, and the press targets the parent Checkpoint.
+func TestNewMenuRebaseRowOnBehindMainlineBuild(t *testing.T) {
+	m := rebaseModel(t)
+	bs := append(slices.Clone(m.beads),
+		bd.Bead{ID: "bcp", Kind: contract.KindCheckpoint, Container: true, Status: "open", Created: epoch},
+		bd.Bead{ID: "bocp", Kind: contract.KindCheckpoint, Container: true, Status: "closed", Created: epoch},
+		bd.Bead{ID: "bdep", Kind: contract.KindBuild, Parent: "bocp", Status: "closed", Created: epoch},
+		bd.Bead{ID: "bcomp", Kind: contract.KindBuild, Parent: "bcp", Status: "open", BlockedBy: []string{"bdep"}, Created: epoch},
+		bd.Bead{ID: "bpaused", Kind: contract.KindBuild, Parent: "bcp", Status: "open", Labels: []string{"paused:" + bd.PausedBehindMainline}, Created: epoch},
+		bd.Bead{ID: "bplain", Kind: contract.KindBuild, Parent: "bcp", Status: "open", Created: epoch},
+	)
+	m, _ = send(t, m, loadedMsg{beads: bs, live: map[string]bool{}, sessions: map[string]session.Info{},
+		frontier: fixtureReady(bs), slowTier: true,
+		cpTips: map[string]string{"bcp": "abc"}, blockLanded: map[string]string{"bocp": "land1"}, contains: map[string]bool{"land1@abc": false}})
+	for id, want := range map[string]bool{"bcomp": true, "bpaused": true, "bplain": false, "rcp": true} {
+		o := press(t, selectBead(t, m, id), runeKey("n"))
+		if has := strings.Contains(ansi.Strip(o.View()), "r   New rebase request"); has != want {
+			t.Errorf("%s: rebase row = %v, want %v", id, has, want)
+		}
+	}
+	for _, id := range []string{"bcomp", "bpaused"} {
+		var got string
+		seam(t, &requestRebase, func(id string) (rebase.Outcome, error) { got = id; return rebase.Outcome{}, nil })
+		pressN(t, selectBead(t, m, id), "r")
+		if got != "bcp" {
+			t.Errorf("%s: press requested %q, want the parent Checkpoint bcp", id, got)
+		}
 	}
 }

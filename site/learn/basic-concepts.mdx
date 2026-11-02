@@ -1,0 +1,53 @@
+---
+id: basic-concepts
+title: Basic concepts
+---
+
+import SurfaceTabs from '@site/src/components/SurfaceTabs';
+
+# Basic concepts
+
+Every term the other guides use, in one place, so you meet it before you need it. For the deeper picture, see mugicrew as a [workspace](/workspace), a [framework](/framework) or a [game](/game): three lenses on the same system.
+
+## The Workspace and the bead graph
+
+The **Workspace** is the git repo whose code mugicrew changes. Worktrees are cut from it, lands move its mainline, and its history carries mugicrew's land record.
+
+mugicrew keeps its state in the **bead graph**: the bd issue database one loop reads and writes, as bd resolves it from the Workspace. The graph may live inside the Workspace or elsewhere. One loop drives exactly one bead graph and one Workspace.
+
+## Beads, kinds and crewmates
+
+A **bead** is one node of the graph. Each bead has a **kind**, its single routing key, and its kind never changes. A kind is either a **container**, which parents member beads, or a **leaf**, which parents none.
+
+A **crewmate** is a named member of mugicrew's crew. Each kind is owned by exactly one crewmate, so a bead's kind decides which crewmate works it. Crewmates never call each other: they coordinate only by reading and writing the bead graph.
+
+Every kind has an entry in the [Bead glossary](/learn/bead-glossary).
+
+## The spine
+
+A unit of work runs a chain of distinct beads, each born from the last. The typical flow is the **spine**:
+
+[Signal](/learn/bead-glossary#signal) → [Chart](/learn/bead-glossary#chart) → [Spec](/learn/bead-glossary#spec) → [Checkpoint](/learn/bead-glossary#checkpoint) → [Build](/learn/bead-glossary#build)
+
+- A **Signal** is anything that could catalyze a change to the Workspace: an idea, an error log, an alert.
+- A **Chart** wayfinds a Signal into a plan, clearing the fog around it.
+- A **Spec** is the closed record the Chart produces: the plan, sliced into Builds.
+- A **Checkpoint** is a candidate for the Workspace's next mainline state.
+- A **Build** is one unit of implementation work inside a Checkpoint.
+
+[Review](/learn/bead-glossary#review), [Critique](/learn/bead-glossary#critique) and [Approval](/learn/bead-glossary#approval) hang off the Checkpoint: a review pass, a defect it found, and the stamp that gates the land.
+
+File a Signal to start a chain:
+
+<SurfaceTabs
+  tui={<p>Open the TUI with <code>mugicrew</code> and press <code>n</code> to open the New menu, then <code>s</code> for a Signal.</p>}
+  cli={<pre><code className="language-bash">mugicrew signal new --title "Add a --json flag" --description "Why and where"</code></pre>}
+/>
+
+## HITL and AFK
+
+A session is **HITL** (human in the loop) when a person works it with the crewmate, or **AFK** (away from keyboard) when the loop runs it unattended. AFK efforts share one Workspace-wide limit; HITL sessions take no slot.
+
+## Land
+
+To **land** is to move a container's branch, a Chart's or a Checkpoint's, onto mainline as one commit. Only containers land. The human approves, the crew writes: nothing reaches mainline without an Approval.

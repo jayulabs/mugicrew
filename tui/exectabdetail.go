@@ -21,7 +21,7 @@ func (t execTab) detailVP() viewport.Model {
 }
 
 // specOfCP is the Spec a Checkpoint serves, from the snapshot (bd.SpecOf): its caused-by
-// Spec, or through a Rollback's related target the rolled-back Checkpoint's. Nil when
+// Spec, or through a Rollback's or Remnant's related target that Checkpoint's. Nil when
 // the cause is neither, or the walk leaves the snapshot or runs past four hops.
 func (g graphData) specOfCP(cp *bd.Bead) *bd.Bead {
 	for range 4 {
@@ -32,7 +32,7 @@ func (g graphData) specOfCP(cp *bd.Bead) *bd.Bead {
 		switch p.Kind {
 		case contract.KindSpec:
 			return p
-		case contract.KindRollback:
+		case contract.KindRollback, contract.KindRemnant:
 			if len(p.Related) == 0 || g.beadIndex(p.Related[0]) < 0 {
 				return nil
 			}
@@ -111,7 +111,7 @@ func (t execTab) rowText(r eRow) string {
 	if b.Kind == contract.KindCheckpoint {
 		title = b.Title
 	}
-	h.WriteString(g.sbrn(b, title, true, 0) + "\n\n")
+	h.WriteString(g.withInherit(b, g.sbrn(b, title, true, 0)) + "\n\n")
 	owner := "—"
 	if e, err := registry.Lookup(b.Kind); err == nil {
 		owner = e.Owner
@@ -208,7 +208,11 @@ func (t execTab) rowText(r eRow) string {
 			field("session", v)
 		}
 		if r.cp != nil {
-			field("checkpoint", r.cp.Title+" ("+r.cp.ID+") — "+r.rel)
+			rel := r.rel
+			if rel == remnantRel {
+				rel = "stranded from it"
+			}
+			field("checkpoint", r.cp.Title+" ("+r.cp.ID+") — "+rel)
 		}
 	}
 	if bl := g.openBlockers(b); len(bl) > 0 {
@@ -221,9 +225,31 @@ func (t execTab) rowText(r eRow) string {
 	if l := g.pauseLine(b); l != "" {
 		field("paused", l)
 	}
+	isRemnant := b.Kind == contract.KindRemnant
+	if isRemnant { // the stranded lists, one fact a line, in place of the body paragraph
+		rb := bd.ParseRemnantBody(b.Description)
+		if tip := rb.LandedTip(); tip != "" {
+			field("landed tip", tip)
+		}
+		if l, ok := strings.CutPrefix(rb.StrandedLine(), "Stranded: "); ok {
+			field("stranded", l)
+		}
+		for _, e := range rb.Kept() {
+			field("kept", e.Value)
+		}
+		for _, c := range rb.Children() {
+			field("child", c.Value)
+		}
+		for _, e := range rb.Errands() {
+			field("errand", e)
+		}
+		if w := g.respinWaitText(b); w != "" {
+			field("respin", w)
+		}
+	}
 	field("enter", t.enterField(r))
 	out := []string{strings.TrimRight(h.String(), "\n")}
-	if body := g.beadBody(b, true); body != "" {
+	if body := g.beadBody(b, true); body != "" && !isRemnant {
 		out = append(out, body)
 	}
 	return strings.Join(out, "\n\n")

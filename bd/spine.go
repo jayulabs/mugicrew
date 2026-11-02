@@ -60,7 +60,7 @@ func spineOf(target string, rows []spineRow) (ids []string, open bool) {
 		case "caused-by", "parent-child":
 			return kind[r.from] != contract.KindInitiative && kind[r.to] != contract.KindInitiative
 		case "related":
-			return kind[r.from] == contract.KindRollback || kind[r.from] == contract.KindPivot
+			return kind[r.from] == contract.KindRollback || kind[r.from] == contract.KindPivot || kind[r.from] == contract.KindRemnant
 		case "discovered-from":
 			return kind[r.from] == contract.KindPivot
 		}

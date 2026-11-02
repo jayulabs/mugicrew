@@ -1,0 +1,127 @@
+---
+id: cli-verbs
+title: CLI verbs
+---
+
+# CLI verbs
+
+Every `mugicrew` verb you run, grouped by the job. Synopses are exactly what `mugicrew --help` prints; `mugicrew -C <dir> ...` runs any of them in the Workspace containing `<dir>`. Where the TUI has a key for the same job, it is named.
+
+With no arguments, `mugicrew` opens the TUI; `mugicrew --watch` opens it with the watched loop armed.
+
+## Filing and triage
+
+Put work into the bead graph and decide what it becomes.
+
+- `mugicrew signal new --title T --description D`  
+  File a Signal: a request that may become code. TUI: `n` opens the New menu, then `s`.
+
+- `mugicrew intake jira <KEY>`  
+  File a Jira work item as a Signal. TUI: `n` opens the New menu, then `j`.
+
+- `mugicrew signal triage <id>`  
+  Triage a Signal in an interactive session. TUI: `enter` on a Signal row in the Graph tab (key `4`).
+
+## Driving the loop and efforts
+
+Start the dispatch loop and steer what it runs.
+
+- `mugicrew loop [--watch | start [--watch] | status [--json] | stop [--force]]`  
+  Run or control the dispatch loop; `loop start` detaches it, `loop status` reports it and `loop stop` ends it. TUI: `o` starts the loop.
+
+- `mugicrew ps [--json]`  
+  List active AFK efforts. TUI: `S` opens the sessions list.
+
+- `mugicrew abort <bead-id>`  
+  Abort a bead's running effort. TUI: `x` on a running bead.
+
+- `mugicrew surgery new --title T [--problem P] [--checkpoint ID]`  
+  File a Surgery: hands-on work on a fresh Checkpoint, or join an existing one. TUI: `n` opens the New menu, then `u`.
+
+- `mugicrew surgery end <surgery-id>`  
+  End a Surgery.
+
+## Initiatives
+
+Group chains of work and move them in or out.
+
+- `mugicrew initiative adopt <head> <initiative> | release <head>`  
+  Move a chain into (`initiative adopt`) or out of (`initiative release`) an Initiative. TUI: `a` adopts and `A` releases on a Graph row.
+
+- `mugicrew initiative cancel <initiative> --why <text> [--release <head>]... [--discard]`  
+  Drop an Initiative and its member chains. TUI: `X` on an Initiative.
+
+- `mugicrew withdraw <head> [--discard]`  
+  Drop any unclosed chain head, Errand or Latch. TUI: `X` on the row.
+
+## Repair and recovery
+
+Fix what a crash, a pause or a conflict left behind.
+
+- `mugicrew recover [<bead-id> [--force] [--discard]]`  
+  List stranded beads, or repair one. TUI: `x` on a stranded bead recovers it.
+
+- `mugicrew checkup <bead> [--problem "<one line>"]`  
+  Repair a broken bead in a Chopper session. TUI: `c` on any bead row.
+
+- `mugicrew checkup close <checkup> --reason "<reason>"`  
+  Close a Checkup and lift its target's fence.
+
+- `mugicrew duplicate <dup> <original>`  
+  Close a duplicate as `duplicate: <original>`, keeping the supersedes lineage.
+
+- `mugicrew rebase <chart-or-checkpoint-id>`  
+  File a rebase of an open Chart or Checkpoint onto mainline. TUI: `n` opens the New menu, then `r`.
+
+- `mugicrew remnant <remnant> drop|offshoot|respin`  
+  Take an exit of a Remnant, the work a Forge merge stranded: delete its refs, file one offshoot Signal listing it, or respin it onto a fresh Checkpoint for the landed one's Spec.
+
+## Reading cost and transcripts
+
+See what the crew spent and what it said.
+
+- `mugicrew stats [<bead>] [--spine] [--since <dur|date>] [--by crewmate|model|profile|kind|day] [--kind <kind>] [--json]`  
+  Show session cost and agent time. TUI: `#` opens the Stats tab.
+
+- `mugicrew transcript [--no-follow] [--session <prefix> | --last] [--no-pager] <bead>`  
+  Read every session a bead ran. TUI: `t` on a bead row.
+
+## Workspace setup and health
+
+Bootstrap a clone and check it is ready.
+
+- `mugicrew init [--prefix <p>]`  
+  Bootstrap this clone's server-mode bd store (never commits).
+- `mugicrew init workspace [--land-strategy local|gitlab] [--require-initiatives <bool>] [--external-ref <bool>] [--jira-site <host>] [--context name=[repo:|path:]dir]...`  
+  Write the Workspace's shared settings to `.mugicrew/config.toml` in a linked worktree (never commits). TUI: `*` opens the Settings tab.
+
+- `mugicrew upgrade`  
+  Move an npm global install onto the latest release, then run doctor. TUI: `u`.
+
+- `mugicrew doctor`  
+  Check the environment and Workspace are ready (read-only).
+- `mugicrew doctor fix`  
+  Apply doctor's safe fixes, then re-check.
+
+- `mugicrew upgrade`  
+  Move an npm global install onto the latest release, then run doctor.
+
+## External systems
+
+Hold work on Jira tickets and GitLab merge requests, and back the graph up.
+
+- `mugicrew latch jira <KEY> --blocks <bead>...`  
+  Hold beads until a Jira ticket is Done.
+
+- `mugicrew latch mr <ref> --blocks <bead>...`  
+  Hold beads until a GitLab merge request is merged.
+
+- `mugicrew probe mr (<ref> | --branch <b>) | pipeline <ref> (<id> | --main) | landed <id> | foreign [--context <c>]`  
+  Print one word of state, read-only, for a merge request (`probe mr`), a pipeline (`probe pipeline`), a landed container (`probe landed`) or a foreign land (`probe foreign`).
+
+- `mugicrew backup push`  
+  Push the Bead Graph's unpushed commits to its backup remote.
+
+## Run by agents
+
+Agents run these, not you: `signal offshoot`, `errand new`, `triage locate`, `pivot confirm`, `pivot escalate`, `pivot dismiss`, `pivot amend`, `pivot raise`, `reconcile`, `approval rework`, `integrate`, `sequence next`, `chart append`, `chart drop`, `land-lineage`.

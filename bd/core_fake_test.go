@@ -255,3 +255,103 @@ func TestInProgressTruncatesAtBdsDefaultCap(t *testing.T) {
 		t.Fatalf("InProgress = %d beads, %v; want 50", len(got), err)
 	}
 }
+
+// TieDrafts gives a raiser's Critique Drafts the discovered-from edge they were
+// filed without; one born with it, a non-Critique Draft and another raiser's Draft
+// are left alone.
+func TestTieDraftsAddsTheMissingEdgeOnly(t *testing.T) {
+	f := bdtest.New(t,
+		bdtest.Claimed(bd.Bead{ID: "t-build", Kind: contract.KindBuild}),
+		bdtest.Draft("t-build", bd.Bead{ID: "t-bare", Kind: contract.KindCritique}),
+		bdtest.Draft("t-build", bd.Bead{ID: "t-born", Kind: contract.KindCritique}),
+		bdtest.Draft("t-build", bd.Bead{ID: "t-sig", Kind: contract.KindSignal}),
+		bdtest.Draft("t-other", bd.Bead{ID: "t-theirs", Kind: contract.KindCritique}),
+	)
+	if err := bd.DiscoveredFrom("t-born", "t-build"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.Calls())
+	for range 2 { // the second pass is a re-run tail
+		if err := bd.TieDrafts("t-build", contract.KindCritique); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := bd.CarriersFrom("t-build")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("CarriersFrom must exclude a Critique: %v, %v", rows, err)
+	}
+	up, err := f.Edges("t-build", bd.Up, "discovered-from")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range up {
+		got = append(got, r.Bead.ID)
+	}
+	slices.Sort(got)
+	if want := []string{"t-bare", "t-born"}; !slices.Equal(got, want) {
+		t.Errorf("discovered-from t-build = %v, want %v", got, want)
+	}
+	adds := 0
+	for _, c := range f.Calls()[before:] {
+		if strings.HasPrefix(c, "AddEdge ") {
+			adds++
+		}
+	}
+	if adds != 1 {
+		t.Errorf("edge writes = %d, want 1 (calls %v)", adds, f.Calls()[before:])
+	}
+}
+
+// A Build with both a discovered-from Critique and a discovered-from pivot raises
+// only the pivot.
+func TestRaiseIfPivotedIgnoresADiscoveredFromCritique(t *testing.T) {
+	bdtest.New(t,
+		bd.Bead{ID: "t-build", Kind: contract.KindBuild, Status: "in_progress"},
+		bd.Bead{ID: "t-crit", Kind: contract.KindCritique, Status: "open"},
+		bd.Bead{ID: "t-piv", Kind: contract.KindPivot, Status: "open"},
+	)
+	for _, id := range []string{"t-crit", "t-piv"} {
+		if err := bd.DiscoveredFrom(id, "t-build"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := bd.PivotsDiscoveredFrom("t-build")
+	if err != nil || len(got) != 1 || got[0].ID != "t-piv" {
+		t.Fatalf("pivots = %v, %v; want only t-piv", got, err)
+	}
+}
+
+// bd.SetField is a title-writing door: a title-field value loses its kind prefix and
+// records one title.stripped event; any other field is written as given (ADR 0097).
+func TestSetFieldStripsOnlyTheTitle(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	f := bdtest.New(t, bdtest.Claimed(bd.Bead{ID: "mc-a", Title: "old"}))
+	s := bd.UnderClaim("mc-a")
+
+	if err := bd.SetField("mc-a", bd.Description, "Spec: body", s); err != nil {
+		t.Fatal(err)
+	}
+	if b := f.Bead("mc-a"); b.Description != "Spec: body" || strings.Contains(logs.String(), "title.stripped") {
+		t.Errorf("description = %q, log = %q; want unchanged and no strip event", b.Description, logs.String())
+	}
+	if err := bd.SetField("mc-a", bd.TitleField, "Critique: Finish FR3", s); err != nil {
+		t.Fatal(err)
+	}
+	if b := f.Bead("mc-a"); b.Title != "Finish FR3" {
+		t.Errorf("title = %q, want stripped", b.Title)
+	}
+	if out := logs.String(); strings.Count(out, "title.stripped") != 1 || !strings.Contains(out, `from="Critique: Finish FR3"`) ||
+		!strings.Contains(out, `to="Finish FR3"`) || !strings.Contains(out, "id=mc-a") {
+		t.Errorf("want one title.stripped with from, to, id; log = %q", out)
+	}
+	if err := bd.SetField("mc-a", bd.TitleField, "Critique:", s); err != nil {
+		t.Fatal(err)
+	}
+	if b := f.Bead("mc-a"); b.Title != "Critique:" {
+		t.Errorf("title = %q, want a strip-to-nothing title kept", b.Title)
+	}
+}

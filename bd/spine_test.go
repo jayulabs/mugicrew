@@ -50,6 +50,10 @@ func TestSpineOf(t *testing.T) {
 			e("related", "rb:rollback:closed", "cp:checkpoint:closed"),
 			e("caused-by", "succ:checkpoint:open", "rb:rollback:closed"),
 		}, []string{"cp", "rb", "succ"}, true},
+		{"remnant and open respin held", "cp", []spineRow{
+			e("related", "rm:remnant:closed", "cp:checkpoint:closed"),
+			e("caused-by", "resp:checkpoint:open", "rm:remnant:closed"),
+		}, []string{"cp", "resp", "rm"}, true},
 		{"pivot via discovered-from and related", "cp", []spineRow{
 			e("parent-child", "b:build:closed", "cp:checkpoint:closed"),
 			e("discovered-from", "pv:pivot:closed", "b:build:closed"),
@@ -115,5 +119,26 @@ func TestSpineReadsCSV(t *testing.T) {
 	ids, open, err := Spine("sig")
 	if err != nil || open != true || !slices.Equal(ids, []string{"ch", "sig"}) {
 		t.Errorf("Spine = %v %v %v", ids, open, err)
+	}
+}
+
+// ADR 0401 gives a Landing's Conflict and Hold Errand a discovered-from edge to it; the spine
+// follows discovered-from only from a Rollback or a Pivot (ADR 0281), so they add no node.
+func TestSpineIgnoresALandingsDiscoveredFromFollowUps(t *testing.T) {
+	today := []spineRow{
+		e("caused-by", "cp:checkpoint:closed", "sig:signal:closed"),
+		e("parent-child", "ld:landing:closed", "cp:checkpoint:closed"),
+		e("parent-child", "cf:conflict:closed", "cp:checkpoint:closed"),
+		e("blocks", "h:errand:closed", "cp:checkpoint:closed"),
+	}
+	withEdges := append(slices.Clone(today),
+		e("discovered-from", "cf:conflict:closed", "ld:landing:closed"),
+		e("discovered-from", "h:errand:closed", "ld:landing:closed"))
+	for _, target := range []string{"sig", "cp"} {
+		want, wantOpen := spineOf(target, today)
+		got, open := spineOf(target, withEdges)
+		if !slices.Equal(got, want) || open != wantOpen {
+			t.Errorf("spineOf(%s) with the edges = %v open=%v, want today's %v open=%v", target, got, open, want, wantOpen)
+		}
 	}
 }

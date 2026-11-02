@@ -44,3 +44,28 @@ func TestUnmetPauseOffersRunNowAndNamesFixes(t *testing.T) {
 		t.Error("no colour for unmet")
 	}
 }
+
+// paused:behind-mainline refuses run-now, says r requests a rebase, and the detail
+// pause line says the Checkpoint is behind mainline.
+func TestBehindMainlinePauseHint(t *testing.T) {
+	b := bd.Bead{ID: "bm", Parent: "cp", Status: "open", Kind: "build", Labels: []string{"kind:build", "paused:" + bd.PausedBehindMainline}}
+	if h := pauseHint(b); !strings.Contains(h, "checkpoint/cp is behind mainline") || !strings.Contains(h, "r requests a rebase") {
+		t.Errorf("hint = %q", h)
+	}
+	if line := (graphData{}).pauseLine(&b); !strings.Contains(line, "behind mainline") || !strings.Contains(line, "r requests a rebase") {
+		t.Errorf("pause line = %q", line)
+	}
+}
+
+// The Behind mainline: note rides the hint only from cached comments; the hint itself
+// never shells out to bd.
+func TestBehindMainlineHintNoteFromCache(t *testing.T) {
+	b := bd.Bead{ID: "bm", Parent: "cp", Status: "open", Kind: "build", CommentCount: 1, Labels: []string{"kind:build", "paused:" + bd.PausedBehindMainline}}
+	g := graphData{comments: map[commentKey]commentEntry{{"bm", 1}: {cs: []bd.Comment{{Text: "Behind mainline: lacks selfexec"}}}}}
+	if h := g.withBehindNote(&b, pauseHint(b)); !strings.Contains(h, "Behind mainline: lacks selfexec") {
+		t.Errorf("cached note missing: %q", h)
+	}
+	if h := (graphData{}).withBehindNote(&b, pauseHint(b)); strings.Contains(h, "Behind mainline:") || !strings.Contains(h, "r requests a rebase") {
+		t.Errorf("uncached hint = %q", h)
+	}
+}

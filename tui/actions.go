@@ -523,7 +523,17 @@ func (m Model) runNow(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 		m.setStatus(why)
 		return m, nil
 	}
-	if v := g.eligibility(&b); v.Cause == loop.CauseBlocked {
+	if v := g.eligibility(&b); v.Cause == loop.CauseBehindMainline {
+		return m.push(promptDialog("Run behind-mainline bead now?", func(w int) []string { return []string{fitTitle(behindMainlinePromptFmt, b.Title, w)} }, b.ID,
+			func(m Model, d dialog) (Model, tea.Cmd) {
+				cur, ok := m.pinned(d.id)
+				if !ok {
+					m.setStatus("run cancelled: " + d.id + " no longer available")
+					return m, nil
+				}
+				return into(m.runNowGo(cur, true))
+			})), nil
+	} else if v.Cause == loop.CauseBlocked {
 		blockers := make([]*bd.Bead, len(v.Holders))
 		for i := range v.Holders {
 			blockers[i] = &v.Holders[i].Bead
@@ -629,6 +639,16 @@ func (m Model) togglePause(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 	})
 }
 
+// prioFlashFor is how long a no-op +/- flashes the drawer's "dispatches as" line.
+const prioFlashFor = 1500 * time.Millisecond
+
+// prioFlashMsg ends id's flash.
+// Only the latest press's message (seq) ends the flash.
+type prioFlashMsg struct {
+	id  string
+	seq int
+}
+
 // minPriority and maxPriority are the bounds bumpPriority stops at: P0 (highest) and P4.
 const minPriority, maxPriority = 0, 4
 
@@ -650,25 +670,37 @@ func (m Model) bumpPriority(b bd.Bead, d int) (tea.Model, tea.Cmd) {
 		err := updateBead(id, []string{"--priority", strconv.Itoa(p)})
 		return writeDoneMsg{id, func(m Model) (tea.Model, tea.Cmd) {
 			// Echo on the bead as it is now, so a press before the reload steps from p.
+			echo := fmt.Sprintf("%s → P%d", id, p)
+			var flash tea.Cmd
 			if i := beadIndex(m.beads, id); err == nil && i >= 0 {
+				before, _ := m.gateData().effectivePriority(&m.beads[i])
 				m.beads = slices.Clone(m.beads)
 				m.beads[i].Priority = p
+				g := m.gateData()
+				if eff, src := g.effectivePriority(&m.beads[i]); eff == before && src != "" {
+					echo += fmt.Sprintf("; still dispatches as P%d %s", eff, g.inheritSource(src))
+					m.prioFlash, m.prioFlashSeq = id, m.prioFlashSeq+1
+					seq := m.prioFlashSeq
+					flash = tea.Tick(prioFlashFor, func(time.Time) tea.Msg { return prioFlashMsg{id, seq} })
+				}
 			}
-			return m.doneOrErr("priority", fmt.Sprintf("%s → P%d", id, p), err)
+			next, cmd := m.doneOrErr("priority", echo, err)
+			return next, tea.Batch(cmd, flash)
 		}}
 	})
 }
 
 // The dialogs' wording: the title cut to what the width leaves.
 const (
-	minPromptTitle   = 6
-	markedBlockedFmt = `"%s" is marked blocked (no open deps) — %s anyway?`
-	blockedByFmt     = `%s "%s" anyway? blocked by: `
-	dropPromptFmt    = `drop "%s"? kills the session and discards uncommitted changes in its worktree`
-	finishPromptFmt  = `finish "%s"?  y finish (clean exit, publishes) · d drop (discards) · n cancel`
-	abortPromptFmt   = `abort "%s"? pauses it (paused:manual) and SIGTERMs its running effort`
-	recoverPromptFmt = `recover "%s"? %s; leftovers: %s`
-	orphanPromptFmt  = `"%s": branch held by an orphaned worktree %s (crashed session) — drop it and launch?`
+	minPromptTitle          = 6
+	behindMainlinePromptFmt = `"%s" runs on a checkpoint branch behind mainline (it may lack a blocker's code) — run anyway?`
+	markedBlockedFmt        = `"%s" is marked blocked (no open deps) — %s anyway?`
+	blockedByFmt            = `%s "%s" anyway? blocked by: `
+	dropPromptFmt           = `drop "%s"? kills the session and discards uncommitted changes in its worktree`
+	finishPromptFmt         = `finish "%s"?  y finish (clean exit, publishes) · d drop (discards) · n cancel`
+	abortPromptFmt          = `abort "%s"? pauses it (paused:manual) and SIGTERMs its running effort`
+	recoverPromptFmt        = `recover "%s"? %s; leftovers: %s`
+	orphanPromptFmt         = `"%s": branch held by an orphaned worktree %s (crashed session) — drop it and launch?`
 )
 
 // confirmBlockedPrompt names the open blockers by truncated title, as many as fit

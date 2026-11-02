@@ -22,6 +22,7 @@ import (
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
 // Nami is the concrete charting crewmate. It carries no state; bd access and the
@@ -74,25 +75,39 @@ func runResearch(ctx contract.Ctx, bead contract.Bead) error {
 	}
 	// The agent ends its run with the pointer line "Wrote docs/research/<slug>.md:
 	// <summary>"; that IS the close reason. Only the pointer means a doc landed to
-	// close against: an exit-0 soft failure that printed some other final line
-	// (e.g. "Unable to find primary sources") must NOT false-close the bead, so
-	// require the prefix (subsumes the empty case) and leave the bead for the next
-	// tick otherwise.
+	// close against: an exit-0 run that printed some other final line (or none)
+	// must NOT false-close the bead, and is a failed effort: the error leaves the
+	// bead open and counts toward the failure pause (ADR 0078).
 	if !strings.HasPrefix(reason, researchDocPointer) {
-		return nil
+		return fmt.Errorf("research %s: final line is not a %q pointer: %q", bead.ID, researchDocPointer, reason)
 	}
 	return closeBead(bead.ID, reason)
 }
 
 // resolvedOutcome prefixes the chart-conflict agent's success line, "Resolved:
-// <summary>" (ADR 0080 §1); the summary is the close reason.
+// <summary>" (ADR 0080 §1). Go closes the bead "resolved: <summary>" (ADR 0400 §1),
+// so the agent's protocol stays as it is and the outcome word is Go's.
 const resolvedOutcome = "Resolved:"
+
+// resolvedReason is the outcome word of a resolved Chart-conflict's close reason, in
+// the <outcome>[: <detail>] shape of ADR 0396 §5.
+const resolvedReason = "resolved"
+
+// resolvedCloseReason is the close reason for the agent's summary: "resolved: <summary>",
+// or bare "resolved" when the summary is empty or blank. The summary keeps its case.
+func resolvedCloseReason(summary string) string {
+	if summary = strings.TrimSpace(summary); summary != "" {
+		return resolvedReason + ": " + summary
+	}
+	return resolvedReason
+}
 
 // runChartConflict is Nami's AFK arm for a chart-conflict (ADR 0080; hybrid, ADR
 // 0019): the headless agent resolves and commits on its effort branch in this
 // worktree, Go checks, publishes and does the graph. It reads the Base:/Tip: pins
 // (no base is an error), records the session-start HEAD, and runs the session.
-// Only a last non-empty line of "Resolved: <summary>" closes, and only once the
+// Only a last non-empty line of "Resolved: <summary>" closes (Go writes the reason
+// "resolved: <summary>", ADR 0400 §1), and only once the
 // post-resolve check passes against the carried base and Go's mugicrew integrate
 // then publishes the rewrite (Spec FR 13–14); a failed check restores the
 // session-start tip and fails the effort, publishing nothing. A Chart has no
@@ -159,7 +174,7 @@ func runChartConflict(ctx contract.Ctx, bead contract.Bead) error {
 		return err
 	}
 	if b.Open() {
-		return closeOnPublish(ctx, bead.ID, strings.TrimSpace(summary), nil)
+		return closeOnPublish(ctx, bead.ID, resolvedCloseReason(summary), nil)
 	}
 	return nil // already closed by a prior run: no double close
 }
@@ -174,7 +189,7 @@ const (
 // escalateChartConflict is the Go half of an escalation (ADR 0079 §4–6, Spec
 // D6). An open grilling blocker already on the conflict files nothing, so a re-run
 // can't stack escalations. Otherwise it files a grilling Draft child of the Chart,
-// drafted-by the conflict, titled from the Escalate: line; its body is the payload
+// drafted-by and discovered-from the conflict (FR4), titled from the Escalate: line; its body is the payload
 // (the last Blocks: line up to the Escalate: line) plus how to answer. It hands
 // conflict blocks→grilling to the publish, so the grilling and its gate appear in
 // one batch and the conflict leaves bd ready until a human closes the grilling.
@@ -189,8 +204,8 @@ func escalateChartConflict(ctx contract.Ctx, conflict bd.Bead, title, output str
 		return fmt.Errorf("chart-conflict %s: %q needs a title and a Blocks: payload", conflict.ID, escalateOutcome+" "+title)
 	}
 	body := payload + fmt.Sprintf("\n\nAnswer each numbered question in this bead's notes under the same number, "+
-		"then close it. Do not commit to the Chart branch or close %s: the AFK resolve applies the answers (ADR 0079 (mugicrew-afk-chart-conflict-escalates…)).", conflict.ID)
-	id, err := spawnChild(conflict.Parent, bd.Successor{Kind: contract.KindGrilling, Title: title, Description: body, DraftedBy: conflict.ID})
+		"then open it with the TUI launch key: Nami records the answers and closes it %s. Do not close it by hand, commit to the Chart branch or close %s: the AFK resolve applies the answers (ADR 0079 (mugicrew-afk-chart-conflict-escalates…)).", bd.AnsweredReason, conflict.ID)
+	id, err := spawnChild(conflict.Parent, bd.Successor{Kind: contract.KindGrilling, Title: title, Description: body, DraftedBy: conflict.ID, DiscoveredFrom: conflict.ID})
 	if err != nil {
 		return err
 	}
@@ -229,6 +244,13 @@ func (Nami) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 		prompt = grillingPrompt(bead.ID)
 		if b, err := showBead(bead.ID); err == nil && hasSourceLine(b.Description) {
 			prompt = sourceGrillingPrompt(bead.ID)
+		}
+		cc, open, err := openEscalation(bead.ID)
+		if err != nil {
+			return nil, err
+		}
+		if open {
+			prompt = escalationGrillingPrompt(bead.ID, cc)
 		}
 		prompt = contexts.FocusUnder(prompt, bead.ID, showBead)
 	case contract.KindSurvey:
@@ -270,7 +292,7 @@ func grillingPrompt(grillingID string) string {
 // one close instruction, so a framing that owns the close line (the Source
 // variant) never leaves the plain one beside it.
 func grillingPromptClosing(grillingID, closeBlock string) string {
-	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID), contract.IntegrateExits(), closeBlock)
+	return fmt.Sprintf(grillingTmpl, grillingID, contract.DraftInstruction(grillingID), contract.IntegrateExits(), closeBlock, bd.ObsoleteReason, bd.SupersededReason)
 }
 
 // sourceCloseTmpl is the verdict-prefixed close block of a filed grilling (ADR 0339).
@@ -290,6 +312,18 @@ func sourceGrillingPrompt(grillingID string) string {
 	return sourceGrillingTmpl + "\n" + grillingPromptClosing(grillingID, strings.TrimRight(fmt.Sprintf(sourceCloseTmpl, grillingID), "\n"))
 }
 
+// escalationCloseTmpl is the close block of a chart-conflict escalation grilling
+// (ADR 0079 (mugicrew-afk-chart-conflict-escalates…)): answers in the notes, no Chart edits.
+//
+//go:embed prompts/grilling-escalation-close.md
+var escalationCloseTmpl string
+
+// escalationGrillingPrompt is the plain grilling prompt under the escalation close block: the
+// open chart-conflict blocks on this grilling, and its next AFK resolve applies the answers.
+func escalationGrillingPrompt(grillingID, conflictID string) string {
+	return grillingPromptClosing(grillingID, strings.TrimRight(fmt.Sprintf(escalationCloseTmpl, grillingID, conflictID, bd.AnsweredReason), "\n"))
+}
+
 // hasSourceLine reports a "Source:" key line in a grilling body; a quoted
 // "> Source:" does not start a line with the key, so it never matches.
 func hasSourceLine(body string) bool {
@@ -304,7 +338,7 @@ func hasSourceLine(body string) bool {
 // Scope: this only keeps the guard and the emit line in lockstep; the prompt's
 // landing-convention prose hardcodes "docs/research/" separately, so editing this
 // moves the guard + emit line, not the landing path.
-const researchDocPointer = "Wrote docs/research/"
+const researchDocPointer = bd.ResearchedReason
 
 // researchPrompt is the research workflow an AFK kind:research bead's agent runs
 // (spec §5.3: the prompt carries the workflow, embedded in-repo, not
@@ -335,8 +369,17 @@ func researchPrompt(researchID string) string {
 //go:embed prompts/chart-conflict.md
 var chartConflictTmpl string
 
+// completedDefogReasons and skippedDefogReasons are the close reasons the readers
+// of closed defog children filter on (Spec mc-3cnhf.74 D7): a child closed with a
+// completed reason is a decision, one closed with a skipped reason is not, and
+// any other reason is legacy and read as before (ADR 0399 §4).
+const (
+	completedDefogReasons = bd.AnsweredReason + ", " + bd.ResearchedReason + " or " + bd.PrototypedReason
+	skippedDefogReasons   = bd.ObsoleteReason + ", " + bd.SupersededReason + " or " + bd.WithdrawnReason
+)
+
 func chartConflictPrompt(conflictID string) string {
-	return fmt.Sprintf(chartConflictTmpl, conflictID)
+	return fmt.Sprintf(chartConflictTmpl, conflictID, bd.AnsweredReason)
 }
 
 // wayfinderMapFields aliases contract.WayfinderMapFields — the sections a Chart body
@@ -358,7 +401,7 @@ const wayfinderMapFields = contract.WayfinderMapFields
 var chartingTmpl string
 
 func chartingPrompt(surveyID, chartID string) string {
-	return fmt.Sprintf(chartingTmpl, surveyID, wayfinderMapFields, contract.DraftInstruction(surveyID), chartID)
+	return fmt.Sprintf(chartingTmpl, surveyID, wayfinderMapFields, contract.DraftInstruction(surveyID), chartID, bd.ObsoleteReason, bd.SupersededReason)
 }
 
 // speccingPrompt is the fork-of-to-spec workflow the AFK speccing session runs
@@ -375,7 +418,7 @@ func chartingPrompt(surveyID, chartID string) string {
 var speccingTmpl string
 
 func speccingPrompt(chartID string) string {
-	return fmt.Sprintf(speccingTmpl, chartID, wayfinderMapFields)
+	return fmt.Sprintf(speccingTmpl, chartID, wayfinderMapFields, completedDefogReasons, skippedDefogReasons)
 }
 
 // promoteOrStampPrompt is the AFK judge workflow reconcileChart dispatches over a
@@ -396,7 +439,7 @@ func speccingPrompt(chartID string) string {
 var promoteOrStampTmpl string
 
 func promoteOrStampPrompt(chartID string) string {
-	return fmt.Sprintf(promoteOrStampTmpl, chartID, wayfinderMapFields, contract.DraftInstruction(chartID), contract.LabelDefogged, contract.IntegrateExits())
+	return fmt.Sprintf(promoteOrStampTmpl, chartID, wayfinderMapFields, contract.DraftInstruction(chartID), contract.LabelDefogged, contract.IntegrateExits(), completedDefogReasons, skippedDefogReasons)
 }
 
 // Reconcile drives a bead to its conformant next state (spec §8.2), the single
@@ -480,6 +523,7 @@ var (
 	integrate          = integrateVerb
 	openBlockers       = bd.OpenBlockersOfKind
 	openAnyBlockers    = bd.OpenBlockers
+	openEscalation     = bd.OpenChartConflict
 	spawnChild         = bd.SpawnChild
 	hasEdge            = bd.HasEdge
 	edgesOnPublish     = bd.EdgesOnPublish
@@ -535,7 +579,7 @@ func headIn(repo git.Repo, ref string) (string, error) {
 // never ran reads as transient. A child process, not session.Integrate: session's
 // tests import nami.
 func integrateVerb(out io.Writer) int {
-	self, err := os.Executable()
+	self, err := selfexe.Path()
 	if err != nil {
 		return 1
 	}
@@ -716,7 +760,7 @@ func reconcileChart(ctx contract.Ctx, chart bd.Bead) error {
 		if err := carryOrdering(chart, specID); err != nil {
 			return err
 		}
-		return closeOnPublish(ctx, chart.ID, "", nil) // body authored: the Chart's terminal artifact exists, close it with the Spec's publish
+		return closeOnPublish(ctx, chart.ID, bd.SpeccedReason+" "+specID, nil) // body authored: the Chart's terminal artifact exists, close it with the Spec's publish
 	}
 	return nil
 }
@@ -781,7 +825,7 @@ func gateChart(chart bd.Bead) error {
 	var atHead *bd.Bead
 	for i, a := range open {
 		if got, ok := git.ParseCommit(a.Description); !ok || got != head {
-			if err := closeBead(a.ID, "Approval obsoleted: pinned commit superseded by advanced HEAD"); err != nil {
+			if err := closeBead(a.ID, bd.ApprovalObsoletedReason); err != nil {
 				return err
 			}
 		} else {
@@ -905,6 +949,11 @@ const (
 	// ConflictRequested is a human-filed rebase onto the pinned base (ADR 0262): no
 	// failed land stands behind it, and a clean rebase is a complete result.
 	ConflictRequested = "requested"
+	// ConflictReplay is a respin's conflicting seed replay (Spec mc-d8xi1 D6): Base: is
+	// the mainline the respin was cut at, Tip: the stranded branch's old head, and
+	// Replay-from: the range start. It rebases nothing; Franky three-way merges the range
+	// and integrates the result as the respin's seed commit.
+	ConflictReplay = "replay"
 )
 
 // ChartConflictBody is the payload the chart-conflict bead carries for its
@@ -945,6 +994,47 @@ func RequestedCheckpointBody(cpID, base, tip string) string {
 	return "requested rebase: Franky rebases checkpoint/" + cpID + " onto the pinned base, then this bead closes\n" +
 		git.BasePin(base) + "\n" + git.TipPin(tip) + "\nvariant: " + ConflictRequested
 }
+
+// ReplayConflictTitle is the title of a respin's replay Conflict.
+func ReplayConflictTitle(landedTitle string) string {
+	return "Replay of stranded work of " + landedTitle
+}
+
+// ReplayRange is what a respin replays and where onto: the stranded range Tip..Head
+// (the landed squash's Tip: and the old branch head) onto Mainline.
+type ReplayRange struct{ Mainline, Tip, Head string }
+
+// ReplayConflictBody is the body of a respin's replay Conflict: the pins
+// (Base: mainline, Tip: old head), the Replay-from: range start, and the seed
+// commit's subject and trailers Franky stamps on its one commit. Pure.
+func ReplayConflictBody(remnantID, landedTitle string, r ReplayRange) string {
+	return "variant: " + ConflictReplay + "\n" +
+		"replay conflict: stranded work of " + landedTitle + " did not replay cleanly onto mainline; Franky resolves it into the respin's seed commit\n" +
+		git.BasePin(r.Mainline) + "\n" + git.TipPin(r.Head) + "\nReplay-from: " + r.Tip + "\n" +
+		"Seed-subject: " + ReplaySeedSubject(landedTitle) + "\n" +
+		seedTrailerLines(r, remnantID)
+}
+
+func seedTrailerLines(r ReplayRange, remnantID string) string {
+	var lines []string
+	for _, t := range ReplaySeedTrailers(r, remnantID) {
+		lines = append(lines, "Seed-trailer: "+t)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ReplaySeedTrailers are the trailers of a respin's seed commit, clean or resolved:
+// the replayed range and the Remnant. The Remnant: key marks the seed (SeedTrailerKey);
+// Replayed: is also stamped on effort commits by Integrate's replay.
+func ReplaySeedTrailers(r ReplayRange, remnantID string) []string {
+	return []string{"Replayed: " + r.Tip + ".." + r.Head, SeedTrailerKey + ": " + remnantID}
+}
+
+// SeedTrailerKey is the trailer key only a respin's seed commit carries.
+const SeedTrailerKey = "Remnant"
+
+// ReplaySeedSubject is the subject of a respin's seed commit, clean or resolved.
+func ReplaySeedSubject(landedTitle string) string { return "replay: stranded work of " + landedTitle }
 
 // BodyVariant reads a conflict body's "variant:" line; a body without one (a
 // Checkpoint land conflict) is "".

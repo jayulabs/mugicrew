@@ -43,7 +43,7 @@ An earlier run may have escalated. Read this bead's grilling blockers:
 
     bd dep list %[1]s --direction=down -t blocks --json
 
-For each closed `kind:grilling` one, `bd show` it: the human recorded numbered
+For each `kind:grilling` one closed with reason `%[2]s` (and only those), `bd show` it: the human recorded numbered
 answers in its notes, matching its numbered questions. Those answers are
 binding — apply them as given, even where you would have chosen otherwise.
 Never re-ask an answered item. An answer whose hunk is gone (mainline moved
@@ -88,8 +88,9 @@ grilling already answered.
 To escalate: if a rebase is in progress, run `git rebase --abort`; commits a
 finished rebase already made stay on the branch. Go files the grilling bead
 from your payload and blocks this bead on it. The human records answers in the
-grilling's notes under the same numbers and closes it — never touching the
-Chart branch or this bead — and the next run applies them.
+grilling's notes under the same numbers by opening it with the TUI launch key,
+where Nami closes it `answered:` — never touching the Chart branch or this
+bead — and the next run applies them.
 
 ## Rules
 

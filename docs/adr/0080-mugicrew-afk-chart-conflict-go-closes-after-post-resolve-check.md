@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-10-05
+Amended by ADR 0400 (mugicrew-a-chart-conflict-resolved-close…) §1 (the resolved close writes `resolved: <summary>`).
 
 Amends ADR 0011 §3 and ADR 0030 §3 (chart-conflict was HITL; the agent closed
 its own bead). Builds on ADR 0019 (hybrid AFK), ADR 0078 (failure pause) and

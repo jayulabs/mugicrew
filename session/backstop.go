@@ -13,7 +13,9 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/nami"
 	"jayulabs.org/mugicrew/route"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
 // BackstopEnv marks the backstop's own `mugicrew integrate` child, so the verb
@@ -29,11 +31,15 @@ const BackstopEnv = "MUGICREW_BACKSTOP"
 //     effort/<id>, pause not-built, reopen, log effort.paused at Warn with the
 //     agent's "Not built:" note (ADR 0248). Reports stranded and kept. A Build
 //     carrying paused:not-built whose count is above zero is unpaused first,
-//     logging effort.resumed {cause: not-built}.
+//     logging effort.resumed {cause: not-built}. When the Build's newest "Behind
+//     mainline:" comment is newer than its newest "Not built:" and mainline is no
+//     ancestor of the Checkpoint tip, it pauses behind-mainline instead (note: the
+//     comment body) and a later counted integrate lifts that too (ADR 0420).
 //   - ExitLanded: its container already landed, so b's commits can never integrate.
 //     File them as an offshoot Signal for intake, close b obsolete: container
 //     landed (so the container still drains), then teardown, keep effort/<id> and
-//     log effort.stranded at Warn. Not stranded. If the facts, the Signal or the
+//     log effort.stranded at Warn. Not stranded. A gitlab Checkpoint still open
+//     with no Remnant filed yet pauses b instead, so it holds the Remnant. If the facts, the Signal or the
 //     close fail, it falls to the conflict arm below.
 //   - ExitNoCutPoint: no cut ref and no fork point after a rewrite; nothing was
 //     integrated and a retry cannot help. Pause integrate-conflict naming it
@@ -83,31 +89,52 @@ func Backstop(b bd.Bead, wt string, failed bool, teardown func(), out io.Writer,
 		return false, true
 	case code == ExitIntegrated:
 		// counted before the teardown: the host's count runs in the tree
-		var missing, built bool
+		var missing, built, behind bool
 		var cerr error
+		var note string
 		if b.Kind == contract.KindBuild {
 			missing, built, cerr = notBuilt(b, kid, treeDir)
+			if missing && cerr == nil {
+				note, behind = behindMainline(b, kid, treeDir)
+			}
 		}
 		teardown()
+		if behind {
+			if id, ok := standingRewrite(b.Parent); ok {
+				return waitOnRewrite(b, attrs, note, id)
+			}
+			return pauseBehindMainline(b, attrs, note)
+		}
 		if missing {
 			return pauseNotBuilt(b, attrs, cerr)
 		}
 		// a retry that integrated lifts the pause; a clean return alone never does (ADR 0104)
-		if built && bd.PausedBy(b, bd.PausedNotBuilt) {
-			if err := unpause(b.ID, bd.PausedNotBuilt); err != nil {
-				slog.Warn("effort.resume_failed", append(attrs, "cause", bd.PausedNotBuilt, "error", err.Error())...)
+		for _, cause := range []string{bd.PausedNotBuilt, bd.PausedBehindMainline} {
+			if !built || !bd.PausedBy(b, cause) {
+				continue
+			}
+			if err := unpause(b.ID, cause); err != nil {
+				slog.Warn("effort.resume_failed", append(attrs, "cause", cause, "error", err.Error())...)
 			} else {
-				slog.Info("effort.resumed", append(eventlog.BeadAttrs(b), "cause", bd.PausedNotBuilt)...)
+				slog.Info("effort.resumed", append(eventlog.BeadAttrs(b), "cause", cause)...)
 			}
 		}
 		eventlog.RecordBranches([]bd.BranchOutcome{{Branch: branch, Err: del(branch)}}, attrs...)
 		return false, false
 	case code == ExitLanded:
-		signal, info, err := carryStranded(b, kid)
+		signal, remnant, info, err := carryStranded(b, kid)
 		if err == nil {
 			teardown()
-			slog.Warn("effort.stranded", append(attrs, "signal", signal, "container", info.Container, "landed", info.Landed, "range", info.Range)...)
+			if remnant != "" {
+				attrs = append(attrs, "remnant", remnant, "container", info.Container)
+			} else {
+				attrs = append(attrs, "signal", signal, "container", info.Container, "landed", info.Landed, "range", info.Range)
+			}
+			slog.Warn("effort.stranded", attrs...)
 			return false, true
+		}
+		if errors.Is(err, errRemnantPending) {
+			err = errors.Join(err, commentBead(b.ID, remnantPendingNote))
 		}
 		return pauseConflict(b, wt, attrs, err)
 	case code == ExitNoCutPoint:
@@ -212,6 +239,94 @@ func notBuilt(b bd.Bead, kid *Child, treeDir string) (missing, built bool, err e
 	return err != nil || n == 0, err == nil && n > 0, err
 }
 
+// behindMainline reports b's "Behind mainline:" note and whether to hold it: the
+// report is newer than its newest "Not built:" and mainline really has commits
+// checkpoint/<parent> lacks (mainline is no ancestor of the tip), in the repo the
+// integrate squashed into. A failed or errored check reads as not behind, so b pauses not-built.
+func behindMainline(b bd.Bead, kid *Child, treeDir string) (note string, behind bool) {
+	note = behindReport(b.ID)
+	if note == "" {
+		return "", false
+	}
+	repo := git.Repo(treeDir)
+	if kid != nil {
+		repo = kid.Main
+	}
+	tip, err := containerTip(repo, git.BranchName("checkpoint", b.Parent))
+	if err != nil || tip == "" {
+		return "", false
+	}
+	in, err := containsCommit(repo, tip, repo.Mainline())
+	if err != nil {
+		return "", false
+	}
+	return note, !in
+}
+
+// standingRewrite finds an open Conflict child of checkpoint whose variant is a
+// rewrite of its branch (requested, rebase-conflict or number-clash). A failed read
+// finds none, so the Build pauses (ADR 0420).
+func standingRewrite(checkpoint string) (string, bool) {
+	kids, err := conflictKids(checkpoint, contract.KindConflict)
+	if err != nil {
+		return "", false
+	}
+	for _, k := range kids {
+		if !k.Open() || k.Draft() {
+			continue
+		}
+		switch nami.BodyVariant(k.Description) {
+		case nami.ConflictRequested, nami.ConflictRebase, nami.ConflictNumberClash:
+			return k.ID, true
+		}
+	}
+	return "", false
+}
+
+// waitOnRewrite edges b behind the standing rewrite and reopens it without a pause,
+// keeping effort/<id> and writing no paused:behind-mainline; the rewrite's close releases it through the ordinary path.
+func waitOnRewrite(b bd.Bead, attrs []any, note, rewrite string) (stranded, kept bool) {
+	attrs = append(attrs, "cause", bd.PausedBehindMainline, "note", note, "blocker", rewrite)
+	if err := addBlocker(b.ID, rewrite); err != nil { // edge before release: pause instead
+		return pauseBehindMainline(b, append(attrs, "error", err.Error()), note)
+	}
+	if err := reopenBead(b.ID); err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	liftStaleNotBuilt(b)
+	slog.Warn("effort.paused", attrs...)
+	return true, true
+}
+
+// liftStaleNotBuilt lifts a paused:not-built b carries once its behind-mainline pause or edge
+// is written: the newer Behind mainline: report supersedes the Not built: one, and only a
+// counted integrate would otherwise lift it. Always called after the hold, so b is never free.
+func liftStaleNotBuilt(b bd.Bead) {
+	if !bd.PausedBy(b, bd.PausedNotBuilt) {
+		return
+	}
+	if err := unpause(b.ID, bd.PausedNotBuilt); err != nil {
+		slog.Warn("effort.resume_failed", append(eventlog.BeadAttrs(b), "cause", bd.PausedNotBuilt, "error", err.Error())...)
+		return
+	}
+	slog.Info("effort.resumed", append(eventlog.BeadAttrs(b), "cause", bd.PausedNotBuilt)...)
+}
+
+// pauseBehindMainline pauses b paused:behind-mainline and reopens it, keeping effort/<id> as
+// pauseNotBuilt does; note is the crewmate's "Behind mainline:" body (ADR 0420).
+func pauseBehindMainline(b bd.Bead, attrs []any, note string) (stranded, kept bool) {
+	attrs = append(attrs, "cause", bd.PausedBehindMainline, "note", note)
+	pauseErr := pauseBead(b.ID, bd.PausedBehindMainline)
+	if err := errors.Join(pauseErr, reopenBead(b.ID)); err != nil {
+		attrs = append(attrs, "error", err.Error())
+	}
+	if pauseErr == nil { // a failed pause leaves paused:not-built holding b
+		liftStaleNotBuilt(b)
+	}
+	slog.Warn("effort.paused", attrs...)
+	return true, true
+}
+
 // pauseNotBuilt pauses b not-built and reopens it, keeping effort/<id> so its live
 // ref holds the Checkpoint undrained and a re-run rolls forward (ADR 0248). The
 // tree is already torn down.
@@ -278,7 +393,7 @@ func reopenIfClosed(id string) error {
 // git's (showBead is hitl-run's). Vars, so the outcome mapping is testable without a repo or a bd.
 var (
 	integrateIn = func(wt string, out io.Writer) int {
-		self, err := os.Executable()
+		self, err := selfexe.Path()
 		if err != nil {
 			return ExitTransient
 		}
@@ -300,9 +415,13 @@ var (
 		return repo.CommitsByTrailer(repo.Mainline(), git.BranchName("checkpoint", parent), trailer)
 	}
 	notBuiltNote   = bd.NotBuiltNote
+	behindReport   = bd.BehindMainlineReport
+	conflictKids   = bd.ChildrenOfKind
+	addBlocker     = bd.Blocks
 	probeChildren  = ProbeChildren
 	abortRebase    = git.AbortRebase
 	pauseBead      = bd.Pause
+	commentBead    = bd.AddComment
 	landedFacts    = landedFactsFor
 	fileStranded   = bd.SpawnOffshootSignalTitledIfAbsent
 	closeBead      = bd.Close
@@ -310,6 +429,7 @@ var (
 	deleteBranch   = git.DeleteBranch
 	routeBead      = route.Route
 	isAncestor     = git.Repo.IsAncestor
+	containsCommit = git.Repo.Contains
 	containerTip   = func(r git.Repo, container string) (string, error) { return r.Head("refs/heads/" + container) }
 	setDescription = func(id, body string) error { return bd.Update(id, []string{"--description", body}) }
 )

@@ -63,6 +63,20 @@ func spineIDs(t *testing.T, l *Lineage, id string) []string {
 	return ids
 }
 
+func TestLineageSpineThroughRemnant(t *testing.T) {
+	l := NewLineage([][]string{
+		bead("sp", "kind:spec", "2026-10-01"), bead("cp1", "kind:checkpoint", "2026-10-02"),
+		bead("rm", "kind:remnant", "2026-10-03"), bead("cp2", "kind:checkpoint", "2026-10-04"),
+		edge("cp1", "sp", "caused-by"), edge("rm", "cp1", "related"), edge("cp2", "rm", "caused-by"),
+	})
+	want := []string{"sp:spec", "cp1:checkpoint", "cp2:checkpoint"}
+	for _, from := range []string{"cp1", "cp2"} {
+		if got := spineIDs(t, l, from); !slices.Equal(got, want) {
+			t.Errorf("Spine(%s) = %v, want %v", from, got, want)
+		}
+	}
+}
+
 func TestLineageSpine(t *testing.T) {
 	n := func(i int) string { return "2026-10-0" + string(rune('0'+i)) + " 00:00:00 +0000 UTC" }
 	rows := [][]string{

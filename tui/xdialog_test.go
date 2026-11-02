@@ -76,7 +76,7 @@ func ok(string, bool) (withdraw.Result, error) { return withdraw.Result{Closed: 
 func TestXOpensWithdrawDialogOnHeadRowsOnly(t *testing.T) {
 	m, _ := actModel(t)
 	stubWithdraw(t, cleanPlan, ok)
-	for _, id := range []string{"res"} { // a Build
+	for _, id := range []string{"live"} { // a live-session bead
 		o := selectBead(t, m, id)
 		if strings.Contains(hintsOf(o), "X withdraw") {
 			t.Errorf("%s hints offer X: %s", id, hintsOf(o))
@@ -470,7 +470,7 @@ func TestXLiveErrandOpensBarredWithSessionFix(t *testing.T) {
 func TestXNonHeadStatusNamesErrand(t *testing.T) {
 	m, _ := actModel(t)
 	stubWithdraw(t, cleanPlan, ok)
-	m = press(t, selectBead(t, m, "res"), runeKey("X"))
+	m = press(t, selectBead(t, m, "live"), runeKey("X"))
 	if !strings.Contains(statusOf(m), "Errand") {
 		t.Errorf("status %q", statusOf(m))
 	}
@@ -733,6 +733,77 @@ func TestXOpensOnAnUnclosedLatchRow(t *testing.T) {
 	for _, want := range []string{"Withdraw T-lt?", "Releases", "Waiting build"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("Latch dialog lacks %q:\n%s", want, v)
+		}
+	}
+}
+
+// X on an unclosed defog leaf row opens the withdraw dialog for that bead alone (Spec mc-3cnhf.74 FR 13).
+func TestXOpensOnADefogLeafRow(t *testing.T) {
+	gr := bd.Bead{ID: "gr", Kind: contract.KindGrilling, Status: "open", Title: "T-gr", Created: epoch}
+	stubWithdraw(t, func(string) (withdraw.Plan, error) {
+		return withdraw.Plan{Kind: withdraw.KindWithdraw, Target: "gr", Set: []bd.Bead{gr}}, nil
+	}, func(h string, _ bool) (withdraw.Result, error) { return withdraw.Result{Closed: []string{h}}, nil })
+	m, _ := actModel(t)
+	m, _ = send(t, m, loadedMsg{beads: append(actionBeads(), gr), live: map[string]bool{"live": true}, sessions: actionSessions()})
+	m = press(t, selectBead(t, m, "gr"), runeKey("X"))
+	if len(m.modals) != 1 || m.modals[0].kind != xdialog {
+		t.Fatalf("X on a defog leaf opened %d modals (status %q)", len(m.modals), statusOf(m))
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "Withdraw T-gr?") {
+		t.Errorf("dialog lacks the withdraw title:\n%s", v)
+	}
+}
+
+// X's footer hint, availability and press are one decision: the hint is offered
+// exactly when the press runs a verb, and it names that verb.
+func TestXHintAvailabilityAndPressAgree(t *testing.T) {
+	stubWithdraw(t, cleanPlan, ok)
+	closedRemnant := func(b *bd.Bead) { b.Status = "closed" }
+	cases := []struct {
+		name string
+		bead func(beads []bd.Bead) bd.Bead
+		want string // the hint's label; "" is none
+	}{
+		{"remnant", func(bs []bd.Bead) bd.Bead { return bs[len(bs)-1] }, "drop"},
+		{"closed remnant", func(bs []bd.Bead) bd.Bead { b := bs[len(bs)-1]; closedRemnant(&b); return b }, ""},
+		{"open initiative", func(bs []bd.Bead) bd.Bead { return bs[0] }, "cancel"},
+		{"chain head", func(bs []bd.Bead) bd.Bead {
+			return bd.Bead{ID: "sig", Kind: contract.KindSignal, Status: "open", Title: "S", Created: epoch}
+		}, "withdraw"},
+		{"chain member", func(bs []bd.Bead) bd.Bead {
+			return bd.Bead{ID: "b1", Kind: contract.KindBuild, Status: "open", Title: "B", Parent: "sig", Created: epoch}
+		}, ""},
+	}
+	for _, tc := range cases {
+		beads := remnantFixture()
+		b := tc.bead(beads)
+		beads = append(beads, chainSet()...)
+		for i := range beads {
+			if beads[i].ID == b.ID {
+				beads[i] = b
+			}
+		}
+		m, _ := execModel(t, beads)
+		g := m.gateData()
+		g.beads = beads
+
+		label := ""
+		hinted, _ := beadVerbBindings(g, &b, roleFull)
+		for _, kb := range hinted {
+			if kb.Keys()[0] == "X" {
+				label = kb.Help().Desc
+			}
+		}
+		if label != tc.want {
+			t.Errorf("%s: hint = %q, want %q", tc.name, label, tc.want)
+		}
+		if got := g.xTargetOf(&b) != xNone; got != (tc.want != "") {
+			t.Errorf("%s: X offered = %v with hint %q", tc.name, got, tc.want)
+		}
+		next, cmd := m.xPress(g, b)
+		ran := len(next.(Model).modals) > 0 || cmd != nil
+		if ran != (tc.want != "") {
+			t.Errorf("%s: press ran a verb = %v with hint %q", tc.name, ran, tc.want)
 		}
 	}
 }

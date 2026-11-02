@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ROUTES, htmlPages } from './check-build.mjs';
+import { ROUTES, LEARN_ROUTES, htmlPages } from './check-build.mjs';
 import { walk, run } from './lib.mjs';
 
 // What a page loads: <link>, <script>, <img>, <source> and <video> with an
@@ -16,7 +16,7 @@ const NPM_LINK = new RegExp(`href="${NPM_PACKAGE.replace(/[./]/g, '\\$&')}"`);
 
 export function checkStyle(dir) {
   const errs = [];
-  for (const route of ROUTES) {
+  for (const route of [...ROUTES, ...LEARN_ROUTES]) {
     const file = path.join(dir, route);
     if (!fs.existsSync(file)) continue;
     const html = fs.readFileSync(file, 'utf8');

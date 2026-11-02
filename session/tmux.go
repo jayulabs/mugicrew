@@ -25,6 +25,7 @@ import (
 	"jayulabs.org/mugicrew/luffy"
 	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/route"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
 // ErrNoTmux is the refusal when tmux is off PATH: tmux is required, with no
@@ -291,7 +292,7 @@ const protoPane = "#{P:#{?#{@protopane},#{pane_id},}}"
 // beadExe names the mugicrew executable the bead pane runs; a var so a test can
 // point it at a stub. The binding is server-wide, so it is an absolute path, not PATH.
 var beadExe = func() string {
-	if exe, err := os.Executable(); err == nil {
+	if exe, err := selfexe.Path(); err == nil {
 		return exe
 	}
 	return "mugicrew"
@@ -532,7 +533,7 @@ func Start(b bd.Bead, ac contract.AgentCommand) error {
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return err
 	}
@@ -615,7 +616,7 @@ func Resume(b bd.Bead, s Info, h contract.Harness) error {
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return err
 	}
@@ -887,7 +888,7 @@ func LaunchTUI(args ...string) error {
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return err
 	}
@@ -1286,7 +1287,7 @@ func Watch(bead string) error {
 	if !paneName.MatchString(pane) || !safeID.MatchString(bead) {
 		return fmt.Errorf("watch: not in a pane of this repo's tmux server, or bad bead id %q", bead)
 	}
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return err
 	}

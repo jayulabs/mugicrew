@@ -1,0 +1,154 @@
+---
+id: failure-modes
+title: Failure modes and troubleshooting
+---
+
+import Link from '@docusaurus/Link';
+import SurfaceTabs from '@site/src/components/SurfaceTabs';
+
+# Failure modes and troubleshooting
+
+Find what you see, confirm it, then apply the fix. Each entry opens with the **cue** in the TUI and the **read** in the CLI that show the symptom, so you can tell you are in the right entry before you act. The fix follows, as a TUI and a CLI tab.
+
+Three reads answer most "what is it doing?" questions, and every entry uses them:
+
+<SurfaceTabs
+  tui={<ul><li>The <code>●</code> on a row means a live effort. <code>d</code> opens the bead's detail, which lists its labels (a <code>paused</code> field) and effort branch.</li><li><code>t</code> on a row reads its transcript. <code>S</code> opens the sessions list and <code>#</code> the Stats tab.</li></ul>}
+  cli={<pre><code className="language-bash">mugicrew loop status{'\n'}mugicrew ps{'\n'}mugicrew stats &lt;bead&gt; --spine{'\n'}mugicrew transcript &lt;bead&gt;</code></pre>}
+/>
+
+Symptoms covered: [a stranded bead](#a-stranded-bead), [an effort to abort](#an-effort-to-abort), [a paused bead or Latch](#a-paused-bead-or-latch), [a Conflict or Chart-conflict](#a-conflict-or-chart-conflict), [a Pivot](#a-pivot), [a broken bead](#a-broken-bead), [doctor failing](#doctor-failing), and [a branch behind mainline](#a-branch-behind-mainline).
+
+## A stranded bead
+
+A bead is stranded when its effort died (a crash, a closed laptop, a killed process) and left its claim, its worktree or its branch behind. Nothing is running on it, but the loop will not pick it up either.
+
+<SurfaceTabs
+  tui={<p>The bead's row shows no live <code>●</code> though it is claimed (<code>in_progress</code>), and the same bead is missing from the sessions list (<code>S</code>). Press <code>d</code> on the row: its detail shows the leftover effort branch.</p>}
+  cli={<div><p>The bead is claimed but absent from the efforts list, and <code>recover</code> with no argument lists it:</p><pre><code className="language-bash">mugicrew ps{'\n'}mugicrew recover</code></pre></div>}
+/>
+
+The fix is **recover**, which only you can start. It repairs the bead and clears the leftovers.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>x</code> on the stranded bead. The first press reads the leftovers; press <code>x</code> again if the status line says the read is done.</li><li>A <strong>Recover?</strong> dialog names what it will clear. Press <code>y</code> to confirm. If the tree holds uncommitted files, a second dialog asks whether to discard them.</li><li>The status line reports what was recovered. The TUI never forces: if it refuses because it sees a live process, check for one and use the CLI.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew recover &lt;bead-id&gt;{'\n'}mugicrew recover &lt;bead-id&gt; --discard   # drop uncommitted files with the tree{'\n'}mugicrew recover &lt;bead-id&gt; --force     # only after you have checked nothing still runs</code></pre>}
+/>
+
+If recover itself failed partway, the bead stays paused as _recovering_; run recover again.
+
+## An effort to abort
+
+An effort is running, but you no longer want it: it is on the wrong track, or it is burning time.
+
+<SurfaceTabs
+  tui={<p>The bead's row has a live <code>●</code>. Press <code>t</code> to read its transcript and confirm it is the one.</p>}
+  cli={<pre><code className="language-bash">mugicrew ps{'\n'}mugicrew transcript &lt;bead&gt;</code></pre>}
+/>
+
+Abort pauses the bead and sends its running effort a stop. The effort branch is kept.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>x</code> on the running bead.</li><li>The <strong>Abort effort?</strong> dialog says it pauses the bead and stops the effort. Press <code>y</code>.</li><li>The status line names the processes signalled. Press <code>p</code> on the row later to lift the pause.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew abort &lt;bead-id&gt;</code></pre>}
+/>
+
+## A paused bead or Latch
+
+A paused bead is one the loop will not dispatch until its pause is lifted. A [Latch](/learn/bead-glossary#latch) pauses too, when its watched merge request is closed unmerged or missing, or when repeated reads of its Jira ticket fail.
+
+<SurfaceTabs
+  tui={<p>The row sits in the Actionable section's paused band. Press <code>d</code> for its detail: the <code>paused</code> field names the cause (<em>manual</em>, <em>failing</em>, <em>abandoned</em>, <em>integrate-conflict</em>, <em>not-built</em>, <em>unmet</em>, <em>checkup</em> and so on).</p>}
+  cli={<div><p>Read why from the transcript of its last effort, and check the loop is running:</p><pre><code className="language-bash">mugicrew loop status{'\n'}mugicrew transcript &lt;bead&gt;</code></pre></div>}
+/>
+
+What lifts the pause depends on the cause. A loop-written pause such as _foreign-hold_ lifts itself; _failing_, _abandoned_ and _manual_ wait for you; _integrate-conflict_ and _not-built_ also lift when a later effort integrates. For a Latch whose watched item is gone, withdraw it.
+
+<SurfaceTabs
+  tui={<ol><li>Fix what the cause names, then press <code>p</code> on the row to unpause (the key reads <em>unpause</em> on a manually paused bead).</li><li>For a Latch whose ticket or merge request is gone for good, press <code>X</code> to withdraw it, and confirm.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew withdraw &lt;latch-id&gt;{'\n'}mugicrew latch jira &lt;KEY&gt; --blocks &lt;bead&gt;   # or hold again on a ticket that exists</code></pre>}
+/>
+
+The CLI has no verb to unpause a bead; use the TUI's `p`, or run the bead again from the TUI. The verbs for holding work on a ticket or a merge request are on [CLI verbs](/learn/cli-verbs).
+
+## A Conflict or Chart-conflict
+
+A [Conflict](/learn/bead-glossary#conflict) is filed on a Checkpoint when its rebase onto mainline hit a clash, either a textual conflict or a numbered file whose number mainline already holds. A [Chart-conflict](/learn/bead-glossary#chart-conflict) is the same for a Chart. The Checkpoint or Chart cannot land until it closes.
+
+<SurfaceTabs
+  tui={<p>A Conflict or Chart-conflict row appears under the Checkpoint (Execute tab, <code>3</code>) or Chart (Defog tab, <code>2</code>). A live <code>●</code> on it means the crew is already resolving it.</p>}
+  cli={<pre><code className="language-bash">mugicrew ps{'\n'}mugicrew transcript &lt;conflict-bead&gt;</code></pre>}
+/>
+
+Franky resolves a Conflict and Nami a Chart-conflict, both on their own. You step in only for a Chart-conflict that needs a judgment call: it files a [Grilling](/learn/bead-glossary#grilling) bead that blocks the Chart-conflict until you answer it (see [Working the spine](/learn/working-the-spine#3-defog-the-chart)). To pre-empt one, [rebase the branch yourself](#a-branch-behind-mainline); that is also how you ask for a rebase when mainline moved.
+
+If the resolver itself is stuck, abort it ([an effort to abort](#an-effort-to-abort)), then relaunch.
+
+## A Pivot
+
+A [Pivot](/learn/bead-glossary#pivot) says work on a Checkpoint proved the [Spec](/learn/bead-glossary#spec) wrong. While one is open it blocks the whole Checkpoint: Builds stop, no Review or Approval spawns and nothing lands.
+
+<SurfaceTabs
+  tui={<p>On the Execute tab (<code>3</code>) a Pivot row sits beside the Checkpoint it freezes. A run-now on the Checkpoint answers <em>Checkpoint not ready, open Pivot freezes it</em>. The oldest open Pivot is the lead; its detail (<code>d</code>) lists the other open Pivots it covers.</p>}
+  cli={<pre><code className="language-bash">mugicrew stats &lt;checkpoint&gt; --spine{'\n'}mugicrew transcript &lt;pivot&gt;</code></pre>}
+/>
+
+A Pivot is yours to decide. Zoro reads the evidence in a session and recommends one of four outcomes; you pick:
+
+- **Correct the Spec:** a slice error. A corrected Spec replaces the old one.
+- **Amend:** the requirement's intent holds and no built work is wrong. An Amendment is added to the Spec and the finding is refiled as a Critique.
+- **Escalate:** the charting assumption was wrong. A fresh Chart is cut for Nami and the old Spec and Checkpoint are obsoleted.
+- **Dismiss:** the Spec was fine; Builds resume, and the finding may become a Critique.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>3</code>, then <code>j</code>/<code>k</code> to the lead Pivot row.</li><li>Press <code>enter</code> to open Zoro's session. It triages every open Pivot on that Checkpoint together.</li><li>Read the recommendation and say which outcome you want. Zoro carries it out; confirming or escalating also sweeps the sibling Pivots.</li></ol>}
+  cli={<div><p>There is no verb that starts the triage; the CLI reads the Pivot's state. The session you start in the TUI runs <code>mugicrew pivot confirm</code> or <code>mugicrew pivot escalate</code> for you.</p><pre><code className="language-bash">mugicrew transcript &lt;pivot&gt;</code></pre></div>}
+/>
+
+## A broken bead
+
+Sometimes a bead is just wrong: a malformed field, a missing edge, a state the loop cannot make sense of. A **Checkup** is a session in which Chopper diagnoses it with you and repairs it. Recover does not apply here; it is for beads a dead effort stranded.
+
+<SurfaceTabs
+  tui={<p>The row looks inconsistent, or the loop leaves it alone with no pause you can explain. <code>d</code> shows what it holds.</p>}
+  cli={<pre><code className="language-bash">mugicrew transcript &lt;bead&gt;{'\n'}mugicrew stats &lt;bead&gt;</code></pre>}
+/>
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>c</code> on the bead's row, on any tab.</li><li>Chopper's session opens in a pane. Tell it what looks wrong; it diagnoses with you and repairs.</li><li>While the <Link to="/learn/bead-glossary#checkup">Checkup</Link> is open the target is paused (<em>checkup</em>); the pause lifts when the session ends, as repaired or as not a bead fault.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew checkup &lt;bead&gt; --problem "the Build shows closed but its branch was never integrated"</code></pre>}
+/>
+
+## doctor failing
+
+`mugicrew doctor` checks that the machine and the Workspace are ready to run mugicrew: tools, git repo, bead graph, Agent Profiles and the backup rows. The loop refuses to start while a failure remains.
+
+<SurfaceTabs
+  tui={<p>The loop does not start when you press <code>o</code>. The TUI has no doctor view, so run it in a shell.</p>}
+  cli={<pre><code className="language-bash">mugicrew loop status{'\n'}mugicrew doctor</code></pre>}
+/>
+
+doctor reads and repairs nothing. Each warn or FAIL row names its fix, classed _safe_ (changes only this machine or clone and needs no credentials) or _manual_. **doctor fix** applies every safe fix, lists the manual ones it left and re-checks.
+
+<SurfaceTabs
+  tui={<p>There is no TUI key. Run <code>mugicrew doctor fix</code> in a shell, do the manual fixes it lists, then press <code>o</code> again.</p>}
+  cli={<pre><code className="language-bash">mugicrew doctor fix{'\n'}mugicrew doctor</code></pre>}
+/>
+
+`doctor fix` exits 1 if a failure remains. It never changes the bead graph.
+
+## A branch behind mainline
+
+Mainline moved after a Chart or Checkpoint was cut, so its branch is behind. Left alone it meets the clash at the land and files a Conflict; rebasing it first costs you one request.
+
+<SurfaceTabs
+  tui={<p>The container's detail (<code>d</code>) shows a mainline that has moved past its base, or a Landing has filed a Conflict on it.</p>}
+  cli={<pre><code className="language-bash">mugicrew ps{'\n'}mugicrew transcript &lt;checkpoint&gt;</code></pre>}
+/>
+
+<SurfaceTabs
+  tui={<ol><li>Select the Chart or Checkpoint row.</li><li>Press <code>n</code> for the New menu, then <code>r</code> to file a rebase.</li><li>A requested <Link to="/learn/bead-glossary#conflict">Conflict</Link> (or Chart-conflict) appears and the crew resolves it like any other.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew rebase &lt;chart-or-checkpoint-id&gt;</code></pre>}
+/>
+
+At most one Conflict is open per Checkpoint, whatever its variant. Every verb used here is on [CLI verbs](/learn/cli-verbs); for the flow these failures interrupt, see [Working the spine](/learn/working-the-spine). Installation problems are covered in [the install guide](/try/install).

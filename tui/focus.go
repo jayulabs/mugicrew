@@ -151,7 +151,7 @@ func (f focus) members(g graphData, kinds ...contract.Kind) (open, closed []*bd.
 			open = append(open, &g.beads[i])
 		}
 	}
-	byCmp := func(a, b *bd.Bead) int { return beadCmp(*a, *b) }
+	byCmp := func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) }
 	slices.SortStableFunc(open, byCmp)
 	slices.SortStableFunc(closed, byCmp)
 	return
@@ -177,7 +177,7 @@ func (f focus) defogSection(g graphData) (s fSection) {
 		if f.folded(s.rows[len(s.rows)-1]) {
 			continue
 		}
-		hitl, afk, done := chartKids(g.beads, c)
+		hitl, afk, done := g.chartKids(c)
 		for _, l := range hitl {
 			s.rows = append(s.rows, fRow{kind: fBead, key: l.ID, sec: secDefog, b: l, depth: 2, leaf: true})
 		}
@@ -246,7 +246,7 @@ func (f focus) execSection(g graphData) (s fSection) {
 			}
 		}
 	}
-	slices.SortStableFunc(sides, func(a, b fRow) int { return beadCmp(*a.b, *b.b) })
+	slices.SortStableFunc(sides, func(a, b fRow) int { return g.rowCmp(*a.b, *b.b) })
 	s.rows = append(s.rows, sides...)
 	s.open = len(cps) + len(specs) + len(sides)
 	s.closed = append(closedCPs, closedSpecs...)
@@ -837,7 +837,7 @@ func (m Model) focusFrame() string {
 		m.headerView(),
 		m.backBar(),
 		fit(m.focusView(m.w, m.h-chromeH+1), m.w, m.h-chromeH+1),
-		" " + strings.ReplaceAll(m.status, "\n", " "),
+		" " + strings.ReplaceAll(m.statusText(), "\n", " "),
 		m.hintsView(),
 	}, "\n"), m.w, m.h)
 }

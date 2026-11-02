@@ -59,8 +59,8 @@ a reason naming %[1]s; remove any paused:* label, paused:manual included, saying
 whether the bead will re-dispatch or just re-pause. Rewrite the whole body of an
 open non-Chart bead only after a before/after diff. Edit a Chart body one line
 at a time through mugicrew chart append|drop. Crew verbs: mugicrew recover,
-abort, rebase, signal new, signal offshoot, chart append|drop, and the read-only
-transcript.
+abort, rebase, checkup close, signal new, signal offshoot, chart append|drop,
+and the read-only transcript.
 
 ## Never, whatever the human says
 
@@ -83,13 +83,16 @@ as an offshoot Signal, discovered-from %[1]s (read crew doc signal-filing.md).
 Close %[1]s only when the human says they are finished. A Checkup whose every
 finding the human declined stays open.
 
-- If any repair plan ran: bd close %[1]s --reason "repaired: <what changed>",
-  naming any offshoot Signal filed, any command printed for the human and any
-  finding the human declined.
+- If any repair plan ran, run, as one line:
+  mugicrew checkup close %[1]s --reason "repaired: <what changed>", naming any
+  offshoot Signal filed, any command printed for the human and any finding the
+  human declined.
 - If no change inside your write surface would fix the symptom durably (a code
   defect with its offshoot Signal, a git or environment fault with its printed
-  command, or nothing wrong): bd close %[1]s --reason "not a bead fault: <why>".
-  Write nothing on the target.
+  command, or nothing wrong):
+  mugicrew checkup close %[1]s --reason "not a bead fault: <why>". Write nothing
+  on the target.
 
-Lift the fence last, as the final act of the close and never as part of a plan:
-bd update <target> --remove-label paused:checkup. Then print the closing line.
+The verb lifts the fence as part of the close, still only when the human says they
+are finished: the lift is the final act of the close and never part of a plan. Then
+print the closing line.

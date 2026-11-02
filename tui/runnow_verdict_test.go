@@ -24,10 +24,12 @@ type pressView struct {
 	blocked map[string][]bd.Bead
 }
 
-func (v pressView) Children(id string) ([]bd.Bead, error)  { return v.kids[id], nil }
-func (v pressView) Efforts() (*git.EffortSet, error)       { return git.NewEffortSet(), nil }
-func (v pressView) Landed(b bd.Bead) (loop.Trailer, error) { return v.landed[b.ID], nil }
-func (v pressView) CheckpointTip(string) (string, error)   { return v.tip, nil }
+func (v pressView) Children(id string) ([]bd.Bead, error)          { return v.kids[id], nil }
+func (v pressView) Efforts() (*git.EffortSet, error)               { return git.NewEffortSet(), nil }
+func (v pressView) Landed(b bd.Bead) (loop.Trailer, error)         { return v.landed[b.ID], nil }
+func (v pressView) SameRepo(_, _ bd.Bead) bool                     { return true }
+func (v pressView) CheckpointTip(string) (string, error)           { return v.tip, nil }
+func (v pressView) Contains(bd.Bead, string, string) (bool, error) { return true, nil }
 func (v pressView) Bead(id string) (bd.Bead, error) {
 	if b, ok := v.beads[id]; ok {
 		return b, nil

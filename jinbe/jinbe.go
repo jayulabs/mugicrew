@@ -87,6 +87,7 @@ var (
 	showBead             = bd.Show
 	jiraKey              = bd.JiraKeyOf
 	closeBead            = bd.Close
+	forceClose           = bd.ForceClose
 	updateBody           = bd.Update
 	spawnChild           = bd.SpawnChildIfAbsent
 	spawnSignal          = bd.SpawnOffshootSignalIfAbsent
@@ -185,6 +186,8 @@ var (
 	hasBranch       = git.Repo.HasBranch
 	childrenOfKind  = bd.ChildrenOfKind
 	supersede       = bd.Supersede
+	blockedOn       = bd.GateTargets // the beads a bead blocks (blocks edges up)
+	addBlocks       = bd.Blocks
 	clock           = time.Now
 )
 
@@ -247,11 +250,13 @@ func reconcileCheckpoint(cp bd.Bead) error {
 	return err
 }
 
-// closeLanded rolls a landed container forward: under gitlab it first flags a stale pin,
-// runs the final close-out and closes any MR still open on the branch, then mints the
-// renumber; its open Landings close landed: <sha> through the Open() guard, its MR Watches
-// close, then the container itself — always the Landing first (ADR 0145 §3), so a
-// container never closes over an open Landing.
+// closeLanded rolls a landed container forward: under gitlab it first runs the final
+// close-out and closes any MR still open on the branch, then mints the renumber and
+// files the Remnant of any work the early merge stranded (force-closing the container
+// over its running children and pivot when it has one); its open Landings close
+// landed: <sha> through the Open() guard, its MR Watches close, then the container
+// itself, force-closed over any open blocker — always the Landing first (ADR 0145 §3),
+// so a container never closes over an open Landing.
 func closeLanded(container bd.Bead, branch, sha string) error {
 	landings, err := landingsOf(container.ID)
 	if err != nil {
@@ -268,8 +273,10 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 		evBead := container
 		if hasLanding {
 			evBead = l
-			if err := flagStalePin(l, container, branch, sha, lg); err != nil {
-				return err
+			if lg.repo != "" { // a nested container has no Remnant, so its stranded range keeps the stale-pin Signal
+				if err := flagStalePin(l, container, branch, sha, lg); err != nil {
+					return err
+				}
 			}
 			if err := finalCloseOut(l, container, branch, sha, lg); err != nil {
 				return holdRateLimited(evBead, "land.rate_limited", err, lg.attrs)
@@ -288,6 +295,9 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 				return err
 			}
 		}
+		if err = fileRemnant(container, branch, sha, l, hasLanding, lg); err != nil {
+			return err
+		}
 	}
 	if err := bd.CloseLandings(landings, sha, closeBead); err != nil {
 		return err
@@ -295,10 +305,15 @@ func closeLanded(container bd.Bead, branch, sha string) error {
 	if err := closeWaitingApprovals(container.ID); err != nil {
 		return err
 	}
-	if err := closeMRWatches(container.ID, "container closed"); err != nil {
+	if err := closeMRWatches(container.ID, reasonContainerClosed); err != nil {
 		return err
 	}
-	return closeIfOpen(container, "")
+	if !container.Open() {
+		return nil
+	}
+	// a landed container closes over any open blocker: a Remnant's running children
+	// and pivot, or a Hold Errand whose guide session is live
+	return forceClose(container.ID, bd.LandedReason+" "+sha)
 }
 
 // mintRenumber files the renumber Checkpoint when container, landed at sha on the
@@ -534,11 +549,13 @@ func reconcileLandingOnce(l bd.Bead) (nested []any, _ error) {
 }
 
 // landedClose closes a Landing whose trailer is on mainline at sha; under gitlab a
-// stale-pin squash also files its offshoot Signal first.
+// Chart's stale-pin squash also files its offshoot Signal first.
 func landedClose(l, cp bd.Bead, branch, sha, strategy string, lg legs) error {
 	if strategy == git.LandStrategyGitlab {
-		if err := flagStalePin(l, cp, branch, sha, lg); err != nil {
-			return err
+		if cp.Kind != contract.KindCheckpoint || lg.repo != "" { // a Workspace Checkpoint's strand check is closeLanded's Remnant; a nested one has none
+			if err := flagStalePin(l, cp, branch, sha, lg); err != nil {
+				return err
+			}
 		}
 		if err := finalCloseOut(l, cp, branch, sha, lg); err != nil {
 			return err
@@ -629,7 +646,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 		} else if !errors.Is(err, git.ErrNotLanded) {
 			return true, err // a failed read says nothing about the trailer
 		}
-		return true, holdTrailerless(cp, lg.repo, mrNaming{lg.mrPath, mr.WebURL, "merge request", "MR"}, git.TrailerFor(string(cp.Kind), cp.ID), iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
+		return true, holdTrailerless(cp, l.ID, lg.repo, mrNaming{lg.mrPath, mr.WebURL, "merge request", "MR"}, git.TrailerFor(string(cp.Kind), cp.ID), iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
 	}
 	if mr.State == forge.StateOpened {
 		if err := forgeReviewArm(cp, &l, lg, mr); err != nil { // first: an open Forge Review holds the land, and a 429 is held by reconcileLanding
@@ -673,7 +690,7 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 	do := fmt.Sprintf("reopen or merge MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. "+
 		"If it was already merged and the Check fails, stamp the trailer: %s "+
 		"The next Landing reuses a reopened MR or opens a fresh one.", ref, cp.ID, stamp)
-	if err := holdClosedMR(cp, lg, mr, lead, do); err != nil {
+	if err := holdClosedMR(cp, l.ID, lg, mr, lead, do); err != nil {
 		return true, err
 	}
 	landOutcome(lg, l, eventlog.LandClosed, iid)
@@ -682,8 +699,9 @@ func mirrorMR(l, cp bd.Bead, branch, trailer string, lg legs, base string) (done
 
 // holdClosedMR is the closed-MR arm's Hold (ADR 0185 §4): one Brook Task, idempotent on
 // (container, MR iid), blocking cp until a human reopens the closed MR mr or withdraws cp.
-// lead opens the Errand body and do is its step's instruction.
-func holdClosedMR(cp bd.Bead, lg legs, mr *forge.MR, lead, do string) error {
+// lead opens the Errand body and do is its step's instruction. raiser is the closed
+// Landing that files it ("" for the MR Watch's closed Draft, which has none).
+func holdClosedMR(cp bd.Bead, raiser string, lg legs, mr *forge.MR, lead, do string) error {
 	ref := git.MRRef(lg.mrPath, mr.IID)
 	body := bd.ErrandBody(lead,
 		[]string{fmt.Sprintf("Closed MR: !%d", mr.IID), git.MRLinkLine(mr.WebURL)},
@@ -693,7 +711,7 @@ func holdClosedMR(cp bd.Bead, lg legs, mr *forge.MR, lead, do string) error {
 			Do:      do,
 			Check:   fmt.Sprintf("`mugicrew probe mr '%s'` prints `opened`, or `mugicrew probe landed %s` prints `landed`, or `bd show %s` shows it closed.", ref, cp.ID, cp.ID),
 		}}, "")
-	_, _, err := holdErrand(cp, fmt.Sprintf("Closed MR: !%d\n", mr.IID), "merge request "+ref+" was closed", body)
+	_, _, err := holdErrand(cp, fmt.Sprintf("Closed MR: !%d\n", mr.IID), "merge request "+ref+" was closed", body, raiser)
 	return err
 }
 
@@ -706,16 +724,16 @@ func conflictArm(l *bd.Bead, cp bd.Bead, branch, trailer string, mr *forge.MR, l
 	var fileErr error
 	switch {
 	case mr.HasConflicts || mr.MergeError != "":
-		fileErr = fileConflict(cp, base, nil, lg.head, false)
+		fileErr = fileConflict(cp, base, nil, lg.head, l.ID)
 	case checkedBase(l.Description) != base:
 		_, _, _, err := lg.compose(branch, trailer, "", "")
 		var conflict *git.RebaseConflict
 		var clash *git.NumberClash
 		switch {
 		case errors.As(err, &conflict):
-			fileErr = fileConflict(cp, conflict.Base, nil, lg.head, false)
+			fileErr = fileConflict(cp, conflict.Base, nil, lg.head, l.ID)
 		case errors.As(err, &clash):
-			fileErr = fileConflict(cp, clash.Base, clash.Clashes, lg.head, false)
+			fileErr = fileConflict(cp, clash.Base, clash.Clashes, lg.head, l.ID)
 		case err != nil:
 			return true, err
 		default:
@@ -912,7 +930,7 @@ func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
 	if infra {
 		if _, _, err := holdErrand(cp, pipelineKey, title, bd.ErrandBody(
 			infraErrandLead+" the runner, not the code, failed.", errandFacts,
-			[]bd.ErrandStep{infraRetryStep(ref, pl.ID, cp.ID, false)}, tails)); err != nil {
+			[]bd.ErrandStep{infraRetryStep(ref, pl.ID, cp.ID, false)}, tails), l.ID); err != nil {
 			return true, err
 		}
 		landOutcome(lg, l, eventlog.LandPipelineFailed, git.RecordedMR(l.Description), "pipeline", pl.ID, "infra", true)
@@ -921,7 +939,7 @@ func pipelineFailed(l, cp bd.Bead, lg legs, pl forge.Pipeline) (bool, error) {
 	if cp.Kind == contract.KindChart {
 		if _, _, err := holdErrand(cp, pipelineKey, title, bd.ErrandBody(
 			"The retried pipeline failed on this Chart's branch; main or the CI config is likely broken.", errandFacts,
-			chartPipelineSteps(ref, pl), tails)); err != nil {
+			chartPipelineSteps(ref, pl), tails), l.ID); err != nil {
 			return true, err
 		}
 	} else if err := fileCritique(l, cp, lg.proj, pl, cp.Title+": "+title, mrLead(lg.mrPath, iid)+joinPipelineParts(facts, tails)); err != nil {
@@ -1046,9 +1064,10 @@ func fileCritique(l, cp bd.Bead, p forge.Project, pl forge.Pipeline, title, deta
 }
 
 // holdErrand files the Brook-owned Errand blocking cp, idempotent on key, titled
-// "<container>: <what>". created is false when the hold was already filed.
-func holdErrand(cp bd.Bead, key, what, body string) (id string, created bool, err error) {
-	return bd.SpawnBlockingErrand(cp.ID, key, cp.Title+": "+what, body)
+// "<container>: <what>". raiser is the Landing whose failure files it ("" for none; ADR 0401).
+// created is false when the hold was already filed.
+func holdErrand(cp bd.Bead, key, what, body, raiser string) (id string, created bool, err error) {
+	return bd.SpawnBlockingErrand(cp.ID, key, cp.Title+": "+what, body, raiser)
 }
 
 // mrNaming is how holdTrailerless names and links the MR it holds on: its nested project
@@ -1060,9 +1079,10 @@ type mrNaming struct{ path, webURL, noun, label string }
 // open; one Brook-owned Errand blocks the container, idempotent on (container, MR iid)
 // (Spec FR 19, ADR 0185 §5). noun and label name the MR in running text and at a sentence
 // start: "merge request"/"MR" for a land's, "revert merge request"/"Revert MR" for a
-// Rollback's. Returns the error that fails the tick once, on the call that files the hold; an
+// Rollback's. raiser is the open Landing under the merged MR ("" on a Rollback, which has
+// none; ADR 0401). Returns the error that fails the tick once, on the call that files the hold; an
 // already-filed hold returns nil.
-func holdTrailerless(cp bd.Bead, repo git.Repo, mr mrNaming, trailer string, iid int, sha string) error {
+func holdTrailerless(cp bd.Bead, raiser string, repo git.Repo, mr mrNaming, trailer string, iid int, sha string) error {
 	path, webURL, noun, label := mr.path, mr.webURL, mr.noun, mr.label
 	ref := git.MRRef(path, iid)
 	revert := strings.HasPrefix(trailer, "Reverts-")
@@ -1094,7 +1114,7 @@ func holdTrailerless(cp bd.Bead, repo git.Repo, mr mrNaming, trailer string, iid
 	}
 	steps := []bd.ErrandStep{{Title: "Stamp the trailer on the Forge's " + main + ".", Markers: []string{"irreversible"}, Do: do, Check: check}}
 	body := bd.ErrandBody(fmt.Sprintf("%s %s for %s was merged at %s, but no %q trailer reached mainline.", label, ref, cp.ID, sha, trailer), facts, steps, "")
-	_, created, err := holdErrand(cp, fmt.Sprintf("Merged MR: !%d\n", iid), fmt.Sprintf("%s %s merged without its trailer", noun, ref), body)
+	_, created, err := holdErrand(cp, fmt.Sprintf("Merged MR: !%d\n", iid), fmt.Sprintf("%s %s merged without its trailer", noun, ref), body, raiser)
 	if err != nil {
 		return err
 	}
@@ -1150,7 +1170,7 @@ func finalCloseOut(l, cp bd.Bead, branch, sha string, lg legs) error {
 }
 
 // landedReason prefixes the close reason of a Landing that landed: "landed: <sha>".
-const landedReason = "landed:"
+const landedReason = bd.LandedReason
 
 // landedHead is the commit a landed container's close-outs read trailers from: the squash's
 // Tip when it resolves, else the merge sha.
@@ -1347,9 +1367,9 @@ func landed(l, cp bd.Bead, sha string, err error, lg legs) error {
 		var clash *git.NumberClash
 		switch {
 		case errors.As(err, &conflict):
-			err = fileConflict(cp, conflict.Base, nil, lg.head, false)
+			err = fileConflict(cp, conflict.Base, nil, lg.head, l.ID)
 		case errors.As(err, &clash):
-			err = fileConflict(cp, clash.Base, clash.Clashes, lg.head, false)
+			err = fileConflict(cp, clash.Base, clash.Clashes, lg.head, l.ID)
 		case errors.Is(err, git.ErrLandPending):
 			return nil
 		default:
@@ -1566,7 +1586,7 @@ func landStrategyAt(root string) (string, git.LandStrategy, error) {
 //     at the revert and seeded with a reapply — or, fixing forward, cut at main HEAD
 //     with no seed — and its one Build.
 //  4. Close the Rollback — only once the handoff exists (ADR 0048 §6), reason
-//     "fix-forward: revert conflicted" when fixing forward. A fix-forward leaves no
+//     "handed off: <successor>", or "fix-forward: <successor>" when fixing forward. A fix-forward leaves no
 //     Reverts-Checkpoint: trailer, so its resume keys on the successor instead: once
 //     spawned it pins the decision (pinnedFixForward) and the revert is not retried.
 func reconcileRollback(rb bd.Bead) error {
@@ -1657,9 +1677,9 @@ func reconcileRollbackOnce(rb bd.Bead) ([]any, error) {
 		return lg.attrs, err
 	}
 	if conflict != nil {
-		return lg.attrs, closeRollback(rb, proj, bd.FixForwardReason+" revert conflicted", lg.attrs...)
+		return lg.attrs, closeRollback(rb, proj, bd.FixForwardCloseReason(successor), lg.attrs...)
 	}
-	return lg.attrs, closeRollback(rb, proj, "", lg.attrs...)
+	return lg.attrs, closeRollback(rb, proj, bd.HandedOffReason(successor), lg.attrs...)
 }
 
 // reconcileGitlabRollback is a gitlab Rollback's tick past the validity checks, on the
@@ -1707,7 +1727,7 @@ func reconcileGitlabRollback(rb, cp bd.Bead, lg rbLeg, squash, base string) erro
 		if err != nil {
 			return err
 		}
-		return closeRollback(rb, lg.proj, "", lg.attrs...)
+		return closeRollback(rb, lg.proj, bd.HandedOffReason(successor), lg.attrs...)
 	case !errors.Is(err, git.ErrNotLanded):
 		return err
 	}
@@ -1761,7 +1781,7 @@ func revertMRArms(rb, cp bd.Bead, lg rbLeg, squash, base, reverts string, iid in
 		if _, err := lg.landedBase(reverts); !errors.Is(err, git.ErrNotLanded) {
 			return err // landed: the next tick hands off
 		}
-		return holdTrailerless(rb, lg.repo, mrNaming{lg.mrPath, mr.WebURL, "revert merge request", "Revert MR"}, reverts, iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
+		return holdTrailerless(rb, "", lg.repo, mrNaming{lg.mrPath, mr.WebURL, "revert merge request", "Revert MR"}, reverts, iid, cmp.Or(mr.MergeCommitSHA, mr.SquashCommitSHA))
 	case forge.StateClosed:
 		conflict, err := pinnedFixForward(rb.ID)
 		if err != nil {
@@ -1883,7 +1903,7 @@ func fixForwardRevert(rb, cp bd.Bead, lg rbLeg, squash string, iid int, conflict
 	if err != nil {
 		return err
 	}
-	return closeRollback(rb, lg.proj, bd.FixForwardReason+" revert conflicted", lg.attrs...)
+	return closeRollback(rb, lg.proj, bd.FixForwardCloseReason(successor), lg.attrs...)
 }
 
 // revertPipelineFailed is ADR 0188 for a revert MR (ADR 0208 §4): retry once and record
@@ -1918,7 +1938,7 @@ func revertPipelineFailed(rb *bd.Bead, lg rbLeg, iid int, pl forge.Pipeline) err
 				Check:   fmt.Sprintf("`mugicrew probe mr '%s'` prints `merged` or `closed`.", ref),
 			}}, tails)
 	}
-	errand, _, err := holdErrand(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), body)
+	errand, _, err := holdErrand(*rb, pipelineLine(pl.ID)+"\n", failedTitle(pl.ID, lg.mrPath, iid), body, "")
 	if err != nil {
 		return err
 	}
@@ -2153,9 +2173,9 @@ func spawnReviewIfDue(cp bd.Bead) error {
 	var clash *git.NumberClash
 	switch err := probeConflict(repo, checkpointBranch(cp.ID), base); {
 	case errors.As(err, &conflict):
-		return fileConflict(cp, base, nil, head, true)
+		return fileConflict(cp, base, nil, head, "")
 	case errors.As(err, &clash):
-		return fileConflict(cp, base, clash.Clashes, head, true)
+		return fileConflict(cp, base, clash.Clashes, head, "")
 	case err != nil:
 		return err
 	}
@@ -2250,14 +2270,14 @@ func healCarried(cp bd.Bead) error {
 }
 
 // reviewSuccessor is the one Review member a drained Checkpoint spawns: a bare
-// kind:review leaf with NO Commit: pin, because Usopp pins git.Head at review
-// start himself. Pure, so the emitted shape is checkable without a DB.
+// kind:review leaf with NO Commit: pin, because Usopp writes git.Head onto the
+// Review at review start. Pure, so the emitted shape is checkable without a DB.
 func reviewSuccessor(checkpointID string) bd.Successor {
 	return bd.Successor{
 		Kind:        contract.KindReview,
 		Container:   false,
 		Title:       "Built slice of checkpoint " + checkpointID,
-		Description: "Review the built Checkpoint slice — Usopp pins the branch HEAD at review start (no Commit: pin seeded here).",
+		Description: "Review the built Checkpoint slice — Usopp writes the Commit: pin onto this bead at review start.",
 	}
 }
 
@@ -2305,11 +2325,14 @@ func ChartApproval(chart bd.Bead) (*bd.Bead, error) {
 // failed land saw: Land never writes the branch (ADR 0102 §8), so the tip read now is
 // it, and Franky's effort is cut there and replace-CASes it (Spec D3).
 // Non-empty clashes is the number-clash variant: the body names the colliding
-// numbered files to renumber instead. preReview words the body for a collision the probe found
+// numbered files to renumber instead. landing "" words the body for a collision the probe found
 // before the first Review (no Landing failed, nothing re-lands yet); the pins, kind and
-// title stay the same so Franky's procedure is one. Returns nil on success — the
+// title stay the same so Franky's procedure is one.
+// landing is the raising Landing's id, which the Conflict is born discovered-from (ADR 0401
+// (mugicrew-a-landing-s-follow-up-is-born…)); "" is the pre-review probe, which no Landing raised. Returns nil on success — the
 // conflict is now a bead, not a propagated error.
-func fileConflict(cp bd.Bead, base string, clashes []string, head func(string) (string, error), preReview bool) error {
+func fileConflict(cp bd.Bead, base string, clashes []string, head func(string) (string, error), landing string) error {
+	preReview := landing == ""
 	tip, err := head("refs/heads/" + git.BranchName(string(cp.Kind), cp.ID))
 	if err != nil {
 		return err
@@ -2320,9 +2343,10 @@ func fileConflict(cp bd.Bead, base string, clashes []string, head func(string) (
 			variant = nami.ConflictNumberClash
 		}
 		return spawnConflict(cp.ID, bd.Successor{
-			Kind:        contract.KindChartConflict,
-			Title:       cp.Title + " conflicts with main",
-			Description: nami.ChartConflictBody(cp.ID, base, tip, variant, clashes),
+			Kind:           contract.KindChartConflict,
+			Title:          cp.Title + " conflicts with main",
+			Description:    nami.ChartConflictBody(cp.ID, base, tip, variant, clashes),
+			DiscoveredFrom: landing,
 		})
 	}
 	where, after := "Checkpoint-land ", "the Checkpoint re-lands"
@@ -2350,19 +2374,20 @@ func fileConflict(cp bd.Bead, base string, clashes []string, head func(string) (
 		body = "Found before review: " + body
 	}
 	return spawnConflict(cp.ID, bd.Successor{
-		Kind:        contract.KindConflict,
-		Container:   false,
-		Title:       "Checkpoint " + cp.ID + " conflicts with main",
-		Description: body + git.BasePin(base) + "\n" + git.TipPin(tip),
+		Kind:           contract.KindConflict,
+		Container:      false,
+		Title:          "Checkpoint " + cp.ID + " conflicts with main",
+		Description:    body + git.BasePin(base) + "\n" + git.TipPin(tip),
+		DiscoveredFrom: landing,
 	})
 }
 
 // spawnConflict files a real Conflict (s.Kind: conflict or chart-conflict) under the
 // container. An open requested rebase on it yields (ADR 0261): unclaimed, it is closed
 // superseded: <title> before the filing, then linked to the new Conflict by bd's supersede
-// edge; claimed, the open-child guard swallows the Conflict and the request finishes.
+// edge, and the new Conflict inherits the request's open blocks dependents; claimed, the open-child guard swallows the Conflict and the request finishes.
 // Re-runs converge: a crash between close and file leaves no open child; one between
-// file and edge is repaired from the closed request, the latest superseded for this title
+// file and edges is repaired from the closed request, the latest superseded for this title
 // with no other Conflict filed after it. ponytail: that scan reads the kind's children each call.
 func spawnConflict(containerID string, s bd.Successor) error {
 	kids, err := childrenOfKind(containerID, s.Kind)
@@ -2371,6 +2396,7 @@ func spawnConflict(containerID string, s bd.Successor) error {
 	}
 	reason := "superseded: " + s.Title
 	var old *bd.Bead
+	closedNow := false
 	for i, k := range kids {
 		if nami.BodyVariant(k.Description) != nami.ConflictRequested {
 			continue
@@ -2381,7 +2407,7 @@ func spawnConflict(containerID string, s bd.Successor) error {
 				return err
 			}
 			kids[i].Status, kids[i].CloseReason, kids[i].Closed = "closed", reason, time.Now()
-			old = &kids[i]
+			old, closedNow = &kids[i], true
 		case !k.Open() && k.CloseReason == reason && (old == nil || k.Closed.After(old.Closed)):
 			old = &kids[i]
 		}
@@ -2393,6 +2419,22 @@ func spawnConflict(containerID string, s bd.Successor) error {
 	if !created && !filedRightAfter(*old, id, kids) {
 		return nil
 	}
+	if created && !closedNow && !noneSince(*old, id, kids) { // an older request: its edges were handed on long ago
+		return nil
+	}
+	// the Builds a human's rebase request held keep waiting for the rewrite that will happen
+	deps, err := blockedOn(old.ID)
+	if err != nil {
+		return err
+	}
+	for _, d := range deps {
+		if !d.Open() {
+			continue
+		}
+		if err := addBlocks(d.ID, id); err != nil {
+			return err
+		}
+	}
 	return supersede(old.ID, id)
 }
 
@@ -2400,13 +2442,21 @@ func spawnConflict(containerID string, s bd.Successor) error {
 // the real Conflict filed right after the closed request old: no other child was created
 // since old closed, and id is not itself a (claimed) requested rebase.
 func filedRightAfter(old bd.Bead, id string, kids []bd.Bead) bool {
+	if !noneSince(old, id, kids) {
+		return false
+	}
+	i := slices.IndexFunc(kids, func(k bd.Bead) bool { return k.ID == id })
+	return i >= 0 && nami.BodyVariant(kids[i].Description) != nami.ConflictRequested
+}
+
+// noneSince reports whether no child other than id and old was created since old closed.
+func noneSince(old bd.Bead, id string, kids []bd.Bead) bool {
 	for _, k := range kids {
 		if k.ID != id && k.ID != old.ID && !k.Created.Before(old.Closed) {
 			return false
 		}
 	}
-	i := slices.IndexFunc(kids, func(k bd.Bead) bool { return k.ID == id })
-	return i >= 0 && nami.BodyVariant(kids[i].Description) != nami.ConflictRequested
+	return true
 }
 
 // closeIfOpen closes b with reason behind the Open() guard so a re-dispatch after a

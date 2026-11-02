@@ -11,6 +11,7 @@ package usopp
 import (
 	_ "embed"
 	"fmt"
+	"strings"
 	"text/template"
 
 	"jayulabs.org/mugicrew/bd"
@@ -31,7 +32,7 @@ var _ contract.Crewmate = Usopp{}
 // neighborhood (the loop hands only ID+Kind) and runs the one review pass. An
 // unowned kind is a loud error, mirroring Franky.Run.
 func (Usopp) Run(ctx contract.Ctx, bead contract.Bead) error {
-	b, err := showBead(bead.ID)
+	b, err := bd.Show(bead.ID)
 	if err != nil {
 		return err
 	}
@@ -51,24 +52,13 @@ func (Usopp) Launch(_ contract.Ctx, bead contract.Bead) (contract.LaunchCommand,
 	return nil, fmt.Errorf("usopp.Launch: kind %q is AFK (review), not launchable — dispatched via Run", bead.Kind)
 }
 
-// Seams over the bd/git legs runReview drives, so the clean→Approval transition
-// is testable with a fake harness and no live bd/git (mirrors franky's var seam).
-// These alias the real package funcs; the usopp test swaps them.
+// Seams over the git and config legs runReview drives, so the clean→Approval
+// transition is testable with a fake harness and no live git. bd is reached only
+// through the bd free functions, which a test points at a bdtest graph.
 var (
-	showBead                = bd.Show
-	closeBead               = bd.Close
-	spawnChild              = bd.SpawnChildIfAbsent
-	openChildrenOfKind      = bd.OpenChildrenOfKind
-	openChildrenBeadsOfKind = bd.OpenChildrenOfKindBeads
-	specOf                  = bd.SpecOf
-	surgeriesOf             = bd.SurgeriesOf
-	head                    = git.Head
-	declaredRepos           = cfglayer.Repos
-	openPivots              = bd.OpenPivots
-	runSession              = bd.RunSession
-	raiseIfPivoted          = bd.RaiseIfPivoted
-	closeOnPublish          = bd.CloseOnPublish
-	changedPaths            = git.ChangedPaths
+	head          = git.Head
+	declaredRepos = cfglayer.Repos
+	changedPaths  = git.ChangedPaths
 )
 
 // reviewPrompt (review.md) runs the two-axis code-review Crew doc whole —
@@ -111,7 +101,8 @@ func (a reviewArgs) Draft() string { return contract.DraftInstruction(a.ReviewID
 func reviewPrompt(a reviewArgs) string { return contract.Render(reviewTmpl, a) }
 
 // runReview is the one review handler (FR26–FR31): pin the Checkpoint branch HEAD
-// at review start (the Review was spawned BARE by Jinbe — Usopp pins it himself),
+// at review start and write it onto the Review as its Commit: line (the Review was
+// spawned BARE by Jinbe),
 // resolve the Spec and the Surgeries for the Spec axis, fork the read-only review agent (it files
 // critique beads, a pivot, or nothing), then drive the tail: a raised pivot wins
 // over the clean→Approval transition. An errored fork leaves the Review open for
@@ -128,11 +119,16 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	specID, _, err := specOf(bead.Parent)
+	if next, changed := git.WithCommitPin(bead.Description, pin); changed {
+		if err := bd.SetDescription(bead.ID, next, bd.UnderClaim(bead.ID)); err != nil {
+			return err
+		}
+	}
+	specID, _, err := bd.SpecOf(bead.Parent)
 	if err != nil {
 		return err
 	}
-	surgeries, err := surgeriesOf(bead.Parent)
+	surgeries, err := bd.SurgeriesOf(bead.Parent)
 	if err != nil {
 		return err
 	}
@@ -149,11 +145,20 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	fresh, _, _, open, err := runSession(ctx, inv, showBead)
-	if err != nil || !open {
+	fresh, _, _, open, err := bd.RunSession(ctx, inv, bd.Show)
+	if err != nil {
 		return err
 	}
-	if raised, err := raiseIfPivoted(ctx, fresh, specID); err != nil || raised {
+	// The tie runs before anything publishes, even when the session closed its
+	// own bead (open=false): dispatch still publishes that bead's Drafts after a
+	// nil return.
+	if err := bd.TieDrafts(fresh.ID, contract.KindCritique); err != nil {
+		return err
+	}
+	if !open {
+		return nil
+	}
+	if raised, err := bd.RaiseIfPivoted(ctx, fresh, specID); err != nil || raised {
 		return err
 	}
 	return approveIfClean(ctx, fresh, pin)
@@ -163,7 +168,7 @@ func runReview(ctx contract.Ctx, bead bd.Bead) error {
 // context. With no repo = declared it reads no bead (ADR 0157's second rule).
 func pinOf(checkpointID, branch string) (string, error) {
 	if len(declaredRepos(".")) > 0 {
-		cp, err := showBead(checkpointID)
+		cp, err := bd.Show(checkpointID)
 		if err != nil {
 			return "", err
 		}
@@ -182,7 +187,7 @@ func focusReview(a *reviewArgs) (string, error) {
 	if len(cs) == 0 {
 		return "", nil
 	}
-	cp, err := showBead(a.CheckpointID)
+	cp, err := bd.Show(a.CheckpointID)
 	if err != nil {
 		return "", err
 	}
@@ -210,34 +215,50 @@ func focusReview(a *reviewArgs) (string, error) {
 // hands the Review's close to the publish in EVERY case — so the critiques the
 // agent drafted become visible together with the close (Spec D6, D11 row 4). The
 // Approval stays a one-call create (inventory row 15). The Approval is a membership child of the
-// Checkpoint carrying the Commit: pin with NO caused-by edge and NO HEAD re-check
+// Checkpoint carrying the Commit: pin, born caused-by the clean Review (one create with
+// its parent edge) and with NO HEAD re-check
 // (a stale pin self-heals). Both legs are idempotent — SpawnChildIfAbsent's
 // open-child guard and runReview's Open() guard — so a re-dispatch converges
 // without a second Approval or a double close. Its read-then-writes (and
 // obsoleteStaleApprovals') are serialized by the Review's claim plus graph
 // ordering: no Build or critique is open while a Review runs (ADR 0070).
 func approveIfClean(ctx contract.Ctx, bead bd.Bead, pin string) error {
-	open, err := openChildrenOfKind(bead.Parent, contract.KindCritique)
+	critiques, err := bd.OpenChildrenOfKindBeads(bead.Parent, contract.KindCritique)
 	if err != nil {
 		return err
 	}
-	pivots, err := openPivots(bead.Parent)
+	pivots, err := bd.OpenPivots(bead.Parent)
 	if err != nil {
 		return err
 	}
-	if open == 0 && len(pivots) == 0 {
-		cp, err := showBead(bead.Parent) // the Approval inherits the Checkpoint's title
+	approvalID := ""
+	if len(critiques) == 0 && len(pivots) == 0 {
+		cp, err := bd.Show(bead.Parent) // the Approval inherits the Checkpoint's title
 		if err != nil {
 			return err
 		}
 		if err := obsoleteStaleApprovals(bead.Parent, pin); err != nil {
 			return err
 		}
-		if _, _, err := spawnChild(bead.Parent, approvalSuccessor(cp.Title, pin)); err != nil {
+		if approvalID, _, err = bd.SpawnChildIfAbsent(bead.Parent, approvalSuccessor(cp.Title, pin, bead.ID)); err != nil {
 			return err
 		}
 	}
-	return closeOnPublish(ctx, bead.ID, "", nil)
+	return bd.CloseOnPublish(ctx, bead.ID, reviewCloseReason(critiques, pivots, approvalID), nil)
+}
+
+// reviewCloseReason names a Review's outcome (ADR 0415): open Critiques win over a
+// pivot (the findings are what the review produced), a pivot alone holds the
+// Approval, and neither is a clean pass naming the Approval at head. Ids keep the
+// graph-read order, joined ", " like the pivoted: reason.
+func reviewCloseReason(critiques, pivots []bd.Bead, approvalID string) string {
+	switch {
+	case len(critiques) > 0:
+		return bd.CritiquedReason + " " + strings.Join(bd.IDs(critiques), ", ")
+	case len(pivots) > 0:
+		return bd.HeldReason + " " + strings.Join(bd.IDs(pivots), ", ")
+	}
+	return bd.CleanReason + " " + approvalID
 }
 
 // obsoleteStaleApprovals closes any OPEN Approval of the Checkpoint whose Commit:
@@ -249,13 +270,13 @@ func approveIfClean(ctx contract.Ctx, bead bd.Bead, pin string) error {
 // ALREADY at HEAD is left untouched for the spawn to reuse, so a plain re-dispatch
 // (unchanged HEAD) neither churns nor double-approves.
 func obsoleteStaleApprovals(checkpointID, pin string) error {
-	open, err := openChildrenBeadsOfKind(checkpointID, contract.KindApproval)
+	open, err := bd.OpenChildrenOfKindBeads(checkpointID, contract.KindApproval)
 	if err != nil {
 		return err
 	}
 	for _, a := range open {
 		if got, ok := git.ParseCommit(a.Description); !ok || got != pin {
-			if err := closeBead(a.ID, "Approval obsoleted: pinned commit superseded by advanced HEAD"); err != nil {
+			if err := bd.Close(a.ID, bd.ApprovalObsoletedReason); err != nil {
 				return err
 			}
 		}
@@ -267,13 +288,16 @@ func obsoleteStaleApprovals(checkpointID, pin string) error {
 // membership child kind:approval leaf of the Checkpoint, carrying the Commit: pin
 // captured at review start (git.CommitPin, ParseCommit greps it back), titled
 // exactly the Checkpoint's title (the kind rides on the label). Pure, so
-// the emitted shape (leaf, kind, pinned body) is checkable without a DB, mirroring
-// Jinbe's reviewSuccessor.
-func approvalSuccessor(checkpointTitle, pin string) bd.Successor {
+// the emitted shape (leaf, kind, pinned body, caused-by) is checkable without a DB,
+// mirroring Jinbe's reviewSuccessor. reviewID is the clean Review it certifies; an
+// open Approval reused by SpawnChildIfAbsent keeps the edges it was born with.
+func approvalSuccessor(checkpointTitle, pin, reviewID string) bd.Successor {
 	return bd.Successor{
 		Kind:        contract.KindApproval,
 		Container:   false,
 		Title:       checkpointTitle,
+		CausedBy:    reviewID,
 		Description: "Clean review pass over the built Checkpoint slice at the pinned commit.\n" + git.CommitPin(pin),
+		Serializer:  bd.UnderClaim(reviewID),
 	}
 }

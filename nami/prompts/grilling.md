@@ -23,9 +23,17 @@ skipping its Claim step: the TUI claimed this bead when it launched you.
    note. Graduated fog becomes Draft defog beads by this bead:
 
        bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:%[1]s \
-         --parent <chartID> --no-inherit-labels --title "..." --description "..."
+         --parent <chartID> --no-inherit-labels --deps discovered-from:%[1]s --title "..." --description "..."
+
+   Where one defog bead really depends on another's answer, write the gate in
+   the same create: --deps discovered-from:%[1]s,blocked-by:<blocking-bead>.
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
+
+   Stale defog beads your decision made moot leave the frontier through
+   mugicrew obsolete <bead> --by %[1]s (closes "%[5]s <id>"), or through
+   mugicrew supersede <bead> --with <new bead> when its question moved or it
+   duplicates another (closes "%[6]s <new id>"); never by a raw bd call.
 
    A step the work will need in the external world (outside the bead graph and
    the code) may be drafted as an Errand, never a Chart child (no

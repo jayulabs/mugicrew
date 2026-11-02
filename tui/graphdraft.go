@@ -127,7 +127,16 @@ func (g graphData) draftedByLine(b *bd.Bead) string {
 	if who == "" {
 		who = c.ID
 	}
+	if respinDraft(c, s) {
+		return who + softSt.Render(" · "+s.word(c)+", re-run its respin to publish")
+	}
 	return who + softSt.Render(" · "+s.word(c))
+}
+
+// respinDraft is whether a Draft's creator is an unclosed Remnant at rest: its Draft is the respin
+// Checkpoint, which the respin re-run publishes, where recover would delete it.
+func respinDraft(c *bd.Bead, s creatorState) bool {
+	return c.Kind == contract.KindRemnant && c.Status != "closed" && (s == creatorGone || s == creatorStranded || s == creatorReleased)
 }
 
 // draftRefused are the keys a Draft row refuses (Spec mc-pyamf D6): every mutating key
@@ -158,6 +167,9 @@ func (g graphData) draftWhy(b *bd.Bead) string {
 	case creatorExited:
 		return who + " exited — resume it (enter) or drop it (x) on its row; its Drafts publish when it exits again"
 	case creatorGone, creatorStranded, creatorReleased:
+		if respinDraft(c, s) {
+			return "re-run the respin of " + who + " to publish it"
+		}
 		if g.xLabel(c) == "recover" {
 			return who + " is " + s.word(c) + " — x recovers it on its row, and its Drafts publish"
 		}

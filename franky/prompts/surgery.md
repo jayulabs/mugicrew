@@ -91,7 +91,7 @@ Any exit that is not an end is a stop: never end a surgery on your own judgment.
    is abandoned. After an abort, do not end; stop instead. On any other
    note-and-stop exit, show the human its output and stop; do not end.
 5. Run `mugicrew surgery end %[1]s`. It integrates again (a no-op now), hands
-   the branch to review and closes the Surgery (or, with zero commits, closes
+   the branch to review and closes the Surgery ended (or, with zero commits, closes
    the Surgery, and its Checkpoint only if this Surgery created it: nothing
    ahead of {{MAINLINE}} and no other child).
 6. The verb has closed your bead: print the closing lines below.

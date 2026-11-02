@@ -25,6 +25,7 @@ import (
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/looplock"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -149,7 +150,7 @@ func (m Model) tabAt(i int) component {
 // (launchWhy, blocked, openBlockers, canAdopt…); any tab's keys route through it.
 func (m Model) gateData() graphData {
 	return graphData{
-		beads: m.beads, idx: m.idx, live: m.live, orphans: m.orphans, sessions: m.sessions, sessErr: m.sessErr, efforts: m.efforts, cpTips: m.cpTips, frontier: m.frontier, landed: m.landed, ancestors: m.ancestors, landEv: m.landEv, launching: m.launching, launched: m.launched,
+		beads: m.beads, idx: m.idx, live: m.live, orphans: m.orphans, sessions: m.sessions, sessErr: m.sessErr, efforts: m.efforts, cpTips: m.cpTips, frontier: m.frontier, landed: m.landed, blockLanded: m.blockLanded, contains: m.contains, strandCommits: m.strandCommits, ancestors: m.ancestors, behind: m.behind, prioFlash: m.prioFlash, landEv: m.landEv, launching: m.launching, launched: m.launched,
 		pending: m.pending, crew: m.crew, comments: m.comments, rollups: m.rollups, extRef: m.initiatives.ExternalRef, landName: m.landName, landErr: m.landErr, w: m.w, h: m.h - chromeH,
 	}
 }
@@ -271,6 +272,8 @@ type Model struct {
 	deferred    string
 	loadErr     error
 	loaded      bool                     // a snapshot has loaded; before it Recents prunes nothing
+	spinning    bool                     // a spinner frame chain is in flight; at most one runs
+	spinFrame   int                      // the loading indicator's current glyph
 	loading     bool                     // a tick's load is in flight; the next tick skips its load
 	slowAt      time.Time                // when listAll last ran; zero until the first slow load
 	slowWant    bool                     // Graph entry landed on a load in flight: the next tick runs the slow tier
@@ -300,35 +303,49 @@ type Model struct {
 	// beads is the graph's work beads; event beads never land here. idx indexes this exact
 	// slice: any edit that reorders, adds or removes beads must rebuild it. The priority echo
 	// clones the slice and edits a field in place, so it keeps idx.
-	beads       []bd.Bead
-	idx         *snapIndex
-	live        map[string]bool         // effort liveness: active AFK effort id → not orphaned (follows the orphan reading, not probeLiveness); display only
-	orphans     map[string]bool         // the Orphaned-claim reading, from the same load; display and the pool count
-	sessions    map[string]session.Info // the tmux session table; display and attach only
-	sessErr     error                   // the last session read's error: the table above is then empty, not truthful
-	recents     []string                // Recents, read with each load and after each save; never read on the event loop
-	recentSaves int                     // saves folded so far: a load that began before one holds a stale Recents
-	efforts     *git.EffortSet          // bead ids holding effort/<id>, and which are integrated
-	frontier    []bd.Bead               // bd ready -n 0, every refresh
-	landed      map[string]string       // landed map, slow tier
-	ancestors   map[string]bd.Bead      // walk ancestors missing from beads
-	cpTips      map[string]string       // Checkpoint id → its checkpoint/<id> tip sha; empty when unread
-	landEv      map[string]string       // bead id → latest landing-relevant event msg, folded from logs
-	inits       map[string]initStats    // the Initiatives tab's line-2 counts, per refresh
-	initWaits   map[string]bool         // Initiatives whose session waits (row ●), same snapshot as inits
+	beads         []bd.Bead
+	idx           *snapIndex
+	live          map[string]bool         // effort liveness: active AFK effort id → not orphaned (follows the orphan reading, not probeLiveness); display only
+	orphans       map[string]bool         // the Orphaned-claim reading, from the same load; display and the pool count
+	sessions      map[string]session.Info // the tmux session table; display and attach only
+	sessErr       error                   // the last session read's error: the table above is then empty, not truthful
+	recents       []string                // Recents, read with each load and after each save; never read on the event loop
+	recentSaves   int                     // saves folded so far: a load that began before one holds a stale Recents
+	efforts       *git.EffortSet          // bead ids holding effort/<id>, and which are integrated
+	frontier      []bd.Bead               // bd ready -n 0, every refresh
+	landed        map[string]string       // landed map, slow tier
+	blockLanded   map[string]string       // closed container id → land sha behind a Build's closed blocker, slow tier
+	contains      map[string]bool         // "sha@tip" → land sha on that Checkpoint tip, slow tier
+	strandCommits map[string]int          // open Remnant id → its range's commit count, slow tier
+	ancestors     map[string]bd.Bead      // walk ancestors missing from beads
+	behind        map[string]bd.Bead      // closed blockers (and parents) of open Checkpoint Builds missing from beads
+	cpTips        map[string]string       // Checkpoint id → its checkpoint/<id> tip sha; empty when unread
+	landEv        map[string]string       // bead id → latest landing-relevant event msg, folded from logs
+	inits         map[string]initStats    // the Initiatives tab's line-2 counts, per refresh
+	initWaits     map[string]bool         // Initiatives whose session waits (row ●), same snapshot as inits
 
-	loop           looplock.Status // the loop per the last read; display and o only
-	loopBusy       bool            // a loop verb has not returned, or (a stop) no read has confirmed it
-	loopFrom       looplock.Status // the loop that verb acted on
-	loopStarting   bool            // o's start is unconfirmed: the header reads loop starting…
-	loopRestarting bool            // a `loop restart` has not returned: the menu's options are dimmed and inert
-	watched        bool            // opened with --watch: o starts a watched loop
+	loop           looplock.Status  // the loop per the last read; display and o only
+	releaseRead    releaseCheck     // the Release notice check (WithRelease); nil = none
+	swapPath       string           // the startup path watched for a swap (WithSwap)
+	swapID         selfexe.Identity // its identity at startup
+	swapWatch      bool             // the swap line is still to show: false once shown
+	swapProbing    bool             // a version probe of the swapped binary is in flight
+	swapFrom       string           // the running version
+	releaseLatest  string           // the newer release the check found; "" = none known
+	upgrading      bool             // the upgrade action is running (u)
+	loopBusy       bool             // a loop verb has not returned, or (a stop) no read has confirmed it
+	loopFrom       looplock.Status  // the loop that verb acted on
+	loopStarting   bool             // o's start is unconfirmed: the header reads loop starting…
+	loopRestarting bool             // a `loop restart` has not returned: the menu's options are dimmed and inert
+	watched        bool             // opened with --watch: o starts a watched loop
 
-	launched  map[string]time.Time // bead id → when its launch succeeded; cleared by a loadedMsg that began after that and shows it alive, or one launchHoldMax on
-	waitSince map[string]time.Time // bead id → first snapshot its session read waiting; dropped when it stops (Sessions modal order)
-	launching map[string]bool      // bead ids whose session start is in flight (ADR 0107 §5)
-	attachTo  string               // the one in-flight launch that switches this terminal (ADR 0107 §6)
-	pending   map[string]string    // bd writes in flight, key → verb (ADR 0098 §3)
+	launched     map[string]time.Time // bead id → when its launch succeeded; cleared by a loadedMsg that began after that and shows it alive, or one launchHoldMax on
+	waitSince    map[string]time.Time // bead id → first snapshot its session read waiting; dropped when it stops (Sessions modal order)
+	launching    map[string]bool      // bead ids whose session start is in flight (ADR 0107 §5)
+	attachTo     string               // the one in-flight launch that switches this terminal (ADR 0107 §6)
+	pending      map[string]string    // bd writes in flight, key → verb (ADR 0098 §3)
+	prioFlashSeq int                  // counts flashes, so a stale prioFlashMsg can't end a newer one
+	prioFlash    string               // bead id whose drawer inherit line flashes after a +/- that left its effective priority unchanged
 
 	evlog                *eventlog.Log        // the process's event log (WithLog); nil reads as no path
 	histCommits          []git.MainlineCommit // History's last mainline read, newest first
@@ -370,14 +387,26 @@ func New(ctx contract.Ctx, crew map[string]contract.Crewmate) Model {
 		crew:     crew,
 		tabs:     newTabs(),
 		loading:  true, // Init's slow load is in flight; a tick must not stack another
+		spinning: true, // Init starts the frame chain
 		w:        80,
 		h:        24,
 		wheelAcc: &wheelAcc{},
 	}
 }
 
+// rearmSpin restarts a stopped spinner frame chain while no snapshot has loaded; a chain
+// still in flight is never doubled. A safety net: the chain stops only once loaded, so
+// no message sequence reaches the stopped-and-unloaded state today.
+func (m *Model) rearmSpin() tea.Cmd {
+	if m.loaded || m.spinning {
+		return nil
+	}
+	m.spinning = true
+	return spinTick()
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.loadSlow(), m.loadLogs(), tick(), m.pollUsage(), tmuxMouse(m.mouseOn))
+	return tea.Batch(m.loadSlow(), m.loadLogs(), tick(), spinTick(), m.pollUsage(), m.checkRelease(), tmuxMouse(m.mouseOn))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -454,7 +483,10 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case key.Matches(k, keyQuit):
 			return m.quit() // an in-flight effort or write still gets its Quit? dialog (FR20, ADR 0082)
 		case key.Matches(k, keyF5):
-			return m, tea.Batch(m.slowLoad(), m.loadLogs())
+			if !m.loaded {
+				m.loadErr = nil // the retry is in flight: the indicator shows until a load succeeds; after a first load the notice stays until the retry answers
+			}
+			return m, tea.Batch(m.slowLoad(), m.loadLogs(), m.rearmSpin())
 		}
 		return m, nil
 	}
@@ -526,7 +558,7 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(k, keyF5):
 		m.setStatus("refreshing…")
 		m = m.retryComments().retryRollup()
-		cmds := []tea.Cmd{m.slowLoad(), m.loadLogs()}
+		cmds := []tea.Cmd{m.slowLoad(), m.loadLogs(), m.rearmSpin()}
 		if m.tab == tabStats {
 			cmds = append(cmds, m.refreshUsage())
 		}
@@ -775,11 +807,14 @@ func (m Model) tabBindings() []key.Binding {
 	return m.tabAt(m.tab).bindings()
 }
 
+// tabBase is a tab's badge-less label, "<jump key> <Name>".
+func tabBase(i int) string { return tabDefs[i].key + " " + tabNames[i] }
+
 // tabLabel is "<jump key> <Name>", plus amber ●N while N sessions wait on you, else a
 // light-blue ●N for the N Actionable rows (Spec mc-lu2x.38 D3), else a bold green ●N for
 // the N Live rows of a tab that reports them (liveCounter).
 func tabLabel(i int, c component) string {
-	l := tabDefs[i].key + " " + tabNames[i]
+	l := tabBase(i)
 	if n := c.count(); n > 0 {
 		l += " " + badgeSt.Render(fmt.Sprintf("●%d", n))
 	} else if n := c.actN(); n > 0 {
@@ -890,14 +925,21 @@ func tabLayout(labels []string, active, start, hover, w int) tabStrip {
 // flatHints is a dialog's or input's keys as one flat line (no sections, no rank): when
 // it does not fit w it shortens every label to key-only (ADR 0229 §4; Spec FR18).
 func flatHints(bs []key.Binding, w int) string {
+	line, _ := flatHintsOf(bs, w)
+	return line
+}
+
+// flatHintsOf is flatHints and the bindings it drew, with their labels collapsed to
+// key-only when the line did not fit.
+func flatHintsOf(bs []key.Binding, w int) (string, []key.Binding) {
 	bs = helpable(bs)
 	if line := shortHelpView(bs); lipgloss.Width(line) <= w {
-		return line
+		return line, bs
 	}
 	for i := range bs {
 		bs[i].SetHelp(bs[i].Help().Key, "")
 	}
-	return shortHelpView(bs)
+	return shortHelpView(bs), bs
 }
 
 // hintsBar is a flat line on the bar's own background, exactly w wide; blank when bs is empty.
@@ -946,6 +988,9 @@ func (m Model) strip(hov int) tabStrip {
 	labels := make([]string, len(m.tabs))
 	for i := range m.tabs {
 		labels[i] = tabLabel(i, m.tabAt(i)) // the badge reads live data
+		if m.unloaded(i) {                  // no badge claims a count the snapshot hasn't given
+			labels[i] = tabBase(i)
+		}
 	}
 	if m.settingsStaged() { // FR11
 		labels[tabSettings] += " •"
@@ -966,15 +1011,25 @@ func (m Model) frame() string {
 	if m.focus.id != "" {
 		return m.focusFrame()
 	}
-	body := fit(m.tabAt(m.tab).view(m.w, m.h-chromeH), m.w, m.h-chromeH)
+	var body string
+	if m.unloaded(m.tab) {
+		body = lipgloss.Place(m.w, m.h-chromeH, lipgloss.Center, lipgloss.Center, softSt.Render(spinFrames[m.spinFrame%len(spinFrames)]+" loading…"))
+	} else {
+		body = m.tabAt(m.tab).view(m.w, m.h-chromeH)
+	}
+	body = fit(body, m.w, m.h-chromeH)
 	return fit(strings.Join([]string{
 		m.headerView(),
 		m.strip(-1).view,
 		body,
-		" " + strings.ReplaceAll(m.status, "\n", " "), // status line
+		" " + strings.ReplaceAll(m.statusText(), "\n", " "), // status line
 		m.hintsView(),
 	}, "\n"), m.w, m.h)
 }
+
+// unloaded is whether tab i reads the bead-graph snapshot and none has loaded yet: Logs and
+// Settings have their own sources and never wait.
+func (m Model) unloaded(i int) bool { return !m.loaded && i < tabLogs }
 
 // hintsView is the bar for the current mode: blank under a dialog or ?, a tab input's
 // keep/revert, or the tab's verbs plus ? keys (FR24, ADR 0229).

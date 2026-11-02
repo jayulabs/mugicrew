@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
@@ -107,9 +108,6 @@ func FileCheckup(x CheckupFiling, target bd.Bead, problem string) (string, error
 	id := ck.ID
 	if !found {
 		if id, err = x.New(target, problem); err != nil {
-			if id != "" {
-				return "", fmt.Errorf("filed Checkup %s but its edge to %s failed (close it or add the related edge by hand): %w", id, target.ID, err)
-			}
 			return "", err
 		}
 	}
@@ -117,4 +115,53 @@ func FileCheckup(x CheckupFiling, target bd.Bead, problem string) (string, error
 		return "", fmt.Errorf("Checkup %s is filed but fencing %s failed (re-run to attach): %w", id, target.ID, err)
 	}
 	return id, nil
+}
+
+// The reason texts a Checkup closes with. The checkup close verb accepts only the
+// first two, each followed by a detail; the third is the TUI drop's alone.
+const (
+	ReasonRepaired      = "repaired:"
+	ReasonNotABeadFault = "not a bead fault:"
+	ReasonDropped       = "dropped"
+)
+
+// SessionReasonOK reports whether r is one of the two outcomes Chopper writes,
+// each followed by a detail that is not blank.
+func SessionReasonOK(r string) bool {
+	for _, prefix := range []string{ReasonRepaired, ReasonNotABeadFault} {
+		if detail, ok := strings.CutPrefix(r, prefix); ok {
+			return strings.TrimSpace(detail) != ""
+		}
+	}
+	return false
+}
+
+// CheckupClosing is CloseCheckup's reads and writes, so each caller's tests script
+// them. OpenOn's bool alone decides the lift; its bead is never read, and the
+// signature matches bd.OpenCheckupOn.
+type CheckupClosing struct {
+	Close   func(id, reason string) error
+	OpenOn  func(target string) (bd.Bead, bool, error)
+	Unpause func(id, cause string) error
+}
+
+// CloseCheckup is the one Checkup close: close ck with reason, then lift
+// paused:checkup from each related target no other open Checkup still holds. It
+// closes first, so ck is no longer open when each target is checked. A failed close
+// lifts nothing.
+func CloseCheckup(x CheckupClosing, ck bd.Bead, reason string) error {
+	if err := x.Close(ck.ID, reason); err != nil {
+		return err
+	}
+	for _, t := range ck.Related {
+		if _, held, err := x.OpenOn(t); err != nil {
+			return err
+		} else if held {
+			continue
+		}
+		if err := x.Unpause(t, bd.PausedCheckup); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -199,3 +199,51 @@ func TestDeleteDraftsDeletesACreatorsDraftsOnly(t *testing.T) {
 		t.Errorf("Show(t-d1) = %v, want deleted", err)
 	}
 }
+
+func TestFakeCreateEnforcesAGivenSerializer(t *testing.T) {
+	rec := &recorder{TB: t}
+	f := bdtest.New(rec, bd.Bead{ID: "t-a", Status: "open"}, bdtest.Claimed(bd.Bead{ID: "t-held", Status: "open"}))
+	if _, err := f.Create(bd.CreateSpec{Title: "plain"}); err != nil || len(rec.errs) != 0 {
+		t.Fatalf("Create without a Serializer = %v, errs %v; want a plain insert", err, rec.errs)
+	}
+	if _, err := f.Create(bd.CreateSpec{Title: "held", Serializer: bd.UnderClaim("t-held")}); err != nil || len(rec.errs) != 0 {
+		t.Fatalf("Create under a held claim = %v, errs %v", err, rec.errs)
+	}
+	id, err := f.Create(bd.CreateSpec{Title: "unheld", Serializer: bd.UnderClaim("t-a")})
+	if err == nil || len(rec.errs) != 1 || !strings.Contains(rec.errs[0], "ADR 0070 violation") {
+		t.Fatalf("Create under an unheld claim = %q, %v, errs %v; want an ADR 0070 violation", id, err, rec.errs)
+	}
+	if got, _ := f.List(bd.Query{All: true}); len(got) != 4 {
+		t.Errorf("%d beads, want the 2 seeded and 2 created (the refused create leaves none)", len(got))
+	}
+}
+
+func TestFakeCreateMintsTheNextFreeChildSuffix(t *testing.T) {
+	f := bdtest.New(t, bd.Bead{ID: "cp", Status: "open"}, bd.Bead{ID: "cp.1", Parent: "cp", Status: "closed", Labels: []string{"seeded"}})
+	id, err := f.Create(bd.CreateSpec{Title: "kid", Parent: "cp"})
+	if err != nil || id != "cp.2" {
+		t.Fatalf("Create = %q, %v; want cp.2", id, err)
+	}
+	if got, err := f.Show("cp.1"); err != nil || got.Status != "closed" || !slices.Contains(got.Labels, "seeded") {
+		t.Errorf("seeded cp.1 = %+v, %v; want it intact", got, err)
+	}
+}
+
+func TestFakeCreateMintsBdsDefaultPriorityUnlessSet(t *testing.T) {
+	f := bdtest.New(t)
+	for _, c := range []struct {
+		name string
+		set  *int
+		want int
+	}{{"unset", nil, 2}, {"P0", ptr(0), 0}, {"P4", ptr(4), 4}} {
+		id, err := f.Create(bd.CreateSpec{Title: c.name, Priority: c.set})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := f.Show(id); err != nil || got.Priority != c.want {
+			t.Errorf("%s: priority = %d, %v; want %d", c.name, got.Priority, err, c.want)
+		}
+	}
+}
+
+func ptr(n int) *int { return &n }

@@ -6,10 +6,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "docusaurus build",
-    "start": "docusaurus start",
+    "build": "node scripts/gen-glossary.mjs && docusaurus build",
+    "start": "node scripts/gen-glossary.mjs && docusaurus start",
     "unit": "node --test \"src/plugins/*.test.mjs\" \"scripts/*.test.mjs\"",
-    "test": "npm run unit && npm run build && node scripts/check-build.mjs && node scripts/check-style.mjs && node scripts/check-hero.mjs && node scripts/check-game.mjs && node scripts/check-try.mjs && node scripts/check-framework.mjs && node scripts/check-workspace.mjs && node scripts/denylist.mjs"
+    "test": "npm run unit && npm run build && node scripts/check-build.mjs && node scripts/check-style.mjs && node scripts/check-hero.mjs && node scripts/check-game.mjs && node scripts/check-try.mjs && node scripts/check-framework.mjs && node scripts/check-workspace.mjs && node scripts/check-learn.mjs && node scripts/check-glossary.mjs && node scripts/denylist.mjs"
   },
   "dependencies": {
     "@docusaurus/core": "~3.10.2",

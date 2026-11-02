@@ -38,14 +38,13 @@ type palette struct {
 	// liveness
 	Alive, AFK, BlockerPink lipgloss.Color
 	// state
-	InProgress       lipgloss.Color
-	P0Fg, P0Tint     lipgloss.Color
-	P1Fg, P1Tint     lipgloss.Color
-	ChipInk, TintInk lipgloss.Color
-	UnknownKind      lipgloss.Color
-	Pause            map[string]lipgloss.Color // by bd pause cause, plus pauseInherited
-	Kind             map[contract.Kind]lipgloss.Color
-	Bolder           bool // bold inactive and hovered tabs and reference keys
+	InProgress  lipgloss.Color
+	P0Fg, P1Fg  lipgloss.Color
+	ChipInk     lipgloss.Color
+	UnknownKind lipgloss.Color
+	Pause       map[string]lipgloss.Color // by bd pause cause, plus pauseInherited
+	Kind        map[contract.Kind]lipgloss.Color
+	Bolder      bool // bold inactive and hovered tabs and reference keys
 }
 
 // darkPalette is today's colors, and the default.
@@ -64,14 +63,13 @@ var darkPalette = palette{
 	StatsBars: "109", Burn: "180",
 	Alive: "114", AFK: "151", BlockerPink: "210",
 	InProgress: "220",
-	P0Fg:       "203", P0Tint: "203",
-	P1Fg: "217", P1Tint: "217",
-	ChipInk: "0", TintInk: "16",
+	P0Fg:       "203", P1Fg: "217",
+	ChipInk:     "0",
 	UnknownKind: "244",
 	Pause: map[string]lipgloss.Color{
 		bd.PausedForeignHold: "214", bd.PausedFailing: "203", bd.PausedAbandoned: "208",
 		bd.PausedRecovering: "172", bd.PausedCheckup: "179", bd.PausedManual: "213",
-		bd.PausedIntegrateConflict: "44", bd.PausedNotBuilt: "220", bd.PausedUnmet: "167",
+		bd.PausedIntegrateConflict: "44", bd.PausedNotBuilt: "220", bd.PausedBehindMainline: "178", bd.PausedUnmet: "167",
 		bd.PausedProfile: "75",
 		bd.PausedContext: "141", pauseInherited: "127",
 	},
@@ -88,7 +86,7 @@ var darkPalette = palette{
 		// gates
 		contract.KindApproval: "107", contract.KindPivot: "160", contract.KindRollback: "94",
 		// hitl misc
-		contract.KindErrand: "248", contract.KindDiscussion: "246", contract.KindCheckup: "246",
+		contract.KindErrand: "248", contract.KindDiscussion: "246", contract.KindCheckup: "246", contract.KindRemnant: "160",
 		contract.KindSurgery: "93", contract.KindInitiative: "255", contract.KindLanding: "209", contract.KindMRWatch: "209",
 		contract.KindForgeReview: "109",
 		contract.KindLatch:       "244", // no hue of its own today: it drew in the unknown-kind fallback
@@ -132,11 +130,8 @@ var lightPalette = palette{
 	BlockerPink:       "168",
 	InProgress:        "136",
 	P0Fg:              "160",
-	P0Tint:            "210",
 	P1Fg:              "131",
-	P1Tint:            "224",
 	ChipInk:           "231",
-	TintInk:           "16",
 	UnknownKind:       "243",
 	Pause: map[string]lipgloss.Color{
 		bd.PausedForeignHold:       "166",
@@ -147,6 +142,7 @@ var lightPalette = palette{
 		bd.PausedManual:            "163",
 		bd.PausedIntegrateConflict: "30",
 		bd.PausedNotBuilt:          "136",
+		bd.PausedBehindMainline:    "142",
 		bd.PausedUnmet:             "131",
 		bd.PausedProfile:           "26",
 		bd.PausedContext:           "91",
@@ -172,6 +168,7 @@ var lightPalette = palette{
 		contract.KindErrand:        "242",
 		contract.KindDiscussion:    "244",
 		contract.KindCheckup:       "244",
+		contract.KindRemnant:       "160",
 		contract.KindSurgery:       "55",
 		contract.KindInitiative:    "235",
 		contract.KindLanding:       "130",
@@ -217,11 +214,8 @@ var highContrastPalette = palette{
 	BlockerPink:       "204",
 	InProgress:        "226",
 	P0Fg:              "196",
-	P0Tint:            "196",
 	P1Fg:              "217",
-	P1Tint:            "217",
 	ChipInk:           "16",
-	TintInk:           "16",
 	UnknownKind:       "251",
 	Pause: map[string]lipgloss.Color{
 		bd.PausedForeignHold:       "214",
@@ -232,6 +226,7 @@ var highContrastPalette = palette{
 		bd.PausedManual:            "201",
 		bd.PausedIntegrateConflict: "51",
 		bd.PausedNotBuilt:          "226",
+		bd.PausedBehindMainline:    "227",
 		bd.PausedUnmet:             "209",
 		bd.PausedProfile:           "81",
 		bd.PausedContext:           "177",
@@ -257,6 +252,7 @@ var highContrastPalette = palette{
 		contract.KindErrand:        "252",
 		contract.KindDiscussion:    "250",
 		contract.KindCheckup:       "250",
+		contract.KindRemnant:       "196",
 		contract.KindSurgery:       "141",
 		contract.KindInitiative:    "231",
 		contract.KindLanding:       "215",
@@ -301,8 +297,7 @@ func applyTheme(p palette) {
 	waitSt, softSt, pinkFg = fgSt(p.WaitsOnYou), fgSt(p.Soft), fgSt(p.BlockerPink)
 	selRow = lipgloss.NewStyle().Background(p.SelBg).Foreground(p.SelInk).Bold(true)
 	pickRow, ancRow, hoverRow = shade(p.PickerBg, p.ShadeInk), shade(p.AncestorBg, p.ShadeInk), shade(p.HoverBg, p.ShadeInk)
-	kindFallback, chipInk, tintInk = p.UnknownKind, p.ChipInk, p.TintInk
-	prio0Tint, prio1Tint = p.P0Tint, p.P1Tint
+	kindFallback, chipInk = p.UnknownKind, p.ChipInk
 	inProgSty = fgSt(p.InProgress)
 
 	// derived copies

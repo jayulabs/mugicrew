@@ -92,13 +92,15 @@ matter of taste.
 - File **one Critique per confirmed blocking finding**:
 
       bd create --type task --labels kind:critique,drafted-by:{{.ReviewID}} -s deferred --no-inherit-labels --parent {{.CheckpointID}} \
+        --deps discovered-from:{{.ReviewID}} \
         --title "<what's wrong>" --description "<the defect, where it is, and how to fix it>"
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 - **Nits & smells** (naming, minor duplication, style, non-blocking smells) do NOT
   each get their own bead. Instead, file **exactly ONE aggregate "nits & smells"
-  critique** listing them — and file it **only when you also filed ≥1 blocking
+  critique** listing them, with the same create above (including
+  `--deps discovered-from:{{.ReviewID}}`) — and file it **only when you also filed ≥1 blocking
   critique this pass**. This is a severity gate: a clean pass (zero blocking
   findings) files NOTHING at all — never the nit bead — so nits never stall an
   unattended run, but they still get cleaned up during the rework a blocking

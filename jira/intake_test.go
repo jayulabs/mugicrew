@@ -29,10 +29,10 @@ func intakeWorkspace(t *testing.T, cfg, out string) (root, argvLog string, filed
 	}
 	os.MkdirAll(filepath.Join(root, ".mugicrew"), 0o755)
 	os.WriteFile(filepath.Join(root, ".mugicrew", "config.toml"), []byte(cfg), 0o644)
-	oN, oC, oS := NewSignalWithRef, CarrierOf, Supersede
-	t.Cleanup(func() { NewSignalWithRef, CarrierOf, Supersede = oN, oC, oS })
+	oN, oC, oS := NewSignalWithRef, CarrierOf, Retire
+	t.Cleanup(func() { NewSignalWithRef, CarrierOf, Retire = oN, oC, oS })
 	CarrierOf = func(string) (bd.Bead, bool, error) { return bd.Bead{}, false, nil }
-	Supersede = func(string, string) error { t.Error("superseded with no live carrier"); return nil }
+	Retire = func(string, string, string) error { t.Error("retired with no live carrier"); return nil }
 	filed = &[][3]string{}
 	NewSignalWithRef = func(title, body, ref string) (string, error) {
 		*filed = append(*filed, [3]string{title, body, ref})
@@ -75,20 +75,20 @@ func TestIntakeMovedKeyWins(t *testing.T) {
 func TestIntakeReintakeSupersedesOntoCarrier(t *testing.T) {
 	root, _, filed := intakeWorkspace(t, siteCfg, itemJSON)
 	var asked string
-	var edge [2]string
+	var edge [3]string
 	CarrierOf = func(ref string) (bd.Bead, bool, error) { asked = ref; return bd.Bead{ID: "mc-old"}, true, nil }
-	Supersede = func(old, n string) error { edge = [2]string{old, n}; return nil }
+	Retire = func(old, n, why string) error { edge = [3]string{old, n, why}; return nil }
 	res, err := Intake(root, "ABC-1")
 	if err != nil || res != (IntakeResult{ID: "mc-new", Key: "ABC-1", Carrier: "mc-old"}) {
 		t.Fatalf("res %+v err %v", res, err)
 	}
-	if asked != "jira-ABC-1" || len(*filed) != 1 || edge != [2]string{"mc-new", "mc-old"} {
+	if asked != "jira-ABC-1" || len(*filed) != 1 || edge != [3]string{"mc-new", "mc-old", "duplicate: mc-old"} {
 		t.Errorf("asked %q, filed %d, edge %v", asked, len(*filed), edge)
 	}
 }
 
 func TestIntakeAfterCarrierClosedStaysLive(t *testing.T) {
-	root, _, _ := intakeWorkspace(t, siteCfg, itemJSON) // CarrierOf finds none; Supersede fails the test
+	root, _, _ := intakeWorkspace(t, siteCfg, itemJSON) // CarrierOf finds none; Retire fails the test
 	if res, err := Intake(root, "ABC-1"); err != nil || res.Carrier != "" {
 		t.Errorf("res %+v err %v", res, err)
 	}
@@ -159,7 +159,7 @@ func TestIntakeWrapsLookupAndFilingErrors(t *testing.T) {
 func TestIntakePartialSupersedeFailureKeepsTheID(t *testing.T) {
 	root, _, _ := intakeWorkspace(t, siteCfg, itemJSON)
 	CarrierOf = func(string) (bd.Bead, bool, error) { return bd.Bead{ID: "mc-old"}, true, nil }
-	Supersede = func(string, string) error { return errors.New("boom") }
+	Retire = func(string, string, string) error { return errors.New("boom") }
 	res, err := Intake(root, "ABC-1")
 	if want := "intake jira ABC-1: filed mc-new but could not supersede it onto mc-old: boom"; err == nil || err.Error() != want {
 		t.Errorf("err = %v, want %q", err, want)

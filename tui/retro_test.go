@@ -28,10 +28,13 @@ func retroModel(t *testing.T) (Model, *[]string) {
 
 func TestRetrospectiveFlow(t *testing.T) {
 	m, calls := retroModel(t)
-	var created, body string
+	var got bd.Bead
+	var gotSpine []string
 	seam(t, &readSpine, func(string) ([]string, bool, error) { return []string{"sp", "x"}, false, nil })
-	seam(t, &newDiscussion, func(title, b string) (string, error) { created, body = title, b; return "disc", nil })
-	seam(t, &relate, func(from, to string) error { *calls = append(*calls, "related "+from+" "+to); return nil })
+	seam(t, &newRetrospective, func(target bd.Bead, spine []string) (string, error) {
+		got, gotSpine = target, spine
+		return "disc", nil
+	})
 
 	// ineligible: status line, no Cmd
 	n, cmd := send(t, press(t, selectBead(t, m, "bd"), runeKey("n")), runeKey("t"))
@@ -65,26 +68,28 @@ func TestRetrospectiveFlow(t *testing.T) {
 	}
 	o, cmd = send(t, o, runeKey("y"))
 	drain(t, o, cmd, 4)
-	if created != "Retrospective Done spec" || !strings.Contains(body, "\nTarget: sp\nSpine: sp x") {
-		t.Errorf("created %q body %q", created, body)
+	if got.ID != "sp" || got.Title != "Done spec" || strings.Join(gotSpine, " ") != "sp x" {
+		t.Errorf("created on %+v spine %v", got, gotSpine)
 	}
-	if got := strings.Join(*calls, ";"); !strings.Contains(got, "related disc sp") || !strings.Contains(got, "startSession disc") {
+	if got := strings.Join(*calls, ";"); strings.Contains(got, "related") || !strings.Contains(got, "startSession disc") {
 		t.Errorf("calls = %q", got)
 	}
 }
 
-func TestRetrospectiveEdgeFailureNamesOrphan(t *testing.T) {
-	m, _ := retroModel(t)
+func TestRetrospectiveCreateFailureNamesError(t *testing.T) {
+	m, calls := retroModel(t)
 	seam(t, &readSpine, func(string) ([]string, bool, error) { return []string{"sp"}, false, nil })
-	seam(t, &newDiscussion, func(string, string) (string, error) { return "disc", nil })
-	seam(t, &relate, func(string, string) error { return errors.New("boom") })
+	seam(t, &newRetrospective, func(bd.Bead, []string) (string, error) { return "", errors.New("boom") })
 	m = selectBead(t, m, "sp")
 	_, cmd := send(t, press(t, m, runeKey("n")), runeKey("t"))
 	o := settle(t, m, cmd)
 	o, cmd = send(t, o, runeKey("y"))
 	o = settle(t, o, cmd)
-	if s := statusOf(o); !strings.Contains(s, "boom") || !strings.Contains(s, "filed disc") {
+	if s := statusOf(o); !strings.Contains(s, "retrospective: boom") || strings.Contains(s, "filed") {
 		t.Errorf("status = %q", s)
+	}
+	if got := strings.Join(*calls, ";"); strings.Contains(got, "related") || strings.Contains(got, "startSession") {
+		t.Errorf("calls = %q", got)
 	}
 }
 

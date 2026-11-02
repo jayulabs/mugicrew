@@ -38,6 +38,7 @@ func (r *jinbeSeamRec) closeAfterMR(t *testing.T) {
 		r.closed = append(r.closed, id)
 		return nil
 	}
+	forceClose = func(id, reason string) error { return closeBead(id, reason) }
 }
 
 // jinbeSeamRec captures the bd/git legs so the tests can assert the approvedAtHead
@@ -49,6 +50,7 @@ type jinbeSeamRec struct {
 	landedErr      error               // non-nil → landedBase fails with it (not a miss)
 	errandBody     string
 	errands        []string       // blocking Errand keys bd.SpawnBlockingErrand was asked for, deduped
+	raisers        []string       // the raiser each new blocking Errand was filed with, parallel to errands
 	approvalBody   string         // one closed Approval's body; "" → no closed Approval (single-approval shorthand)
 	approvalBodies []string       // >1 closed Approval bodies in creation order; wins over approvalBody
 	rewritten      bool           // the landed Tip: is not an ancestor of head
@@ -137,6 +139,8 @@ type jinbeSeamRec struct {
 	findErr    error     // non-nil → forgeFindOpenMR fails
 	closeMRErr error     // non-nil → forgeCloseMR fails
 	mrsClosed  []int     // forgeCloseMR iids
+
+	rem *remRec // the Remnant leg's recorder (stubRemnantSeams)
 }
 
 func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
@@ -196,6 +200,7 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 		r.trailerRefs = append(r.trailerRefs, ref)
 		return r.integrateSHA, nil
 	}
+	stubRemnantSeams(t, r)
 	oBranch := hasBranch
 	t.Cleanup(func() { hasBranch = oBranch })
 	hasBranch = func(git.Repo, string) bool { return !r.branchGone }
@@ -434,12 +439,13 @@ func stubJinbeSeams(t *testing.T, r *jinbeSeamRec) {
 	}
 	oErrand := bd.SpawnBlockingErrand
 	t.Cleanup(func() { bd.SpawnBlockingErrand = oErrand })
-	bd.SpawnBlockingErrand = func(container, key, _, body string) (string, bool, error) { // bd's (container, key) guard
+	bd.SpawnBlockingErrand = func(container, key, _, body, raiser string) (string, bool, error) { // bd's (container, key) guard
 		k := container + "|" + key
 		if slices.Contains(r.errands, k) {
 			return "ws-errand", false, nil
 		}
 		r.errands = append(r.errands, k)
+		r.raisers = append(r.raisers, raiser)
 		r.errandBody = body
 		return "ws-errand", true, nil
 	}
@@ -638,6 +644,9 @@ func TestLandTrailerIdempotencyRollsForward(t *testing.T) {
 	if r.reasons[0] != "landed: landsha" {
 		t.Errorf("Landing close reason = %q, want landed: landsha", r.reasons[0])
 	}
+	if r.reasons[1] != "landed: landsha" {
+		t.Errorf("Checkpoint close reason = %q, want landed: landsha, the Landing's", r.reasons[1])
+	}
 }
 
 // A re-run over an already-closed, already-landed Checkpoint closes nothing again.
@@ -725,6 +734,9 @@ func TestRebaseConflictRaisesConflictBead(t *testing.T) {
 	}
 	if want := "Checkpoint ws-cp conflicts with main"; conf.Title != want {
 		t.Errorf("conflict title = %q, want %q (no kind prefix)", conf.Title, want)
+	}
+	if conf.DiscoveredFrom != "ws-land" {
+		t.Errorf("DiscoveredFrom = %q, want the Landing ws-land", conf.DiscoveredFrom)
 	}
 	if !slices.Equal(r.closed, []string{"ws-land"}) || r.reasons[0] != "obsolete: conflict" {
 		t.Errorf("closed %v %v, want the Landing obsolete: conflict, never the Checkpoint", r.closed, r.reasons)
@@ -922,6 +934,9 @@ func TestLandingMirrorsItsMR(t *testing.T) {
 				if r.reasons[0] != "obsolete: merge request closed" || len(r.errands) != 1 {
 					t.Errorf("reason %q errands %v, want obsolete: merge request closed and one Errand across ticks", r.reasons[0], r.errands)
 				}
+				if !slices.Equal(r.raisers, []string{"ws-land"}) {
+					t.Errorf("raisers %v, want the closed Landing", r.raisers)
+				}
 				for _, want := range []string{"!7", "reopen", "merge", "withdraw"} {
 					if !strings.Contains(r.errandBody, want) {
 						t.Errorf("Errand body %q lacks %q", r.errandBody, want)
@@ -1045,6 +1060,9 @@ func TestLandingConflictFromTrialOrMR(t *testing.T) {
 				if len(r.spawned) != 1 || r.spawned[0].Kind != contract.KindConflict || len(r.reasons) != 1 || r.reasons[0] != "obsolete: conflict" || len(r.landed) != 0 {
 					t.Errorf("spawned %v reasons %v landed %v, want a conflict member and obsolete: conflict", r.spawned, r.reasons, r.landed)
 				}
+				if got := r.spawned[0].DiscoveredFrom; got != "ws-land" {
+					t.Errorf("DiscoveredFrom = %q, want the Landing ws-land", got)
+				}
 			} else if len(r.spawned)+len(r.closed) != 0 || len(r.landed) != 0 {
 				t.Errorf("spawned %v closed %v landed %v, want pending", r.spawned, r.closed, r.landed)
 			}
@@ -1112,6 +1130,9 @@ func TestLandingMirrorsAFailedPipeline(t *testing.T) {
 			}
 			if len(r.errands) != c.wantErrands || len(r.spawned) != c.wantCrit {
 				t.Errorf("errands %v spawned %d, want %d and %d across two ticks", r.errands, len(r.spawned), c.wantErrands, c.wantCrit)
+			}
+			if len(r.raisers) != c.wantErrands || slices.ContainsFunc(r.raisers, func(s string) bool { return s != "ws-land" }) {
+				t.Errorf("raisers %v, want the failed Landing on each of %d hold(s)", r.raisers, c.wantErrands)
 			}
 			if (c.wantReason == "") != (len(r.reasons) == 0) || (c.wantReason != "" && r.reasons[0] != c.wantReason) {
 				t.Errorf("reasons %v, want %q", r.reasons, c.wantReason)
@@ -1585,8 +1606,8 @@ func assertHandedOff(t *testing.T, r *rollbackRec) {
 	} else if want := "Fix what " + r.target + " broke on main"; r.builds[0].Title != want {
 		t.Errorf("Build title = %q, want %q (no kind prefix)", r.builds[0].Title, want)
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-rb" || r.reasons["ws-rb"] != "" {
-		t.Errorf("closed %v %v, want the Rollback closed once, no reason", r.closed, r.reasons)
+	if len(r.closed) != 1 || r.closed[0] != "ws-rb" || r.reasons["ws-rb"] != "handed off: ws-new" {
+		t.Errorf("closed %v %v, want the Rollback closed once, handed off: ws-new", r.closed, r.reasons)
 	}
 }
 
@@ -1722,7 +1743,7 @@ func TestRollbackRevertMainDirtyFilesNoBead(t *testing.T) {
 // ADR 0049: a conflicting revert fixes forward — nothing reverted, the successor cut
 // at main HEAD with no seed, one Build carrying the evidence, the squash, the
 // conflicted paths and the skipped-revert line, and the Rollback closed
-// "fix-forward: revert conflicted". A crash at any leg resumes (past the successor
+// "fix-forward: ws-new". A crash at any leg resumes (past the successor
 // spawn the decision is pinned on it) with no duplicate successor or Build.
 func TestRollbackRevertConflictFixesForward(t *testing.T) {
 	for _, leg := range []string{"", "successor", "cut", "build", "close"} {
@@ -1763,7 +1784,7 @@ func TestRollbackRevertConflictFixesForward(t *testing.T) {
 						t.Errorf("Build body %q missing %q", d, w)
 					}
 				}
-				if len(r.closed) != 1 || r.reasons["ws-rb"] != "fix-forward: revert conflicted" {
+				if len(r.closed) != 1 || r.reasons["ws-rb"] != "fix-forward: ws-new" {
 					t.Errorf("closed %v %v, want ws-rb closed once fix-forward", r.closed, r.reasons)
 				}
 			})
@@ -1774,7 +1795,7 @@ func TestRollbackRevertConflictFixesForward(t *testing.T) {
 // Once a fix-forward pass has spawned its successor, the decision is pinned
 // on it. If main then changes so the revert would apply cleanly (a human reverted the
 // later land), the resume still fixes forward — no revert on main, the Build still
-// carries the conflicted paths, and the Rollback closes "fix-forward: revert conflicted".
+// carries the conflicted paths, and the Rollback closes "fix-forward: ws-new".
 func TestRollbackFixForwardResumeStaysFixForward(t *testing.T) {
 	for _, leg := range []string{"successor", "cut", "build", "close"} {
 		t.Run(leg, func(t *testing.T) {
@@ -1797,7 +1818,7 @@ func TestRollbackFixForwardResumeStaysFixForward(t *testing.T) {
 			if len(r.builds) != 1 || !strings.Contains(r.builds[0].Description, "a.go, b.go") {
 				t.Errorf("builds = %+v, want one fix-forward Build carrying the conflicted paths", r.builds)
 			}
-			if len(r.closed) != 1 || r.reasons["ws-rb"] != "fix-forward: revert conflicted" {
+			if len(r.closed) != 1 || r.reasons["ws-rb"] != "fix-forward: ws-new" {
 				t.Errorf("closed %v %v, want ws-rb closed once fix-forward", r.closed, r.reasons)
 			}
 		})
@@ -2101,6 +2122,9 @@ func TestChartLandingConflictFilesChartConflict(t *testing.T) {
 			}
 			if len(r.spawned) != 1 || r.spawned[0].Kind != contract.KindChartConflict || r.spawned[0].Container {
 				t.Fatalf("spawned %+v, want one chart-conflict leaf", r.spawned)
+			}
+			if got := r.spawned[0].DiscoveredFrom; got != "ws-land" {
+				t.Errorf("DiscoveredFrom = %q, want the Landing ws-land", got)
 			}
 			d := r.spawned[0].Description
 			if base, _ := git.ParseBase(d); base != "basesha" {
@@ -2586,7 +2610,7 @@ func TestLocalLandingDoesNotFetch(t *testing.T) {
 
 // A merged MR is read after the fetch (Spec FR 18–21): a trailer on mainline closes the
 // Landing landed; a trailerless merge leaves it open, errors and files one Errand across
-// ticks; a stale-pin merge closes landed and files one Signal naming Tip:, head and range,
+// ticks; a stale-pin merge closes landed (the Remnant carries the stranded range),
 // winning over "obsolete: branch advanced" for the same tick.
 func TestLandingMergedMR(t *testing.T) {
 	merged := &forge.MR{IID: 7, State: "merged", MergeCommitSHA: "m3rg3"}
@@ -2618,6 +2642,9 @@ func TestLandingMergedMR(t *testing.T) {
 		if len(r.closed) != 0 || len(r.errands) != 1 || !strings.Contains(r.errandBody, "!7") || !strings.Contains(r.errandBody, "m3rg3") {
 			t.Errorf("closed %v errands %v body %q, want the Landing open and one Errand naming the MR and sha", r.closed, r.errands, r.errandBody)
 		}
+		if !slices.Equal(r.raisers, []string{"ws-land"}) {
+			t.Errorf("raisers %v, want the open Landing", r.raisers)
+		}
 	})
 	t.Run("merged-landedbase-fails", func(t *testing.T) { // a transient read failure is not a trailerless merge
 		boom := errors.New("bd sql down")
@@ -2626,19 +2653,12 @@ func TestLandingMergedMR(t *testing.T) {
 			t.Errorf("err %v closed %v errands %v, want the read error, the Landing open and no Errand", err, r.closed, r.errands)
 		}
 	})
-	t.Run("merged-stale-pin", func(t *testing.T) {
+	t.Run("merged-stale-pin", func(t *testing.T) { // the Checkpoint's closeLanded files the Remnant, so no Signal here
 		r := &jinbeSeamRec{head: "newhead", fetchLands: true, landedTip: "oldtip", mr: merged}
-		if err := land(r, "oldtip"); err != nil || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" {
-			t.Fatalf("err %v reasons %v, want landed", err, r.reasons)
+		if err := land(r, "oldtip"); err != nil || len(r.reasons) != 1 || r.reasons[0] != "landed: landsha" || len(r.signals) != 0 {
+			t.Fatalf("err %v reasons %v signals %v, want landed and no Signal", err, r.reasons, r.signals)
 		}
-		if len(r.signals) != 1 {
-			t.Fatalf("signals = %v, want one", r.signals)
-		}
-		for _, want := range []string{"oldtip", "newhead", "oldtip..newhead"} {
-			if !strings.Contains(r.signals[0], want) {
-				t.Errorf("Signal %q lacks %q", r.signals[0], want)
-			}
-		}
+
 	})
 }
 
@@ -2718,15 +2738,15 @@ func TestLocalLandingNeverInvokesGlab(t *testing.T) {
 }
 
 // A stale-pin squash merged before the Landing's own tick: the Checkpoint's reconcile
-// closes the Landing landed, and files the offshoot Signal first (Spec FR 20).
-func TestReconcileCheckpointStaleMergedPinFilesSignal(t *testing.T) {
+// closes the Landing landed, and files the Remnant, not a stale-pin Signal (Spec FR 13).
+func TestReconcileCheckpointStaleMergedPinFilesRemnant(t *testing.T) {
 	r := &jinbeSeamRec{head: "newhead", landedTip: "oldtip", trailerLanded: true, landings: []bd.Bead{openLanding("oldtip")}}
 	stubJinbeSeams(t, r)
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
 		t.Fatalf("reconcileCheckpoint: %v", err)
 	}
-	if len(r.signals) != 1 || !strings.Contains(r.signals[0], "oldtip..newhead") {
-		t.Errorf("signals = %v, want one naming oldtip..newhead", r.signals)
+	if len(r.signals) != 0 || r.rem.remnant == nil || !strings.Contains(r.rem.remnant.Description, "Stranded: oldtip..newhead") {
+		t.Errorf("signals = %v remnant %v, want a Remnant naming oldtip..newhead and no Signal", r.signals, r.rem.remnant)
 	}
 }
 
@@ -2737,8 +2757,8 @@ func TestFlagStalePinRewrittenPointsAtRangeDiff(t *testing.T) {
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
 		t.Fatalf("reconcileCheckpoint: %v", err)
 	}
-	if len(r.signals) != 1 || strings.Contains(r.signals[0], "Range:") || !strings.Contains(r.signals[0], "git range-diff oldtip...newhead") {
-		t.Errorf("signals = %v, want one with range-diff wording and no Range:", r.signals)
+	if r.rem.remnant == nil || strings.Contains(r.rem.remnant.Description, "Stranded: oldtip..") || !strings.Contains(r.rem.remnant.Description, "git range-diff oldtip...newhead") {
+		t.Errorf("remnant %v, want one with range-diff wording and no range", r.rem.remnant)
 	}
 }
 
@@ -2779,8 +2799,8 @@ func TestLandingDoesNotRetryASecondPipelineTwice(t *testing.T) {
 }
 
 // The only Landing closed obsolete and its MR was merged afterwards: the container still
-// closes landed and the closed Landing is flagged (Spec FR 20).
-func TestReconcileCheckpointStaleMergedPinFlagsClosedLanding(t *testing.T) {
+// closes landed and the Remnant hangs off the closed Landing.
+func TestReconcileCheckpointStaleMergedPinFilesRemnantOffClosedLanding(t *testing.T) {
 	l := openLanding("oldtip")
 	l.Status, l.CloseReason = "closed", "obsolete: branch advanced without landing"
 	r := &jinbeSeamRec{head: "newhead", landedTip: "oldtip", trailerLanded: true, landings: []bd.Bead{l}}
@@ -2788,8 +2808,8 @@ func TestReconcileCheckpointStaleMergedPinFlagsClosedLanding(t *testing.T) {
 	if err := reconcileCheckpoint(openCheckpoint()); err != nil {
 		t.Fatalf("reconcileCheckpoint: %v", err)
 	}
-	if len(r.signals) != 1 || !strings.Contains(r.signals[0], "oldtip..newhead") {
-		t.Errorf("signals = %v, want one naming oldtip..newhead", r.signals)
+	if len(r.signals) != 0 || r.rem.remnant == nil || r.rem.landing != "ws-land" {
+		t.Errorf("signals = %v remnant %v landing %q, want a Remnant discovered-from the closed Landing", r.signals, r.rem.remnant, r.rem.landing)
 	}
 }
 
@@ -2836,7 +2856,7 @@ func TestCheckpointApprovalCountsOnlyApprovedClose(t *testing.T) {
 	}{
 		{"approved", true},
 		{"rework: mc-1", false},
-		{"Approval obsoleted: tip moved", false},
+		{bd.ApprovalObsoletedReason, false},
 		{"obsolete: x", false},
 		{"", false},
 	} {
@@ -2938,6 +2958,9 @@ func TestGitlabRollbackHandsOffOnTheMerge(t *testing.T) {
 	}
 	if want := []string{"revert.done", "handoff.done", "revert.mr_closed"}; !slices.Equal(names, want) {
 		t.Errorf("events = %v, want %v", names, want)
+	}
+	if e := eventNamed(*evs, "revert.mr_closed"); e.Attrs["reason"] != "handed off: ws-new" || r.reasons["ws-rb"] != "handed off: ws-new" {
+		t.Errorf("revert.mr_closed reason = %v, bead reason %q, want both handed off: ws-new", e.Attrs["reason"], r.reasons["ws-rb"])
 	}
 }
 
@@ -3213,6 +3236,35 @@ func TestGitlabRollForwardUsesTheChildsProject(t *testing.T) {
 	if !slices.Equal(r.mrsClosed, []int{9}) || slices.ContainsFunc(r.projects, func(p forge.Project) bool { return p != childProject }) {
 		t.Errorf("MRs %v projects %v, want 9 on the child's only", r.mrsClosed, r.projects)
 	}
+	if i := slices.Index(r.closed, "ws-cp"); i < 0 || r.reasons[i] != "landed: landsha" {
+		t.Errorf("closed %v %v, want the Checkpoint closed landed: landsha on the gitlab path", r.closed, r.reasons)
+	}
+}
+
+// A nested Checkpoint first seen landed by closeLanded keeps the stale-pin Signal for its
+// stranded range, and files no Remnant (Spec Out of Scope; FR 15).
+func TestNestedCloseLandedFilesStalePinSignalNotRemnant(t *testing.T) {
+	r := &jinbeSeamRec{head: "newhead", landedTip: "oldtip", trailerLanded: true, landings: []bd.Bead{openLanding("oldtip")}}
+	stubJinbeSeams(t, r)
+	root := t.TempDir()
+	t.Chdir(root)
+	child := filepath.Join(root, "child") // a real repo, so the legs' Head reads the checkpoint branch
+	for _, args := range [][]string{{"init", "-q", root}, {"init", "-q", child},
+		{"-C", child, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"},
+		{"-C", child, "branch", "checkpoint/ws-cp"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	oRepo := repoDirOf
+	t.Cleanup(func() { repoDirOf = oRepo })
+	repoDirOf = func(bd.Bead) (git.Repo, string) { return git.Repo(child), "child" }
+	if err := closeLanded(openCheckpoint(), "checkpoint/ws-cp", "landsha"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.signals) != 1 || r.rem.remnant != nil {
+		t.Errorf("signals %v remnant %v, want one stale-pin Signal and no Remnant", r.signals, r.rem.remnant)
+	}
 }
 
 // Under a non-gitlab strategy the roll-forward makes no Forge call.
@@ -3262,7 +3314,7 @@ func TestLocalLandingComposesWithTheConventionalSubject(t *testing.T) {
 func trailerlessBody(t *testing.T, r *jinbeSeamRec, trailer, kind string) string {
 	t.Helper()
 	stubJinbeSeams(t, r)
-	_ = holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, trailer, 7, "m3rg3")
+	_ = holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, trailer, 7, "m3rg3")
 	return r.errandBody
 }
 
@@ -3408,7 +3460,7 @@ func TestOpenApprovalMRSpawnsTheWatchBeforeRecordingTheMRLine(t *testing.T) {
 func TestTrailerlessHoldReturnsNilOnceAlreadyFiled(t *testing.T) {
 	stubJinbeSeams(t, &jinbeSeamRec{})
 	hold := func() error {
-		return holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, "Checkpoint: ws-cp", 7, "m3rg3")
+		return holdTrailerless(bd.Bead{ID: "ws-cp", Title: "C"}, "", "", mrNaming{webURL: "https://gl/grp/proj/-/merge_requests/7", noun: "merge request", label: "MR"}, "Checkpoint: ws-cp", 7, "m3rg3")
 	}
 	if err := hold(); err == nil {
 		t.Fatal("the call that files the hold returned nil")

@@ -215,14 +215,14 @@ func (t initsTab) folded(k string) bool { return t.flip[k] != (k == initsClosed)
 
 // closedCmp orders Closed by real close time, newest first; beads with no close time
 // sort as a block after the timed ones, and a tie falls back to beadCmp (a total order).
-func closedCmp(a, b bd.Bead) int {
+func (g graphData) closedCmp(a, b bd.Bead) int {
 	if a.Closed.IsZero() != b.Closed.IsZero() {
 		if a.Closed.IsZero() {
 			return 1
 		}
 		return -1
 	}
-	return cmp.Or(b.Closed.Compare(a.Closed), beadCmp(a, b))
+	return cmp.Or(b.Closed.Compare(a.Closed), g.rowCmp(a, b))
 }
 
 func (t initsTab) rows() []iRow {
@@ -239,8 +239,8 @@ func (t initsTab) rows() []iRow {
 	if len(open)+len(closed) == 0 {
 		return nil
 	}
-	slices.SortStableFunc(open, func(a, b *bd.Bead) int { return beadCmp(*a, *b) })
-	slices.SortStableFunc(closed, func(a, b *bd.Bead) int { return closedCmp(*a, *b) })
+	slices.SortStableFunc(open, func(a, b *bd.Bead) int { return t.g.rowCmp(*a, *b) })
+	slices.SortStableFunc(closed, func(a, b *bd.Bead) int { return t.g.closedCmp(*a, *b) })
 	var rows []iRow
 	for _, s := range []struct {
 		key, name string

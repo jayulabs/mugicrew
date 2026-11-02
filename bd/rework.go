@@ -33,15 +33,16 @@ func parseCritiqueFile(path string) (critiqueFile, error) {
 // 0203 §2). It validates every file before any read, and refuses unless approval
 // is an open or in_progress kind:approval child of a Checkpoint or a Chart.
 //
-// Checkpoint: --critique files only. It adopts the Approval's Critique Drafts
-// whose title matches a file, creates the missing ones, deletes the unnamed ones,
-// then publishes them (and any Signal Drafts of the Approval) and closes the
-// Approval "rework: <ids>" in one batch.
+// Checkpoint: --critique files only. Each Critique is discovered-from the
+// Approval, born with the edge or given it on adoption. It adopts the
+// Approval's Critique Drafts whose title matches a file, creates the missing
+// ones, deletes the unnamed ones, then publishes them (and any Signal Drafts of
+// the Approval) and closes the Approval "rework: <ids>" in one batch.
 //
 // Chart: --grilling and --research files only (at least one in total). The same
 // adopt/create/prune runs over grilling and research Drafts, children of the
 // Chart; chart:defogged comes off before the publish, so the Chart owes defog
-// again. A re-run after a crash before the publish adopts and finishes.
+// again. Each is discovered-from the Approval too, the same way. A re-run after a crash before the publish adopts and finishes.
 // Returns the new bead ids.
 func ReworkApproval(approval string, critiques, grillings, research []string) ([]string, error) {
 	type want struct {
@@ -127,9 +128,14 @@ func ReworkApproval(approval string, critiques, grillings, research []string) ([
 	ids := make([]string, len(items))
 	for i, it := range items {
 		if ids[i] = have[it.title]; ids[i] != "" {
+			// A Draft a crashed run created: it gains the edge it would have been born with.
+			if err := DiscoveredFrom(ids[i], approval); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		if ids[i], err = SpawnChild(ap.Parent, Successor{Kind: it.kind, Title: it.title, Description: it.body, DraftedBy: approval}); err != nil {
+		s := Successor{Kind: it.kind, Title: it.title, Description: it.body, DraftedBy: approval, DiscoveredFrom: approval}
+		if ids[i], err = SpawnChild(ap.Parent, s); err != nil {
 			return nil, err
 		}
 	}

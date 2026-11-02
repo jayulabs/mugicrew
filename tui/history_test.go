@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -176,7 +177,7 @@ func TestHistoryRefusalsOpenNothing(t *testing.T) {
 	check("pending", "cp-b: rollback pending")
 	m = goSha(t, m, "0000008") // cp-a, reverted
 	check("badged", "cp-a: already rolled back")
-	m.beads[len(m.beads)-1] = bd.Bead{ID: "rb", Kind: contract.KindRollback, Status: "closed", CloseReason: bd.FixForwardReason + " x", Related: []string{"cp-b"}}
+	m.beads[len(m.beads)-1] = bd.Bead{ID: "rb", Kind: contract.KindRollback, Status: "closed", CloseReason: bd.FixForwardCloseReason("cp-new"), Related: []string{"cp-b"}}
 	m = press(t, press(t, m, runeKey("k")), runeKey("k"))
 	check("fixed forward", "cp-b: already fixed forward")
 	empty := press(t, sized(t, 100, 24), runeKey("6"))
@@ -218,6 +219,16 @@ func TestHistoryRollbackFormFilesOnSubmitOnly(t *testing.T) {
 	}
 	if m.status != "filed Rollback rb-new of cp-b" {
 		t.Errorf("status = %q", m.status)
+	}
+}
+
+// A failed create takes the form's retry path: the form stays open with the error.
+func TestHistoryRollbackCreateErrorRetries(t *testing.T) {
+	seam(t, &newRollback, func(string, string, bd.Bead) (string, error) { return "", errors.New("bd down") })
+	m := press(t, goSha(t, historyModel(t), "0000006"), runeKey("u"))
+	m = press(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.modals) != 1 || !strings.Contains(body(m), "create: bd down") {
+		t.Errorf("modals=%d, want the form reopened with the error:\n%s", len(m.modals), body(m))
 	}
 }
 

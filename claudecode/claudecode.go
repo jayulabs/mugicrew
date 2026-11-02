@@ -19,6 +19,7 @@ import (
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/crewdocs"
 	"jayulabs.org/mugicrew/eventlog"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
 // Backend is the claudecode Harness. Model is an optional --model pass-through
@@ -225,7 +226,7 @@ func (b *Backend) LaunchCommand(inv contract.Invocation) (contract.LaunchCommand
 // rides here. Claude Code merges it with the user's and Workspace's hooks and no
 // file is written; a policy that silences hooks just means never waiting.
 func waitingHooks() (string, error) {
-	exe, err := os.Executable()
+	exe, err := selfexe.Path()
 	if err != nil {
 		return "", fmt.Errorf("hitl-hook path: %w", err)
 	}

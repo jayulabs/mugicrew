@@ -80,6 +80,25 @@ Landing `obsolete: build failed`. A command that cannot start (exec error, exit
 126 or 127), the timeout, or a signal-killed shell is infra: `gate.infra`, the
 Landing stays open to retry.
 
+## The personal layer
+
+`<os.UserConfigDir()>/mugicrew/config.toml` (`~/.config/mugicrew/config.toml` on
+Linux) is a per-user layer outside any repo. It holds settings that govern the one
+machine-wide binary, so no Workspace layer (checked-in or machine-local) is ever
+read for them: setting one there has no effect.
+
+```toml
+[upgrade]
+unattended = true  # let an opted-in loop Upgrade its npm global install
+```
+
+`[upgrade] unattended` is off when unset. `MUGICREW_UNATTENDED_UPGRADE` wins over
+the key: `1`, `on` or `true` turns it on, `0`, `off` or `false` turns it off.
+Opting in only lets a loop Upgrade, and only an `npm i -g` install; ProjectLocal,
+pnpm/yarn global, npx, unknown and from-source builds always read off. The
+Release notice opt-outs (`MUGICREW_RELEASE_NOTICE=0`, `[release] notice = false`)
+turn it off too, and `MUGICREW_EFFORT` plays no part.
+
 ## Poll intervals
 
 An open Latch is re-checked on the interval of the system it watches:

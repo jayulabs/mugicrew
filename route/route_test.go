@@ -77,6 +77,11 @@ func TestRouteCoversEveryKindInTable(t *testing.T) {
 			want: Destination{Placement: Worktree, Branch: "effort/ws-conf", Container: "checkpoint/ws-cp", Mode: Replace, Tip: "t1p"},
 		},
 		{
+			name: "replay conflict → Replace on the respin, pinned at its empty cut (Base:), not the old head",
+			bead: bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "replay\nBase: m41n\nTip: 0ldhead\nReplay-from: fr0m\nvariant: replay"},
+			want: Destination{Placement: Worktree, Branch: "effort/ws-conf", Container: "checkpoint/ws-cp", Mode: Replace, Tip: "m41n"},
+		},
+		{
 			name: "requested chart rebase → Replace at the pinned Tip",
 			bead: bd.Bead{ID: "ws-cc", Kind: contract.KindChartConflict, Parent: "ws-chart", Description: "Base: b4se\nTip: t1p\nvariant: requested"},
 			want: Destination{Placement: Worktree, Branch: "effort/ws-cc", Container: "chart/ws-chart", Mode: Replace, Tip: "t1p"},

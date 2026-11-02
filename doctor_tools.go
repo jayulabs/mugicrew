@@ -12,6 +12,7 @@ import (
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/loop"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -23,7 +24,7 @@ var doctorToolVersion = func(bin string, args ...string) (string, error) {
 }
 
 // doctorExe is the running binary's path; a var so tests stub it.
-var doctorExe = os.Executable
+var doctorExe = selfexe.Path
 
 // doctorEnv reads the environment (the devShell wrapper's MUGICREW_WRAPPER
 // marker); a var so tests stub it.

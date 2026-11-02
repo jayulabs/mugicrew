@@ -1,6 +1,6 @@
 # ADR 0366: The explainer is five pages for the deciding stranger, and renders only install.md
 
-Status: Accepted
+Status: Accepted; §1 and §3 superseded by ADR 0403 (mugicrew-the-site-gains-a-learn-section…)
 Date: 2026-10-28
 
 Chart mc-tmuh9 (public mugicrew explainer site with three framings). Settles

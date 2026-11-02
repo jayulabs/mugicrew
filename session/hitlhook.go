@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/eventlog"
 )
 
 // paneVar is the pane's address, <socket>,<pane id>, that hitl-run exports to its
@@ -18,6 +19,11 @@ const paneVar = "MUGICREW_HITL_PANE"
 
 // InPane reports whether this process runs under a HITL pane's agent (paneVar set).
 func InPane() bool { return os.Getenv(paneVar) != "" }
+
+// CalledByAgent reports whether this process runs inside a crewmate session: an AFK
+// effort (eventlog.EffortEnv set) or a HITL pane (InPane). The one predicate integrate's
+// attribution and the rebase verb's refusal share, so they can't drift on who is an agent.
+func CalledByAgent() bool { return os.Getenv(eventlog.EffortEnv) != "" || InPane() }
 
 // HitlHook is the hidden `mugicrew hitl-hook` a Claude Code hook runs (ADR 0099):
 // it reads the hook event from stdin and the pane address from paneVar, and sets or

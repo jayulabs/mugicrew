@@ -38,7 +38,7 @@ var _ contract.Crewmate = Franky{}
 // critique share the implement job (build.md), conflict re-runs the rebase
 // (conflict.md). An unowned kind is a loud error, mirroring Nami.Run.
 func (Franky) Run(ctx contract.Ctx, bead contract.Bead) error {
-	b, err := showBead(bead.ID)
+	b, err := bd.Show(bead.ID)
 	if err != nil {
 		return err
 	}
@@ -67,33 +67,20 @@ func (Franky) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchComma
 	if err != nil {
 		return nil, err
 	}
-	inv, err := contract.NewInvocation(bead.ID, contexts.FocusUnder(surgeryPrompt(a), bead.ID, showBead))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusUnder(surgeryPrompt(a), bead.ID, bd.Show))
 	if err != nil {
 		return nil, err
 	}
 	return ctx.Harness().LaunchCommand(inv)
 }
 
-// Seams over the bd legs the handlers drive, so the close and pivot tails are
-// testable with a fake harness and no live bd/git (mirrors zoro/nami's var
-// seam). These alias the real package funcs; the franky test swaps them.
+// Seams over the non-bd legs the handlers drive: git, and the surgery
+// integrate session. Every bd leg is a bd free function called directly, so the
+// tests seed a bdtest graph.
 var (
-	showBead  = bd.Show
-	closeBead = bd.Close
-	rationale = bd.RationaleNote
-
-	runSession     = bd.RunSession
-	raiseIfPivoted = bd.RaiseIfPivoted
-
-	openPivots     = bd.OpenPivots
-	specOf         = bd.SpecOf
-	surgeriesOf    = bd.SurgeriesOf
-	childrenOfKind = bd.ChildrenOfKind
-
-	commitsAhead         = git.Repo.CommitsAhead
-	commitsByTrailer     = git.Repo.CommitsByTrailer
-	checkpointChildCount = bd.ChildCount
-	integrateSurgery     = integrateEffort
+	commitsAhead     = git.Repo.CommitsAhead
+	commitsByTrailer = git.Repo.CommitsByTrailer
+	integrateSurgery = integrateEffort
 )
 
 // integrateEffort is surgery end's first leg (Spec D8, FR 33): mugicrew
@@ -246,26 +233,26 @@ say so once, then follow the human: never block on it and never raise a pivot.`,
 
 // surgeryContext reads the Surgery's Checkpoint and what bd knows of it at launch.
 func surgeryContext(id string) (surgeryArgs, error) {
-	sg, err := showBead(id)
+	sg, err := bd.Show(id)
 	if err != nil {
 		return surgeryArgs{}, err
 	}
-	cp, err := showBead(sg.Parent)
+	cp, err := bd.Show(sg.Parent)
 	if err != nil {
 		return surgeryArgs{}, err
 	}
 	a := surgeryArgs{ID: id, Checkpoint: cp.ID, CheckpointTitle: cp.Title}
-	if a.SpecID, _, err = specOf(cp.ID); err != nil {
+	if a.SpecID, _, err = bd.SpecOf(cp.ID); err != nil {
 		return a, err
 	}
 	if a.SpecID != "" {
-		spec, err := showBead(a.SpecID)
+		spec, err := bd.Show(a.SpecID)
 		if err != nil {
 			return a, err
 		}
 		a.SpecTitle = spec.Title
 	}
-	all, err := surgeriesOf(cp.ID)
+	all, err := bd.SurgeriesOf(cp.ID)
 	if err != nil {
 		return a, err
 	}
@@ -282,7 +269,7 @@ func surgeryContext(id string) (surgeryArgs, error) {
 }
 
 func openOfKind(cp string, k contract.Kind) ([]bd.Bead, error) {
-	kids, err := childrenOfKind(cp, k)
+	kids, err := bd.ChildrenOfKind(cp, k)
 	return slices.DeleteFunc(kids, func(b bd.Bead) bool { return !b.Open() }), err
 }
 
@@ -292,10 +279,10 @@ func conflictPrompt(a promptArgs) string  { return contract.Render(conflictTmpl,
 // intentOf is the Checkpoint's intent for a prompt: its Spec and its Surgeries,
 // read independently (Spec D1, D6); neither on a headless Checkpoint.
 func intentOf(checkpointID string) (specID string, surgeries []bd.Bead, err error) {
-	if specID, _, err = specOf(checkpointID); err != nil {
+	if specID, _, err = bd.SpecOf(checkpointID); err != nil {
 		return "", nil, err
 	}
-	surgeries, err = surgeriesOf(checkpointID)
+	surgeries, err = bd.SurgeriesOf(checkpointID)
 	return specID, surgeries, err
 }
 
@@ -315,7 +302,7 @@ func runImplement(ctx contract.Ctx, bead bd.Bead) error {
 	if bead.Kind == contract.KindCritique {
 		base, _ = git.ParseBase(bead.Description)
 	}
-	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(implementPrompt(promptArgs{BeadID: bead.ID, Checkpoint: bead.Parent, Base: base, SpecID: specID, Surgeries: surgeries}), bead.Parent, showBead))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(implementPrompt(promptArgs{BeadID: bead.ID, Checkpoint: bead.Parent, Base: base, SpecID: specID, Surgeries: surgeries}), bead.Parent, bd.Show))
 	if err != nil {
 		return err
 	}
@@ -335,7 +322,7 @@ func runConflict(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(conflictPrompt(promptArgs{BeadID: bead.ID, Base: base, SpecID: specID, Surgeries: surgeries}), bead.Parent, showBead))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(conflictPrompt(promptArgs{BeadID: bead.ID, Base: base, SpecID: specID, Surgeries: surgeries}), bead.Parent, bd.Show))
 	if err != nil {
 		return err
 	}
@@ -343,14 +330,23 @@ func runConflict(ctx contract.Ctx, bead bd.Bead) error {
 }
 
 // runAndFinish is the tail both handlers share: run the session (a bead closed
-// out from under it is done, FR49), then raise a pivot the agent filed — else
-// finish.
+// out from under it is done, FR49), then tie the Critiques it drafted to its bead
+// (discovered-from, before anything publishes), then raise a pivot the agent filed —
+// else finish.
 func runAndFinish(ctx contract.Ctx, inv contract.Invocation, specID string) error {
-	fresh, _, _, open, err := runSession(ctx, inv, showBead)
-	if err != nil || !open {
+	fresh, _, _, open, err := bd.RunSession(ctx, inv, bd.Show)
+	if err != nil {
 		return err
 	}
-	if raised, err := raiseIfPivoted(ctx, fresh, specID); err != nil || raised {
+	// The tie runs even when the session closed its own bead (open=false):
+	// dispatch still publishes that bead's Drafts after a nil return.
+	if err := bd.TieDrafts(fresh.ID, contract.KindCritique); err != nil {
+		return err
+	}
+	if !open {
+		return nil
+	}
+	if raised, err := bd.RaiseIfPivoted(ctx, fresh, specID); err != nil || raised {
 		return err
 	}
 	return finish(fresh)
@@ -360,18 +356,26 @@ func runAndFinish(ctx contract.Ctx, inv contract.Invocation, specID string) erro
 // only closes the bead. Jinbe spawns the Review from drained-Checkpoint state, so
 // no member races another over deciding it is last (ADR 0103). The Open() guard
 // makes a re-dispatch after a committed-but-not-closed crash converge without a
-// double close. A Critique alone is closed "accepted: <rationale>" when its build
-// session left a Rationale: comment (Spec D5, D6); everything else closes bare.
+// double close. A Critique is closed "accepted: <rationale>" when its build
+// session left a Rationale: comment (Spec D5, D6), else completed; a Conflict closes
+// resolved and a Build built (ADR 0415); everything else closes bare.
 func finish(bead bd.Bead) error {
 	if !bead.Open() {
 		return nil // already closed by a prior dispatch: no double close
 	}
 	if bead.Kind == contract.KindCritique {
-		if note := rationale(bead.ID); note != "" {
-			return closeBead(bead.ID, "accepted: "+note)
+		if note := bd.RationaleNote(bead.ID); note != "" {
+			return bd.Close(bead.ID, "accepted: "+note)
 		}
+		return bd.Close(bead.ID, bd.CompletedReason)
 	}
-	return closeBead(bead.ID, "")
+	if bead.Kind == contract.KindConflict {
+		return bd.Close(bead.ID, bd.ResolvedReason)
+	}
+	if bead.Kind == contract.KindBuild {
+		return bd.Close(bead.ID, bd.BuiltReason)
+	}
+	return bd.Close(bead.ID, "")
 }
 
 // EndSurgery is surgery end (Spec D5, FR27–30), the Franky-owned transition
@@ -379,13 +383,13 @@ func finish(bead bd.Bead) error {
 // It refuses anything but an open kind:surgery under a kind:checkpoint. It first
 // integrates the Surgery's effort/<id> (a failure closes nothing), then counts: with
 // this Surgery's own "Surgery: <id>" squashes on mainline..checkpoint/<cp>, it only
-// closes the Surgery: Jinbe spawns the Review once the Checkpoint drains (Spec D8).
+// closes the Surgery ended: Jinbe spawns the Review once the Checkpoint drains (Spec D8).
 // With none, it closes the Surgery abandoned, and the Checkpoint too only when
 // nothing at all is ahead of mainline and the Surgery is its only child, so a
 // joined Surgery never closes the Checkpoint under its Builds or earlier
 // Surgeries. The branch is left. Gates and the tree are the prompt's check, not this verb's.
 func EndSurgery(id string) error {
-	sg, err := showBead(id)
+	sg, err := bd.Show(id)
 	if err != nil {
 		return err
 	}
@@ -398,7 +402,7 @@ func EndSurgery(id string) error {
 	if sg.Parent == "" {
 		return fmt.Errorf("surgery end: Surgery %s has no Checkpoint parent", id)
 	}
-	cp, err := showBead(sg.Parent)
+	cp, err := bd.Show(sg.Parent)
 	if err != nil {
 		return err
 	}
@@ -419,19 +423,19 @@ func EndSurgery(id string) error {
 		return err
 	}
 	if n > 0 {
-		return closeBead(id, "")
+		return bd.Close(id, "ended")
 	}
 	const reason = "abandoned: surgery ended with no commits"
-	if err := closeBead(id, reason); err != nil {
+	if err := bd.Close(id, reason); err != nil {
 		return err
 	}
 	ahead, err := commitsAhead(r, mainline(), branch)
 	if err != nil || ahead > 0 {
 		return err
 	}
-	kids, err := checkpointChildCount(cp.ID)
+	kids, err := bd.ChildCount(cp.ID)
 	if err != nil || kids > 1 {
 		return err
 	}
-	return closeBead(cp.ID, reason)
+	return bd.Close(cp.ID, reason)
 }

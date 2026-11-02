@@ -16,6 +16,12 @@ import (
 func reworkWorld(t *testing.T, rows, drafts []map[string]any) (calls *[][]string, scripts *[]string) {
 	t.Helper()
 	calls, scripts = &[][]string{}, &[]string{}
+	held := map[string]string{} // bead → its `dep list` answer; a draft row marked "edge" already holds ap
+	for _, d := range drafts {
+		if d["edge"] == true {
+			held[d["id"].(string)] = `[{"id":"ap","title":"t ap","status":"in_progress","dependency_type":"discovered-from"}]`
+		}
+	}
 	n := 0
 	orun, obatch := run, runBatch
 	t.Cleanup(func() { run, runBatch = orun, obatch })
@@ -28,6 +34,13 @@ func reworkWorld(t *testing.T, rows, drafts []map[string]any) (calls *[][]string
 			}
 			b, _ := json.Marshal(src)
 			return string(b), nil
+		case "dep":
+			if args[1] == "list" {
+				if h := held[args[2]]; h != "" {
+					return h, nil
+				}
+				return "[]", nil
+			}
 		case "create":
 			n++
 			*calls = append(*calls, args)
@@ -120,10 +133,11 @@ func TestReworkApprovalAdoptsPrunesAndPublishes(t *testing.T) {
 	if want := []string{"d1", "c1"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("ids = %v, want %v", ids, want)
 	}
-	if len(*calls) < 2 || !reflect.DeepEqual((*calls)[0], []string{"delete", "d2", "--force"}) {
-		t.Fatalf("calls = %v: want the stray deleted, then one create", *calls)
+	if len(*calls) < 3 || !reflect.DeepEqual((*calls)[0], []string{"delete", "d2", "--force"}) ||
+		!reflect.DeepEqual((*calls)[1], []string{"dep", "add", "d1", "ap", "-t", "discovered-from"}) {
+		t.Fatalf("calls = %v: want the stray deleted, the adopted Draft given its edge, then one create", *calls)
 	}
-	create := strings.Join((*calls)[1], " ")
+	create := strings.Join((*calls)[2], " ")
 	for _, w := range []string{"--labels kind:critique,drafted-by:ap", "--status deferred", "--no-inherit-labels", "--parent cp", "--title B", "--description line1\nline2"} {
 		if !strings.Contains(create, w) {
 			t.Errorf("create %q lacks %q", create, w)
@@ -215,5 +229,78 @@ func TestReworkApprovalRefusesWrongFlagForContainer(t *testing.T) {
 		if len(*calls)+len(*scripts) != 0 {
 			t.Errorf("%s: wrote %v %v", name, *calls, *scripts)
 		}
+	}
+}
+
+// FR3, FR8: a new rework Critique is born discovered-from the Approval, in its create.
+func TestReworkApprovalCritiqueIsBornDiscoveredFromTheApproval(t *testing.T) {
+	calls, _ := reworkWorld(t, goodGraph(), nil)
+	if _, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nbody\n")}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 1 || !strings.Contains(strings.Join((*calls)[0], " "), "--deps discovered-from:ap") {
+		t.Errorf("calls = %v: want one create carrying --deps discovered-from:ap", *calls)
+	}
+}
+
+// FR9: a re-run adopts a Draft lacking the edge and adds it; one holding it gets no write.
+func TestReworkApprovalAdoptedCritiqueGainsMissingEdge(t *testing.T) {
+	drafts := []map[string]any{
+		row("d1", "critique", "deferred", "cp", map[string]any{"title": "A"}),
+		row("d2", "critique", "deferred", "cp", map[string]any{"title": "B", "edge": true}),
+	}
+	calls, _ := reworkWorld(t, goodGraph(), drafts)
+	if _, err := ReworkApproval("ap", []string{critFile(t, "# A\n\nx\n"), critFile(t, "# B\n\ny\n")}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var adds [][]string
+	for _, c := range *calls {
+		if c[0] == "dep" {
+			adds = append(adds, c)
+		}
+	}
+	if want := [][]string{{"dep", "add", "d1", "ap", "-t", "discovered-from"}}; !reflect.DeepEqual(adds, want) {
+		t.Errorf("dep adds = %v, want %v", adds, want)
+	}
+}
+
+// FR5: a Chart rework's grilling and research beads are born discovered-from the Approval.
+func TestReworkApprovalChartBeadsAreBornDiscoveredFromTheApproval(t *testing.T) {
+	calls, _ := reworkWorld(t, chartGraph(), nil)
+	if _, err := ReworkApproval("ap", nil, []string{critFile(t, "# G\n\nb\n")}, []string{critFile(t, "# R\n\nb\n")}); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, c := range *calls {
+		if c[0] == "create" {
+			n++
+			if !strings.Contains(strings.Join(c, " "), "--deps discovered-from:ap") {
+				t.Errorf("create %v: want --deps discovered-from:ap", c)
+			}
+		}
+	}
+	if n != 2 {
+		t.Errorf("creates = %d, want 2", n)
+	}
+}
+
+// FR13: a re-run adopts a Chart Draft lacking the edge and adds it.
+func TestReworkApprovalAdoptedChartDraftGainsMissingEdge(t *testing.T) {
+	drafts := []map[string]any{
+		row("d1", "grilling", "deferred", "ch", map[string]any{"title": "G"}),
+		row("d2", "research", "deferred", "ch", map[string]any{"title": "R", "edge": true}),
+	}
+	calls, _ := reworkWorld(t, chartGraph(), drafts)
+	if _, err := ReworkApproval("ap", nil, []string{critFile(t, "# G\n\nb\n")}, []string{critFile(t, "# R\n\nb\n")}); err != nil {
+		t.Fatal(err)
+	}
+	var adds [][]string
+	for _, c := range *calls {
+		if c[0] == "dep" {
+			adds = append(adds, c)
+		}
+	}
+	if want := [][]string{{"dep", "add", "d1", "ap", "-t", "discovered-from"}}; !reflect.DeepEqual(adds, want) {
+		t.Errorf("dep adds = %v, want %v", adds, want)
 	}
 }

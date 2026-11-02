@@ -18,10 +18,15 @@ func TestIsWithdrawable(t *testing.T) {
 		{id: "latch", kind: "latch", status: "open"},
 		{id: "latchdone", kind: "latch", status: "closed"},
 		{id: "latchdraft", kind: "latch", status: "deferred", draft: true},
+		{id: "gr", kind: "grilling", status: "open"},
+		{id: "rs", kind: "research", status: "in_progress"},
+		{id: "pt", kind: "prototype", status: "open"},
+		{id: "grdone", kind: "grilling", status: "closed"},
+		{id: "grdraft", kind: "grilling", status: "deferred", draft: true},
 	}
 	all, _ := heads(t, g)
 	by := func(id string) Bead { return all[slices.IndexFunc(all, func(b Bead) bool { return b.ID == id })] }
-	for id, want := range map[string]bool{"errand": true, "claimed": true, "done": false, "draft": false, "sig": true, "build": false, "latch": true, "latchdone": false, "latchdraft": false} {
+	for id, want := range map[string]bool{"errand": true, "claimed": true, "done": false, "draft": false, "sig": true, "build": false, "latch": true, "latchdone": false, "latchdraft": false, "gr": true, "rs": true, "pt": true, "grdone": false, "grdraft": false} {
 		if got := IsWithdrawable(by(id), all); got != want {
 			t.Errorf("IsWithdrawable(%s) = %v, want %v", id, got, want)
 		}

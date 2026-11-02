@@ -1,13 +1,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import remarkRewriteLinks from './src/plugins/rewrite-links.mjs';
+import remarkRewriteLinks, { learnGuides } from './src/plugins/rewrite-links.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, '..');
 
 // The only Markdown the site renders (ADR 0366), relative to the Application root.
-const rendered = ['docs/install.md'];
+// Docs also shown as Learn pages: repo file -> Learn doc id. The docs plugin keys a file by its
+// real path, so Learn gets a gitignored byte-for-byte copy, refreshed on every config load.
+const learnPages = {
+  'docs/configuration.md': 'customization/configuration',
+  'docs/gitlab.md': 'customization/gitlab',
+  'docs/jira.md': 'customization/jira',
+};
+const learnDir = 'site/learn';
+const origins = {};
+const rendered = {
+  'docs/install.md': '/try/install',
+  ...learnGuides(learnDir, fs.readdirSync(path.join(appRoot, learnDir))),
+};
+// Build-time generators: this loop copies each rendered doc into site/learn/customization as a side
+// effect of loading the config; scripts/gen-glossary.mjs writes learn/bead-glossary.md. Both outputs are git-ignored.
+for (const [src, id] of Object.entries(learnPages)) {
+  const dest = path.join(appRoot, learnDir, `${id}.md`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(path.join(appRoot, src), dest);
+  origins[`${learnDir}/${id}.md`] = src;
+  rendered[src] = `/learn/${id}`;
+}
 
 /** @type {import('@docusaurus/types').Config} */
 export default {
@@ -24,6 +45,19 @@ export default {
     format: 'detect',
     hooks: { onBrokenMarkdownLinks: 'throw', onBrokenMarkdownImages: 'throw' },
   },
+  plugins: [
+    [
+      '@docusaurus/plugin-content-docs',
+      {
+        id: 'learn',
+        path: './learn',
+        routeBasePath: 'learn',
+        sidebarPath: './learn-sidebars.js',
+        // Before the defaults: Docusaurus's own link resolver would otherwise reject links to docs outside Learn.
+        beforeDefaultRemarkPlugins: [[remarkRewriteLinks, { root: appRoot, rendered, exists: fs.existsSync, origins }]],
+      },
+    ],
+  ],
   presets: [
     [
       'classic',
@@ -33,7 +67,8 @@ export default {
           include: ['install.md'],
           routeBasePath: 'try',
           sidebarPath: false,
-          remarkPlugins: [[remarkRewriteLinks, { root: appRoot, rendered, exists: fs.existsSync }]],
+          // Before the defaults, as for Learn: docs rendered into Learn must resolve to their Learn routes first.
+          beforeDefaultRemarkPlugins: [[remarkRewriteLinks, { root: appRoot, rendered, exists: fs.existsSync }]],
         },
         blog: false,
         theme: { customCss: './src/css/custom.css' },
@@ -50,6 +85,7 @@ export default {
         { to: '/framework', label: 'Framework', position: 'left' },
         { to: '/game', label: 'Game', position: 'left' },
         { to: '/try', label: 'Try it', position: 'left' },
+        { to: '/learn', label: 'Learn', position: 'left' },
         { href: 'https://github.com/jayulabs/mugicrew', label: 'GitHub', position: 'right' },
         { href: 'https://www.npmjs.com/package/@jayulabs/mugicrew', label: 'npm', position: 'right' },
       ],

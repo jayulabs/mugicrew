@@ -40,6 +40,7 @@ const (
 	CauseInheritedPause   Cause = "inherited-pause"
 	CauseContainerFrozen  Cause = "container-frozen"
 	CauseBlocked          Cause = "blocked"
+	CauseBehindMainline   Cause = "behind-mainline"
 	CausePaced            Cause = "paced"
 	CauseSurgeryHold      Cause = "surgery-hold"
 	CauseUndrained        Cause = "undrained"
@@ -55,7 +56,7 @@ const (
 
 // Causes is every Cause, in precedence order where one applies.
 var Causes = []Cause{
-	CauseNotCandidate, CausePaused, CauseInheritedPause, CauseContainerFrozen, CauseBlocked, CausePaced,
+	CauseNotCandidate, CausePaused, CauseInheritedPause, CauseContainerFrozen, CauseBlocked, CauseBehindMainline, CausePaced,
 	CauseSurgeryHold, CauseUndrained, CauseLandingOpen, CauseForeignLanding,
 	CauseDefectOpen, CausePivotOpen, CauseAwaitingApproval, CauseNoMembers, CauseLandHeld, CauseReviewDue,
 }
@@ -111,13 +112,19 @@ type View interface {
 	Landed(b bd.Bead) (Trailer, error)
 	// CheckpointTip is the checkpoint/<id> tip, "" when unknown.
 	CheckpointTip(id string) (string, error)
+	// Contains is whether sha is an ancestor of (or is) tip, in cp's repo. A failed read is an
+	// error, never "no".
+	Contains(cp bd.Bead, tip, sha string) (bool, error)
+	// SameRepo is whether a and b live in the same git repo; a sha landed in another one is
+	// unknown to the other's branches, so no ancestry read is made.
+	SameRepo(a, b bd.Bead) bool
 	Blockers(b bd.Bead) ([]Blocker, error)
 	// Bead resolves an id, for an inherited-pause walk hop and a parent.
 	Bead(id string) (bd.Bead, error)
 }
 
 // Inputs are the mode inputs the caller supplies: Paced in ModeLoop (nil never paces),
-// Force in ModeRunNow (it waives the blocked leg only).
+// Force in ModeRunNow (it waives the blocked and behind-mainline legs only).
 type Inputs struct {
 	Paced func(bd.Bead) bool
 	Force bool
@@ -165,12 +172,29 @@ func Judge(b bd.Bead, mode Mode, frontier []bd.Bead, in Inputs, view View) (Verd
 	} else if len(frozen) > 0 {
 		return no(CauseContainerFrozen, frozen...)
 	}
-	if !(mode == ModeRunNow && in.Force) && !slices.ContainsFunc(frontier, func(f bd.Bead) bool { return f.ID == b.ID }) {
+	onFrontier := slices.ContainsFunc(frontier, func(f bd.Bead) bool { return f.ID == b.ID })
+	if !onFrontier && cp { // a landed Checkpoint is past every blocker, a pivot's included: closeLanded must run
+		if t, err := view.Landed(b); err != nil {
+			return Verdict{}, err
+		} else if t.Landed {
+			onFrontier = true
+		}
+	}
+	if !(mode == ModeRunNow && in.Force) && !onFrontier {
 		held, err := blockedBy(b, view)
 		if err != nil {
 			return Verdict{}, err
 		}
 		return no(CauseBlocked, held...)
+	}
+	if !(mode == ModeRunNow && in.Force) && leaf && b.Kind == contract.KindBuild {
+		behind, err := behindMainlineBy(b, view)
+		if err != nil {
+			return Verdict{}, err
+		}
+		if len(behind) > 0 {
+			return no(CauseBehindMainline, behind...)
+		}
 	}
 	if mode == ModeLoop && in.Paced != nil && in.Paced(b) {
 		return no(CausePaced)
@@ -291,6 +315,88 @@ func blockedBy(b bd.Bead, view View) ([]Holder, error) {
 	return out, nil
 }
 
+// behindMainlineBy is the closed blocks blockers of Build b, a member of a Checkpoint, whose
+// container landed on mainline outside b's Checkpoint with a land commit missing from
+// checkpoint/<parent> (ADR 0420 (a-build-behind-mainline-is-held…)). An unknown tip holds nothing.
+func behindMainlineBy(b bd.Bead, view View) ([]Holder, error) {
+	if b.Parent == "" {
+		return nil, nil
+	}
+	cp, err := view.Bead(b.Parent)
+	if err != nil || cp.Kind != contract.KindCheckpoint {
+		return nil, err
+	}
+	blockers, err := view.Blockers(b)
+	if err != nil {
+		return nil, err
+	}
+	var out []Holder
+	tip, tipRead := "", false
+	for _, x := range blockers {
+		if x.Edge != EdgeBlocks || x.Bead.Status != "closed" {
+			continue
+		}
+		container, ok, err := BlockerContainer(x.Bead, view.Bead)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if container.ID == cp.ID {
+			continue
+		}
+		if !view.SameRepo(container, cp) {
+			continue
+		}
+		t, err := view.Landed(container)
+		if err != nil {
+			return nil, err
+		}
+		if !t.Landed {
+			continue
+		}
+		if !tipRead {
+			if tip, err = view.CheckpointTip(cp.ID); err != nil {
+				return nil, err
+			}
+			tipRead = true
+		}
+		if tip == "" {
+			return nil, nil
+		}
+		in, err := view.Contains(cp, tip, t.Sha)
+		if err != nil {
+			return nil, err
+		}
+		if !in {
+			out = append(out, Holder{Bead: x.Bead})
+		}
+	}
+	return out, nil
+}
+
+// BlockerContainer is the container a blocks blocker belongs to for the behind-mainline leg: the
+// blocker itself when it is a Chart or Checkpoint, else its parent when that is one. ok is false
+// when it has none. bead resolves a parent id.
+func BlockerContainer(blocker bd.Bead, bead func(id string) (bd.Bead, error)) (bd.Bead, bool, error) {
+	if isContainer(blocker) {
+		return blocker, true, nil
+	}
+	if blocker.Parent == "" {
+		return bd.Bead{}, false, nil
+	}
+	parent, err := bead(blocker.Parent)
+	if err != nil {
+		return bd.Bead{}, false, err
+	}
+	return parent, isContainer(parent), nil
+}
+
+func isContainer(b bd.Bead) bool {
+	return b.Kind == contract.KindChart || b.Kind == contract.KindCheckpoint
+}
+
 func leafArm(b bd.Bead, view View) (Verdict, error) {
 	if b.Kind == contract.KindCritique && b.Parent != "" {
 		kids, err := view.Children(b.Parent)
@@ -384,18 +490,20 @@ func checkpointArm(b bd.Bead, mode Mode, view View) (Verdict, error) {
 	if err != nil {
 		return Verdict{}, err
 	}
-	if defects := openOfKind(kids, contract.KindConflict, contract.KindCritique); len(defects) > 0 {
-		return Verdict{Cause: CauseDefectOpen, Holders: holders(defects)}, nil
-	}
+	// Deliberate (D2): this git read runs before the open-defect check below, so every
+	// verdict on a Checkpoint pays it.
 	t, err := view.Landed(b)
 	if err != nil {
 		return Verdict{}, err
 	}
-	if t.Foreign != nil && !t.Landed {
-		return Verdict{Cause: CauseForeignLanding, Foreign: t.Foreign}, nil
-	}
-	if t.Landed {
+	if t.Landed { // the trailer wins over an open defect: closeLanded runs as soon as the land is seen
 		return runnable(ActionLand), nil
+	}
+	if defects := openOfKind(kids, contract.KindConflict, contract.KindCritique); len(defects) > 0 {
+		return Verdict{Cause: CauseDefectOpen, Holders: holders(defects)}, nil
+	}
+	if t.Foreign != nil {
+		return Verdict{Cause: CauseForeignLanding, Foreign: t.Foreign}, nil
 	}
 	if open := openOfKind(kids, contract.KindLanding); len(open) > 0 {
 		return Verdict{Cause: CauseLandingOpen, Holders: holders(open)}, nil
@@ -447,3 +555,7 @@ func checkpointArm(b bd.Bead, mode Mode, view View) (Verdict, error) {
 	}
 	return runnable(ActionReview), nil
 }
+
+// ContainsKey is the key of the ancestry fact "sha is an ancestor of tip", for the views that
+// cache Contains answers.
+func ContainsKey(tip, sha string) string { return sha + "@" + tip }

@@ -79,14 +79,14 @@ func TestDarkPaletteComplete(t *testing.T) {
 func TestDarkPaletteIsTodaysLiterals(t *testing.T) {
 	for name, c := range map[string]lipgloss.Color{
 		"accent": accent, "hintBg": hintBg, "dim": dim, "inProgress": inProgSty.GetForeground().(lipgloss.Color),
-		"unknown kind": kindFallback, "chip ink": chipInk, "tint ink": tintInk, "P0 tint": prio0Tint, "P1 tint": prio1Tint,
+		"unknown kind": kindFallback, "chip ink": chipInk,
 		"hover": hoverRow.GetBackground().(lipgloss.Color), "anc": ancRow.GetBackground().(lipgloss.Color),
 		"pick": pickRow.GetBackground().(lipgloss.Color), "teal": tealSt.GetForeground().(lipgloss.Color),
 		"burn": burnSty.GetForeground().(lipgloss.Color), "caution": usageWarnSty.GetForeground().(lipgloss.Color),
 	} {
 		want := map[string]lipgloss.Color{
 			"accent": "212", "hintBg": "236", "dim": "240", "inProgress": "220", "unknown kind": "244", "chip ink": "0",
-			"tint ink": "16", "P0 tint": "203", "P1 tint": "217", "hover": "17", "anc": "236", "pick": "237",
+			"hover": "17", "anc": "236", "pick": "237",
 			"teal": "109", "burn": "180", "caution": "214",
 		}[name]
 		if c != want {
@@ -228,8 +228,8 @@ func TestPresetStylesRenderThePresetsColors(t *testing.T) {
 			}
 		}
 		for role, c := range map[string]struct{ got, want lipgloss.Color }{
-			"chip ink": {chipInk, p.ChipInk}, "tint ink": {tintInk, p.TintInk}, "fallback": {kindFallback, p.UnknownKind},
-			"p0 tint": {prio0Tint, p.P0Tint}, "p1 tint": {prio1Tint, p.P1Tint}, "accent": {accent, p.Accent},
+			"chip ink": {chipInk, p.ChipInk}, "fallback": {kindFallback, p.UnknownKind},
+			"accent": {accent, p.Accent},
 		} {
 			if c.got != c.want {
 				t.Errorf("%s/%s = %q, want %q", name, role, c.got, c.want)
@@ -257,15 +257,15 @@ func TestPresetStylesRenderThePresetsColors(t *testing.T) {
 // The relationships ADR 0372, 0179 and 0057 protect hold in every preset.
 func TestPresetRelationships(t *testing.T) {
 	for name, p := range presets {
-		bgs := map[string]lipgloss.Color{"sel": p.SelBg, "hover": p.HoverBg, "anc": p.AncestorBg, "pick": p.PickerBg, "p0": p.P0Tint, "p1": p.P1Tint}
+		bgs := map[string]lipgloss.Color{"sel": p.SelBg, "hover": p.HoverBg, "anc": p.AncestorBg, "pick": p.PickerBg}
 		for a, ca := range bgs {
 			for b, cb := range bgs {
-				if a < b && ca == cb && !(a == "p0" && b == "p1") {
+				if a < b && ca == cb {
 					t.Errorf("%s: %s and %s share bg %s", name, a, b, ca)
 				}
 			}
 		}
-		if p.P1Fg == p.BlockerPink || p.P1Tint == p.BlockerPink {
+		if p.P1Fg == p.BlockerPink {
 			t.Errorf("%s: P1 is the blocker pink", name)
 		}
 		if name != "dark" && p.Caution == p.WaitsOnYou {

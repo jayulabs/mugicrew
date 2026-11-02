@@ -82,7 +82,8 @@ Read crew doc defog-session.md and run its skeleton over this bead, in order:
    In every case print the target in the chat (and for UI the start command and
    %[3]s) so the human can open or re-run it.
 4. **Capture durable decisions as docs** on effort/%[1]s: an ADR (format:
-   crew doc ADR-FORMAT.md) or a GLOSSARY.md edit. The throwaway *code* stays on
+   crew doc ADR-FORMAT.md, then crew doc sequence-number.md to number it) or a
+   GLOSSARY.md edit. The throwaway *code* stays on
    the side ref; the validated *decision* is what downstream builds on.
 5. **Tend the Chart before closing**, one body line at a time through
    mugicrew chart append|drop, never bd update --description: the
@@ -91,9 +92,17 @@ Read crew doc defog-session.md and run its skeleton over this bead, in order:
    chart-body.md):
 
        bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:%[1]s \
-         --parent <chartID> --no-inherit-labels --title "..." --description "..."
+         --parent <chartID> --no-inherit-labels --deps discovered-from:%[1]s --title "..." --description "..."
+
+   Where one defog bead really depends on another's answer, write the gate in
+   the same create: --deps discovered-from:%[1]s,blocked-by:<blocking-bead>.
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
+
+   Stale defog beads your decision made moot leave the frontier through
+   mugicrew obsolete <bead> --by %[1]s (closes "%[6]s <id>"), or through
+   mugicrew supersede <bead> --with <new bead> when its question moved or it
+   duplicates another (closes "%[7]s <new id>"); never by a raw bd call.
 
 6. **Record, integrate and close**: the bead resolves when the design question
    is answered, not merely when code exists. Run `mugicrew integrate` in this

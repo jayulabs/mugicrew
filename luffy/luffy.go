@@ -97,7 +97,7 @@ func (Luffy) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchComman
 		}
 		prompt = cutPrompt(bead.ID, !bd.HasDoneWhen(ini.Description))
 	case contract.KindApproval:
-		chart, hasSpec, surgeries, err := intentBehind(bead.ID)
+		parent, chart, hasSpec, surgeries, err := intentBehind(bead.ID)
 		if err != nil {
 			return nil, fmt.Errorf("luffy.Launch: %w", err)
 		}
@@ -107,7 +107,11 @@ func (Luffy) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchComman
 			slog.Warn("luffy.launch_strategy_read_failed", "bead", bead.ID, "err", err) // reads as local, as StampModeSnapshots does
 			strategy = git.LandStrategyLocal
 		}
-		prompt = contexts.FocusUnder(withCarried(approvalPrompt(bead.ID, chart, hasSpec, surgeries, a.HasLabel(registry.AutoApproveFailedLabel), strategy == git.LandStrategyGitlab), carriedLapsFor(a)), bead.ID, show)
+		prompt, err = withRespin(withCarried(approvalPrompt(bead.ID, chart, hasSpec, surgeries, a.HasLabel(registry.AutoApproveFailedLabel), strategy == git.LandStrategyGitlab), carriedLapsFor(a)), parent)
+		if err != nil {
+			return nil, fmt.Errorf("luffy.Launch: respin packet: %w", err)
+		}
+		prompt = contexts.FocusUnder(prompt, bead.ID, show)
 	default:
 		return nil, fmt.Errorf("luffy.Launch: kind %q is not a launchable HITL kind", bead.Kind)
 	}
@@ -226,23 +230,23 @@ var paneProcedure string
 // intentBehind is whether the Approval's parent is a Chart (which picks the prompt and
 // skips the Checkpoint-only intent read), and otherwise whether the parent Checkpoint
 // serves a Spec and its Surgeries in filing order (none when the Approval has no parent).
-func intentBehind(approvalID string) (chart, hasSpec bool, surgeries []bd.Bead, err error) {
+func intentBehind(approvalID string) (parent bd.Bead, chart, hasSpec bool, surgeries []bd.Bead, err error) {
 	approval, err := show(approvalID)
 	if err != nil || approval.Parent == "" {
-		return false, false, nil, err
+		return bd.Bead{}, false, false, nil, err
 	}
-	parent, err := show(approval.Parent)
+	parent, err = show(approval.Parent)
 	if err != nil {
-		return false, false, nil, err
+		return bd.Bead{}, false, false, nil, err
 	}
 	if parent.Kind == contract.KindChart {
-		return true, false, nil, nil
+		return parent, true, false, nil, nil
 	}
 	if _, hasSpec, err = specOf(approval.Parent); err != nil {
-		return false, false, nil, err
+		return bd.Bead{}, false, false, nil, err
 	}
 	surgeries, err = surgeriesOf(approval.Parent)
-	return false, hasSpec, surgeries, err
+	return parent, false, hasSpec, surgeries, err
 }
 
 // coreFor is the shared prompt core for the Approval's parent kind.
@@ -415,7 +419,7 @@ func runApproval(ctx contract.Ctx, bead contract.Bead) error {
 		return fmt.Errorf("luffy.Run: approval %s carries no Commit: pin", bead.ID)
 	}
 	patchID, _ := git.ParsePatchID(a.Description) // a Chart's Approval carries one beside the pin; the session must keep it
-	chart, hasSpec, surgeries, err := intentBehind(bead.ID)
+	parent, chart, hasSpec, surgeries, err := intentBehind(bead.ID)
 	if err != nil {
 		return fmt.Errorf("luffy.Run: %w", err)
 	}
@@ -430,7 +434,10 @@ func runApproval(ctx contract.Ctx, bead contract.Bead) error {
 	if waits {
 		line, prompt = "", approvalPromptAFKWait(bead.ID, chart, hasSpec, surgeries)
 	}
-	prompt = withCarried(prompt, carriedLapsFor(a))
+	prompt, err = withRespin(withCarried(prompt, carriedLapsFor(a)), parent)
+	if err != nil {
+		return fmt.Errorf("luffy: respin packet: %w", err)
+	}
 	inv, err := contract.NewInvocation(bead.ID, contexts.FocusUnder(prompt, bead.ID, show))
 	if err != nil {
 		return err

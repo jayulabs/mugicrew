@@ -451,3 +451,48 @@ func TestResolveGate(t *testing.T) {
 		})
 	}
 }
+
+func TestReleaseNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name, shared, local string
+		want                bool
+	}{
+		{"unset", "gate = \"x\"\n", "", true},
+		{"shared off", "[release]\nnotice = false\n", "", false},
+		{"local off", "", "[release]\nnotice = false\n", false},
+		{"local on beats shared off", "[release]\nnotice = false\n", "[release]\nnotice = true\n", true},
+		{"local table without key falls through", "[release]\nnotice = false\n", "[release]\n", false},
+		{"mistyped local falls through", "[release]\nnotice = false\n", "[release]\nnotice = \"no\"\n", false},
+	} {
+		if got := ReleaseNotice(workspace(t, tc.shared, tc.local)); got != tc.want {
+			t.Errorf("%s: ReleaseNotice = %v; want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestUnattendedUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		name, personal, shared, local string
+		want                          bool
+	}{
+		{"unset", "", "", "", false},
+		{"personal on", "[upgrade]\nunattended = true\n", "", "", true},
+		{"personal off", "[upgrade]\nunattended = false\n", "", "", false},
+		{"mistyped personal", "[upgrade]\nunattended = \"yes\"\n", "", "", false},
+		{"shared ignored", "", "[upgrade]\nunattended = true\n", "", false},
+		{"local ignored", "", "", "[upgrade]\nunattended = true\n", false},
+		{"workspace cannot flip personal off", "[upgrade]\nunattended = true\n", "[upgrade]\nunattended = false\n", "[upgrade]\nunattended = false\n", true},
+	} {
+		cfg := t.TempDir()
+		t.Setenv("XDG_CONFIG_HOME", cfg)
+		t.Setenv("HOME", cfg)
+		if tc.personal != "" {
+			os.MkdirAll(filepath.Join(cfg, "mugicrew"), 0o755)
+			os.WriteFile(filepath.Join(cfg, "mugicrew", "config.toml"), []byte(tc.personal), 0o644)
+		}
+		_ = workspace(t, tc.shared, tc.local)
+		if got := UnattendedUpgrade(); got != tc.want {
+			t.Errorf("%s: UnattendedUpgrade = %v; want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -198,8 +198,8 @@ func TestPublishLeftoverMergesHandNoEdgeNorComment(t *testing.T) {
 	if err := PublishDrafts("ws-sig", nil); err != nil {
 		t.Fatal(err)
 	}
-	if g.closing == nil || g.closing.ID != "ws-sig" || g.closing.Reason != "" {
-		t.Errorf("closing = %+v, want the plain close of ws-sig", g.closing)
+	if g.closing == nil || g.closing.ID != "ws-sig" || g.closing.Reason != "charted: ws-chart" {
+		t.Errorf("closing = %+v, want ws-sig charted: ws-chart", g.closing)
 	}
 	if len(g.edges) != 0 || len(g.posted) != 0 {
 		t.Errorf("edges = %v posted = %v, want neither from leftover merges", edgeStrings(g.edges), g.posted)
@@ -387,5 +387,28 @@ func TestDropDraftsClearsErrandRaiseMerges(t *testing.T) {
 	eventlogtest.Capture(t)
 	if err := DropDrafts(bd.Bead{ID: "ws-errand", Kind: contract.KindErrand}); err != nil || !slices.Equal(cleared, []string{"ws-errand/raise_merges"}) {
 		t.Errorf("cleared %v (err %v), want raise_merges cleared", cleared, err)
+	}
+}
+
+// A Signal's clean-exit close names the successor the publish found: Chart, Spec or Initiative.
+func TestSignalClosingNamesSuccessor(t *testing.T) {
+	for _, c := range []struct {
+		kind contract.Kind
+		want string
+	}{
+		{contract.KindChart, "charted: ws-s"},
+		{contract.KindSpec, "specced: ws-s"},
+		{contract.KindInitiative, "initiative: ws-s"},
+	} {
+		g := newRR(t)
+		swapSeam(t, &successorOf, func(_ string, k contract.Kind) (string, bool, error) {
+			return "ws-s", k == c.kind, nil
+		})
+		if err := PublishDrafts("ws-sig", nil); err != nil {
+			t.Fatal(err)
+		}
+		if g.closing == nil || g.closing.ID != "ws-sig" || g.closing.Reason != c.want {
+			t.Errorf("%s: closing = %+v, want %s", c.kind, g.closing, c.want)
+		}
 	}
 }

@@ -123,12 +123,12 @@ the pivot that carries the Signal's Ask. The Ask assumes the Spec is wrong, so
 it is not refiled as-is, and you never reopen the Signal: the human just
 decided on it. Read "the Ask" for "the unfinished FR" below.
 
-- **Dismiss** (the report was wrong): rewrite it to whatever as-specced work is
-  left (`bd update <critiqueID> --title ... --description ...`), or else close it
-  `dismissed: <pivotID>` (`bd close <critiqueID> --reason "dismissed: <pivotID>"`).
-  Never reopen the Signal. It is the dismiss refile, so file no second Critique.
-- **Amend**: add an `AMENDMENT (<pivotID>): …` comment on the Ask Critique, so
-  the original Ask stays visible. It is the amend refile, so file no second one.
+- **Dismiss** (the report was wrong): pass `--rewrite <askID>=<file>` for each Ask
+  whose as-specced work remains; the verb closes the rest `dismissed: <pivotID>`.
+  Never reopen the Signal. The Ask is the dismiss refile, so pass no `--critique`.
+- **Amend**: the verb comments the `AMENDMENT (<pivotID>): …` on each Ask Critique,
+  so the original Ask stays visible. The Ask is the amend refile, so pass no
+  `--critique`.
 - **Confirm** or **escalate**: the sweep closes it as obsolete, and the session
   folds the Ask into the corrected Spec or the escalate evidence, where an effort
   raiser's unfinished FR goes.
@@ -139,16 +139,9 @@ Several Ask Critiques on one pivot (after a merge) are each treated so.
 
 A pivot with an Errand raiser has an Ask Critique too, and it is treated exactly as
 for a Signal raiser above (dismiss rewrites or closes it, amend comments on it),
-so skip the step-1 refile of Dismiss and Amend: the Ask Critique already exists.
-The Errand is never closed by you or the sweep.
-
-On dismiss or amend, add one comment on EACH raising Errand (skip if it has one for
-this pivot):
-
-    bd comments add <errandID> "pivot <pivotID> dismissed|amended: <gist>. <which Critique to wait for>"
-
-where the last part names which Critique to wait for (`Wait for <critiqueID>.`), or,
-if the Ask Critique was closed, says "the step may be wrong; amend it on resume".
+so pass no `--critique` to Dismiss or Amend: the Ask Critique already exists.
+The Errand is never closed by you or the sweep; the verb comments on each raising
+Errand, naming which Critique to wait for.
 
 ### Held Errands on confirm and escalate
 
@@ -164,32 +157,37 @@ adopted; the new Chart's Spec carries the entry.
 
 ### Dismiss
 
-1. File a Critique on the Checkpoint carrying the unfinished FR, unless a
-   kind:critique row is in `bd dep list <pivotID> --direction=up -t discovered-from --json`:
+Write the refiled FR (its title as the first line or heading, then the FR quoted and
+what is left to build) to a temp file outside the repo, as Confirm's body is; skip it
+when the pivot has an Ask Critique:
 
-       bd create --type task --labels kind:critique,drafted-by:%[1]s -s deferred --no-inherit-labels \
-         --parent %[2]s --deps discovered-from:<pivotID> --title "<FR>: <the unfinished work>" --description "<the FR, quoted, and what is left to build>"
+    critique=$(mktemp) # then write the Critique into "$critique"
+    rewrite=$(mktemp)  # one per Ask kept: its new title (first line) and body
 
-If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
+    mugicrew pivot dismiss <pivotID> --gist "<gist>" [--critique "$critique"] [--rewrite <askID>="$rewrite"]... --drafted-by %[1]s
 
-2. Close the pivot (skip if closed), keeping the edge for lineage:
-   `bd close <pivotID> --reason "dismissed: <gist>"`
+The verb refiles the FR as a Critique Draft (required with no Ask Critique, refused
+with one), rewrites or closes each Ask, comments on each raising Errand, and closes
+the pivot `dismissed: <gist>`, last.
 
 ### Amend
 
-1. Append the Amendment, only if `bd comments %[3]s` has no comment starting
-   `AMENDMENT (<pivotID>):`. Never edit the Spec body:
+Amend ONLY on the amend line. `--amendment` is the Amendment text, copied into the
+refiled Critique's FR and decision:
 
-       bd comments add %[3]s "AMENDMENT (<pivotID>): <FR> — <decision> — rejected: <options>"
+    critique=$(mktemp) # as Dismiss; skip it when the pivot has an Ask Critique
 
-2. File a Critique as Dismiss step 1, COPYING the FR and decision.
-3. Close the pivot (skip if closed), superseding nothing:
-   `bd close <pivotID> --reason "amended: <gist>"`
-4. Only if the amendment is architectural beyond this Spec, write an ADR (Read
-   crew doc ADR-FORMAT.md) and commit it in its own worktree, never on `main`:
-   `git worktree add ../pivot-adr-<pivotID> -b adr/<pivotID> {{MAINLINE}}`;
-   the ADR commit is conventional: `git commit -m "docs(<pivotID>): <subject>"`;
-   tell the human the branch to land, then `git worktree remove` it.
+    mugicrew pivot amend <pivotID> --gist "<gist>" --amendment "<FR> — <decision> — rejected: <options>" [--critique "$critique"] --drafted-by %[1]s
+
+The verb appends `AMENDMENT (<pivotID>): …` to the Spec (%[3]s) and each Ask Critique,
+never editing the Spec body, refiles the Critique when there is no Ask, comments on
+each raising Errand, and closes the pivot `amended: <gist>`, last.
+
+Then, only if the amendment is architectural beyond this Spec, write an ADR (Read
+crew doc ADR-FORMAT.md, then crew doc sequence-number.md to number it) and commit it in its own worktree, never on `main`:
+`git worktree add ../pivot-adr-<pivotID> -b adr/<pivotID> {{MAINLINE}}`;
+the ADR commit is conventional: `git commit -m "docs(<pivotID>): <subject>"`;
+tell the human the branch to land, then `git worktree remove` it.
 
 ### Confirm
 

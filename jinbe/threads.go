@@ -92,9 +92,12 @@ var verdictPrefixes = []struct {
 	{"pivoted:", verdictDeferred},
 }
 
-// parseVerdict reads a close reason's verdict prefix: ok is false with no known prefix,
-// and rationale is then the whole trimmed reason ("" for bd's literal Closed). A pivoted:
-// reason is Deferred with the fixed rationale, and rest, the pivot ids, is kept.
+// parseVerdict reads a close reason's verdict prefix: ok is false with no known
+// prefix, and rationale is then the whole trimmed reason ("" for bd's literal Closed
+// or a bare completed, a Critique fixed without a rationale: ADR 0415
+// (mugicrew-review-conflict-and-critique-completed…), amending ADR 0339 §1–2). A
+// pivoted: reason is Deferred with the fixed rationale, and rest, the pivot ids, is
+// kept.
 func parseVerdict(reason string) (v verdict, rationale, rest string, ok bool) {
 	reason = strings.TrimSpace(reason)
 	for _, p := range verdictPrefixes {
@@ -106,7 +109,7 @@ func parseVerdict(reason string) (v verdict, rationale, rest string, ok bool) {
 			return p.v, rest, "", true
 		}
 	}
-	if reason == bd.DefaultCloseReason {
+	if reason == bd.DefaultCloseReason || strings.EqualFold(reason, bd.CompletedReason) {
 		reason = ""
 	}
 	return verdictClosed, reason, "", false
@@ -128,9 +131,10 @@ func sweptReply(s bd.SweptReason, carried bool) (verdict, string) {
 }
 
 // closeVerdict is b's verdict and rationale (the rationale may be empty): the close
-// reason's prefix, else the fallback, which never yields Rejected or Deferred: Accepted
-// with an integrate commit (sha8 non-empty), else Answered for a "Reviewer asks …" bead
-// (ADR 0317 (a-forge-review-files-whatever…)), else Closed.
+// reason's prefix, else the fallback (also for a bare completed, ADR 0415), which
+// never yields Rejected or Deferred: Accepted with an integrate commit (sha8
+// non-empty), else Answered for a "Reviewer asks …" bead (ADR 0317
+// (a-forge-review-files-whatever…)), else Closed.
 func closeVerdict(b bd.Bead, sha8 string) (v verdict, rationale string) {
 	v, rationale, _, ok := parseVerdict(b.CloseReason)
 	switch {

@@ -87,7 +87,7 @@ func TestSettingsClickMatchesDrawnLine(t *testing.T) {
 				lines, _, rowOf := after.settingsLines()
 				found := false
 				for i, l := range lines {
-					if rowOf[i] == after.setRow && strings.TrimSpace(ansi.Strip(l)) == text {
+					if rowOf[i] == after.setRow && unstepped(l) == unstepped(text) {
 						found = true
 					}
 				}
@@ -103,6 +103,12 @@ func TestSettingsClickMatchesDrawnLine(t *testing.T) {
 			}
 		}
 	}
+}
+
+// unstepped is a drawn line's words without a stepper's arrows: the selected row gains them
+// once a click turns Mouse mode on.
+func unstepped(l string) string {
+	return strings.Join(strings.Fields(strings.NewReplacer("◀", "", "▶", "").Replace(ansi.Strip(l))), " ")
 }
 
 // A gloss line selects its setting, and the ↑/↓ N more markers do nothing.

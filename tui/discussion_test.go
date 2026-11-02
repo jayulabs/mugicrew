@@ -278,3 +278,28 @@ func TestLandingHomeTabFollowsContainer(t *testing.T) {
 		t.Errorf("Checkpoint's Landing home = %d, want Execute", got)
 	}
 }
+
+// Dropping a live Checkup session closes it as dropped through the chopper closer, which
+// lifts the target's fence only when no other Checkup holds it.
+func TestCheckupLiveDropLiftsFenceUnlessAnotherHolds(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		other bool
+		want  string
+	}{
+		{"free", false, "dropSession ck;closeBead ck dropped;unpauseBead tk checkup"},
+		{"held", true, "dropSession ck;closeBead ck dropped"},
+	} {
+		calls := stubActions(t)
+		seam(t, &closeBead, func(id, reason string) error { *calls = append(*calls, "closeBead "+id+" "+reason); return nil })
+		seam(t, &unpauseBead, func(id, profile string) error { *calls = append(*calls, "unpauseBead "+id+" "+profile); return nil })
+		seam(t, &openCheckupOn, func(string) (bd.Bead, bool, error) { return bd.Bead{ID: "other"}, c.other, nil })
+		seam(t, &readSessions, func() (map[string]session.Info, error) {
+			return map[string]session.Info{"ck": {Session: "s1", State: session.Alive}}, nil
+		})
+		dropRun("ck", "s1", &bd.Bead{ID: "ck", Kind: contract.KindCheckup, Status: "in_progress", Related: []string{"tk"}})
+		if got := strings.Join(*calls, ";"); got != c.want {
+			t.Errorf("%s: calls = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

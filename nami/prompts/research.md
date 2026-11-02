@@ -29,6 +29,14 @@ Then a ## Purpose section, numbered ## N. ... sections, and end with a
 ## Open questions / gaps list. Cite every claim inline to its owning source
 (file:line, ADR/spec §, or exact pinned CLI output).
 
+If no primary source answers the question, still write the doc: a negative
+finding is a finding. Its numbered sections record each place searched (files
+and symbols, ADRs and spec sections, exact commands run) with citations; its
+findings state plainly that no primary source answers the question; the question
+itself goes under ## Open questions / gaps. Never guess an answer to fill the doc.
+Index it on the Chart with a gist that starts "no primary source answers:", and
+end with the same final line below.
+
 Commit the doc — exactly one file under docs/research/:
 
     git add docs/research/<slug>.md

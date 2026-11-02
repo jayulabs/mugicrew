@@ -7,6 +7,7 @@ package tui
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/rebase"
 )
 
@@ -45,8 +47,21 @@ var (
 	requestRebase    = func(id string) (rebase.Outcome, error) { return rebase.Request(rebase.Real, id) }
 )
 
-// rejectDefault is the close reason a blank z reason falls back to.
-const rejectDefault = "rejected from TUI"
+// rejectDefault is the close reason a blank z reason writes.
+const rejectDefault = bd.RejectedReason
+
+// rejectReason is z's close reason: bare rejected for a blank input, rejected: <typed>
+// otherwise, and a typed text already starting with rejected as given.
+func rejectReason(typed string) string {
+	typed = strings.TrimSpace(typed)
+	switch {
+	case typed == "":
+		return rejectDefault
+	case strings.HasPrefix(strings.ToLower(typed), rejectDefault):
+		return typed
+	}
+	return rejectDefault + ": " + typed
+}
 
 // rejectable is z's gate: an open, unclaimed Signal. A claimed or in-progress one is
 // a live session's or another actor's to close.
@@ -72,6 +87,22 @@ func canRebase(b *bd.Bead) bool {
 	return b != nil && b.Open() && !b.Draft() && (b.Kind == contract.KindChart || b.Kind == contract.KindCheckpoint)
 }
 
+// rebaseTarget is the bead r requests a rebase of from the selected row: a container row
+// itself under canRebase; an open Build that reads behind-mainline (computed verdict) or
+// carries paused:behind-mainline stands for its parent Checkpoint. "" when r is not offered.
+func (g graphData) rebaseTarget(b *bd.Bead) string {
+	if canRebase(b) {
+		return b.ID
+	}
+	if b == nil || !b.Open() || b.Draft() || b.Kind != contract.KindBuild || b.Parent == "" {
+		return ""
+	}
+	if bd.PausedBy(*b, bd.PausedBehindMainline) || g.eligibility(b).Cause == loop.CauseBehindMainline {
+		return b.Parent
+	}
+	return ""
+}
+
 // rebaseFlash renders a Request outcome as the verb prints it (FR 12).
 func rebaseFlash(out rebase.Outcome, err error) string {
 	if err != nil {
@@ -87,8 +118,14 @@ func rebaseFlash(out rebase.Outcome, err error) string {
 		s = "already being rebased by open conflict: " + out.Title + " (" + out.ID + ") Base: " + out.Base
 	case rebase.AlreadyOnMain:
 		s = "already on mainline: " + out.Base
+		if out.MembersMayBePaused {
+			s += " — " + rebase.MemberPauseHint
+		}
 	default:
 		s = "rebase: refused: " + out.Reason
+	}
+	if n := len(out.Edged); n > 0 {
+		s += fmt.Sprintf(" — %d build(s) now wait on it", n)
 	}
 	if out.Warning != "" {
 		s += " — warning: " + out.Warning
@@ -412,7 +449,7 @@ func reject(m Model, d dialog) (Model, tea.Cmd) {
 		m.setStatus(d.id + " not rejected: no longer an open, unclaimed Signal")
 		return m, m.load()
 	}
-	reason := cmp.Or(strings.TrimSpace(d.inputs[0].text), rejectDefault)
+	reason := rejectReason(d.inputs[0].text)
 	next, cmd := m.startAct(b.ID, "rejecting", func() writeDoneMsg {
 		err := closeBead(b.ID, reason)
 		return writeDoneMsg{b.ID, func(m Model) (tea.Model, tea.Cmd) {

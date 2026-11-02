@@ -85,6 +85,9 @@ func causeHint(b bd.Bead, v loop.Verdict) string {
 		return b.Parent + " is gated by " + cmp.Or(h.Title, h.ID) + " (" + h.ID + ") — not running"
 	case loop.CauseBlocked:
 		return id + " is blocked / not ready — run-now only drives a bead already in the bd ready frontier"
+	case loop.CauseBehindMainline:
+		h := v.Holders[0].Bead
+		return id + ": " + bd.BehindMainlineRemedy(b.Parent) + " — " + cmp.Or(h.Title, h.ID) + " (" + h.ID + ") landed after the cut"
 	case loop.CausePaced:
 		return id + " was checked within its poll interval — the loop retries it when due"
 	case loop.CauseSurgeryHold:

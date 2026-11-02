@@ -268,7 +268,7 @@ func (g graphData) cpKids(cp *bd.Bead) (open, closed []*bd.Bead) {
 			open = append(open, &g.beads[i])
 		}
 	}
-	byCmp := func(a, b *bd.Bead) int { return beadCmp(*a, *b) }
+	byCmp := func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) }
 	slices.SortStableFunc(open, byCmp)
 	slices.SortStableFunc(closed, byCmp)
 	return
@@ -317,6 +317,12 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 		}
 	}
 	rows = append(rows, g.errandRows(cps, seen)...)
+	for _, r := range g.remnants() { // its landed Checkpoint is closed: no listed Checkpoint reaches it
+		if !seen[r.b.ID] {
+			seen[r.b.ID] = true
+			rows = append(rows, eRow{kind: eAct, key: "act:" + r.b.ID, b: r.b, cp: r.landed, rel: remnantRel, depth: 1})
+		}
+	}
 	wait, front, paused = band(g, rows, func(r eRow) *bd.Bead { return r.b })
 	for _, r := range memberPaused { // after the Errand pass, so a waiter or Errand member stays one row
 		if !seen[r.b.ID] {
@@ -336,7 +342,7 @@ func (g graphData) actionBands() (wait, front, paused []eRow) {
 		}
 		paused = append(paused, r)
 	}
-	slices.SortStableFunc(paused, func(a, b eRow) int { return beadCmp(*a.b, *b.b) })
+	slices.SortStableFunc(paused, func(a, b eRow) int { return g.rowCmp(*a.b, *b.b) })
 	return
 }
 
@@ -388,6 +394,9 @@ func (g graphData) liveRows(actRows []eRow) []eRow {
 			add(&g.beads[i], cp, rel)
 		}
 	}
+	for _, r := range g.remnants() {
+		add(r.b, r.landed, remnantRel)
+	}
 	for _, cp := range cps {
 		add(cp, nil, "")
 		open, _ := g.cpKids(cp)
@@ -413,7 +422,7 @@ func (g graphData) liveRows(actRows []eRow) []eRow {
 // specsRows is the Specs section's rows: every listed Spec, by beadCmp.
 func (g graphData) specsRows() []eRow {
 	_, specs := execListed(g.beads)
-	slices.SortStableFunc(specs, func(a, b *bd.Bead) int { return beadCmp(*a, *b) })
+	slices.SortStableFunc(specs, func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) })
 	rows := make([]eRow, len(specs))
 	for i, sp := range specs {
 		rows[i] = eRow{kind: eSPS, key: specsPrefix + sp.ID, b: sp, depth: 1}
@@ -432,7 +441,7 @@ func (g graphData) cpsRows() []eRow {
 		if c := rank[a.ID] - rank[b.ID]; c != 0 {
 			return c
 		}
-		return beadCmp(*a, *b)
+		return g.rowCmp(*a, *b)
 	})
 	rows := make([]eRow, len(cps))
 	for i, cp := range cps {
@@ -460,7 +469,7 @@ func (g graphData) mrRows(cont contract.Kind) (rows []eRow, shown bool) {
 			rows = append(rows, eRow{kind: eMR, key: mrsPrefix + w.ID, b: &g.beads[i], cp: &g.beads[p], rel: "watches", depth: 1})
 		}
 	}
-	slices.SortStableFunc(rows, func(a, b eRow) int { return beadCmp(*a.cp, *b.cp) })
+	slices.SortStableFunc(rows, func(a, b eRow) int { return g.rowCmp(*a.cp, *b.cp) })
 	return rows, true
 }
 
@@ -702,6 +711,13 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			sides[p] = append(sides[p], eRow{kind: eSide, key: "side:" + x.ID, b: x, cp: cp, rel: rel[i], depth: 1})
 		}
 	}
+	for _, r := range g.remnants() { // keyed on the closed landed Checkpoint, which is in no cps
+		if !seen[r.b.ID] {
+			seen[r.b.ID] = true
+			p := g.initiativeOf(r.b, r.landed)
+			sides[p] = append(sides[p], eRow{kind: eSide, key: "side:" + r.b.ID, b: r.b, cp: r.landed, rel: remnantRel, depth: 1})
+		}
+	}
 	for i, b := range g.beads { // every other live Errand: no cp, no hint
 		if b.Kind == contract.KindErrand && execLive(b) && !seen[b.ID] {
 			seen[b.ID] = true
@@ -720,7 +736,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			ids = append(ids, id)
 		}
 	}
-	slices.SortStableFunc(ids, func(a, b string) int { return beadCmp(*inits[a], *inits[b]) })
+	slices.SortStableFunc(ids, func(a, b string) int { return g.rowCmp(*inits[a], *inits[b]) })
 
 	// group emits the rows of the Initiative group (or No Initiative section) id at
 	// depth d: its Checkpoints, Specs, then Errands and Pivots.
@@ -730,7 +746,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			if (a.Kind == contract.KindCheckpoint) != (b.Kind == contract.KindCheckpoint) {
 				return boolInt(b.Kind == contract.KindCheckpoint) - boolInt(a.Kind == contract.KindCheckpoint)
 			}
-			return beadCmp(*a, *b)
+			return g.rowCmp(*a, *b)
 		})
 		for _, b := range ms {
 			if b.Kind == contract.KindSpec {
@@ -758,7 +774,7 @@ func (g graphData) execList(flip map[string]bool) []eRow {
 			}
 		}
 		ss := slices.Clone(sides[id])
-		slices.SortStableFunc(ss, func(a, b eRow) int { return beadCmp(*a.b, *b.b) })
+		slices.SortStableFunc(ss, func(a, b eRow) int { return g.rowCmp(*a.b, *b.b) })
 		for _, s := range ss {
 			s.depth = d
 			out = append(out, s)
@@ -1078,6 +1094,8 @@ func relText(rel string) string {
 		return "holds land of →"
 	case "after land":
 		return "waits on land of →"
+	case remnantRel:
+		return "stranded from →"
 	}
 	return "in →"
 }
@@ -1155,6 +1173,17 @@ func (t execTab) body(r eRow, tagW int, hot bool, trail string) (string, string)
 		s += sep() + dimSt.Render(g.rollup(r.b).label())
 	} else if (r.kind == eAct || r.kind == eSide || r.kind == eLive) && r.cp != nil && r.cp != r.b {
 		s += sep() + dimSt.Render(relText(r.rel)+" "+r.cp.Title)
+	}
+	if r.b.Kind == contract.KindRemnant && r.kind != eClosed {
+		if r.kind == eSide {
+			if h := g.heldHint(r.b); h != "" {
+				s += sep() + dimSt.Render(h)
+			}
+		}
+		if w := g.respinWaitText(r.b); w != "" {
+			s += sep() + warnSt.Faint(true).Render(w)
+		}
+		suffix = dimSt.Render(g.strandSummary(r.b)) + suffix
 	}
 	if r.kind == eAct && r.b.HasLabel(registry.AutoApproveFailedLabel) {
 		s += sep() + warnSt.Render(autoApproveFailedWord)

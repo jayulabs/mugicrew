@@ -408,10 +408,11 @@ func TestIdeaListBacklog(t *testing.T) {
 		t.Errorf("folded: %s", got)
 	}
 	rs := oldIdeaList(bs, sess, map[string]bool{backlogKey: true})
-	if got := strings.Join(shape(rs), ","); got != "+,# Init,n2,# No Initiative,tri,backlog 3,b3new,b3old,b4" {
+	if got := strings.Join(shape(rs), ","); got != "+,# Init,n2,# No Initiative,tri,backlog 3,b3new,b4,b3old" {
 		t.Errorf("expanded: %s", got)
 	}
-	if rs[6].hint != "Init" || rs[7].hint != "" {
+	// both Init members inherit P1, so they lead the Backlog group (membership stays keyed on own P4)
+	if rs[6].hint != "Init" || rs[8].hint != "" {
 		t.Errorf("hints %q %q", rs[6].hint, rs[7].hint)
 	}
 	if got := strings.Join(shape(oldIdeaList([]bd.Bead{ini("i", "open", "Init", 1), sig("b", "open", 3, "i")}, nil, nil)), ","); got != "+,backlog 1" {
@@ -512,7 +513,7 @@ func TestIdeateBadgeIgnoresFolds(t *testing.T) {
 
 func TestIdeateBacklogSignalKeys(t *testing.T) {
 	m := ideaModel(t, 100, 24, backlogBeads(), nil)
-	m = press(t, press(t, ideaAt(t, m, backlogKey), runeKey(" ")), runeKey("j"))
+	m = press(t, press(t, press(t, press(t, ideaAt(t, m, backlogKey), runeKey(" ")), runeKey("j")), runeKey("j")), runeKey("j"))
 	if got, want := hintsOf(m), "enter triage · b bg · d detail · p pause · X withdraw · t transcript · z reject · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"; got != want {
 		t.Errorf("backlog Signal hints %q, want %q", got, want)
 	}

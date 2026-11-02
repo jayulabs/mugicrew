@@ -58,6 +58,7 @@ func (g group) beads() []bd.Bead {
 // or in the Unparented group. An Initiative's member Chart and Checkpoint heads
 // nest under it with their own members, its member chains in phaseOrder: depth 3.
 func buildGraph(beads []bd.Bead) []group {
+	cmpBead := graphData{beads: beads}.rowCmp
 	var order []string
 	heads := map[string]*bd.Bead{}
 	for i := range beads {
@@ -86,24 +87,24 @@ func buildGraph(beads []bd.Bead) []group {
 	order = slices.DeleteFunc(order, func(id string) bool {
 		return heads[id].Kind != contract.KindInitiative && isInitiative(heads[id].Parent)
 	})
-	slices.SortStableFunc(order, func(a, b string) int { return beadCmp(*heads[a], *heads[b]) })
+	slices.SortStableFunc(order, func(a, b string) int { return cmpBead(*heads[a], *heads[b]) })
 	var groups []group
 	if len(unparented) > 0 {
-		slices.SortStableFunc(unparented, beadCmp)
+		slices.SortStableFunc(unparented, cmpBead)
 		groups = append(groups, group{key: "", name: "Unparented", members: unparented})
 	}
 	for _, id := range order {
 		h := heads[id]
 		g := group{key: id, head: h, name: chartName(h.Title), members: members[id]}
 		if h.Kind == contract.KindInitiative {
-			g.members, g.nested = slices.Concat(phaseOrder(g.members)...), map[string][]bd.Bead{}
+			g.members, g.nested = slices.Concat(phaseOrder(g.members, cmpBead)...), map[string][]bd.Bead{}
 			for _, c := range g.members {
 				if c.Container {
-					g.nested[c.ID] = slices.SortedStableFunc(slices.Values(members[c.ID]), beadCmp)
+					g.nested[c.ID] = slices.SortedStableFunc(slices.Values(members[c.ID]), cmpBead)
 				}
 			}
 		} else {
-			slices.SortStableFunc(g.members, beadCmp)
+			slices.SortStableFunc(g.members, cmpBead)
 		}
 		groups = append(groups, g)
 	}
@@ -116,7 +117,7 @@ func buildGraph(beads []bd.Bead) []group {
 // blocks cycle falls back to beadCmp. A phase may hold several members (ADR 0252):
 // each member chain is one entry here, and members joined by no edge sort side by side.
 // ponytail: O(chains²) selection; members per Initiative are few.
-func phaseOrder(ms []bd.Bead) [][]bd.Bead {
+func phaseOrder(ms []bd.Bead, beadCmp func(a, b bd.Bead) int) [][]bd.Bead {
 	byID := map[string]bd.Bead{}
 	for _, b := range ms {
 		byID[b.ID] = b
@@ -197,11 +198,33 @@ func phaseOrder(ms []bd.Bead) [][]bd.Bead {
 // beadCmp is the list order: open before closed, then priority ascending (P0
 // first), then newest-created first.
 func beadCmp(a, b bd.Bead) int {
+	return orderCmp(a, b, a.Priority, b.Priority)
+}
+
+// orderCmp is the one list order, given each bead's effective level: open before closed,
+// effective then own priority ascending, newest-created first. beadCmp passes the own
+// levels, which makes the effective key a no-op.
+func orderCmp(a, b bd.Bead, effA, effB int) int {
 	return cmp.Or(
 		cmp.Compare(boolInt(a.Status == "closed"), boolInt(b.Status == "closed")),
+		cmp.Compare(effA, effB),
 		cmp.Compare(a.Priority, b.Priority),
 		b.Created.Compare(a.Created),
 	)
+}
+
+// rowCmp is beadCmp for a section's rows: open before closed, then effective priority
+// ascending, own priority ascending, newest-created first, so the list reads in the
+// order the loop dispatches. A closed bead's effective level is its own.
+func (g graphData) rowCmp(a, b bd.Bead) int {
+	eff := func(x bd.Bead) int {
+		if x.Status == "closed" {
+			return x.Priority
+		}
+		l, _ := g.effectivePriority(&x)
+		return l
+	}
+	return orderCmp(a, b, eff(a), eff(b))
 }
 
 func boolInt(b bool) int {
@@ -359,28 +382,33 @@ func jumpTo[R any](rows []R, i, d int, head func(R) bool) int {
 // graphData is the slice of the shell's live data the Graph reads: the shell hands
 // it over before every update and view, so the tab never holds a stale copy.
 type graphData struct {
-	beads     []bd.Bead
-	live      map[string]bool
-	orphans   map[string]bool // the Orphaned-claim reading: in_progress AFK id → orphaned
-	sessions  map[string]session.Info
-	sessErr   error // why the session table couldn't be read: a HITL Draft creator then reads unknown, never gone
-	efforts   *git.EffortSet
-	cpTips    map[string]string  // Checkpoint id → checkpoint/<id> tip; unknown counts as not at the tip
-	frontier  []bd.Bead          // bd ready -n 0 as of the last refresh; the row widens it with loop.Readmit over beads
-	landed    map[string]string  // open Chart/Checkpoint id → its landed trailer's sha (own Graph only); slow tier
-	ancestors map[string]bd.Bead // inherited-pause walk ancestors beads lacks, read by id
-	landEv    map[string]string  // bead id → msg of its latest land.*, gate.*, effort.failed or effort.paused event
-	launching map[string]bool
-	launched  map[string]time.Time // launches that succeeded, held in Live until a later snapshot shows it alive, or one launchHoldMax on
-	pending   map[string]string
-	crew      map[string]contract.Crewmate
-	idx       *snapIndex                  // lookups over beads; nil falls back to a linear scan
-	comments  map[commentKey]commentEntry // fetched comments; a miss renders as loading…
-	rollups   map[string]rollupEntry      // fetched ROLLUP totals; a miss renders as loading…
-	extRef    bool                        // Enforce external ID is on: an open Initiative with no ref shows "no ref"
-	landName  string                      // the Workspace land_strategy, cached by the slow tier; "" when unread or unusable
-	landErr   error                       // why it is unusable: the Merge Requests section shows it
-	w, h      int                         // the body's size
+	beads         []bd.Bead
+	live          map[string]bool
+	orphans       map[string]bool // the Orphaned-claim reading: in_progress AFK id → orphaned
+	sessions      map[string]session.Info
+	sessErr       error // why the session table couldn't be read: a HITL Draft creator then reads unknown, never gone
+	efforts       *git.EffortSet
+	cpTips        map[string]string  // Checkpoint id → checkpoint/<id> tip; unknown counts as not at the tip
+	frontier      []bd.Bead          // bd ready -n 0 as of the last refresh; the row widens it with loop.Readmit over beads
+	landed        map[string]string  // open Chart/Checkpoint id → its landed trailer's sha (own Graph only); slow tier
+	blockLanded   map[string]string  // closed container id → its land sha, for the containers a Build's closed blockers sit in; slow tier
+	contains      map[string]bool    // "sha@tip" → the land sha is an ancestor of that Checkpoint tip; slow tier
+	strandCommits map[string]int     // open Remnant id → the commit count of its Stranded: range; slow tier
+	ancestors     map[string]bd.Bead // inherited-pause walk ancestors beads lacks, read by id
+	behind        map[string]bd.Bead // closed blockers (and parents) of open Checkpoint Builds beads lacks, read by id; slow tier
+	prioFlash     string             // bead id whose "dispatches as" drawer line is flashing after a no-op +/-
+	landEv        map[string]string  // bead id → msg of its latest land.*, gate.*, effort.failed or effort.paused event
+	launching     map[string]bool
+	launched      map[string]time.Time // launches that succeeded, held in Live until a later snapshot shows it alive, or one launchHoldMax on
+	pending       map[string]string
+	crew          map[string]contract.Crewmate
+	idx           *snapIndex                  // lookups over beads; nil falls back to a linear scan
+	comments      map[commentKey]commentEntry // fetched comments; a miss renders as loading…
+	rollups       map[string]rollupEntry      // fetched ROLLUP totals; a miss renders as loading…
+	extRef        bool                        // Enforce external ID is on: an open Initiative with no ref shows "no ref"
+	landName      string                      // the Workspace land_strategy, cached by the slow tier; "" when unread or unusable
+	landErr       error                       // why it is unusable: the Merge Requests section shows it
+	w, h          int                         // the body's size
 }
 
 // snapIndex is the immutable lookup index over one bead snapshot, built once per refresh

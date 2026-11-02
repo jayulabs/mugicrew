@@ -32,6 +32,9 @@ func spawnMRWatch(cp bd.Bead, lg legs, iid int, webURL string) error {
 	return err
 }
 
+// reasonContainerClosed is the close reason of an MR Watch whose container closed.
+const reasonContainerClosed = "completed: container closed"
+
 // closeMRWatches closes every open MR Watch of a landed container, before the container
 // itself closes.
 func closeMRWatches(containerID, reason string) error {
@@ -62,7 +65,7 @@ func reconcileMRWatch(w bd.Bead) error {
 	}
 	if name, _, err := landStrategy(); err != nil || name != git.LandStrategyGitlab {
 		if err == nil && !cp.Unclosed() {
-			return closeIfOpen(w, "container closed")
+			return closeIfOpen(w, reasonContainerClosed)
 		}
 		return err
 	}
@@ -80,7 +83,7 @@ func reconcileMRWatch(w bd.Bead) error {
 	iid := git.RecordedMR(w.Description)
 	if iid == 0 {
 		if !cp.Unclosed() {
-			return closeIfOpen(w, "container closed")
+			return closeIfOpen(w, reasonContainerClosed)
 		}
 		return nil
 	}
@@ -214,7 +217,7 @@ func holdClosedDraft(cp bd.Bead, lg legs, mr *forge.MR) error {
 	}
 	lead := fmt.Sprintf("MR %s for %s was closed on the Forge while its Approval waited for the un-draft: the waiting Approval resumes on a reopened MR, or the %s is abandoned.", ref, cp.ID, noun)
 	do := fmt.Sprintf("reopen MR %s on the Forge at the MR link, or run `mugicrew withdraw %s`. The waiting Approval resumes on a reopened MR.", ref, cp.ID)
-	return holdClosedMR(cp, lg, mr, lead, do)
+	return holdClosedMR(cp, "", lg, mr, lead, do)
 }
 
 // abandonAfter is how long a closed container's Watch keeps closing out before a human is told.
@@ -257,11 +260,11 @@ func lateMRWatch(w, cp bd.Bead, landings []bd.Bead, lg legs, mr *forge.MR) error
 	}
 	switch {
 	case !cp.Unclosed():
-		return closeIfOpen(w, "container closed")
+		return closeIfOpen(w, reasonContainerClosed)
 	case mr.State == forge.StateMerged:
-		return closeIfOpen(w, "obsolete: merge request merged")
+		return closeIfOpen(w, "completed: merge request merged")
 	}
-	return closeIfOpen(w, "obsolete: merge request closed")
+	return closeIfOpen(w, "completed: merge request closed")
 }
 
 // clearCloseOutLines removes the close-out lines a closed container still carries from before
@@ -305,7 +308,7 @@ func abandonMRWatch(w, cp bd.Bead, lg legs, mr *forge.MR, landed bool, owed []st
 		return err
 	}
 	slog.Warn("mrwatch.closeout_abandoned", append(eventlog.BeadAttrs(w), "mr", ref, "signal", id)...)
-	return closeIfOpen(w, "obsolete: close-out abandoned; carried by "+id)
+	return closeIfOpen(w, "abandoned: close-outs still failing; carried by "+id)
 }
 
 // mrWatchOwes lists, one line each, what cp's filed children for MR iid still owe: a child

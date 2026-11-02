@@ -29,6 +29,7 @@ func TestMain(m *testing.M) {
 	initiativesSetting = func() cfglayer.Initiatives { return cfglayer.Initiatives{} }
 	initiativesByRef = func(string) ([]bd.Bead, error) { return nil, nil }
 	draftsOf = func(string) ([]bd.Bead, error) { return nil, nil }
+	isRespin = func(string) (bool, error) { return false, nil }
 	os.Exit(m.Run())
 }
 
@@ -119,9 +120,9 @@ func stubSignalSeams(t *testing.T) *fakeSignalGraph {
 		return "tipsha", nil
 	})
 	swap(t, &showSpec, func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: g.pins[id]}, nil })
-	swap(t, &updateBody, func(id string, a []string) error {
+	swap(t, &setDescription, func(id, body string, _ bd.Serializer) error {
 		g.anchors++
-		g.pins[id] = a[1]
+		g.pins[id] = body
 		return nil
 	})
 	swap(t, &cutBranch, func(b, _ string) (bool, error) {
@@ -552,7 +553,7 @@ func TestLaunchSignalComposesTriageSession(t *testing.T) {
 		"You are Luffy",
 		"### ACCEPT", "### FAST LANE", "### REJECT", "### DUPLICATE",
 		"mugicrew reconcile ws-sig\n", `mugicrew reconcile ws-sig --spec <body-file> --title "<what is built>"`,
-		"bd close ws-sig --reason", "bd supersede ws-sig --with",
+		"bd close ws-sig --reason", "mugicrew duplicate ws-sig <original-id>",
 		`--title "<Destination name>"`, "--priority <P0-P4>", "bd update <specID> --priority <P0-P4>",
 		"No kind prefix", "Do not seed defog beads", "Inbox",
 		contract.DraftInstruction("ws-sig"),
@@ -560,6 +561,10 @@ func TestLaunchSignalComposesTriageSession(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("triage prompt missing %q", want)
 		}
+	}
+	// A duplicate closes through the door; raw bd supersede survives only in the park warning.
+	if n := strings.Count(p, "bd supersede"); n > 1 {
+		t.Errorf("triage prompt names bd supersede %d times, want only the park warning", n)
 	}
 	// The fast-laned Spec takes the standard template, so Zoro slices it like any Spec.
 	_, fastLane, _ := strings.Cut(p, "### FAST LANE")
@@ -592,6 +597,34 @@ func TestTriageAcceptSeedsAndTendsSurvey(t *testing.T) {
 		if !strings.Contains(accept, want) {
 			t.Errorf("ACCEPT missing %q:\n%s", want, accept)
 		}
+	}
+}
+
+// Spec mc-0zvln FR1-FR5: fog-free external-world work is offered as an
+// Errand-only Spec through FAST LANE, not rejected.
+func TestTriagePromptOffersErrandOnlySpec(t *testing.T) {
+	p := triagePrompt("ws-sig", "", "", "", nil, nil)
+	section := func(from, to string) string {
+		_, s, _ := strings.Cut(p, from)
+		s, _, _ = strings.Cut(s, to)
+		return strings.Join(strings.Fields(s), " ")
+	}
+	pre := section("## Triage", "## Before FAST LANE")
+	if !strings.Contains(pre, "Errand-only Spec") {
+		t.Errorf("preamble must mention the Errand-only Spec:\n%s", pre)
+	}
+	fast := section("### FAST LANE", "\n### ")
+	for _, want := range []string{"## Errands", "no Builds", "None: no Builds; this Spec lays Errands only"} {
+		if !strings.Contains(fast, want) {
+			t.Errorf("FAST LANE missing %q:\n%s", want, fast)
+		}
+	}
+	reject := section("### REJECT", "\n### ")
+	if !strings.Contains(reject, "Errand-only Spec") {
+		t.Errorf("REJECT must point to the Errand-only Spec:\n%s", reject)
+	}
+	if strings.Contains(p, "no code change") || !strings.Contains(p, "not wanted, by design") {
+		t.Errorf("REJECT sub-reasons must read \"not wanted, by design\", never \"no code change\":\n%s", reject)
 	}
 }
 
@@ -995,7 +1028,7 @@ func TestFastLaneGitlabPinsFetchedMainline(t *testing.T) {
 	swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
 	swap(t, &showSpec, func(string) (bd.Bead, error) { return bd.Bead{Description: body}, nil })
 	swap(t, &fetchForge, func() (string, error) { fetches++; return "forgesha", nil })
-	swap(t, &updateBody, func(_ string, a []string) error { body = a[1]; return nil })
+	swap(t, &setDescription, func(_, b string, _ bd.Serializer) error { body = b; return nil })
 	for i := 0; i < 2; i++ {
 		if err := reconcileSignal(openSignal(), ""); err != nil {
 			t.Fatalf("reconcileSignal: %v", err)
@@ -1021,7 +1054,7 @@ func TestFastLaneNestedGitlabPinsChildTip(t *testing.T) {
 	swap(t, &showSpec, func(string) (bd.Bead, error) { return bd.Bead{Description: body}, nil })
 	swap(t, &fetchForge, func() (string, error) { t.Fatal("workspace fetch"); return "", nil })
 	swap(t, &repoFetch, func(r git.Repo) (string, error) { return "kid-tip", nil })
-	swap(t, &updateBody, func(_ string, a []string) error { body = a[1]; return nil })
+	swap(t, &setDescription, func(_, b string, _ bd.Serializer) error { body = b; return nil })
 	if err := reconcileSignal(openSignal(), ""); err != nil {
 		t.Fatal(err)
 	}

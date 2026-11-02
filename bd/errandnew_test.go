@@ -191,7 +191,7 @@ func TestSpawnBlockingErrandPlacement(t *testing.T) {
 			}
 			return fake(args...)
 		}
-		id, created, err := SpawnBlockingErrandIfAbsent(c.container, "Closed MR: !3\n", "t", "Closed MR: !3\nFix: reopen.\n")
+		id, created, err := SpawnBlockingErrandIfAbsent(c.container, "Closed MR: !3\n", "t", "Closed MR: !3\nFix: reopen.\n", "")
 		if err != nil || !created || id != "mc-new" || len(*creates) != 1 {
 			t.Fatalf("%s: got %q %v %v, %d creates", name, id, created, err, len(*creates))
 		}
@@ -222,7 +222,7 @@ func TestSpawnBlockingErrandReRunFindsAParentedHold(t *testing.T) {
 		}
 		return fake(args...)
 	}
-	id, created, err := SpawnBlockingErrandIfAbsent("cp", "Closed MR: !3\n", "t", "b")
+	id, created, err := SpawnBlockingErrandIfAbsent("cp", "Closed MR: !3\n", "t", "b", "")
 	if err != nil || created || id != "held" {
 		t.Errorf("got %q %v %v", id, created, err)
 	}

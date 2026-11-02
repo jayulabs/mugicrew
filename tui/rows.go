@@ -17,25 +17,27 @@ import (
 	"jayulabs.org/mugicrew/mdrender"
 )
 
-// leafTitleStyle styles a bead row's title, shared by every tab that lists
-// beads: closed > Draft (dim) > hot (an open blocker of the selection) > AFK mute (any non-HITL
-// kind) > normal. plain reports the normal case (no recolour), so a caller can
-// keep its own richer rendering there without repeating the precedence.
-func leafTitleStyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain bool) {
+// leafRestyle styles a bead row's title, shared by every tab that lists beads: closed >
+// Draft (dim) > hot (an open blocker of the selection) > AFK mute (any non-HITL kind) >
+// normal. plain reports the normal case (no recolour), so a caller can keep its own richer
+// rendering there without repeating the precedence. inert marks a restyle that asks for no
+// attention (closed, Draft): its badge is wholly in st. An attention restyle (hot, AFK mute)
+// leaves a P0/P1 effective digit in prio's colour.
+func leafRestyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain, inert bool) {
 	switch {
 	case b.Status == "closed":
-		return closedSty, false
+		return closedSty, false, true
 	case b.Draft():
-		return dimSt, false
+		return dimSt, false, true
 	case hot:
-		return pinkFg, false
+		return pinkFg, false, false
 	case !isHITL(b):
-		return softSt, false
+		return softSt, false, false
 	}
-	return lipgloss.NewStyle(), true
+	return lipgloss.NewStyle(), true, false
 }
 
-// containerTitleStyle is leafTitleStyle for a container row (Chart, Checkpoint,
+// containerTitleStyle is leafRestyle for a container row (Chart, Checkpoint,
 // Initiative): closed > hot > plain. Containers are never AFK-muted.
 func containerTitleStyle(b *bd.Bead, hot bool) (st lipgloss.Style, plain bool) {
 	switch {
@@ -69,18 +71,13 @@ func (g graphData) sbrn(b *bd.Bead, title string, live bool, kindW int) string {
 }
 
 // sbrnLeaf is sbrn for a Defog or Execute leaf row on a live view: its priority
-// takes leafTitleStyle's recolour (closed, hot blocker, AFK mute) like its title.
+// takes leafRestyle's recolour (closed, hot blocker, AFK mute) like its title, except
+// that a hot or AFK-muted row keeps prio's colour on a P0/P1 effective digit.
 func (g graphData) sbrnLeaf(b *bd.Bead, title string, kindW int, hot bool) string {
-	cp, member := g.containerPrio(b)
-	p := prio(b.Priority)
-	if member {
-		p = prioIn(b.Priority, cp)
-	}
-	if st, plain := leafTitleStyle(b, hot); !plain {
-		if !member {
-			cp = 2 // no tint
-		}
-		p = tinted(st, cp).Render(prioText(b.Priority))
+	eff, _ := g.effectivePriority(b)
+	p := prioBadge(eff, b.Priority)
+	if st, plain, inert := leafRestyle(b, hot); !plain {
+		p = styledBadge(st, inert, eff, b.Priority)
 	}
 	head, tail := g.sbrnAround(b, true, kindW, p)
 	return head + title + tail
@@ -89,23 +86,53 @@ func (g graphData) sbrnLeaf(b *bd.Bead, title string, kindW int, hot bool) strin
 // sbrnParts splits sbrn around its title: everything up to and including the
 // separator before it, and the separator and id after it.
 func (g graphData) sbrnParts(b *bd.Bead, live bool, kindW int) (head, tail string) {
-	p := prio(b.Priority)
-	if cp, member := g.containerPrio(b); member {
-		p = prioIn(b.Priority, cp)
-	}
-	return g.sbrnAround(b, live, kindW, p)
+	eff, _ := g.effectivePriority(b)
+	return g.sbrnAround(b, live, kindW, prioBadge(eff, b.Priority))
 }
 
-// containerPrio is the priority of b's container, a Checkpoint or Chart parent read
-// from the live beads; member is false for a bead with no such parent (an Initiative
-// parent included), which renders untinted.
-func (g graphData) containerPrio(b *bd.Bead) (cp int, member bool) {
-	if i := g.beadIndex(b.Parent); b.Parent != "" && i >= 0 {
-		if k := g.beads[i].Kind; k == contract.KindCheckpoint || k == contract.KindChart {
-			return g.beads[i].Priority, true
-		}
+// effectivePriority is b's bd.EffectivePriority over the live beads, then the walk
+// ancestors the snapshot lacks.
+func (g graphData) effectivePriority(b *bd.Bead) (level int, src string) {
+	return bd.EffectivePriority(*b, g.effectivePriorityAncestor)
+}
+
+// inheritLine is the drawer's line under a bead's header row when an open container
+// ancestor sets its effective priority: "dispatches as P<eff> from <kind> <title>".
+// "" when the bead's own priority is effective. It flashes while prioFlash names b.
+func (g graphData) inheritLine(b *bd.Bead) string {
+	eff, src := g.effectivePriority(b)
+	if src == "" {
+		return ""
 	}
-	return 0, false
+	line := fmt.Sprintf("dispatches as P%d %s", eff, g.inheritSource(src))
+	if g.prioFlash == b.ID {
+		return warnSt.Reverse(true).Render(line)
+	}
+	return softSt.Render(line)
+}
+
+// inheritSource is "from <kind> <title>" for the ancestor src that sets a bead's effective
+// priority, the wording the drawer line and the +/- status echo share.
+func (g graphData) inheritSource(src string) string {
+	a, _ := g.effectivePriorityAncestor(src)
+	return fmt.Sprintf("from %s %s", a.Kind, a.Title)
+}
+
+// effectivePriorityAncestor is the ancestor id as the live beads or the walk ancestors hold it.
+func (g graphData) effectivePriorityAncestor(id string) (bd.Bead, bool) {
+	if i := g.beadIndex(id); i >= 0 {
+		return g.beads[i], true
+	}
+	a, ok := g.ancestors[id]
+	return a, ok
+}
+
+// withInherit is a drawer header row followed, when b inherits its priority, by the inherit line.
+func (g graphData) withInherit(b *bd.Bead, head string) string {
+	if l := g.inheritLine(b); l != "" {
+		return head + "\n" + l
+	}
+	return head
 }
 
 // sbrnAround is sbrnParts with the styled priority p supplied by the caller.
@@ -123,9 +150,9 @@ func (g graphData) sbrnAround(b *bd.Bead, live bool, kindW int, p string) (head,
 	return mark + " " + tag + pad + " " + p + sep(), sep() + idSt.Render(b.ID)
 }
 
-// leafTitle is a leaf's title styled by leafTitleStyle.
+// leafTitle is a leaf's title styled by leafRestyle.
 func leafTitle(b *bd.Bead, hot bool) string {
-	if st, plain := leafTitleStyle(b, hot); !plain {
+	if st, plain, _ := leafRestyle(b, hot); !plain {
 		return st.Render(b.Title)
 	}
 	return b.Title
@@ -705,7 +732,7 @@ func band[R any](g graphData, rows []R, bead func(R) *bd.Bead) (wait, ready, pau
 			}
 		}
 	}
-	cmp := func(a, b R) int { return beadCmp(*bead(a), *bead(b)) }
+	cmp := func(a, b R) int { return g.rowCmp(*bead(a), *bead(b)) }
 	slices.SortStableFunc(wait, cmp)
 	slices.SortStableFunc(ready, cmp)
 	slices.SortStableFunc(paused, cmp)

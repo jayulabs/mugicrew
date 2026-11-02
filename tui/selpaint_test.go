@@ -33,6 +33,18 @@ func TestSelectedRowKeepsBadgeAndPriority(t *testing.T) {
 	}
 }
 
+// A selected AFK leaf at P0 keeps the P0 colour on its badge.
+func TestSelectedAFKLeafKeepsP0Colour(t *testing.T) {
+	forceANSI256(t)
+	b := bd.Bead{ID: "l", Kind: contract.KindBuild, Status: "open", Title: "T", Priority: 0}
+	g := graphData{beads: []bd.Bead{b}}
+	row := " " + g.sbrnLeaf(&b, "T", 0, false)
+	l := listLines(1, func(int) (string, string) { return row, "3m" }, 60, 0)[0]
+	if got, want := fgBefore(t, l, "P0"), sgrOf(prio0Sty.Render("x")); got != want {
+		t.Errorf("selected AFK P0 fg = %q, want %q in %q", got, want, l)
+	}
+}
+
 func TestSelectedContainerKeepsChipBackground(t *testing.T) {
 	l := selectedLine(t, &bd.Bead{Kind: contract.KindChart, Container: true, Title: "T"})
 	if !strings.Contains(l, "48;5;68") {

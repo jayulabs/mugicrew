@@ -61,6 +61,7 @@ type surgeryForm struct {
 // bd.JoinVerdict per open Checkpoint. Closed Checkpoints are never listed; a Checkpoint
 // is under an Initiative only when its Parent is an unclosed one, the rule adoptTargets lists rows by.
 func surgeryRows(beads []bd.Bead, required bool) []sgRow {
+	g := graphData{beads: beads}
 	byID := map[string]*bd.Bead{}
 	kids := map[string][]bd.Bead{}
 	for i := range beads {
@@ -98,7 +99,7 @@ func surgeryRows(beads []bd.Bead, required bool) []sgRow {
 		}
 		joins = append(joins, j)
 	}
-	slices.SortStableFunc(joins, func(a, b join) int { return beadCmp(*a.b, *b.b) })
+	slices.SortStableFunc(joins, func(a, b join) int { return g.rowCmp(*a.b, *b.b) })
 
 	var rows []sgRow
 	gap := sgRow{kind: sgGap}
@@ -290,11 +291,16 @@ func (m Model) surgeryView(d dialog) string {
 	return m.placeBox(box)
 }
 
+// surgeryInner is the Surgery box's inner width, which its hint line wraps at.
+func (m Model) surgeryInner() int {
+	return min(max(m.dialogWidth(), min(m.w-8, 100)), m.w-4) - 4
+}
+
 // surgeryBox draws d's box; its one field is the title line, the target list takes no mouse.
 func (m Model) surgeryBox(d dialog) (string, []formField) {
-	styleW := min(max(m.dialogWidth(), min(m.w-8, 100)), m.w-4) - 2
+	styleW := m.surgeryInner() + 2
 	inner := styleW - 2
-	hint := lipgloss.NewStyle().Width(inner).Render(flatHints(d.bindings(), inner))
+	hint, _ := hintLine(d.bindings(), inner)
 	ls := []string{brand.Render(d.title), ""}
 	titleRows := fieldRow(styleW, d.field == 0, "title:", d.inputs[0].render)
 	fs := []formField{textField(0, styleW, "title:", len(ls), len(titleRows))}

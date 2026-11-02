@@ -13,19 +13,28 @@ import (
 
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/eventlog"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
-// startFollower launches `/proc/self/exe args` detached (ADR 0254 §1): its own
+// startFollower re-execs the startup path with args, detached (ADR 0254 §1, ADR
+// 0406 §2), and errors without spawning when there is none: its own
 // session, stdin /dev/null, stdout and stderr on outPath (never the pane's pty,
 // whose hangup kills a child left on it), released and never waited on. A var so
 // tests spawn nothing.
 var startFollower = func(outPath string, args []string) error {
+	exe, err := selfexe.Path()
+	if err == nil && exe == "" {
+		err = errors.New("no startup path")
+	}
+	if err != nil {
+		return err
+	}
 	out, err := os.Create(outPath)
 	if err != nil {
 		return err
 	}
 	defer out.Close() // the child holds its own copy
-	cmd := exec.Command("/proc/self/exe", args...)
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

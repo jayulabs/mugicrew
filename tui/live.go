@@ -9,13 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -23,6 +23,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/chopper"
+	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
 	"jayulabs.org/mugicrew/eventlog"
@@ -30,6 +31,7 @@ import (
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/looplock"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -58,6 +60,7 @@ var (
 	readLanded    = func(trailers []string) (map[string]string, error) {
 		return git.LandedAcross(trailers, cfglayer.Repos("."))
 	}
+	readContains  = func(cp bd.Bead, tip, sha string) (bool, error) { return contexts.RepoOf(cp).Contains(tip, sha) }
 	switchSession = session.SwitchTo
 	watchRun      = session.Watch
 	pauseBead     = bd.Pause
@@ -103,7 +106,7 @@ var (
 	// loopVerb runs `<self> loop <args>`; the TUI never owns the loop, so a
 	// TUI-started loop outlives it (ADR 0051 §2, ADR 0053 §2).
 	loopVerb = func(args ...string) (string, error) {
-		self, err := os.Executable()
+		self, err := selfexe.Path()
 		if err != nil {
 			return "", err
 		}
@@ -121,45 +124,60 @@ var (
 // loop state and effort refs. Closed lineage and the slow-tier reads are carried
 // across fast ticks (ADR 0197); the rest is re-derived each load.
 type loadedMsg struct {
-	orphans     map[string]bool // the shared Orphaned-claim reading over the in_progress beads (ADR 0391)
-	beads       []bd.Bead       // the open set plus the closed lineage, fresh or cached (ADR 0197)
-	jiraSet     bool            // the slow tier's read of the [jira] site
-	closed      []bd.Bead       // the closed lineage this load used: the next load's cache
-	demand      map[string]bool // the ids in closed that only a claim brought (ADR 0232)
-	gone        []string        // on-demand ids the by-id read did not return: bd deleted them
-	openIDs     map[string]bool
-	saves       int  // Model.recentSaves when the read began
-	req         int  // the model's slowLoad request count when this load began
-	listed      bool // the closed lineage was re-read (slow tier or a drop-out): ancestors is fresh
-	slowTier    bool // the slow tier ran: efforts, kinds, pool, auto-exit and commits are fresh
-	live        map[string]bool
-	sessions    map[string]session.Info
-	sessErr     error    // readSessions' error: sessions is then empty
-	recents     []string // Recents as read off the event loop
-	loop        looplock.Status
-	efforts     *git.EffortSet
-	cpTips      map[string]string  // checkpoint/<id> tips, read with efforts
-	frontier    []bd.Bead          // bd ready -n 0, read every load: the exact frontier, not derived from beads
-	landed      map[string]string  // open Chart/Checkpoint id → its own landed trailer's sha on mainline; read with efforts
-	ancestors   map[string]bd.Bead // inherited-pause walk ancestors missing from beads, read by id on the slow tier or a drop-out
-	pool        loop.Setting
-	autoExit    loop.AutoExit
-	initiatives cfglayer.Initiatives
-	approvals   loop.AutoApprove
-	mouse       loop.Mouse
-	theme       loop.Theme
-	landName    string // land_strategy, read with the slow tier
-	landErr     error
-	kinds       kindProfiles
-	commits     []git.MainlineCommit // History's mainline read, newest first
-	histErr     error                // that read failed; the rest of the load stands
-	started     time.Time            // when this load began; it clears only launches that landed before it
+	orphans       map[string]bool // the shared Orphaned-claim reading over the in_progress beads (ADR 0391)
+	beads         []bd.Bead       // the open set plus the closed lineage, fresh or cached (ADR 0197)
+	jiraSet       bool            // the slow tier's read of the [jira] site
+	closed        []bd.Bead       // the closed lineage this load used: the next load's cache
+	demand        map[string]bool // the ids in closed that only a claim brought (ADR 0232)
+	gone          []string        // on-demand ids the by-id read did not return: bd deleted them
+	openIDs       map[string]bool
+	saves         int  // Model.recentSaves when the read began
+	req           int  // the model's slowLoad request count when this load began
+	listed        bool // the closed lineage was re-read (slow tier or a drop-out): ancestors is fresh
+	slowTier      bool // the slow tier ran: efforts, kinds, pool, auto-exit and commits are fresh
+	live          map[string]bool
+	sessions      map[string]session.Info
+	sessErr       error    // readSessions' error: sessions is then empty
+	recents       []string // Recents as read off the event loop
+	loop          looplock.Status
+	efforts       *git.EffortSet
+	cpTips        map[string]string  // checkpoint/<id> tips, read with efforts
+	frontier      []bd.Bead          // bd ready -n 0, read every load: the exact frontier, not derived from beads
+	landed        map[string]string  // open Chart/Checkpoint id → its own landed trailer's sha on mainline; read with efforts
+	blockLanded   map[string]string  // closed container id → land sha, for the containers a Build's closed blockers sit in; read with efforts
+	contains      map[string]bool    // "sha@tip" → whether that land sha is on that Checkpoint tip; read with efforts
+	strandCommits map[string]int     // open Remnant id → its Stranded: range's commit count; read with efforts
+	ancestors     map[string]bd.Bead // walk ancestors (pause, effective priority) missing from beads, read by id on the slow tier or a drop-out
+	behind        map[string]bd.Bead // closed blockers of open Checkpoint Builds (and their parents) missing from beads, read by id on the slow tier
+	pool          loop.Setting
+	autoExit      loop.AutoExit
+	initiatives   cfglayer.Initiatives
+	approvals     loop.AutoApprove
+	mouse         loop.Mouse
+	theme         loop.Theme
+	landName      string // land_strategy, read with the slow tier
+	landErr       error
+	kinds         kindProfiles
+	commits       []git.MainlineCommit // History's mainline read, newest first
+	histErr       error                // that read failed; the rest of the load stands
+	started       time.Time            // when this load began; it clears only launches that landed before it
 }
 
 type (
 	errMsg  struct{ err error }
 	tickMsg struct{}
+	// spinMsg is one frame of the loading indicator's spinner, apart from the refresh tick.
+	spinMsg struct{}
 )
+
+// spinFrames is the loading indicator's glyphs; spinInterval paces them.
+var spinFrames = spinner.MiniDot.Frames
+
+const spinInterval = 100 * time.Millisecond
+
+func spinTick() tea.Cmd {
+	return tea.Tick(spinInterval, func(time.Time) tea.Msg { return spinMsg{} })
+}
 
 // runDoneMsg is a run-now host's exit, already worded (runStatus).
 type runDoneMsg struct{ status string }
@@ -402,6 +420,9 @@ func (m Model) loadTier(slow bool) tea.Cmd {
 		if slow { // the slow tier (ADR 0197): the rest of the reads ride with the closed lineage
 			msg.efforts, msg.cpTips, _ = readRefs() // a failed read is empty: no tip is known, so nothing is approved
 			msg.landed = readLandedMap(beads)       // a failed read is empty: no landing is known
+			msg.behind = readBehindBeads(beads)
+			msg.blockLanded, msg.contains = readBehind(beads, msg.behind, msg.cpTips)
+			msg.strandCommits = readStrandCommits(beads)
 			msg.kinds = readKindProfiles()
 			msg.kinds.reasons = profileReasons(m.ctx, msg.kinds)
 			msg.commits, msg.histErr = readMainline()
@@ -441,15 +462,123 @@ func readLandedMap(beads []bd.Bead) map[string]string {
 	return landed
 }
 
-// missingAncestors is the parent ids the inherited-pause walk reaches that beads lacks, sorted.
-// The walk matters only while some manual or context pause exists, so none is missing without one.
-func missingAncestors(beads []bd.Bead) []string {
-	paused := slices.ContainsFunc(beads, func(b bd.Bead) bool {
-		return bd.PausedBy(b, bd.PausedManual) || bd.PausedBy(b, bd.PausedContext)
-	})
-	if !paused {
+// readBehind is the slow tier's facts for the behind-mainline leg: the land sha of each container
+// that holds a closed blocks blocker of an open Build in a Checkpoint (other than that
+// Checkpoint), and whether that sha is on the Checkpoint's cached tip. A failed read is empty:
+// no hold is shown, and the press-time read stays the gate.
+func readBehind(beads []bd.Bead, extra map[string]bd.Bead, tips map[string]string) (map[string]string, map[string]bool) {
+	byID := make(map[string]bd.Bead, len(beads)+len(extra))
+	maps.Copy(byID, extra)
+	for _, b := range beads {
+		byID[b.ID] = b
+	}
+	type pair struct{ cp, container bd.Bead }
+	var pairs []pair
+	trailers := map[string]string{} // trailer line → container id
+	var lines []string
+	for _, b := range beads {
+		cp, ok := byID[b.Parent]
+		if b.Kind != contract.KindBuild || b.Status != "open" || !ok || cp.Kind != contract.KindCheckpoint || tips[cp.ID] == "" {
+			continue
+		}
+		for _, id := range b.BlockedBy {
+			x, ok := byID[id]
+			if !ok || x.Status != "closed" || slices.Contains(b.CondBlockedBy, id) {
+				continue
+			}
+			x, isCont, err := loop.BlockerContainer(x, func(id string) (bd.Bead, error) {
+				if p, found := byID[id]; found {
+					return p, nil
+				}
+				return bd.Bead{}, fmt.Errorf("bead %s not loaded", id)
+			})
+			if err != nil || !isCont || x.ID == cp.ID {
+				continue
+			}
+			pairs = append(pairs, pair{cp, x})
+			if t := git.TrailerFor(string(x.Kind), x.ID); trailers[t] == "" {
+				trailers[t] = x.ID
+				lines = append(lines, t)
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	got, err := readLanded(lines)
+	if err != nil {
+		return nil, nil
+	}
+	landed := map[string]string{}
+	for t, sha := range got {
+		landed[trailers[t]] = sha
+	}
+	contains := map[string]bool{}
+	for _, p := range pairs {
+		sha, ok := landed[p.container.ID]
+		key := loop.ContainsKey(tips[p.cp.ID], sha)
+		if _, read := contains[key]; !ok || read {
+			continue
+		}
+		if in, err := readContains(p.cp, tips[p.cp.ID], sha); err == nil {
+			contains[key] = in
+		}
+	}
+	return landed, contains
+}
+
+// readBehindBeads reads, with one ListByID per hop, the closed blocks blockers of open
+// Checkpoint Builds that beads lacks (a closed member of a landed Checkpoint is outside the
+// default closed set), then their missing parents. A failed read is empty: no hold is shown.
+func readBehindBeads(beads []bd.Bead) map[string]bd.Bead {
+	byID := make(map[string]bd.Bead, len(beads))
+	for _, b := range beads {
+		byID[b.ID] = b
+	}
+	need := map[string]bool{}
+	for _, b := range beads {
+		if cp, ok := byID[b.Parent]; b.Kind != contract.KindBuild || b.Status != "open" || !ok || cp.Kind != contract.KindCheckpoint {
+			continue
+		}
+		for _, id := range b.BlockedBy {
+			if _, ok := byID[id]; !ok && !slices.Contains(b.CondBlockedBy, id) {
+				need[id] = true
+			}
+		}
+	}
+	out := map[string]bd.Bead{}
+	read := func(ids []string) bool {
+		if len(ids) == 0 {
+			return true
+		}
+		got, err := listByID(ids)
+		if err != nil {
+			return false
+		}
+		for _, b := range got {
+			out[b.ID] = b
+		}
+		return true
+	}
+	if !read(slices.Sorted(maps.Keys(need))) {
 		return nil
 	}
+	var parents []string
+	for _, b := range out {
+		if _, ok := byID[b.Parent]; b.Parent != "" && !ok && out[b.Parent].ID == "" {
+			parents = append(parents, b.Parent)
+		}
+	}
+	slices.Sort(parents)
+	if !read(slices.Compact(parents)) {
+		return nil
+	}
+	return out
+}
+
+// missingAncestors is the parent ids a loaded bead's parent chain reaches that beads lacks,
+// sorted: the inherited-pause walk and the effective-priority walk read them.
+func missingAncestors(beads []bd.Bead) []string {
 	byID := make(map[string]bd.Bead, len(beads))
 	for _, b := range beads {
 		byID[b.ID] = b
@@ -745,7 +874,8 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 				m.syncTheme() // a changed resolved preset repaints while nothing is staged
 			}
 			m.landName, m.landErr = msg.landName, msg.landErr
-			m.landed = msg.landed
+			m.landed, m.blockLanded, m.contains, m.behind = msg.landed, msg.blockLanded, msg.contains, msg.behind
+			m.strandCommits = msg.strandCommits
 			m.histCommits, m.histErr = msg.commits, msg.histErr
 		}
 		m.flashCloseFailed()
@@ -810,12 +940,25 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			m.tabs[tabGraph] = g
 		}
 		m.loopBusy = false // no read will confirm while bd is down
+	case prioFlashMsg:
+		if m.prioFlash == msg.id && m.prioFlashSeq == msg.seq {
+			m.prioFlash = ""
+		}
+	case spinMsg:
+		if m.loaded { // the first snapshot landed: the chain ends and costs nothing
+			m.spinning = false
+			return m, nil, true
+		}
+		m.spinFrame = (m.spinFrame + 1) % len(spinFrames)
+		m.spinning = true
+		return m, spinTick(), true
 	case tickMsg:
+		swap := m.checkSwap()
 		if m.loading {
-			return m, tea.Batch(m.loadLogs(), tick()), true
+			return m, tea.Batch(m.loadLogs(), tick(), swap), true
 		}
 		m.loading = true
-		return m, tea.Batch(m.loadTier(m.slowDue() || m.slowWant), m.loadLogs(), tick()), true
+		return m, tea.Batch(m.loadTier(m.slowDue() || m.slowWant), m.loadLogs(), tick(), swap), true
 	case logsMsg:
 		// an extend read from a state the model has moved past (an overlapping load) is stale: drop it, the next tick re-reads
 		if msg.changed && msg.extend && msg.err == nil && msg.base != (eventlog.State{Sig: m.logSig, Off: m.logOff}) {
@@ -878,6 +1021,23 @@ func (m Model) fold(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, m.pollUsage(), true
 	case usageMsg:
 		m.foldUsage(msg)
+	case releaseMsg:
+		m.releaseLatest = msg.latest
+	case swapMsg:
+		m.swapProbing = false
+		if msg.version != "" {
+			m.swapWatch = false
+			m.setStatus(swapLine(m.swapFrom, msg.version))
+		}
+	case upgradePlanMsg:
+		next, cmd := m.upgradePlanned(msg)
+		return next, cmd, true
+	case upgradeStoppedMsg:
+		next, cmd := m.upgradeStopped(msg)
+		return next, cmd, true
+	case upgradeDoneMsg:
+		next, cmd := m.upgradeDone(msg)
+		return next, cmd, true
 	case revealMsg:
 		if beadIndex(m.beads, msg.id) < 0 {
 			next, cmd := m.fetchReveal(msg.id, true, Model.revealIn)
@@ -1176,6 +1336,7 @@ type headerKind int
 const (
 	headerSessions headerKind = iota // a crew count: the Sessions modal, as S
 	headerLoop                       // the loop segment: the Loop menu, as o
+	headerUpgrade                    // the Release notice: the upgrade dialog, as o then u
 )
 
 // target is the header segment's double-click key, beside the tab strip's targets.
@@ -1198,9 +1359,17 @@ func (m Model) headerRightSpans(w int) (string, []headerSpan) {
 		if m.focus.id != "" {
 			// counts are the back bar's here; only the loop segment and usage warning stay
 			x := lipgloss.Width(prefix)
+			var rel string
+			if r := m.releaseSegment(); r != "" {
+				rel = r + dimSt.Render(" · ")
+				x += lipgloss.Width(rel)
+			}
+			if r := m.releaseSegment(); r != "" {
+				spans = append(spans, headerSpan{lipgloss.Width(prefix), lipgloss.Width(prefix) + lipgloss.Width(r), headerUpgrade})
+			}
 			loop := m.loopSegment()
 			spans = append(spans, headerSpan{x, x + lipgloss.Width(loop), headerLoop})
-			return prefix + loop + m.usageWarning() + " ", spans
+			return prefix + rel + loop + m.usageWarning() + " ", spans
 		}
 		type seg struct {
 			text string
@@ -1208,14 +1377,17 @@ func (m Model) headerRightSpans(w int) (string, []headerSpan) {
 			hit  bool
 		}
 		var segs []seg
-		if counts {
+		if counts && m.loaded {
 			segs = append(segs, seg{countSt(aliveSt, hitl, "HITL"), headerSessions, true}, seg{countSt(afkSt, afk, "AFK"), headerSessions, true})
 			if waiting > 0 {
 				segs = append(segs, seg{waitSt.Render(fmt.Sprintf("%d waiting", waiting)), headerSessions, true})
 			}
 		}
-		if paused > 0 {
+		if paused > 0 && m.loaded {
 			segs = append(segs, seg{text: waitSt.Render(fmt.Sprintf("%d‖", paused))})
+		}
+		if r := m.releaseSegment(); r != "" {
+			segs = append(segs, seg{r, headerUpgrade, true})
 		}
 		segs = append(segs, seg{m.loopSegment(), headerLoop, true})
 		sep := dimSt.Render(" · ")

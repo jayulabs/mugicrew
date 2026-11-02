@@ -7,7 +7,8 @@ It may be a question or a request for a change. Decide which, with the human:
 - **Already fixed:** close it `accepted:`, and say what already fixed it. No
   edit is needed.
 - **A change is asked:** edit the Chart's docs, ADRs and glossary in this tree
-  on your effort branch, commit (as `docs(<bead-id>): <subject>`), and integrate onto the chart branch as usual.
+  on your effort branch (a new ADR: Read crew doc sequence-number.md before
+  numbering it), commit (as `docs(<bead-id>): <subject>`), and integrate onto the chart branch as usual.
   Close it `accepted:`. Append a Decisions-so-far line on the Chart only if a
   decision changed.
 - **Valid, but carried elsewhere:** file an offshoot Signal (crew doc

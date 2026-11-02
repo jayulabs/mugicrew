@@ -140,6 +140,15 @@ func TestFormMotionDroppedAndOtherModalsStayDead(t *testing.T) {
 	if got := MotionFilter(m, tea.MouseMsg{X: 5, Y: 5, Action: tea.MouseActionMotion}); got != nil {
 		t.Errorf("motion over a form passed: %v", got)
 	}
+	fm := focusPrio(t, m)
+	ax, ay := glyphCell(t, fm, "▶")
+	if got := MotionFilter(fm, tea.MouseMsg{X: ax, Y: ay, Action: tea.MouseActionMotion}); got == nil {
+		t.Error("motion over a form's priority arrow was dropped")
+	}
+	fm, _ = send(t, fm, tea.MouseMsg{X: ax, Y: ay, Action: tea.MouseActionMotion})
+	if fm.hover.step != "+" {
+		t.Errorf("hover step %q, want +", fm.hover.step)
+	}
 	m = m.push(confirmDialog("Sure?", nil, "", nil))
 	before := m.modals[len(m.modals)-1]
 	next := formClick(t, m, m.w/2, m.h/2)

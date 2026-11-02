@@ -787,3 +787,29 @@ func TestJudgeApprovalFollowsAutoApprove(t *testing.T) {
 		t.Errorf("marked Approval = %q, %v; want %s", v, err, Dead)
 	}
 }
+
+// A Remnant's Drafts are its respin Checkpoint: recover leaves them (the respin
+// re-run publishes them), so an open, unclaimed Remnant holding one is nothing
+// to recover.
+func TestRecoverLeavesARemnantsDrafts(t *testing.T) {
+	w := &world{bead: bd.Bead{ID: "mc-r", Kind: contract.KindRemnant, Status: "open"}, drafts: []string{"mc-cp2"}}
+	stub(t, w)
+	inv, v, err := Assess("mc-r", Opts{})
+	if err != nil || v != "" || len(inv.Drafts) != 0 {
+		t.Errorf("Assess = %+v, %q, %v, want nothing to recover", inv, v, err)
+	}
+	r, err := Recover("mc-r", Opts{})
+	if err != nil || r.Verdict != "" || len(w.calls) != 0 || !slices.Equal(w.drafts, []string{"mc-cp2"}) {
+		t.Errorf("Recover = %+v, %v; calls %q drafts %q, want the Draft kept and no write", r, err, w.calls, w.drafts)
+	}
+}
+
+// A closed Remnant's Draft is stranded (respin refuses it), so recover deletes it.
+func TestRecoverDeletesAClosedRemnantsDrafts(t *testing.T) {
+	w := &world{bead: bd.Bead{ID: "mc-r", Kind: contract.KindRemnant, Status: "closed"}, drafts: []string{"mc-cp2"}}
+	stub(t, w)
+	inv, _, err := Assess("mc-r", Opts{})
+	if err != nil || !slices.Equal(inv.Drafts, []string{"mc-cp2"}) {
+		t.Errorf("Assess = %+v, %v, want the Draft inventoried", inv, err)
+	}
+}

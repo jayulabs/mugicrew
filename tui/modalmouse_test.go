@@ -112,24 +112,27 @@ func TestOutsideClickBehindDoesNotReachFrame(t *testing.T) {
 	}
 }
 
-func TestFormInputSurgeryAndXIgnoreOutsideClicks(t *testing.T) {
+func TestFormInputSurgeryIgnoreOutsideClicks(t *testing.T) {
 	m := mouseForm(t)
 	next, _ := modalMsg(t, m, 0, 0, tea.MouseButtonLeft, tea.MouseActionPress)
 	if len(next.modals) != 1 {
 		t.Error("form dismissed")
 	}
-	x := modalFixture(t, dialog{kind: xdialog, title: "X"})
-	if x.modalLive() {
-		t.Error("X dialog is mouse-live")
-	}
-	next, _ = modalMsg(t, x, 0, 0, tea.MouseButtonLeft, tea.MouseActionPress)
-	if len(next.modals) != 1 {
-		t.Error("X dialog dismissed")
-	}
 	in := modalFixture(t, dialog{kind: input, title: "In", labels: []string{"a"}, inputs: []line{{}}})
 	next, _ = modalMsg(t, in, 0, 0, tea.MouseButtonLeft, tea.MouseActionPress)
 	if len(next.modals) != 1 {
 		t.Error("input dismissed")
+	}
+}
+
+func TestXDismissesOnOutsideClick(t *testing.T) {
+	x := modalFixture(t, dialog{kind: xdialog, title: "X"})
+	if !x.modalLive() {
+		t.Error("X dialog is not mouse-live")
+	}
+	next, _ := modalMsg(t, x, 0, 0, tea.MouseButtonLeft, tea.MouseActionPress)
+	if len(next.modals) != 0 {
+		t.Error("X dialog not dismissed")
 	}
 }
 
@@ -150,6 +153,20 @@ func TestModalMouseGates(t *testing.T) {
 	if small.modalLive() {
 		t.Error("live below floor")
 	}
+	xd := dialog{kind: xdialog, title: "X"}
+	if next, _ := modalMsg(t, modalFixture(t, xd).WithMouse(false), 0, 0, tea.MouseButtonLeft, tea.MouseActionPress); len(next.modals) != 1 {
+		t.Error("mouse off dismissed X")
+	}
+	xr := modalFixture(t, xd)
+	xr.ref = true
+	if xr.modalLive() {
+		t.Error("X live under ? reference")
+	}
+	xs := modalFixture(t, xd)
+	xs.w, xs.h = floorCols-1, floorRows-1
+	if xs.modalLive() {
+		t.Error("X live below floor")
+	}
 }
 
 func TestModalKeysWorkAfterMouse(t *testing.T) {
@@ -161,4 +178,17 @@ func TestModalKeysWorkAfterMouse(t *testing.T) {
 		t.Error("j after mouse did not move")
 	}
 	send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+}
+
+func TestXKeysWorkAfterMouse(t *testing.T) {
+	m, _ := xMouseOpen(t, cleanPlan)
+	x, y := findDrawn(t, m, "T-b1")
+	m, _ = modalMsg(t, m, x, y, tea.MouseButtonNone, tea.MouseActionMotion)
+	m = press(t, m, runeKey("k"))
+	if m.modals[0].cur != 0 && m.modals[0].cur != len(xPlanTree(m.modals[0].xs.plan))-1 {
+		t.Errorf("k after mouse: cur %d", m.modals[0].cur)
+	}
+	if m = press(t, m, tea.KeyMsg{Type: tea.KeyEsc}); len(m.modals) != 0 {
+		t.Error("esc after mouse did not close")
+	}
 }

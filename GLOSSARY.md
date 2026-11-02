@@ -142,6 +142,25 @@ new build of the source repo's landed mainline. Every other loop runs one
 build until stopped (ADR 0090).
 _Avoid_: dev loop, auto-update
 
+**Personal layer**:
+The per-user config file `<os.UserConfigDir()>/mugicrew/config.toml`, outside any
+repo. It is read only for machine-wide keys such as `[upgrade] unattended`;
+Workspace layers never are, so such a key set there has no effect.
+_Avoid_: global config, user config
+
+**Release notice**:
+An npm-installed mugicrew telling the human that a newer `@jayulabs/mugicrew`
+release than the one it runs exists. It only tells unless unattended Upgrade is
+opted into.
+_Avoid_: auto-update, auto-upgrade, update check
+
+**Upgrade**:
+Moving an npm-installed mugicrew onto a newer release, when the human asks from
+the CLI or the TUI, or by an opted-in loop unattended when safe (ADR 0411
+(an-opted-in-loop-upgrades-an-npm-global-install…)). A from-source build never
+upgrades; a Watched loop keeps it current.
+_Avoid_: auto-update, auto-upgrade, update, self-update
+
 **Watch pane**:
 A read-only tmux split beside the TUI that shows a bead's session
 transcripts, finished or live, opened by t on the bead's row. Unrelated to a
@@ -381,7 +400,8 @@ keeps for other senders).
   the out-of-band channel ADR 0003 ruled out. See ADR 0115, ADR 0222.
 - **Robin** — explain the Workspace read-only from cited sources and, with a
   human's yes, draft Signals and Initiatives from what a conversation finds; owns `discussion`.
-  Never writes a repo file. See ADR 0191, ADR 0193, ADR 0194.
+  Never writes a repo file; a service query that could write runs only on the
+  human's yes. See ADR 0191, ADR 0193, ADR 0194.
 - **Chopper** — the crew's doctor (not `mugicrew doctor`, see **doctor**): keep the bead graph healthy and valid; recovers a
   bead stranded by a dead effort, only on a human's command (deterministic code, no
   session), and diagnoses and repairs a broken bead with a human in a **Checkup**.
@@ -432,10 +452,9 @@ Each kind records a short **description** (top line), then as sub-bullets: its
 **notes** for anything else that matters.
 
 - **Signal** — an intake into the factory: the head of the spine and, with
-  Rollback, one of two kinds that enter the graph from outside mugicrew (ADR
-  0035 §13, ADR 0047; the retired `mugi-grill` Spec door of ADR 0012 survives
-  only as history).
-  - _Owner:_ Luffy (routing owner, ADR 0129); activation is **human-gated** — open
+  Rollback, one of two kinds that enter the graph from outside mugicrew (ADR 0035, ADR 0047); the
+  retired `mugi-grill` Spec door survives only as history.
+  - _Owner:_ Luffy (routing owner) (ADR 0129); activation is **human-gated** — open
     Signals form an intake backlog, and a human explicitly invokes Luffy on a chosen one.
   - _Structure:_ leaf
   - _Operations:_ Luffy **triages** the chosen Signal — triage _is_ its own
@@ -443,13 +462,19 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     **accept** spawns **exactly one Chart** in succession; **fast lane** (for a
     Signal already sharp, with no fog) spawns a **direct Spec** in succession
     instead, written by Luffy during triage, and keeps full review (ADR 0035);
-    **reject** closes with
-    a reason and no successor; **duplicate** is rejected via
-    `bd supersede <dup> --with <original>` (obsoletion), preserving multi-report
-    lineage.
+    **initiative** (for an effort that spans more than one Checkpoint) spawns,
+    on the human's yes, **exactly one Initiative** in succession and files
+    phase 1's member Signal(s) (ADR 0128); **reject** closes with
+    a `rejected[: <why>]` reason and no successor; **duplicate** closes
+    `duplicate: <original>` through `mugicrew duplicate <dup> <original>`,
+    keeping the `supersedes` lineage of multi-report duplicates; **reroute**
+    (when `mugicrew triage locate` finds the Signal's code only on one open
+    Checkpoint) files a pivot and/or Critique on that **host**, or merges
+    evidence into an open pivot on the same FR, and spawns no successor — see
+    **Reroute** (ADR 0322).
   - _Notes:_ Filed by any external actor — a human _or_ a system
     (`system-alert`); the ontology models only the intake, never the source (so
-    an external monitor is in scope; it is not Chopper, ADR 0126). May
+    an external monitor is in scope; it is not Chopper) (ADR 0126). May
     also be an **offshoot** (`discovered-from`) when mid-work turns up genuinely
     new, separate work — distinct from a `pivot` (Spec wrong) or a `critique`
     (defect in current work). No fan-out: a lumpy report splits into
@@ -476,9 +501,9 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     ADRs/CONTEXT, research → `docs/research/*`), plus prototype and chart-conflict
     sessions, **operate in a worktree of `chart/<id>`** (ADR 0071), so their artifacts (ADRs, CONTEXT edits, research docs) accrue
     on the branch and **land on mainline once the Chart is defogged and its Approval is approved**
-    (ADR 0388 (a-chart-lands-through-an-approval-carrying-a-chart-packet)): defog is the review, and
+    (ADR 0388): defog is the review, and
     the Approval gate, with no Usopp Review, is the human's yes. Prototype output does **not** land here (side
-    ref; ADR 0009 §2). Separable work found mid-defog splits as an offshoot-Signal
+    ref) (ADR 0009). Separable work found mid-defog splits as an offshoot-Signal
     (ADR 0006), not a second Spec. See ADR 0008, 0009, 0010.
 - **Survey** — a Chart's HITL charting leaf: the bead of the human-started
   session in which Nami maps the Chart's fog with a human.
@@ -490,7 +515,10 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     the Chart, or, with no fog and the human's assent, finishes it in place
     (`mugicrew chart finish` stamps it defogged). mugicrew closes the Survey on
     clean exit once fog is published, the Chart is closed or the Chart is
-    stamped; otherwise it returns to the Inbox.
+    stamped, with the reason `seeded: <chart id>`, `pushed back: <chart id>` or
+    `defogged: <chart id>`; otherwise it returns to the Inbox. A chain withdraw
+    closes it `withdrawn`. A Survey retires only with its Chart, through a chain
+    withdraw or a session that pushes the Chart back.
   - _Notes:_ Not a defog bead: its body points at the Chart, and its notes
     carry the decisions it settled when it finished its Chart in place. Speccing
     reads a closed Survey; promote-or-stamp skips it, and it never counts as fog
@@ -501,25 +529,46 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Owner:_ Nami
   - _Structure:_ leaf
   - _Operations:_ resolve (interview) → close, contributing to the Chart's defog.
-  - _Notes:_ One of the "Fog" defog beads.
+    Born from Nami's Survey charting, grilling and promote-or-stamp sessions, Sanji's
+    prototype session, the chart-conflict escalation, the Forge Review on a Chart and
+    Chart Approval rework. Closes: `answered: <summary>` (completed, by the session after
+    `mugicrew integrate`, and by the chart-conflict escalation grilling and the
+    Forge Review grilling through the same launch); `obsolete: <decider id>`
+    (`mugicrew obsolete <bead> --by <decider>`); `superseded: <new id>`
+    (`mugicrew supersede <bead> --with <new>`, which also adds the `supersedes`
+    edge, and the door for a duplicate defog bead); `withdrawn` (the human's
+    Withdraw of the one leaf); `cancelled: <initiative>`. Only `answered:` counts
+    as a decision. While the chart-conflict that drafted an escalation grilling
+    is open, it closes only `answered:` (ADR 0417).
+  - _Notes:_ One of the "Fog" defog beads. Born `discovered-from` the bead whose work raised it (the Survey, the grilling being resolved, the prototype, the chart-conflict, the Forge Review or the Approval), written in the same create; Nami's promote-or-stamp on a drained Chart is the exception, its drafter being the Chart, already its parent (ADR 0401 (mugicrew-a-landing-s-follow-up-is-born-discovered-from-it) §1).
 - **Research** — a defog bead resolved by autonomous agent investigation.
   - _Owner:_ Nami
   - _Structure:_ leaf
   - _Operations:_ resolve (investigate) → close, contributing to the Chart's
-    defog.
-  - _Notes:_ One of the "Fog" defog beads.
+    defog. Closes: `Wrote docs/research/<slug>.md: <summary>` (completed, by Go
+    from the agent's last line); `obsolete: <decider id>`; `superseded: <new id>`;
+    `withdrawn`; `cancelled: <initiative>`, by the same doors as a Grilling.
+  - _Notes:_ One of the "Fog" defog beads. Born `discovered-from` the bead whose work raised it (the Survey, the grilling being resolved, the prototype, the chart-conflict, the Forge Review or the Approval), written in the same create; Nami's promote-or-stamp on a drained Chart is the exception, its drafter being the Chart, already its parent (ADR 0401 (mugicrew-a-landing-s-follow-up-is-born-discovered-from-it) §1).
 - **Prototype** — a defog bead resolved by a high-fidelity prototype that
   validates interface design.
   - _Owner:_ Sanji
   - _Structure:_ leaf
   - _Operations:_ resolve (build + validate) → close, contributing to the Chart's
-    defog.
+    defog. Closes: `prototyped: <verdict>` (completed, by the session after
+    `mugicrew integrate`); `obsolete: <decider id>`; `superseded: <new id>`;
+    `withdrawn` (needs `--discard` when the throwaway tree holds work);
+    `cancelled: <initiative>`, by the same doors as a Grilling.
   - _Notes:_ Throwaway by definition: code is pushed to a side ref
     (`refs/mugicrew/prototypes/<chart-id>`), preserved for lineage but **never
     merged** — downstream builds on the validated design in the Spec, not the
     throwaway. The session commits its decisions on its own **Effort branch**
     and integrates them onto `chart/<id>`; the throwaway is built in a separate
-    detached tree and never lands on either. See ADR 0009, 0071, 0102.
+    detached tree and never lands on either. Born `discovered-from` the bead whose work
+    raised it (the Survey, the grilling being resolved, the prototype, the chart-conflict,
+    the Forge Review or the Approval), written in the same create; Nami's promote-or-stamp
+    on a drained Chart is the exception, its drafter being the Chart, already its parent
+    (ADR 0401 (mugicrew-a-landing-s-follow-up-is-born-discovered-from-it) §1).
+    See ADR 0009, 0071, 0102.
 - **Spec** — a closed record produced by a defogged Chart: the plan, sliced into
   Builds. Its body is never edited; it may accrue **Amendments**.
   - _Owner:_ Zoro
@@ -537,7 +586,7 @@ Each kind records a short **description** (top line), then as sub-bullets: its
 - **Checkpoint** — a candidate for its Workspace's next mainline state, which it
   becomes when Jinbe lands it. When the Workspace is the OE, that state is the
   OE's next **Checkpoint** (root glossary); on a foreign Workspace it is just a
-  landed change (OE ADR 0088, ADR 0089). Concretely the **build** branch (`checkpoint/<id>`), cut from its Spec's
+  landed change (ADR 0089). Concretely the **build** branch (`checkpoint/<id>`), cut from its Spec's
   base: the Chart's **landed base**, or — for a direct Spec — the Spec's
   the Spec's **anchor** (ADR 0287). A **successor Checkpoint** is the one a
   Rollback produces: same Spec, caused by the Rollback, cut at the revert commit
@@ -568,8 +617,17 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Owner:_ Usopp
   - _Structure:_ leaf (one bead per iteration)
   - _Operations:_ Usopp reviews → close. A pass that closes with zero open
-    Critiques is _clean_ and spawns the Approval.
-  - _Notes:_ —
+    Critiques is _clean_ and spawns the Approval; the clean close names that
+    Approval (ADR 0415 (mugicrew-review-conflict-and-critique-completed…)).
+  - _Close reasons:_ `clean: <approval id>`, `critiqued: <critique ids>`,
+    `held: pivot <pivot ids>` (no Critiques, but an open pivot withholds the
+    Approval), `pivoted: <pivot ids>` (the session raised its own pivot) and
+    `obsolete: …`. Reviews closed before this naming keep plain `Closed`.
+  - _Notes:_ Usopp writes the pin onto the Review as a `Commit:` line at review
+    start, and a re-dispatch rewrites it. No outcome obsoletes a Review whose
+    branch moved past its pin: a pass against a commit the branch has left
+    spawns an Approval behind the tip, the at-head gate rejects it, and the
+    drained Checkpoint gets a fresh Review.
 - **Critique** — a finding raised against the work (offshoot of a Build,
   Review, Landing or Approval).
   - _Owner:_ Franky
@@ -577,7 +635,15 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Operations:_ raised as an offshoot → resolve → close. A Landing whose gate
     build fails raises one carrying the **target base commit hash**; Franky
     rebases onto that base before fixing, so he fixes the tree that failed.
-  - _Notes:_ See ADR 0152.
+  - _Close reasons:_ `completed` (fixed with no `Rationale:` comment),
+    `accepted: <rationale>`, `rejected: …`, `deferred: …`, `pivoted: <pivot ids>`,
+    `dismissed: <pivot id>` (an Ask Critique dropped by pivot triage) and
+    `obsolete: …`. Critiques closed before this naming keep plain `Closed`.
+  - _Notes:_ See ADR 0152. A Critique is born discovered-from the bead that
+    raised it, with the pivot (a refiled FR, discovered-from the pivot) and the
+    Signal (a reroute, caused-by the Signal) as the named exceptions that keep
+    their one provenance edge; see ADR 0401
+    (mugicrew-a-landing-s-follow-up-is-born-discovered-from-it) §1.
 - **Forge Review** — one pass over a container's unacked Merge Request comments
   (plain comments and thread notes, from any reviewer, bots included) that files
   the actionable ones on the container, merged where they duplicate, and acks
@@ -586,8 +652,11 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
     container); AFK
   - _Operations:_ Jinbe spawns it when unacked comments appear → Usopp files
-    Critiques (Checkpoint) or grillings (Chart) → close. Not a **Review**, which
-    reviews the code at a pin.
+    Critiques (Checkpoint) or grillings (Chart) → close. A pass that filed or
+    folded notes closes `completed: filed N, folded N, skipped N; read through
+    note X`; an empty pass closes `completed: nothing actionable; read N notes
+    through X`. A Forge Review swept with its container closes with that
+    container's sweep reason. Not a **Review**, which reviews the code at a pin.
   - _Notes:_ Charted on the Chart "Actionable Merge Request comments are filed
     deduplicated and acked".
 - **MR Watch** — the leaf that reads a container's open Merge Request every paced
@@ -602,7 +671,13 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     either the MR is merged or closed or the container closes; until then it
     outlives its container, answering late closes; a close-out still failing 7
     days after the container closed is abandoned and carried by a filed
-    Signal. Its body is the `MR:` line plus the `MR link:` line, copied from
+    Signal. It closes `completed: container closed` when its container lands or
+    closes with no MR recorded, under a non-gitlab strategy, or with nothing
+    owed; `completed: merge request merged` or `completed: merge request closed`
+    once nothing is owed and the MR reads so; and `abandoned: close-outs still
+    failing; carried by <signal id>` when it gives up, the Signal filed first. It
+    closes with its container's sweep reason only where a sweep reaches it.
+    Its body is the `MR:` line plus the `MR link:` line, copied from
     the Landing, and, once its container is closed, the `Close-outs due:` /
     `Close-outs failing:` lines.
   - _Notes:_ See ADR 0185 §8, ADR 0343 (an-mr-watch-closes-once-nothing-is-owed…)
@@ -613,17 +688,17 @@ Each kind records a short **description** (top line), then as sub-bullets: its
 - **Approval** — the stamp that gates the land.
   - _Owner:_ Luffy
   - _Structure:_ leaf (one per Checkpoint or Chart; for a Chart, spawned by Nami at the
-    `chart/<id>` head with no Review, ADR 0388)
+    `chart/<id>` head with no Review) (ADR 0388)
   - _Operations:_ Luffy _writes_ the **Decision Packet** (a **Chart Packet** on a Chart) to the Approval,
     presents it, revises it on request, and offers the approve action that closes
     the bead. Open = merge pending; closed approved is the sole
     trigger for the Checkpoint's derived `approved` state; an Approval closed
-    for rework or obsoleted lands nothing (carries **no ordering
+    for rework or obsoleted (`obsolete: branch advanced past the pinned commit`) lands nothing (carries **no ordering
     edge**; a **Landing** succeeds it).
   - _Notes:_ Spawned on demand when a Review closes clean, in **succession** to
     that Review, so it certifies that Review's exact commit; if the branch
     advances past it, it is **obsoleted and respawned** off the new clean Review. A Chart's
-    Approval is spawned by Nami once the Chart is drained and stamped, and respawned at the new
+    Approval is spawned by Nami once the Chart is drained and stamped, with no Review to succeed (parent edge only), and respawned at the new
     head when the branch advances; a Chart with nothing ahead of mainline gets none.
   - _Auto-approve:_ while the `[approvals] auto_approve` setting is on (layered: the
     machine-local override, then the shared config, then off), an unmarked
@@ -635,7 +710,7 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     dispatch); Go closes it `approved`. Off, or marked, it is HITL.
     A third consecutive failed AFK session adds the sticky `auto-approve:failed`
     **fallback marker**, which makes it an ordinary HITL Approval until it closes or
-    a human removes the label (ADR 0341; ADR 0346; ADR 0353).
+    a human removes the label (ADR 0341, ADR 0346, ADR 0353).
   - _Under gitlab:_ the Approval is AFK unless marked `auto-approve:failed`. Its session
     writes the Decision Packet; Go then opens the Checkpoint's MR as a GitLab Draft (or
     reuses the open one) with the Packet and the Landing's trailer block as its
@@ -648,14 +723,12 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   - _Carried:_ a **carried Approval** is one Go writes, closed approved at birth, when the
     head differs from the last approved one only by a renumber of the branch's own numbered
     files. It succeeds the Approval it carries, and its authority is that of its **origin**,
-    the first Approval up that chain that was not carried (ADR 0397
-    (a-renumber-only-head-is-the-approved-squash-replayed…), ADR 0398
-    (a-carried-approval-is-a-go-written-successor…)).
+    the first Approval up that chain that was not carried (ADR 0397, ADR 0398).
     _Avoid:_ auto-approved (that names an AFK session's stamp), skipped Approval.
 - **Decision Packet** — the written case for approving a Checkpoint, kept on its
   Approval and carried into its land commit (and, for a remote-truth Workspace,
   its Merge Request body; under gitlab the Draft MR's description from the moment it
-  opens, followed by the Landing's trailer block, ADR 0382). Sections: Background, Summary, Evidence, Merge Danger,
+  opens, followed by the Landing's trailer block) (ADR 0382). Sections: Background, Summary, Evidence, Merge Danger,
   Execution Notes, Approval History (crew doc `approval-body.md`). A Chart's
   counterpart is the **Chart Packet**.
   _Avoid:_ PR body, approval doc, formal document.
@@ -668,10 +741,10 @@ Each kind records a short **description** (top line), then as sub-bullets: its
   stay first and verbatim. It is the land commit's body and, under gitlab, the Draft
   MR's description, each followed by the trailer block (ADR 0388).
   _Avoid:_ Chart summary, Chart review.
-- **Conflict** — a rebase conflict, or a numbered-file clash (ADR 0219; ADR 0030/0069),
+- **Conflict** — a rebase conflict, or a numbered-file clash (ADR 0219, ADR 0030, ADR 0069),
   hit either by the pre-review probe, when Jinbe would spawn the Review, or while a
   Landing lands the Checkpoint; or a human's **requested rebase** of the Checkpoint
-  onto mainline (the `requested` variant, ADR 0262).
+  onto mainline (the `requested` variant) (ADR 0262).
   - _Owner:_ Franky
   - _Structure:_ leaf (member of the Checkpoint)
   - _Operations:_ Jinbe's Landing aborts the rebase, files it on the Checkpoint
@@ -680,22 +753,30 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     obsoleted. A pre-review Conflict (filed by Jinbe instead of the Review) is
     resolved the same way, but its close leads to a re-probe and then the first
     Review, not a re-review.
+  - _Close reasons:_ `resolved`, `pivoted: <pivot ids>`, `superseded: <conflict
+    title>` (a requested Conflict replaced by a real one) and `obsolete: …`.
+    Conflicts closed before this naming keep plain `Closed`.
   - _Notes:_ Named for the problem, not the action (both Franky and Jinbe rebase).
     See ADR 0004. A **numbered-file clash** is a branch adding a file whose number
     mainline already holds in the same sequence and number-space directory under another
     filename (an ADR, or a configured `{n}` template such as a migration); its body is
     the **number-clash** variant, listing each clashing path with its template.
-    _Avoid:_ adr-number-clash, "ADR-number clash" (History: ADR-only before ADR 0219).
+    _Avoid:_ adr-number-clash, "ADR-number clash" (History: the entry covered ADR numbers only until the numbered-file clash variant was added).
     A **requested rebase** is filed by a human only (never an agent), pinned to
-    mainline at filing, and closes like any Conflict (ADR 0262).
+    mainline at filing, and closes like any Conflict (ADR 0262). The CLI door
+    (`mugicrew rebase`) refuses a crewmate session (an effort id or HITL pane in the
+    env) with exit 1 and no override; an agent suggests one by an offshoot Signal.
     At most one Conflict is open per Checkpoint, whatever its variant (a human's
     requested rebase included); Landing supersedes an unclaimed requested one (ADR 0261).
+    A Conflict a Landing raises is born discovered-from that Landing (ADR 0401); a
+    pre-review or requested one carries no provenance edge.
 - **Chart-conflict** — the Chart-land counterpart of Conflict: a collision that
   stops a Chart's Landing from landing the Chart branch, or a human's request to
   rebase the Chart branch onto mainline. One kind, three **variants**: a
   textual **rebase-conflict**, an **number-clash** (the Chart adds a numbered
   file whose number mainline already has; legacy token `adr-number-clash`), or a
-  human-filed **requested** rebase (ADR 0262).
+  human-filed **requested** rebase (ADR 0262); its CLI door (`mugicrew rebase`)
+  refuses a crewmate session, as for a Conflict.
   - _Owner:_ Nami
   - _Structure:_ leaf (member of the Chart)
   - _Operations:_ Jinbe's Landing files it on the Chart carrying the branch, the **target base commit
@@ -708,14 +789,19 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     judgment call it **escalates**: a grilling bead on the Chart blocks the
     chart-conflict until the human answers, then the AFK writer applies the
     answer.
-  - _Notes:_ See ADR 0011, ADR 0030, ADR 0219, ADR 0079, ADR 0080, ADR 0261, ADR 0262. At most
+  - _Notes:_ See ADR 0011, ADR 0030, ADR 0219, ADR 0079, ADR 0080, ADR 0261, ADR 0262, ADR 0400. At most
     one is open per Chart, whatever its variant; Landing supersedes an unclaimed
-    requested one (ADR 0261).
+    requested one (ADR 0261). One the Chart's Landing raises is born discovered-from
+    that Landing (ADR 0401); a requested one carries no provenance edge. It closes
+    `resolved: <summary>`, `superseded: <title>`, `moot: …`, `withdrawn` or
+    `cancelled: <initiative>`.
 - **Pivot** — work on a Checkpoint proves the **Spec** wrong (the plan, not the
   code). A triaged Signal can raise one on its **Host** by **Reroute**, and a
   **Errand** can raise one on the Checkpoint it holds.
   - _Owner:_ Zoro (triages)
-  - _Structure:_ leaf (offshoot of the Build/Review, pointing at the Spec)
+  - _Structure:_ leaf (offshoot of its raiser: discovered-from it, or caused-by
+    the Signal for a reroute; pointing at the Spec; its host is the Checkpoint
+    the raiser holds)
   - _Operations:_ raised by the discovering crewmate (Franky/Usopp), whose own
     bead then closes normally, or by a stuck Errand (Brook), which stays claimed; a live pivot **blocks the whole Checkpoint** —
     every current and later member, the Review/Approval spawn, and the land.
@@ -728,15 +814,25 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     finding may become a Critique) and let Builds resume. A fast-laned Spec has
     no Chart: escalating it spawns the fresh Chart **caused by the original
     Signal** (which stays closed).
-  - _Notes:_ See ADR 0005, ADR 0035, ADR 0043, ADR 0044, ADR 0045, ADR 0046. Zoro
+  - _Notes:_ See ADR 0005, ADR 0035, ADR 0043, ADR 0044, ADR 0045, ADR 0046,
+    ADR 0326 (mugicrew-a-task-raises-through-mugicrew-pivot-raise…), ADR 0416
+    (mugicrew-a-pivot-s-host-is-its-raiser-s-checkpoint). Zoro
     recommends the outcome; the human picks. One pivot = one FR: a second
     finding on the same FR merges into the open pivot. A Checkpoint's open
     pivots are triaged together; correcting or escalating sweeps the rest.
+  - _Close reasons:_ `confirmed`, `escalated`, `dismissed: <gist>`,
+    `amended: <gist>`, `superseded: <lead>` for a sibling the lead's sweep
+    retires (`sibling superseded`), `superseded: gated Checkpoint <ids> closed`
+    for a straggler, and `obsolete: …` for a retired Draft. Each is a bd
+    constant or builder (`bd.DismissedCloseReason`, `bd.AmendedCloseReason`,
+    `bd.SiblingSupersededReason`); the four outcomes run through the sweep verbs
+    `mugicrew pivot confirm`, `escalate`, `dismiss` and `amend`.
 - **Rollback** — a human's request to undo one landed Checkpoint that broke
   main, and recover its work.
   - _Owner:_ Jinbe
   - _Structure:_ leaf (unparented; `related` to its target Checkpoint)
-  - _Operations:_ filed directly by a human, with no triage. Jinbe adds a
+  - _Operations:_ filed directly by a human through the History tab's `u` key,
+    its only door: no CLI verb, no agent filing (ADR 0047), no triage. Jinbe adds a
     **revert commit** on main for the target's squash, never rewinding main,
     then hands the work on to a **successor Checkpoint** under the same Spec,
     caused by the Rollback and seeded with the reverted work, whose first member
@@ -747,10 +843,31 @@ Each kind records a short **description** (top line), then as sub-bullets: its
     at main HEAD with no seed, and its Build fixes the breakage in place.
     Under remote truth the revert goes through a revert MR; a human closing
     that MR **abandons** the Rollback, with no successor.
+  - _Close reasons:_ `handed off: <successor id>` (completed), `fix-forward:
+    <successor id>`, `abandoned: revert MR closed`, `invalid: …` (no related
+    Checkpoint, target not landed, or no land trailer), and `withdrawn`. Each
+    outcome with a successor names it; Rollbacks closed before this naming
+    keep their old reason (plain `Closed`, `fix-forward: revert conflicted`).
   - _Notes:_ "Rollback" is the bead and the operation; "revert commit" is only
     the git mechanism. One Rollback = one Checkpoint; a landed Checkpoint is
     never reopened. Agents never file one. See ADR 0047, ADR 0048, ADR 0049,
     ADR 0208.
+- **Remnant** — the in-flight work that a Forge merge left off mainline when it
+  landed a Checkpoint at an earlier approved pin. It is also the HITL bead that asks
+  the human which exit to take: drop, offshoot or respin.
+  - _Owner:_ Zoro
+  - _Structure:_ leaf (one per landed Checkpoint; discovered-from the Landing,
+    `related` to the landed Checkpoint)
+  - _Notes:_ See ADR 0402, ADR 0407, ADR 0409.
+  _Avoid:_ Split, Recovery.
+- **Respin** — the Remnant exit that cuts a new Checkpoint for the landed
+  Checkpoint's Spec from fresh mainline, seeded with the stranded work. It is also
+  that new Checkpoint.
+  - _Structure:_ container (kind:checkpoint), caused by its Remnant, with no new
+    Spec; in the landed Checkpoint's Initiative while that is unclosed
+  - _Notes:_ It goes through the full Review and Approval, because nothing it
+    replays was approved onto mainline. See ADR 0407.
+  _Avoid:_ rollback successor, re-cut.
 - **Renumber Checkpoint** — a Spec-less Checkpoint filed on the landed container's
   reconcile pass (Jinbe for a Checkpoint, Nami for a Chart), owned by Jinbe, when a landed
   gitlab container is the later side of a numbered-file clash (two Forge merges
@@ -768,15 +885,22 @@ Each kind records a short **description** (top line), then as sub-bullets: its
 - **Landing** — one bead per attempt to land a container's branch on mainline,
   pinned (`Commit: <sha>`) to the base it will land. Its outcomes: _landed_
   closes it `landed: <sha>`; _conflict_ closes it `obsolete: conflict` and files
-  the container's conflict bead; _pending_ leaves it open; a branch that
-  advanced past its pin closes it `obsolete: branch advanced`.
+  the container's conflict bead; _pending_ leaves it open; _branch advanced_
+  closes it `obsolete: branch advanced without landing`;
+  _build failed_ closes it `obsolete: build failed` and files a Critique on the
+  Checkpoint; _pipeline failed_ closes it `obsolete: pipeline failed` and files
+  a Critique on a Checkpoint, or a hold Errand on a Chart; _merge request
+  closed_ closes it `obsolete: merge request closed` and holds the container on
+  an Errand.
   _Avoid:_ the act of landing, which is **Land**.
   - _Structure:_ leaf (member of a Checkpoint or a Chart; at most one open per
     container); AFK, Mechanical, no session
   - _Notes:_ The `<Kind>: <id>` trailer on mainline stays the durable landed
     fact; the Landing's close mirrors it. Only Checkpoint and Chart lands are
     Landings; other moves of main (Rollback reverts, and legacy Spec anchors)
-    stay bead-less (ADR 0145, ADR 0147).
+    stay bead-less (ADR 0145, ADR 0147). Every follow-up a Landing files
+    (Critique, Conflict, Chart-conflict, Hold Errand) is born discovered-from
+    it (ADR 0401).
 
 Landing mechanics (not lifted into vocabulary.md): Jinbe owns it. It is
 spawned at the container's land gate, pinned to the commit it will land: on a
@@ -806,8 +930,14 @@ when the URL is unknown).
     exiting, leaving a comment on the bead that records what it did. The
     surgery **ends** only on the human's explicit word, which closes the
     Surgery; Jinbe then spawns the Review. The end rule counts only this Surgery's
-    trailered squashes: with none it closes alone, and its Checkpoint closes
-    too only when nothing is ahead of main and the Surgery is its only child.
+    trailered squashes: with some on its Checkpoint it closes `ended`; with none it
+    closes `abandoned: surgery ended with no commits`, and its Checkpoint closes
+    with the same reason too only when nothing is ahead of main and the Surgery is
+    its only child. A Surgery also closes `withdrawn` when its Checkpoint is
+    withdrawn, and `cancelled: <initiative>` when its Checkpoint's Initiative is
+    cancelled. An idle Surgery ends either way: `enter` (resume) on its row, then
+    telling Franky "end"; or the human running `mugicrew surgery end <id>`. A
+    stop or a drop leaves it open and idle and is not a close.
     Its commits are reviewed against the Surgery bead (the Spec, if any, stays
     the intent), its Critiques go to Franky as usual, and pivots follow the
     Spec: none on a surgery Checkpoint. While open (idle included) it
@@ -822,8 +952,8 @@ when the URL is unknown).
   mechanism while keeping its intent. It comes from an amended Pivot.
   - _Owner:_ Zoro (writes it at triage)
   - _Structure:_ not a bead; a marked comment on the Spec
-  - _Operations:_ read alongside the Spec body; the latest Amendment for an FR
-    overrides it.
+  - _Operations:_ written by `mugicrew pivot amend`; read alongside the Spec
+    body; the latest Amendment for an FR overrides it.
   - _Notes:_ A Spec's effective content is its body plus its Amendments in
     order, so the Spec stays append-only. A superseding Spec folds them into
     its body. See ADR 0044, ADR 0045.
@@ -852,14 +982,19 @@ when the URL is unknown).
     **idle**; `x` unclaims it. Abandoning one is a **withdraw**, with `X` or
     `mugicrew withdraw <errand>`, not a hand `bd close`.
   - _Notes:_ Not a defog kind: a Chart never contains one (ADR 0013). Errands
-    are filed by `mugicrew errand new`, only from a Spec's `## Errands` when it is
-    sliced and from Nami's charting, grilling and promote-or-stamp sessions; Hold
-    Errands are the only Errands Go files. A crewmate that finds an
+    are filed by `mugicrew errand new`, and crew producers file them only that
+    way: from a Spec's `## Errands` when it is sliced and from Nami's charting,
+    grilling and promote-or-stamp sessions; Hold Errands are the only Errands Go
+    files. A human may also file one by hand with raw `bd create` and
+    `kind:errand`, with no Signal and no triage (ADR 0113 §1, ADR 0117 §3, ADR
+    0350 §2); that path skips `errand new`'s Initiative climb, so the Errand gets
+    no `Initiative:` line and stays outside any Initiative unless the human
+    parents and orders it. A crewmate that finds an
     external-world step partway through a Build, Review or other work still files
     an offshoot Signal. Going forward only:
     an earlier free-standing Errand is not migrated, and a later Chart adopt does
     not carry the Errands its session drafted. See ADR 0352, ADR 0113, ADR
-    0114, ADR 0115, ADR 0116, ADR 0117, ADR 0118, ADR 0335, ADR 0342.
+    0114, ADR 0115, ADR 0116, ADR 0117, ADR 0118, ADR 0335, ADR 0342, ADR 0350.
     Existing `kind:task` beads, closed included, are relabelled by `mugicrew
     doctor fix`; the loop refuses to start while any remain (ADR 0355).
   - _History:_ named Task until ADR 0354.
@@ -877,10 +1012,11 @@ when the URL is unknown).
   closes them `obsolete:` when the bead they block is closed (ADR 0393, ADR 0396).
   It is born open, not as a Draft, because Go files it with no session to
   publish it. Its lineage is its key fact line, a `blocks` edge to the container
-  or Rollback it holds and, when it re-files after an earlier hold on the same
-  key closed, a `related` edge to that closed hold. It has no `discovered-from`
-  edge: bd keeps one edge per pair, `blocks` already takes the container's pair,
-  and a hold may be filed with no Landing at all. The key, not an edge, is its
+  or Rollback it holds, a `discovered-from` edge to the Landing for a
+  closed-MR, failed-pipeline or trailerless-merge hold a Landing raised (ADR 0401),
+  and, when it re-files after an earlier hold on the same
+  key closed, a `related` edge to that closed hold. A revert-pipeline or
+  foreign-land hold has no `discovered-from`. The key, not an edge, is its
   identity for finding it again, because the MR number or sha that makes a hold
   unique can't live on an edge.
   _Avoid:_ "foreign hold" for the foreign-land Errand (that term names a
@@ -908,7 +1044,8 @@ when the URL is unknown).
   - _Structure:_ leaf, free-standing and off the spine, like an Errand: never a
     member of a Chart, Checkpoint or Initiative.
   - _Operations:_ only a human launches, resumes or drops one; the loop never
-    does. Robin closes it when the human says they are finished. Each Signal
+    does. Robin closes it `completed` when the human says they are finished; a drop
+    closes it `dropped`. Each Signal
     or Initiative she drafts is an offshoot (`discovered-from`) of it. A retrospective keeps
     its title: "Retrospective <target title>", not "Discussion <time>".
   - _Notes:_ See ADR 0194. _Avoid:_ chat, conversation, Robin session (for the
@@ -918,7 +1055,8 @@ when the URL is unknown).
   reads that spine's sessions and drafts Signals from recurring patterns.
   - _Structure:_ an unparented Discussion titled "Retrospective <target title>",
     `related` to its target. Its body holds the key lines `Target: <id>` and
-    `Spine: <id> <id> …`. The human starts it with `r`.
+    `Spine: <id> <id> …`. The human starts it with `n t`.
+  - _Operations:_ closes like any Discussion: `completed` or `dropped`.
   - _Notes:_ A retrospective keeps its title (see **Discussion**).
 - **Checkup** — one human-started session in which Chopper diagnoses, with the
   human, a bead they think is broken (its **target**) and repairs it, as a bead.
@@ -927,7 +1065,9 @@ when the URL is unknown).
     its target by a `related` edge. At most one open Checkup per target.
   - _Operations:_ only a human launches, resumes or drops one; the loop never
     does. While it is open its target carries `paused:checkup`. It closes as
-    repaired or as not a bead fault.
+    repaired (`repaired: <what changed>`), not a bead fault
+    (`not a bead fault: <why>`) or dropped (`dropped`). Every close lifts
+    `paused:checkup` from a target only when no other open Checkup still holds it.
   - _Notes:_ See ADR 0272; launched by `mugicrew checkup <bead>` or `c` on a
     bead row (ADR 0274). Not **recover**, which repairs a bead stranded by a
     dead effort with no session. _Avoid:_ repair, recovery, doctor (for the
@@ -938,8 +1078,7 @@ when the URL is unknown).
   Checkpoints. Its membership is the effort's workstream tag.
   - _Owner:_ Luffy (steward, creates it; handler, decides on drain whether a
     next phase opens or the Initiative is done). Robin may also create one
-    (bodyless, a Draft, on the human's yes) besides Luffy and the tab; see
-    ADR 0381.
+    (bodyless, a Draft, on the human's yes) besides Luffy and the tab (ADR 0381).
   - _Structure:_ container (parents every bead of each member chain); it has
     no branch and no land, since each member Checkpoint lands on its own
   - _Operations:_ **membership** covers the whole chain: a member Signal's
@@ -947,8 +1086,8 @@ when the URL is unknown).
     an existing chain in by its unclosed head; its closed predecessors stay
     where they are, as lineage. Moving a chain between Initiatives is a release,
     then an adoption. **Phases** enter one at a time, each as one or more
-    member Signals (one per touched repo context, at most one per context,
-    ADR 0252); the next is cut only once the Initiative is **drained** (no
+    member Signals (one per touched repo context, at most one per context)
+    (ADR 0252); the next is cut only once the Initiative is **drained** (no
     unclosed member), against the **Done when** finish line written at its
     triage. A **pre-bound member** carries `context:<name>` from its filing
     and its triage keeps it; an unlabelled member's context is undecided, not
@@ -980,8 +1119,7 @@ when the URL is unknown).
     Initiative of the member it is ordered against, and an offshoot joins its
     cause's Initiative whatever its order unless its filer opts out with `--outside`,
     while repair Signals, a Latch and a Pivot stay outside and join only by
-    adoption (ADR 0375 (an-offshoot-whose-cause-is-in-an-initiative-is-born-as-its-member…),
-    ADR 0352).
+    adoption (ADR 0375, ADR 0352).
     Single-Checkpoint work never needs one, unless the Workspace sets Require
     Initiatives. A manual pause on
     it pauses every member (ADR 0081). It carries no defog of its own: a
@@ -1039,6 +1177,13 @@ Named domain relationships, each on one bd edge (ADR 0002):
   open but has no unclosed member; Drafts count as unclosed. A drained
   container is routed to its handler.
   _Avoid:_ "draining" (a loop state), "empty", "done".
+- **Effective priority** — the level a bead dispatches at and the TUI badge
+  leads with: the most urgent (lowest P-number) of its own priority and that of
+  every open container ancestor (Checkpoint, Chart, Initiative). Derived, never
+  stored, and distinct from the bead's **own** priority, the bd field `+`/`-`
+  edits. Own wins a tie; the nearest ancestor at the effective level is its
+  source (ADR 0410, `bd.EffectivePriority`).
+  _Avoid:_ "inherited priority", "container priority" (a container's own field).
 - **Offshoot** — new work discovered _mid-work_, distinct from succession.
   Its **order** with the work it was found from is one of: a **follow-up**
   (it waits for the cause's container to land), a **prerequisite** (the cause's
@@ -1055,6 +1200,10 @@ Named domain relationships, each on one bd edge (ADR 0002):
   stays as lineage. A Spec's dependents therefore wait for its Checkpoint to
   **land**. A Checkpoint obsoleted by a confirmed or escalated **pivot** carries
   the same way, to the corrected Spec or the escalated Chart.
+  A bead closed as a duplicate carries the same way, onto its original's live head
+  (the original while unclosed, else the first unclosed bead along its succession);
+  when that chain has ended, its dependents are released and the event records them
+  skipped `ended`.
   _Avoid:_ "moving" edges (nothing is removed).
 
 ## Ownership roles
@@ -1155,7 +1304,7 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   `mugicrew abort` or TUI `x`: its bead is paused _manual_ first, then its
   processes are terminated, and a live host cleans up as for a failure (ADR 0083).
   _Avoid:_ calling it abandoned, which leaves its claim and tree behind.
-- **Withdraw** — the human dropping one unfinished chain, one Errand or one Latch, inside an
+- **Withdraw** — the human dropping one unfinished chain, one Errand, one Latch or one defog leaf, inside an
   Initiative or not: for a chain or an Errand, its unclosed head and every
   unclosed bead under it close with reason `withdrawn` and no successor, and
   their effort worktrees and branches go with them. A chain's withdraw also
@@ -1165,7 +1314,9 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   **left open** (ADR 0342, ADR 0351). Dropping a whole Initiative is **cancel**
   (ADR 0310). A withdrawn Latch closes alone with reason `withdrawn`: the
   beads it blocked stay open and are released, and its `blocks` edges stay
-  (ADR 0389).
+  (ADR 0389). A withdrawn defog leaf (grilling, research or prototype) likewise
+  closes alone with `withdrawn`, sweeping nothing, and is refused for an
+  escalation grilling while its chart-conflict is open (ADR 0417).
   _Avoid:_ "abandon" (an abandoned effort), "cancel" for one chain, "reject"
   (a triage verdict on a Signal), "swept" for a before-closed Errand (swept is the
   Errands after).
@@ -1175,8 +1326,28 @@ Owner is distinct from two bd-native facts it is easy to conflate:
   Mouse mode row, which switches capture live; the TUI's own tmux session
   follows the setting (its session-scoped `mouse` option, set at start and on
   every switch). While it is on the terminal's own
-  text selection gives way to Shift-drag (Option/Alt on some terminals). _Avoid:_
-  "mouse support" (it is a setting a human turns on, not a capability).
+  text selection gives way to Shift-drag (Option/Alt on some terminals). A bead
+  row's right-click menu offers `+ raise prio` and `- lower prio` in place of
+  `+/- prio`; running one steps the priority and leaves the menu open, at the
+  same place and on the same bead, so it can be clicked again, and an item at
+  its bound (no raise at P0, no lower at P4) drops out (ADR 0412).
+  While it is on, the Settings tab's selected row draws a `◀ value ▶` stepper
+  around its value (the pool, Auto-exit, Auto-approve, Mouse mode, Theme and
+  each Kind profile row; not the read-only Initiatives row). A press on an arrow
+  stages one step through the normal key path, as `-`/`+` do; nothing is
+  saved. An arrow at a bound is a blank, inert cell, and a double-click is two
+  steps, never enter (ADR 0412).
+  A staged row's gloss line starts, two columns in, with `✓ save  ✗ discard`
+  (a staged Kind profile row, which has no gloss line, gains one extra line under
+  it, after any unrunnable reason, carrying them). `✓ save` sends enter and
+  `✗ discard` sends esc through the normal key path; only the drawn labels act,
+  the rest of the gloss line still selects its row. Saving Mouse mode off by a
+  click ends capture at once (ADR 0412).
+  In a Signal or Initiative form the focused priority field draws `◀ P2 ▶` the
+  same way: ◀ steps toward P0, ▶ toward P4, an arrow at a bound is hidden and
+  inert, a step keeps focus, and a click on the unfocused field only focuses it
+  (ADR 0412). The wheel over the arrows never edits.
+  _Avoid:_ "mouse support" (it is a setting a human turns on, not a capability).
 - **Theme** — the layered `[tui] theme` setting (machine-local override, then the
   checked-in `.mugicrew/config.toml`, then built-in dark) that picks one of three
   presets, `dark`, `light` and `high-contrast`, for the main TUI and the F10

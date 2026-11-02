@@ -1,8 +1,8 @@
 // Command mugicrew is the single Application that consumes a Signal and drives
 // the bead graph. With no args it opens the human-action TUI (a bubbletea
 // skeleton for now); `signal new` files a Signal (spec §7.1), `signal triage`
-// opens its charting session (§7.2), `pivot confirm` / `pivot escalate` are the
-// triage session's sweeps (ADR 0046 §5), the hidden `hitl-run` wraps a TUI-launched
+// opens its charting session (§7.2), `pivot confirm` / `pivot escalate` / `pivot
+// dismiss` / `pivot amend` are the triage session's sweeps (ADR 0046 §5), the hidden `hitl-run` wraps a TUI-launched
 // session's pane (ADR 0037), the hidden `hitl-hook` records its waiting bit from
 // a Claude Code hook (ADR 0099), and `reconcile` is the idempotent
 // accept-path verb that session runs (§8.2); `ps` lists active AFK efforts and
@@ -61,6 +61,7 @@ import (
 	"jayulabs.org/mugicrew/robin"
 	"jayulabs.org/mugicrew/route"
 	"jayulabs.org/mugicrew/sanji"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 	"jayulabs.org/mugicrew/tui"
 	"jayulabs.org/mugicrew/usopp"
@@ -80,6 +81,7 @@ var (
 )
 
 func main() {
+	defer func() { afterVerb() }()
 	luffy.ReadAutoApprove = func() luffy.AutoApprove {
 		a := loop.ReadAutoApprove()
 		return luffy.AutoApprove{On: a.On, Source: a.Source}
@@ -91,13 +93,13 @@ func main() {
 		return
 	}
 	if len(os.Args) == 4 && os.Args[1] == "bead-detail" { // hidden: the F10 bead pane's detail text
-		os.Exit(beadDetail(os.Args[2], os.Args[3], os.Stdout, os.Stderr))
+		exit(beadDetail(os.Args[2], os.Args[3], os.Stdout, os.Stderr))
 	}
 	leadPathWithSelf()
 	args, err := workspaceArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exit(1)
 	}
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		fmt.Println(usage) // before the gate and the event log: help works anywhere, logs nothing
@@ -111,31 +113,32 @@ func main() {
 	if len(args) == 1 { // the TUI's `mugicrew --watch`
 		if args, watch, err = cutWatch(args); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exit(1)
 		}
 	}
+	afterVerb = startReleaseNotice(args)
 	if len(args) > 0 && args[0] == "init" { // bootstraps the graph, so before the gate and the event log; like doctor it is no graph-required verb
-		os.Exit(runInit(args[1:], os.Stdin, os.Stdout))
+		exit(runInit(args[1:], os.Stdin, os.Stdout))
 	}
 	if err := requireGraph(args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		exit(1)
 	}
 	if len(args) == 0 {
 		if err := runBare(watch); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exit(1)
 		}
 		return
 	}
 
 	if args[0] == "doctor" { // before the event log opens: bare doctor is read-only, doctor fix writes no event (ADR 0301 §5)
-		os.Exit(runDoctorCmd(args[1:], os.Stdout))
+		exit(runDoctorCmd(args[1:], os.Stdout))
 	}
 	if args[0] == "hitl-follow" { // hidden: hitl-run's detached follower (ADR 0254); its log path is argv, not its cwd's repo
 		if err := runHitlFollow(args[1:], followWait, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			exit(1)
 		}
 		return
 	}
@@ -174,12 +177,22 @@ func main() {
 		err = runPivotConfirm(args[2:])
 	case args[0] == "pivot" && len(args) >= 2 && args[1] == "escalate":
 		err = runPivotEscalate(args[2:])
+	case args[0] == "pivot" && len(args) >= 2 && args[1] == "dismiss":
+		err = runPivotDismiss(args[2:])
+	case args[0] == "pivot" && len(args) >= 2 && args[1] == "amend":
+		err = runPivotAmend(args[2:])
 	case args[0] == "pivot" && len(args) >= 2 && args[1] == "raise":
 		err = runPivotRaise(args[2:], os.Stdout)
 	case args[0] == "initiative":
 		err = runInitiative(args[1:])
 	case args[0] == "withdraw":
 		err = runWithdraw(args[1:])
+	case args[0] == "duplicate":
+		err = runDuplicate(args[1:], os.Stdout)
+	case args[0] == "obsolete":
+		err = runObsolete(args[1:], os.Stdout)
+	case args[0] == "supersede":
+		err = runSupersede(args[1:], os.Stdout)
 	case args[0] == "reconcile":
 		err = runReconcile(args[1:])
 	case args[0] == "loop":
@@ -187,21 +200,25 @@ func main() {
 	case args[0] == "abort":
 		err = runAbort(args[1:], os.Stdout)
 	case args[0] == "run": // hidden: a run-now effort's detached host (ADR 0330)
-		os.Exit(runRun(args[1:]))
+		exit(runRun(args[1:]))
 	case args[0] == "recover":
-		os.Exit(runRecover(args[1:], os.Stdout, os.Stderr))
+		exit(runRecover(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "checkup":
-		os.Exit(runCheckup(args[1:], os.Stderr))
+		exit(runCheckup(args[1:], os.Stderr))
 	case args[0] == "backup":
-		os.Exit(runBackup(args[1:], os.Stdout, os.Stderr))
+		exit(runBackup(args[1:], os.Stdout, os.Stderr))
+	case args[0] == "upgrade":
+		exit(runUpgrade(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "ps":
 		err = runPs(args[1:], os.Stdout)
 	case args[0] == "stats":
 		err = runStats(args[1:], os.Stdout)
 	case args[0] == "integrate":
-		os.Exit(runIntegrate(args[1:]))
+		exit(runIntegrate(args[1:]))
+	case args[0] == "remnant":
+		err = runRemnant(args[1:], os.Stdout)
 	case args[0] == "rebase":
-		os.Exit(runRebase(args[1:], os.Stdout, os.Stderr))
+		exit(runRebase(args[1:], os.Stdout, os.Stderr))
 	case args[0] == "chart":
 		err = runChart(args[1:])
 	case args[0] == "approval":
@@ -209,7 +226,7 @@ func main() {
 	case args[0] == "land-lineage":
 		err = runLandLineage(args[1:], os.Stdout)
 	case args[0] == "hitl-run": // hidden: the tmux pane's wrapper (ADR 0037)
-		os.Exit(session.HitlRun(args[1:], claudecode.MeterCost))
+		exit(session.HitlRun(args[1:], claudecode.MeterCost))
 	case args[0] == "transcript":
 		err = runTranscript(args[1:], os.Stdout)
 	case args[0] == "doc-pane": // hidden: the HITL doc pane's viewer (ADR 0237)
@@ -223,7 +240,7 @@ func main() {
 		if ec := (exitCode{}); errors.As(err, &ec) {
 			code = ec.code
 		}
-		os.Exit(code)
+		exit(code)
 	}
 }
 
@@ -246,15 +263,21 @@ const usage = `usage: mugicrew [-C <dir>] [--watch | <verb> ...]
   mugicrew probe mr (<ref> | --branch <b>) | pipeline <ref> (<id> | --main) | landed <id> | foreign [--context <c>]  print one word of MR or pipeline state, read-only
   mugicrew backup push                                      push the Bead Graph's unpushed commits to its backup remote
   mugicrew checkup <bead> [--problem "<one line>"]          repair a broken bead in a Chopper session
+  mugicrew checkup close <checkup> --reason "<reason>"      close a Checkup and lift its target's fence
+  mugicrew remnant <remnant> drop|offshoot|respin           take a Remnant's exit: delete its refs, file one offshoot Signal, or respin it as a new Checkpoint
   mugicrew pivot confirm <pivot-id> --spec <body-file> [--title <t>] [--carries <id,…>]  file a pivot's corrected Spec
   mugicrew pivot escalate <pivot-id> --evidence <file> [--carries <id,…>]  re-chart a pivot from its evidence
+  mugicrew pivot dismiss <pivot-id> --gist <g> [--critique <file>] [--rewrite <ask>=<file>]... --drafted-by <lead>  refile or rewrite a pivot's FR as Critiques and close it dismissed
+  mugicrew pivot amend <pivot-id> --gist <g> --amendment "<FR> — <decision> — rejected: <options>" [--critique <file>] --drafted-by <lead>  write a pivot's AMENDMENT on its Spec and Asks and close it amended
   mugicrew pivot raise <errand> [--pivot <f>] [--critique <f>] [--merge-into <pivot> <f>]  probe an Errand's held Checkpoint, or raise a pivot or Critique on it
+  mugicrew duplicate <dup> <original>   close a duplicate duplicate: <original>, keeping the supersedes lineage
   mugicrew withdraw <head> [--discard]  drop any unclosed chain head, Errand or Latch (initiative withdraw is its alias)
   mugicrew initiative cancel <initiative> --why <text> [--release <head>]... [--discard]  drop an Initiative and its member chains
   mugicrew initiative adopt <head> <initiative> | release <head>  move a chain into or out of an Initiative
   mugicrew reconcile <id> [--spec <body-file> | --initiative <body-file>] [--title <t>]  drive a bead to its next state
   mugicrew reconcile <signal> --checkpoint <cp> [--pivot <f>]... [--critique <f>]... [--merge-into <pivot> <f>]...  reroute a Signal onto its host Checkpoint
   mugicrew loop [--watch | start [--watch] | status [--json] | stop [--force]]  run or control the dispatch loop
+  mugicrew upgrade                                          move an npm global install onto the latest release, then run doctor
   mugicrew abort <bead-id>                                  abort a bead's running effort
   mugicrew recover [<bead-id> [--force] [--discard]]        list stranded beads, or repair one
   mugicrew ps [--json]                                      list active AFK efforts
@@ -317,11 +340,15 @@ func workspaceArgs(args []string) ([]string, error) {
 var graphDir = bd.GraphDir
 
 // requireGraph is the onboarding gate (Spec FR6): a user verb (bare TUI,
-// signal new/triage, surgery new/end, checkup, integrate, chart append|drop, loop and its start/status/stop) resolves the Bead Graph from
+// signal new/triage, surgery new/end, checkup, upgrade, integrate, chart append|drop, loop and its start/status/stop) resolves the Bead Graph from
 // the Workspace root and refuses when none resolves. On success the graph's
 // absolute dir becomes this process's BEADS_DIR, so every child it spawns (the
 // detached loop, reconcile, tmux sessions, claude -p) hits that graph from any
-// cwd with no per-call plumbing (FR8, FR9). Internal verbs (reconcile, pivot,
+// cwd with no per-call plumbing (FR8, FR9). Right after, once the graph
+// resolves for the probe, it exports this process's bd actor (bd.Actor(), the
+// degraded bare-name fallback included) as BEADS_ACTOR, unless the shell already
+// set one, so a claim and its later close name one actor across the whole process
+// tree even if config.yaml's actor: changes mid-run. Internal verbs (reconcile, pivot,
 // abort, ps) only inherit it, as do the loop's hidden re-exec markers unless they
 // inherited none: a pre-ADR-0089 loop's restart onto this image.
 func requireGraph(args []string) error {
@@ -330,11 +357,11 @@ func requireGraph(args []string) error {
 		args[0] == "signal" && len(args) >= 2 && (args[1] == "new" || args[1] == "triage" || args[1] == "offshoot") ||
 		args[0] == "errand" && len(args) >= 2 && (args[1] == "new" || args[1] == "relabel") ||
 		args[0] == "triage" && len(args) >= 2 && args[1] == "locate" ||
-		args[0] == "probe" || args[0] == "backup" ||
+		args[0] == "probe" || args[0] == "backup" || args[0] == "upgrade" ||
 		args[0] == "intake" && len(args) >= 2 && args[1] == "jira" ||
 		args[0] == "latch" && len(args) >= 2 && (args[1] == "jira" || args[1] == "mr") ||
 		args[0] == "surgery" && len(args) >= 2 && (args[1] == "new" || args[1] == "end") ||
-		args[0] == "checkup" || args[0] == "integrate" || args[0] == "rebase" || args[0] == "chart" || args[0] == "approval"
+		args[0] == "checkup" || args[0] == "integrate" || args[0] == "rebase" || args[0] == "remnant" || args[0] == "chart" || args[0] == "approval"
 	if !user {
 		return nil
 	}
@@ -346,7 +373,14 @@ func requireGraph(args []string) error {
 	if err != nil {
 		return err
 	}
-	return os.Setenv("BEADS_DIR", dir)
+	if err := os.Setenv("BEADS_DIR", dir); err != nil {
+		return err
+	}
+	if os.Getenv("BEADS_ACTOR") == "" {
+		name, _ := bd.Actor()
+		return os.Setenv("BEADS_ACTOR", name)
+	}
+	return nil
 }
 
 // inheritGraph is the non-refusing counterpart of requireGraph for the internal
@@ -541,7 +575,7 @@ func runBare(watch bool) error {
 	if mouse {
 		opts = append(opts, tea.WithMouseAllMotion())
 	}
-	_, err = tea.NewProgram(tui.New(newCtx(), crew()).WithLog(evlog).WithUsage(claudecode.ReadUsage).WithWatch(watch).WithMouse(mouse).WithTheme(loop.ReadTheme().Name), opts...).Run()
+	_, err = tea.NewProgram(tui.New(newCtx(), crew()).WithLog(evlog).WithUsage(claudecode.ReadUsage).WithRelease(tuiReleaseCheck).WithSwap(tuiSwapPath(), version).WithWatch(watch).WithMouse(mouse).WithTheme(loop.ReadTheme().Name), opts...).Run()
 	return err
 }
 
@@ -684,8 +718,10 @@ func versionString() string {
 }
 
 // loopMarkers is one `loop` image's hidden argv: `loop [--detached]
-// [--rev=<sha> [--source=<dir>] [--watch] [--lock-fd=N]]`. No rev is an installed
-// binary's detached child, which runs as itself (ADR 0090 §2); lockFd is -1 for none.
+// [--rev=<sha> [--source=<dir>] [--watch] [--lock-fd=N]]` or `loop [--detached]
+// --lock-fd=N`. No rev is an installed binary, which runs as itself (ADR 0090 §2):
+// its detached child, or its restart, which carries only the lock fd; lockFd is -1
+// for none.
 type loopMarkers struct {
 	detached, watch bool
 	rev, source     string
@@ -714,7 +750,8 @@ func (m loopMarkers) args() []string {
 }
 
 // parseLoopMarkers reads `loop`'s argv (after the verb) as markers, in args'
-// order; ok is false for anything else (a verb or a usage error). A bare
+// order (or the rev-less --lock-fd=N alone); ok is false for anything else (a
+// verb or a usage error). A bare
 // --detached is an installed binary's `loop start` child. --source is optional
 // so a pre-ADR-0090 image's restart, which passes none, still lands.
 func parseLoopMarkers(argv []string) (m loopMarkers, ok bool) {
@@ -724,6 +761,11 @@ func parseLoopMarkers(argv []string) (m loopMarkers, ok bool) {
 	}
 	if len(argv) == 0 {
 		return m, m.detached
+	}
+	if n, ok := strings.CutPrefix(argv[0], lockFdArg); ok { // an installed restart: no rev
+		fd, err := strconv.Atoi(n)
+		m.lockFd = fd
+		return m, err == nil && fd >= 0 && len(argv) == 1
 	}
 	if m.rev, ok = strings.CutPrefix(argv[0], revArg); !ok || m.rev == "" {
 		return m, false
@@ -954,7 +996,7 @@ func launchBuild(path, common string, watch bool) (m loopMarkers, bin string, er
 		return m, "", fmt.Errorf("mugicrew: %w", &looplock.HeldError{Status: st})
 	}
 	if sourceRoot == "" {
-		bin, err = os.Executable()
+		bin, err = selfexe.Path()
 		return m, bin, err
 	}
 	if m.source, err = git.CommonDirOf(sourceRoot); err != nil {
@@ -1064,7 +1106,7 @@ func runLoopRestart(path, common string, w io.Writer) error {
 	case st.StopDrain():
 		return errStopping(st.Pid)
 	case st.State == looplock.Draining:
-		_, err = fmt.Fprintf(w, "loop is already restarting onto main %s (pid %d, %d in flight)\n", short(st.RestartTo), st.Pid, len(st.Inflight))
+		_, err = fmt.Fprintf(w, "loop is already restarting onto %s (pid %d, %d in flight)\n", looplock.Onto(st.RestartTo), st.Pid, len(st.Inflight))
 		return err
 	}
 	evPath := filepath.Join(common, "mugicrew", "events.jsonl")
@@ -1100,7 +1142,7 @@ func runLoopRestart(path, common string, w io.Writer) error {
 					if err != nil {
 						return err
 					}
-					_, err = fmt.Fprintf(w, "loop is already restarting onto main %s (pid %d, %d in flight)\n", short(now.RestartTo), st.Pid, len(now.Inflight))
+					_, err = fmt.Fprintf(w, "loop is already restarting onto %s (pid %d, %d in flight)\n", looplock.Onto(now.RestartTo), st.Pid, len(now.Inflight))
 					return err
 				case "stopping":
 					return errStopping(st.Pid)
@@ -1116,7 +1158,7 @@ func runLoopRestart(path, common string, w io.Writer) error {
 				if _, ok := ev.Raw["restart_to"]; !ok { // a stop took over
 					return errStopping(st.Pid)
 				}
-				_, err = fmt.Fprintf(w, "loop restarting onto main %s (pid %d, %s in flight)\n", short(attr("restart_to")), st.Pid, attr("inflight"))
+				_, err = fmt.Fprintf(w, "loop restarting onto %s (pid %d, %s in flight)\n", looplock.Onto(attr("restart_to")), st.Pid, attr("inflight"))
 				return err
 			}
 		}
@@ -1198,7 +1240,7 @@ func runLoop(m loopMarkers) error {
 		slog.Error("loop.failed", "err", err.Error())
 		return err
 	}
-	self, err := os.Executable() // the lock body names it, pinned or installed (ADR 0090 §7)
+	self, err := selfexe.Path() // the lock body names it, pinned or installed (ADR 0090 §7)
 	if err != nil {
 		slog.Error("loop.failed", "err", err.Error())
 		return err
@@ -1209,15 +1251,22 @@ func runLoop(m loopMarkers) error {
 	sig := make(chan os.Signal, 2) // room for drain + force arriving within one tick
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2)
 	defer signal.Stop(sig)
+	var swapPath string
+	if m.rev == "" && sourceRoot == "" { // an installed binary watches its own file for a swap (ADR 0406 §3)
+		swapPath = self
+	}
 	l := &loop.Loop{
-		Ctx:       newCtx(),
-		Crew:      crew(),
-		Interval:  pollInterval(),
-		Rev:       m.rev,
-		Bin:       self,
-		SourceDir: m.source,
-		CommonDir: common,
-		Watch:     m.watch,
+		Upgrade:     &installedUpgrader{},
+		UpgradeGate: unattendedUpgradeEnabled,
+		SwapPath:    swapPath,
+		Ctx:         newCtx(),
+		Crew:        crew(),
+		Interval:    pollInterval(),
+		Rev:         m.rev,
+		Bin:         self,
+		SourceDir:   m.source,
+		CommonDir:   common,
+		Watch:       m.watch,
 	}
 	return serveLoop(path, m, self, func(onState func(loop.State)) (*loop.Restart, error) {
 		return l.Run(sig, onState)
@@ -1262,7 +1311,7 @@ func serveLoop(path string, m loopMarkers, storePath string, run func(onState fu
 	slog.Info("loop.started", started...)
 	r, err := run(func(s loop.State) {
 		// best-effort: status only, dispatch never reads it
-		lk.Write(looplock.Status{State: s.State, Rev: s.Rev, Inflight: bd.Titles(s.Inflight), RestartTo: s.RestartTo, FailedRev: s.FailedRev, ResetsAt: s.ResetsAt, LimitSource: s.LimitSource})
+		lk.Write(looplock.Status{State: s.State, Rev: s.Rev, Inflight: bd.Titles(s.Inflight), RestartTo: s.RestartTo, FailedRev: s.FailedRev, UpgradeFailed: s.UpgradeFailed, StoppedFor: s.StoppedFor, ResetsAt: s.ResetsAt, LimitSource: s.LimitSource})
 	})
 	switch {
 	case errors.Is(err, loop.ErrForced):
@@ -1296,7 +1345,10 @@ func execRestart(lk *looplock.Lock, r *loop.Restart, m loopMarkers, self string,
 	if m.rev != "" {
 		env = stripPathHead(env, filepath.Dir(self))
 	}
-	m.rev, m.lockFd = r.Rev, fd
+	if m.rev != "" { // an installed loop restarts rev-less: its binary is the swapped file
+		m.rev = r.Rev
+	}
+	m.lockFd = fd
 	slog.Info("loop.restarting", "rev", r.Rev, "store_path", filepath.Dir(filepath.Dir(r.Bin)), "dur_ms", uptime.Milliseconds())
 	return execLoop(r.Bin, append([]string{r.Bin}, m.args()...), env)
 }
@@ -1308,7 +1360,7 @@ func execRestart(lk *looplock.Lock, r *loop.Restart, m loopMarkers, self string,
 // processes never stack duplicate heads.
 // ponytail: a shared bin dir (~/go/bin, Homebrew) pushes its siblings ahead too.
 func leadPathWithSelf() {
-	self, err := os.Executable()
+	self, err := selfexe.Path()
 	if sourceRoot != "" || err != nil {
 		return
 	}
@@ -1590,6 +1642,81 @@ func runPivotEscalate(argv []string) error {
 		return err
 	}
 	return zoro.Escalate(argv[0], string(evidence), splitCarries(*carries))
+}
+
+// runPivotDismiss is the dismiss sweep verb the pivot triage session calls (ADR 0414
+// §1): it refiles the pivot's unfinished FR from the --critique file as a Draft by the
+// lead pivot, or rewrites its Ask Critiques from the --rewrite files, and closes the pivot
+// dismissed (zoro.Dismiss). Idempotent, like confirm. Every file is read before any write.
+func runPivotDismiss(argv []string) error {
+	const usage = "usage: mugicrew pivot dismiss <pivot-id> --gist <g> [--critique <file>] [--rewrite <ask>=<file>]... --drafted-by <lead>"
+	if len(argv) < 1 || argv[0] == "" || strings.HasPrefix(argv[0], "-") {
+		return errors.New(usage)
+	}
+	fs := flag.NewFlagSet("pivot dismiss", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // main prints the error once
+	gist := fs.String("gist", "", "one-line reason the pivot is dismissed")
+	critiqueFile := fs.String("critique", "", "file holding the refiled Critique body (required when the pivot has no Ask Critique)")
+	draftedBy := fs.String("drafted-by", "", "the lead pivot whose triage session publishes the refile")
+	rewriteFiles := map[string]string{}
+	fs.Func("rewrite", "<ask>=<file>: rewrite an Ask Critique from a file (repeatable)", func(v string) error {
+		ask, file, ok := strings.Cut(v, "=")
+		if _, dup := rewriteFiles[ask]; !ok || ask == "" || file == "" || dup {
+			return errors.New(usage)
+		}
+		rewriteFiles[ask] = file
+		return nil
+	})
+	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || strings.TrimSpace(*gist) == "" || *draftedBy == "" {
+		return errors.New(usage)
+	}
+	rewrites := map[string]string{}
+	for ask, file := range rewriteFiles {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		rewrites[ask] = string(body)
+	}
+	critique, err := readOptional(*critiqueFile)
+	if err != nil {
+		return err
+	}
+	return zoro.Dismiss(argv[0], strings.TrimSpace(*gist), critique, rewrites, *draftedBy)
+}
+
+// readOptional reads the file at path, or returns "" when path is empty.
+func readOptional(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	body, err := os.ReadFile(path)
+	return string(body), err
+}
+
+// runPivotAmend is the amend sweep verb the pivot triage session calls (ADR 0414 §1): it
+// writes the --amendment as an AMENDMENT comment on the pivot's Spec and each Ask Critique,
+// refiles the FR from the --critique file when there is no Ask, and closes the pivot
+// amended (zoro.Amend). Idempotent, like dismiss. The --critique file is read before any write.
+func runPivotAmend(argv []string) error {
+	const usage = `usage: mugicrew pivot amend <pivot-id> --gist <g> --amendment "<FR> — <decision> — rejected: <options>" [--critique <file>] --drafted-by <lead>`
+	if len(argv) < 1 || argv[0] == "" || strings.HasPrefix(argv[0], "-") {
+		return errors.New(usage)
+	}
+	fs := flag.NewFlagSet("pivot amend", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // main prints the error once
+	gist := fs.String("gist", "", "one-line reason the pivot is amended")
+	amendment := fs.String("amendment", "", "the AMENDMENT text: <FR> — <decision> — rejected: <options>")
+	critiqueFile := fs.String("critique", "", "file holding the refiled Critique body (required when the pivot has no Ask Critique)")
+	draftedBy := fs.String("drafted-by", "", "the lead pivot whose triage session publishes the refile")
+	if err := fs.Parse(argv[1:]); err != nil || fs.NArg() != 0 || strings.TrimSpace(*gist) == "" || strings.TrimSpace(*amendment) == "" || *draftedBy == "" {
+		return errors.New(usage)
+	}
+	critique, err := readOptional(*critiqueFile)
+	if err != nil {
+		return err
+	}
+	return zoro.Amend(argv[0], strings.TrimSpace(*gist), *amendment, critique, *draftedBy)
 }
 
 // runPivotRaise is `mugicrew pivot raise <errand> [--pivot <body-file>]... [--critique
@@ -1957,7 +2084,7 @@ func runIntegrate(argv []string) int {
 	switch {
 	case os.Getenv(session.BackstopEnv) != "":
 		by = eventlog.ByBackstop
-	case os.Getenv(eventlog.EffortEnv) != "" || session.InPane():
+	case session.CalledByAgent():
 		by = eventlog.ByAgent
 	}
 	return session.IntegrateIn(child, b, by, os.Stdout)
@@ -2058,6 +2185,111 @@ func runWithdraw(argv []string) error {
 		printKept(os.Stdout, res)
 	}
 	return err
+}
+
+// retireBead is the reason-first supersede door (a var so a test fakes the graph).
+var retireBead = bd.Retire
+
+// carryBeads is runDuplicate's carry seam (a var so a test fakes the graph).
+var carryBeads = bd.Carry
+
+// liveHeadOf and endedSkips are runDuplicate's live-head and release seams.
+var (
+	liveHeadOf = bd.LiveHead
+	endedSkips = bd.EndedSkips
+)
+
+// runDuplicate is `mugicrew duplicate <dup> <original>`: the duplicate closes
+// duplicate: <original> and gains the supersedes edge (ADR 0399). While the duplicate
+// is unclosed it first carries its blocks, conditional-blocks and open Latch
+// dependents onto the original's live head (ADR 0085) and records one carry event;
+// when the original's chain has ended nothing is carried and the dependents are
+// released, recorded at Warn. A read or carry error returns before any write that
+// closes the bead. Kind-agnostic; an unknown id is refused by the door before any write.
+func runDuplicate(argv []string, out io.Writer) error {
+	if len(argv) != 2 || argv[0] == "" || argv[1] == "" {
+		return errors.New("usage: mugicrew duplicate <dup> <original>")
+	}
+	dup, original := argv[0], argv[1]
+	if dup == original {
+		return fmt.Errorf("mugicrew duplicate: %s cannot duplicate itself", dup)
+	}
+	d, err := showBead(dup)
+	if err != nil {
+		return err
+	}
+	var (
+		head     string
+		moved    []string
+		skipped  []bd.CarrySkip
+		released []bd.CarrySkip
+	)
+	if d.Unclosed() {
+		h, found, err := liveHeadOf(original)
+		if err != nil {
+			return err
+		}
+		var cerr error
+		if found {
+			head = h
+			moved, skipped, cerr = carryBeads(dup, head)
+		} else {
+			if released, err = endedSkips(dup); err != nil {
+				return err
+			}
+			skipped = released
+		}
+		if err := eventlog.RecordCarry(d, head, moved, skipped, cerr); err != nil {
+			return err
+		}
+	}
+	if err := retireBead(dup, original, bd.DuplicateReason+" "+original); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "duplicate", dup+": closed duplicate of", original)
+	if len(moved) > 0 {
+		fmt.Fprintf(out, "carried %d onto %s\n", len(moved), head)
+	}
+	if len(released) > 0 {
+		fmt.Fprintf(out, "chain of %s ended: released %d\n", original, len(released))
+	}
+	return nil
+}
+
+// obsoleteBead is the obsolete door (a var so a test fakes the graph).
+var obsoleteBead = bd.Obsolete
+
+// runObsolete is `mugicrew obsolete <bead> --by <decider>`: a deciding session closes
+// the defog bead its decision made moot, obsolete: <decider>, writing nothing else.
+func runObsolete(argv []string, out io.Writer) error {
+	const usage = "usage: mugicrew obsolete <bead> --by <decider>"
+	if len(argv) != 3 || argv[0] == "" || argv[1] != "--by" || argv[2] == "" {
+		return errors.New(usage)
+	}
+	target, decider := argv[0], argv[2]
+	if err := obsoleteBead(target, decider); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "obsolete", target+": closed, made moot by", decider)
+	return nil
+}
+
+// supersedeBead is the supersede door (a var so a test fakes the graph).
+var supersedeBead = bd.SupersedeDefog
+
+// runSupersede is `mugicrew supersede <bead> --with <new>`: a deciding session closes
+// the defog bead whose question moved to <new>, superseded: <new>, with the supersedes edge.
+func runSupersede(argv []string, out io.Writer) error {
+	const usage = "usage: mugicrew supersede <bead> --with <new>"
+	if len(argv) != 3 || argv[0] == "" || argv[1] != "--with" || argv[2] == "" {
+		return errors.New(usage)
+	}
+	target, with := argv[0], argv[2]
+	if err := supersedeBead(target, with); err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "superseded", target+": closed, replaced by", with)
+	return nil
 }
 
 // cutDiscard removes the --discard flag from argv: the human's say-so that a chain
@@ -2171,4 +2403,17 @@ func beadDetail(id, width string, out, errw io.Writer) int {
 	}
 	fmt.Fprintln(errw, "bead-detail:", err)
 	return 1
+}
+
+// tuiSwapPath is the startup path an installed TUI watches for a swap (ADR 0406
+// §5); empty for a from-source build, which the Watched loop moves.
+func tuiSwapPath() string {
+	if sourceRoot != "" {
+		return ""
+	}
+	self, err := selfexe.Path()
+	if err != nil {
+		return ""
+	}
+	return self
 }

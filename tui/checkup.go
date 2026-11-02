@@ -67,21 +67,12 @@ func (m Model) checkupFiled(msg checkupFiledMsg) (tea.Model, tea.Cmd) {
 	return next, tea.Batch(cmd, next.(Model).load())
 }
 
-// closeCheckup closes b dropped, then lifts paused:checkup from each related bead
-// no other open Checkup still holds.
+// closeCheckup drops b through the chopper closer: closed dropped, then paused:checkup
+// lifted from each related bead no other open Checkup still holds.
 func closeCheckup(b bd.Bead) error {
-	if err := closeBead(b.ID, "dropped"); err != nil {
-		return err
-	}
-	for _, t := range b.Related {
-		if _, held, err := openCheckupOn(t); err != nil {
-			return err
-		} else if held {
-			continue
-		}
-		if err := unpauseBead(t, bd.PausedCheckup); err != nil {
-			return err
-		}
-	}
-	return nil
+	return chopper.CloseCheckup(chopper.CheckupClosing{
+		Close:   closeBead,
+		OpenOn:  openCheckupOn,
+		Unpause: unpauseBead,
+	}, b, chopper.ReasonDropped)
 }

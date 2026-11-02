@@ -37,12 +37,46 @@ var (
 // only (ADR 0313 §1).
 const xCompact = 80
 
-// xBinding is X's footer hint for b: cancel on an Initiative row, withdraw on a head.
-func xBinding(b *bd.Bead) key.Binding {
-	if isOpenInitiative(b) {
-		return keyCancelKey
+// xTarget is what X does on a row.
+type xTarget int
+
+const (
+	xNone     xTarget = iota // X says why it does nothing
+	xDrop                    // an unclosed Remnant's drop dialog
+	xCancel                  // an open Initiative's cancel
+	xWithdraw                // a chain head's withdraw dialog
+)
+
+// xTargetOf is the one X decision: X's hint, its availability and its press all
+// switch on it. A Remnant is never a withdraw target, so it is checked first.
+func (g graphData) xTargetOf(b *bd.Bead) xTarget {
+	switch {
+	case b == nil:
+		return xNone
+	case b.Kind == contract.KindRemnant:
+		if b.Unclosed() {
+			return xDrop
+		}
+		return xNone
+	case isOpenInitiative(b):
+		return xCancel
+	case g.isHead(b):
+		return xWithdraw
 	}
-	return keyWithdrawKey
+	return xNone
+}
+
+// xBinding is X's footer hint for t: drop, cancel or withdraw; the zero binding for none.
+func xBinding(t xTarget) key.Binding {
+	switch t {
+	case xDrop:
+		return keyDropRemnant
+	case xCancel:
+		return keyCancelKey
+	case xWithdraw:
+		return keyWithdrawKey
+	}
+	return key.Binding{}
 }
 
 // planWithdraw and runWithdraw are the verb's read-only view and its act, vars so
@@ -115,26 +149,26 @@ func isOpenInitiative(b *bd.Bead) bool {
 	return b != nil && b.Kind == contract.KindInitiative && b.Unclosed()
 }
 
-// xOffers is whether X does anything on b: withdraw on a head, cancel on an Initiative.
-func (g graphData) xOffers(b *bd.Bead) bool { return g.isHead(b) || isOpenInitiative(b) }
-
-// withdrawKey is X: a head row's withdraw dialog. Anything but a head says why.
-func (m Model) withdrawKey(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
+// xPress is X: a head row's withdraw dialog, an open Initiative's cancel, a Remnant's drop.
+// Anything else says why.
+func (m Model) xPress(g graphData, b bd.Bead) (tea.Model, tea.Cmd) {
 	if why := g.busyWhy(&b); why != "" {
 		m.setStatus(why)
 		return m, nil
 	}
-	if isOpenInitiative(&b) {
+	switch g.xTargetOf(&b) {
+	case xCancel:
 		return m.cancelOpen(b)
+	case xDrop:
+		return m.dropRemnantKey(g, b)
+	case xWithdraw:
+		id := b.ID
+		return m.openPlan(id, "withdraw", planWithdraw, func(p withdraw.Plan) dialog {
+			return m.xDialog(id, p, len(p.Refusals) > 0, "")
+		})
 	}
-	if !g.isHead(&b) {
-		m.setStatus(b.ID + ": X withdraws a chain head or cancels an Initiative — select a Signal, Chart, Spec, Checkpoint, Rollback, Errand or Latch, or an Initiative")
-		return m, nil
-	}
-	id := b.ID
-	return m.openPlan(id, "withdraw", planWithdraw, func(p withdraw.Plan) dialog {
-		return m.xDialog(id, p, len(p.Refusals) > 0, "")
-	})
+	m.setStatus(b.ID + ": X withdraws a chain head or cancels an Initiative — select a Signal, Chart, Spec, Checkpoint, Rollback, Errand or Latch, or an Initiative")
+	return m, nil
 }
 
 func (m Model) xDialog(head string, p withdraw.Plan, barred bool, warn string) dialog {
@@ -652,6 +686,17 @@ func (m Model) xView(d dialog) string {
 	if d.xs.cancel != nil {
 		return m.cancelView(d)
 	}
+	box, _ := m.xBox(d)
+	return m.placeBox(box)
+}
+
+// xBox draws the withdraw tree's box and reports which drawn line is which tree row (field
+// is the row's index in the whole tree, so only the windowed rows are listed).
+func (m Model) xBox(d dialog) (string, []formField) {
+	if d.xs.cancel != nil {
+		box, hits := m.cancelBox(d)
+		return box, hits.fs
+	}
 	styleW := m.xWidth() - 2
 	inner := styleW - 2
 	wide := inner >= xCompact
@@ -694,7 +739,7 @@ func (m Model) xView(d dialog) string {
 			}
 		}
 	}
-	hint := lipgloss.NewStyle().Width(styleW - 2).Render(flatHints(d.xBindings(), styleW-2))
+	hint, _ := hintLine(d.xBindings(), styleW-2)
 	tail = append(tail, "", hint)
 
 	tree := xPlanTree(p)
@@ -708,7 +753,9 @@ func (m Model) xView(d dialog) string {
 	}
 	cur := d.cur
 	var body []string
+	var fs []formField
 	for i := lo; i < hi && i < len(tree); i++ {
+		fs = append(fs, formField{field: i, row: len(head) + len(body), rows: 1})
 		r := tree[i]
 		tagStr := m.rowTag(p, r, i == 0, wide)
 		line := withTags(r.prefix+kindTag(&r.b)+" "+r.b.Title, tagStr, inner)
@@ -724,7 +771,7 @@ func (m Model) xView(d dialog) string {
 		body = append(body, dimSt.Render(fmt.Sprintf("%d/%d", cur+1, len(tree))))
 	}
 	ls := append(append(head, body...), tail...)
-	return m.placeBox(refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)))
+	return refBox.Width(styleW).Render(lipgloss.JoinVertical(lipgloss.Left, ls...)), fs
 }
 
 // titleOf is a bead's title in the TUI's snapshot, else its id.

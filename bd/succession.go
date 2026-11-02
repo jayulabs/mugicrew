@@ -29,14 +29,16 @@ type Successor struct {
 	Container      bool
 	Title          string
 	Description    string
-	DraftedBy      string // creator bead id: non-empty spawns a Draft (ADR 0059 §2) instead of an open bead
-	Parent         string // successor only: the Initiative it is born into (InitiativeOf, Spec D2); "" spawns it unparented
-	CausedBy       string // child only: a predecessor the member also succeeds (a Landing's Approval, ADR 0145 §4); "" adds no caused-by edge
-	DiscoveredFrom string // child only: provenance edge to the bead it was found from (a gate Critique's Landing); "" adds none
-	Context        string // successor container only: the context: label to carry; "" adds none
-	Repo           string // successor container only: the repo:<dir> stamp to copy; "" adds none
-	ExternalRef    string // bd external_ref the bead carries (an unparented create or a successor spawn); "" adds none
-	Metadata       string // bd metadata, a JSON object, set at create; "" adds none
+	DraftedBy      string     // creator bead id: non-empty spawns a Draft (ADR 0059 §2) instead of an open bead
+	Parent         string     // successor only: the Initiative it is born into (InitiativeOf, Spec D2); "" spawns it unparented
+	CausedBy       string     // child only: a predecessor the member also succeeds (a Landing's Approval, ADR 0145 §4); "" adds no caused-by edge
+	DiscoveredFrom string     // child only: provenance edge to the bead it was found from (a gate Critique's Landing); "" adds none
+	Context        string     // successor container only: the context: label to carry; "" adds none
+	Repo           string     // successor container only: the repo:<dir> stamp to copy; "" adds none
+	ExternalRef    string     // bd external_ref the bead carries (an unparented create or a successor spawn); "" adds none
+	Metadata       string     // bd metadata, a JSON object, set at create; "" adds none (CreateDraft only: a spawn's CreateSpec has no Metadata)
+	PrioritySource string     // successor spawn only: the bead whose own priority is stamped at birth in place of the caused-by predecessor (a pivot's obsoleted Checkpoint, ADR 0419); "" stamps the predecessor
+	Serializer     Serializer // a spawn's exclusion, copied onto its CreateSpec (ADR 0413); nil is a plain insert
 }
 
 // Meta is a bead's bd metadata: custom JSON values by key.
@@ -80,9 +82,60 @@ type Bead struct {
 // instead of reverting (ADR 0049 §4): Jinbe writes it, the History badge reads it.
 const FixForwardReason = "fix-forward:"
 
+// HandedOffReason is a completed Rollback's close reason, naming the successor
+// Checkpoint handOff created (ADR 0399 §1).
+func HandedOffReason(successor string) string { return "handed off: " + successor }
+
+// FixForwardCloseReason is a fixed-forward Rollback's close reason, naming its
+// successor; it keeps the FixForwardReason prefix the History badge matches.
+func FixForwardCloseReason(successor string) string { return FixForwardReason + " " + successor }
+
 // ObsoleteReason prefixes the close reason a confirm sweep gives the members and
 // the Checkpoint it closes out (pivot confirmed or escalated).
 const ObsoleteReason = "obsolete:"
+
+// The spine close words (ADR 0399): every spine close reason is <outcome>[: <detail>],
+// built from these so each literal stays in Go source.
+const (
+	// DuplicateReason prefixes a duplicate's close reason: duplicate: <original id>.
+	DuplicateReason = "duplicate:"
+	// SupersededReason prefixes a replaced bead's close reason: superseded: <new id>.
+	SupersededReason = "superseded:"
+)
+
+// Pivot close reasons (ADR 0414 §5, ADR 0396 §5): every outcome a pivot closes with is
+// built here. The outcome word is dismissed, never rejected, which is ADR 0399's spine
+// reject.
+const (
+	// ConfirmedReason closes a pivot a confirm sweep ran for.
+	ConfirmedReason = "confirmed"
+	// EscalatedReason closes a pivot an escalate sweep ran for.
+	EscalatedReason = "escalated"
+	// DismissedReason prefixes a dismissed pivot's close reason, and an Ask Critique's.
+	DismissedReason = "dismissed:"
+	// AmendedReason prefixes an amended pivot's close reason; Luffy's reapproval check matches it.
+	AmendedReason = "amended:"
+)
+
+// DismissedCloseReason is a dismissed pivot's close reason (dismissed: <gist>), or an Ask
+// Critique's (dismissed: <pivot>).
+func DismissedCloseReason(detail string) string { return DismissedReason + " " + detail }
+
+// AmendedCloseReason is an amended pivot's close reason: amended: <gist>.
+func AmendedCloseReason(gist string) string { return AmendedReason + " " + gist }
+
+// SiblingSupersededReason is a sibling pivot's close reason when the lead pivot's sweep
+// retires it: superseded: <lead>.
+func SiblingSupersededReason(lead string) string { return SupersededReason + " " + lead }
+
+// ObsoleteBy is a defog bead's close reason when a deciding bead's decision made it
+// moot: obsolete: <decider id>. It reuses ObsoleteReason's prefix, but no sweep parser
+// matches it (they anchor on "Spec … superseded by …" / "… escalated to …").
+func ObsoleteBy(decider string) string { return ObsoleteReason + " " + decider }
+
+// RejectedReason is the one word every Signal reject closes with: bare, or
+// followed by ": <why>" (ADR 0399). Luffy's prompt and TUI z both write it.
+const RejectedReason = "rejected"
 
 // SweptReason is a confirm or escalate sweep's close reason, parsed back: OldSpec is the swept
 // Spec, Successor the corrected Spec (confirm) or the fresh Chart (Escalated), Pivot the
@@ -134,14 +187,74 @@ const NothingToLandReason = "nothing to land:"
 // though its effort/<child> branch is kept.
 const ContainerLandedReason = ObsoleteReason + " container landed"
 
+// CarriedByReason is the close reason of a child whose stranded work the Remnant or
+// offshoot Signal carrier now carries.
+func CarriedByReason(carrier string) string { return ContainerLandedReason + "; carried by " + carrier }
+
 // ApprovedReason is the close reason of an approved Approval. Approved means
 // CloseReason equals it exactly (no prefix, no case-fold; empty is not approved),
-// so a rework:, obsolete: or Approval obsoleted: close never reads as approval
-// (ADR 0203 §5).
+// so a rework: or obsolete: close never reads as approval (ADR 0203 §5).
 const ApprovedReason = "approved"
+
+// ApprovalObsoletedReason is the close reason of an Approval obsoleted because
+// its branch advanced past the commit it pins: Usopp's clean-Review tail on a
+// Checkpoint, Nami's Chart step on a Chart. It carries ObsoleteReason, so the
+// backstop and dispatch read it as swept while it never reads as approved.
+const ApprovalObsoletedReason = ObsoleteReason + " branch advanced past the pinned commit"
 
 // ApprovedClosed reports whether the bead is closed with exactly ApprovedReason.
 func (b Bead) ApprovedClosed() bool { return !b.Open() && b.CloseReason == ApprovedReason }
+
+// The outcome words of a Signal's success close (ADR 0399), each followed by the
+// successor's id. The clean-exit publish writes them from the successor it found.
+const (
+	ChartedReason    = "charted:"
+	SpeccedReason    = "specced:"
+	InitiativeReason = "initiative:"
+)
+
+// The outcome words of a Survey's completed close, each followed by the parent
+// Chart's id: the session seeded fog, finished the stamped Chart in place, or
+// closed the Chart. The clean-exit publish writes them.
+const (
+	SeededReason     = "seeded:"
+	DefoggedReason   = "defogged:"
+	PushedBackReason = "pushed back:"
+)
+
+// The outcome words of a completed defog bead's close (ADR 0399): a grilling's
+// answered:, a research's Wrote docs/research/ pointer, a prototype's prototyped:.
+// WithdrawnReason is the human's drop of one defog bead. The readers of closed
+// defog children count only the first three as decisions.
+const (
+	AnsweredReason   = "answered:"
+	ResearchedReason = "Wrote docs/research/"
+	PrototypedReason = "prototyped:"
+	WithdrawnReason  = "withdrawn"
+)
+
+// LandedReason prefixes the close reason of a landed Landing and of its Checkpoint
+// (ADR 0399): "landed: <sha>", the same sha on both. BuiltReason is a finished Build's,
+// ResolvedReason a resolved Conflict's and CompletedReason a Critique fixed without a
+// Rationale: comment (ADR 0415 (mugicrew-review-conflict-and-critique-completed…)).
+const (
+	LandedReason    = "landed:"
+	BuiltReason     = "built"
+	ResolvedReason  = "resolved"
+	CompletedReason = "completed"
+)
+
+// The outcome words of a Review's completed close (ADR 0415): "clean: <approval id>",
+// "critiqued: <critique ids>" and "held: pivot <pivot ids>".
+const (
+	CleanReason     = "clean:"
+	CritiquedReason = "critiqued:"
+	HeldReason      = "held: pivot"
+)
+
+// SlicedReason is the outcome word of a sliced Spec's close (ADR 0399), followed by
+// the Checkpoint's id.
+const SlicedReason = "sliced:"
 
 // DefaultCloseReason is the close_reason bd records when `bd close` gets no --reason.
 const DefaultCloseReason = "Closed"
@@ -196,7 +309,7 @@ func (b Bead) HasLabel(want string) bool {
 // here in the right direction (new bead caused-by <pred>), --no-inherit-labels
 // keeps one kind: label, the bd type is derived from Container (ADR 0002), and
 // --parent rides only when the successor joins an Initiative (Spec D2). extraDeps
-// ride the same --deps value (discoveredCreateArgs' re-run key).
+// ride the same --deps value.
 func successorCreateArgs(predID string, s Successor, extraDeps ...string) []string {
 	typ := "task"
 	if s.Container {
@@ -236,17 +349,73 @@ func externalRefArgs(s Successor) []string {
 // drafted-by:<creator> label in the same --labels value and --status deferred, so
 // the Draft is born unpublished in the one bd create (Spec D3).
 func labelArgs(s Successor) []string {
-	labels := "kind:" + string(s.Kind)
+	args := []string{"--labels", strings.Join(spawnLabels(s), ",")}
+	if s.DraftedBy != "" {
+		args = append(args, "--status", "deferred")
+	}
+	return args
+}
+
+// spawnLabels is labelArgs' label set.
+func spawnLabels(s Successor) []string {
+	labels := []string{"kind:" + string(s.Kind)}
 	if s.Context != "" {
-		labels += "," + contextPrefix + s.Context
+		labels = append(labels, contextPrefix+s.Context)
 	}
 	if s.Repo != "" {
-		labels += "," + repoPrefix + s.Repo
+		labels = append(labels, repoPrefix+s.Repo)
 	}
-	if s.DraftedBy == "" {
-		return []string{"--labels", labels}
+	if s.DraftedBy != "" {
+		labels = append(labels, contract.DraftedBy(s.DraftedBy))
 	}
-	return []string{"--labels", labels + "," + contract.DraftedBy(s.DraftedBy), "--status", "deferred"}
+	return labels
+}
+
+// errSpawnMetadata refuses a Spawn…IfAbsent whose Successor sets Metadata: a CreateSpec
+// has none, so it would be lost silently. CreateDraft carries it.
+var errSpawnMetadata = errors.New("a spawn cannot carry Successor.Metadata; use CreateDraft")
+
+// successorSpec is successorCreateArgs' create as a CreateSpec: the same type, labels, parent,
+// deps (caused-by pred first, then extra), title and Draft status, with s.Serializer.
+// The two derivations are held together by TestSpecArgsParity.
+func successorSpec(predID string, s Successor, extra ...Edge) (CreateSpec, error) {
+	if s.Metadata != "" {
+		return CreateSpec{}, errSpawnMetadata
+	}
+	title := s.Title
+	var deps []Edge
+	if predID != "" {
+		deps = append(deps, Edge{Type: "caused-by", To: predID})
+		title = stripTitle(title, "parent", predID)
+	}
+	return CreateSpec{Type: spawnType(s), Title: title, Description: s.Description, Parent: s.Parent,
+		Labels: spawnLabels(s), Deps: append(deps, extra...), ExternalRef: s.ExternalRef,
+		Deferred: s.DraftedBy != "", NoInherit: true, Serializer: s.Serializer}, nil
+}
+
+// childSpec is childCreateArgs' create as a CreateSpec.
+func childSpec(parentID string, s Successor) (CreateSpec, error) {
+	if s.Metadata != "" {
+		return CreateSpec{}, errSpawnMetadata
+	}
+	var deps []Edge
+	if s.CausedBy != "" {
+		deps = append(deps, Edge{Type: "caused-by", To: s.CausedBy})
+	}
+	if s.DiscoveredFrom != "" {
+		deps = append(deps, Edge{Type: "discovered-from", To: s.DiscoveredFrom})
+	}
+	return CreateSpec{Type: spawnType(s), Title: stripTitle(s.Title, "parent", parentID), Description: s.Description,
+		Parent: parentID, Labels: spawnLabels(s), Deps: deps, Deferred: s.DraftedBy != "", NoInherit: true,
+		Serializer: s.Serializer}, nil
+}
+
+// spawnType is the bd type of a spawn: epic for a container, else task (ADR 0002).
+func spawnType(s Successor) string {
+	if s.Container {
+		return "epic"
+	}
+	return "task"
 }
 
 const contextPrefix = "context:"
@@ -266,10 +435,7 @@ func RepoStampOf(b Bead) string {
 }
 
 // StampRepo adds the repo:<dir> stamp to id.
-func StampRepo(id, dir string) error {
-	_, err := run("update", id, "--add-label", repoPrefix+dir)
-	return err
-}
+func StampRepo(id, dir string) error { return core.AddLabels(id, repoPrefix+dir) }
 
 // ContextOf is the bead's context: label value, "" when it carries none.
 func ContextOf(b Bead) string {
@@ -281,49 +447,20 @@ func ContextOf(b Bead) string {
 	return ""
 }
 
-// findKindInDeps scans a `bd dep list … -t caused-by --json` result for the first
-// bead carrying kind:<want>. Direction is the caller's: SpawnSuccessorIfAbsent
-// passes the --direction=up list to find a successor (so a re-run spawns none);
-// CausedBy passes the --direction=down list to find a predecessor. The parse is
-// direction-agnostic — it just picks the kind — so both roles share it.
-func findKindInDeps(depListJSON []byte, want contract.Kind) (string, bool) {
-	var deps []struct {
-		ID     string   `json:"id"`
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal(depListJSON, &deps); err != nil {
-		return "", false
-	}
-	label := "kind:" + string(want)
-	for _, d := range deps {
-		for _, l := range d.Labels {
-			if l == label {
-				return d.ID, true
-			}
-		}
-	}
-	return "", false
-}
-
 // CausedBy walks the caused-by edge DOWNWARD from id to its predecessor of the
 // wanted kind — the mirror of SpawnSuccessorIfAbsent's upward scan: `bd dep list
 // <id> --direction=down -t caused-by` lists what id depends on (its predecessor),
-// reusing findKindInDeps to pick the one carrying kind:<want>. Zoro walks
-// Spec→Chart here to derive the Checkpoint base; a headless Spec has
-// no such predecessor and returns ("", false, nil).
+// read through Core.Edges, the first row of kind <want>. A failed read is an error,
+// never "not found". Zoro walks Spec→Chart here to derive the Checkpoint base; a
+// headless Spec has no such predecessor and returns ("", false, nil).
 func CausedBy(id string, want contract.Kind) (predID string, found bool, err error) {
-	out, err := run("dep", "list", id, "--direction=down", "-t", "caused-by", "--json")
-	if err != nil {
-		return "", false, err
-	}
-	pred, ok := findKindInDeps([]byte(out), want)
-	return pred, ok, nil
+	return kindAlong(id, Down, "caused-by", want)
 }
 
 // RollbackTarget is the Checkpoint a Rollback is related to — the landed
 // Checkpoint it undoes (ADR 0047), read the way PivotSpec reads a pivot's Spec.
 func RollbackTarget(rollbackID string) (string, bool, error) {
-	return kindAlong(rollbackID, "down", "related", contract.KindCheckpoint)
+	return kindAlong(rollbackID, Down, "related", contract.KindCheckpoint)
 }
 
 // RollbackTargetIn is RollbackTarget over a loaded snapshot, no bd call: the
@@ -338,8 +475,8 @@ func RollbackTargetIn(rb Bead, kinds map[string]contract.Kind) (string, bool) {
 }
 
 // SpecOf is the Spec a Checkpoint serves: its caused-by Spec, or — for a successor
-// a Rollback spawned (ADR 0048 §2) — the Spec of the Rollback's related target,
-// repeated so a chain of Rollbacks still reaches the original. A Checkpoint with
+// a Rollback spawned (ADR 0048 §2) or a respin a Remnant seeded — the Spec of the
+// Rollback's or Remnant's related target, repeated so a chain still reaches the original. A Checkpoint with
 // neither edge returns ("", false, nil).
 func SpecOf(checkpointID string) (string, bool, error) {
 	return specOf(checkpointID, CausedBy, RollbackTarget)
@@ -353,15 +490,18 @@ func specOf(id string, causedBy func(string, contract.Kind) (string, bool, error
 		if spec, ok, err := causedBy(id, contract.KindSpec); err != nil || ok {
 			return spec, ok, err
 		}
-		rb, ok, err := causedBy(id, contract.KindRollback)
+		via, ok, err := causedBy(id, contract.KindRollback)
+		if err == nil && !ok {
+			via, ok, err = causedBy(id, contract.KindRemnant)
+		}
 		if err != nil || !ok {
 			return "", false, err
 		}
-		next, ok, err := target(rb)
+		next, ok, err := target(via)
 		if err != nil || !ok {
 			return "", false, err
 		}
-		id = next // the rolled-back Checkpoint: repeat from it
+		id = next // the rolled-back or landed Checkpoint: repeat from it
 	}
 	return "", false, nil
 }
@@ -371,12 +511,7 @@ func specOf(id string, causedBy func(string, contract.Kind) (string, bool, error
 // reconcileSignal reads it to pick the Signal's leg (Spec → fast lane, else Chart;
 // ADR 0035 §10). No such successor returns ("", false, nil).
 func SuccessorOf(id string, want contract.Kind) (succID string, found bool, err error) {
-	out, err := run("dep", "list", id, "--direction=up", "-t", "caused-by", "--json")
-	if err != nil {
-		return "", false, err
-	}
-	succ, ok := findKindInDeps([]byte(out), want)
-	return succ, ok, nil
+	return kindAlong(id, Up, "caused-by", want)
 }
 
 // InitiativeOf is the Initiative a successor of b is born into (Spec D2, FR11):
@@ -406,11 +541,42 @@ func SpawnSuccessorIfAbsent(predID string, s Successor) (id string, created bool
 	if ok {
 		return existing, false, nil
 	}
-	id, err = run(successorCreateArgs(predID, s)...)
+	spec, err := stampedSpec(predID, s)
+	if err != nil {
+		return "", false, err
+	}
+	id, err = core.Create(spec)
 	if err != nil {
 		return "", false, err
 	}
 	return id, true, nil
+}
+
+// stampedSpec is successorSpec with the birth priority stamped on, the one builder every
+// create-path spawn goes through so a new seam cannot forget the stamp (ADR 0419).
+func stampedSpec(predID string, s Successor, extra ...Edge) (CreateSpec, error) {
+	spec, err := successorSpec(predID, s, extra...)
+	if err != nil {
+		return spec, err
+	}
+	spec.Priority, err = stampedPriority(predID, s)
+	return spec, err
+}
+
+// stampedPriority is the birth priority of a successor (ADR 0419 (mugicrew-succession-stamps-the-predecessor-s-own…)):
+// the OWN priority of s.PrioritySource, else of predID, read with a Show so a failed read
+// fails the spawn rather than falling back to P2. With neither it is nil: bd's default
+// applies. It is read only on the create path, so an existing successor is never rewritten.
+func stampedPriority(predID string, s Successor) (*int, error) {
+	src := cmp.Or(s.PrioritySource, predID)
+	if src == "" {
+		return nil, nil
+	}
+	b, err := Show(src)
+	if err != nil {
+		return nil, fmt.Errorf("read priority of %s: %w", src, err)
+	}
+	return &b.Priority, nil
 }
 
 // CreateDraft creates a successor of predID unconditionally (SpawnSuccessorIfAbsent
@@ -476,7 +642,8 @@ func updateMetadata(id string, change func(Meta) bool) error {
 }
 
 // CarrySkip names a dependent a Carry left out and why: closed | hierarchy |
-// cycle | type-clash | initiative (a Latch onto an Initiative successor, which the
+// cycle | type-clash | ended (the successor's chain ended, so pred's dependents were
+// released, EndedSkips) | initiative (a Latch onto an Initiative successor, which the
 // carry guard produces, ADR 0348 §8). The json tags are the carry event's skipped attr shape.
 type CarrySkip struct {
 	Bead   string `json:"bead"`
@@ -513,28 +680,20 @@ func CarryTargets(pred, ordering, latches string) (moved []string, skipped []Car
 // CarryOrdering is Carry without the Latch step: only pred's blocks and
 // conditional-blocks dependents move onto succ.
 func CarryOrdering(pred, succ string) (moved []string, skipped []CarrySkip, err error) {
-	out, err := run("dep", "list", pred, "--direction=up", "--json")
+	rows, err := core.Edges(pred, Up, "")
 	if err != nil {
 		return nil, nil, err
 	}
-	var deps []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-		Type   string `json:"dependency_type"`
-	}
-	if err := json.Unmarshal([]byte(out), &deps); err != nil {
-		return nil, nil, fmt.Errorf("bd: parse dep list: %w", err)
-	}
-	for _, d := range deps {
+	for _, d := range rows {
 		switch {
 		case d.Type != "blocks" && d.Type != "conditional-blocks":
 			continue
-		case d.Status == "closed": // dep list returns every status; deferred Drafts carry
+		case !d.Unclosed(): // the read returns every status; deferred Drafts carry
 			skipped = append(skipped, CarrySkip{d.ID, "closed"})
 		case d.ID == succ:
 			skipped = append(skipped, CarrySkip{d.ID, "hierarchy"})
 		default:
-			if _, err := run("dep", "add", d.ID, succ, "-t", d.Type); err != nil {
+			if err := core.AddEdge(d.ID, succ, d.Type); err != nil {
 				reason := CarrySkipReason(err)
 				if reason == "" {
 					return moved, skipped, err
@@ -555,21 +714,13 @@ func CarryOrdering(pred, succ string) (moved []string, skipped []CarrySkip, err 
 // since a Latch blocking an Initiative freezes its members (ADR 0348 §8). The
 // successor's kind is read once, on the first open Latch; a failed read fails the carry.
 func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]string, []CarrySkip, error) {
-	out, err := run("dep", "list", pred, "--direction=down", "-t", "blocks", "--json")
+	rows, err := core.Edges(pred, Down, "blocks")
 	if err != nil {
 		return moved, skipped, err
 	}
-	var deps []struct {
-		ID     string   `json:"id"`
-		Status string   `json:"status"`
-		Labels []string `json:"labels"`
-	}
-	if err := json.Unmarshal([]byte(out), &deps); err != nil {
-		return moved, skipped, fmt.Errorf("bd: parse dep list: %w", err)
-	}
 	initiative, read := false, false
-	for _, d := range deps {
-		if d.Status == "closed" || !slices.Contains(d.Labels, "kind:"+string(contract.KindLatch)) {
+	for _, d := range rows {
+		if !d.Unclosed() || d.Kind != contract.KindLatch {
 			continue
 		}
 		if !read {
@@ -583,7 +734,7 @@ func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]str
 			skipped = append(skipped, CarrySkip{d.ID, "initiative"})
 			continue
 		}
-		if _, err := run("dep", "add", succ, d.ID, "-t", "blocks"); err != nil {
+		if err := core.AddEdge(succ, d.ID, "blocks"); err != nil {
 			reason := CarrySkipReason(err)
 			if reason == "" {
 				return moved, skipped, err
@@ -596,13 +747,13 @@ func carryLatches(pred, succ string, moved []string, skipped []CarrySkip) ([]str
 	return moved, skipped, nil
 }
 
-// CarrySkipReason classifies a refused carry dep add by bd 1.3.0's error text,
-// or ""
+// CarrySkipReason classifies a refused carry dep add by bd 1.3.0's error text, or ""
 // for an error that is not a known skip. Re-check these on a bd bump.
 func CarrySkipReason(err error) string {
 	switch msg := err.Error(); {
-	case strings.Contains(msg, "cannot be blocked by its ancestor"), strings.Contains(msg, "cannot be blocked by its descendant"):
-		return "hierarchy" // DependencyHierarchyConflictError
+	case strings.Contains(msg, "cannot be blocked by its ancestor"), strings.Contains(msg, "cannot be blocked by its descendant"),
+		strings.Contains(msg, "is already a child of"):
+		return "hierarchy" // the first two are DependencyHierarchyConflictError's texts; the dotted-ID text is dep add's CLI pre-check, the same refusal
 	case strings.Contains(msg, "would create a cycle"):
 		return "cycle" // ErrDependencyCycle
 	case strings.Contains(msg, "already exists with type"):
@@ -642,7 +793,7 @@ func childCreateArgs(parentID string, s Successor) []string {
 }
 
 // openChildOfKind scans parsed children for an OPEN one of the wanted kind — the
-// pure idempotency guard (mirrors findKindInDeps), so a re-run spawns none.
+// pure idempotency guard (as firstOfKind is for deps), so a re-run spawns none.
 func openChildOfKind(kids []Bead, want contract.Kind) (string, bool) {
 	for _, k := range kids {
 		if k.Kind == want && k.Open() {
@@ -666,7 +817,11 @@ func SpawnChildIfAbsent(parentID string, s Successor) (id string, created bool, 
 	if existing, ok := openChildOfKind(kids, s.Kind); ok {
 		return existing, false, nil
 	}
-	id, err = SpawnChild(parentID, s)
+	spec, err := childSpec(parentID, s)
+	if err != nil {
+		return "", false, err
+	}
+	id, err = core.Create(spec)
 	if err != nil {
 		return "", false, err
 	}
@@ -678,7 +833,9 @@ func SpawnChildIfAbsent(parentID string, s Successor) (id string, created bool, 
 // body: idempotent on (container, key), whatever the existing Errand's parent. It joins the
 // Initiative of the container it holds (a Rollback climbs through the Checkpoint it
 // undoes) and is born outside, with the reason in its body, when there is none (ADR 0348).
-func SpawnBlockingErrandIfAbsent(containerID, key, title, body string) (id string, created bool, err error) {
+// A non-empty raiser is the Landing whose failure files it: the create's --deps adds
+// discovered-from:<raiser> beside blocks:<container>, in the same write (ADR 0401).
+func SpawnBlockingErrandIfAbsent(containerID, key, title, body, raiser string) (id string, created bool, err error) {
 	open, err := OpenBlockersOfKind(containerID, contract.KindErrand)
 	if err != nil {
 		return "", false, err
@@ -694,7 +851,11 @@ func SpawnBlockingErrandIfAbsent(containerID, key, title, body string) (id strin
 	}
 	// --deps is atomic with the create: no orphan Errand that blocks nothing
 	s := Successor{Kind: contract.KindErrand, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindErrand)), Description: withFactLine(body, line)}
-	id, err = run(successorCreateArgs("", s, "blocks:"+containerID)...)
+	deps := []string{"blocks:" + containerID}
+	if raiser != "" {
+		deps = append(deps, "discovered-from:"+raiser)
+	}
+	id, err = run(successorCreateArgs("", s, deps...)...)
 	if err != nil {
 		return "", false, err
 	}
@@ -749,7 +910,7 @@ func ChildCount(id string) (int, error) {
 // leaf, a Draft by the Chart's own drafter — bd delete does not cascade, so a
 // Survey with any other drafted-by would strand on a Chart-only delete or publish.
 func surveyChild(title, drafter string) Successor {
-	return Successor{Kind: contract.KindSurvey, Title: title, Description: contract.SurveyBody, DraftedBy: drafter}
+	return Successor{Kind: contract.KindSurvey, Title: title, Description: contract.SurveyBody, DraftedBy: drafter, Serializer: UnderClaim(drafter)}
 }
 
 // SpawnSurveyIfAbsent seeds chartID's Survey as a Draft unless the Chart has a
@@ -764,7 +925,11 @@ func SpawnSurveyIfAbsent(chartID, title, drafter string) (id string, created boo
 	if len(surveys) > 0 {
 		return surveys[0].ID, false, nil
 	}
-	id, err = SpawnChild(chartID, surveyChild(title, drafter))
+	spec, err := childSpec(chartID, surveyChild(title, drafter))
+	if err != nil {
+		return "", false, err
+	}
+	id, err = core.Create(spec)
 	if err != nil {
 		return "", false, err
 	}
@@ -1282,7 +1447,7 @@ func NewestLanding(landings []Bead) (Bead, bool) {
 func CloseLandings(landings []Bead, sha string, closer func(id, reason string) error) error {
 	for _, l := range landings {
 		if l.Open() {
-			if err := closer(l.ID, "landed: "+sha); err != nil {
+			if err := closer(l.ID, LandedReason+" "+sha); err != nil {
 				return err
 			}
 		}
@@ -1314,4 +1479,86 @@ func SubtreeIDs(id string) ([]string, error) {
 // line, whatever its parent's kind. The MR: line is the one fact; no label mirrors it.
 func AwaitingUndraft(b Bead) bool {
 	return b.Kind == contract.KindApproval && b.Open() && git.RecordedMR(b.Description) > 0
+}
+
+// LiveHead finds where a bead's work lives now: id itself while it is unclosed, else
+// its unclosed caused-by successor (any kind), else the bead it is superseded by
+// (a duplicate's or a pivot Retire's supersedes edge), else its closed successors,
+// backtracking from a dead end until one is unclosed.
+// A chain that ended (landed, rejected, withdrawn) or cycles returns ("", false, nil);
+// a failed read is an error, never "not found". mugicrew duplicate carries onto it.
+func LiveHead(id string) (head string, found bool, err error) {
+	return liveHead(id,
+		func(id string) (Bead, error) { return Show(id) },
+		func(id string) ([]Bead, error) { return depTargets(id, string(Up), "caused-by") },
+		func(id string) ([]Bead, error) { return depTargets(id, string(Down), "supersedes") })
+}
+
+// liveHead is LiveHead's walk over injected reads, so it is table-testable without bd.
+// It is a depth-first search that backtracks: at a closed bead it tries an unclosed
+// caused-by successor, then the supersedes target, then the closed successors, so one
+// dead-end branch (a pivot-superseded Spec's obsolete Checkpoint) does not end the
+// chain. seen is shared across branches and ends a cycle as not found.
+func liveHead(id string, show func(string) (Bead, error), successors, supersededBy func(string) ([]Bead, error)) (string, bool, error) {
+	seen := map[string]bool{}
+	var walk func(id string) (string, bool, error)
+	walk = func(id string) (string, bool, error) {
+		if seen[id] {
+			return "", false, nil
+		}
+		seen[id] = true
+		b, err := show(id)
+		if err != nil {
+			return "", false, err
+		}
+		if b.Unclosed() {
+			return id, true, nil
+		}
+		next, err := successors(id)
+		if err != nil {
+			return "", false, err
+		}
+		sup, err := supersededBy(id)
+		if err != nil {
+			return "", false, err
+		}
+		var order []string
+		for _, n := range next {
+			if n.Unclosed() {
+				order = append(order, n.ID)
+			}
+		}
+		for _, n := range sup {
+			order = append(order, n.ID)
+		}
+		for _, n := range next {
+			if !n.Unclosed() {
+				order = append(order, n.ID)
+			}
+		}
+		for _, n := range order {
+			if head, ok, err := walk(n); err != nil || ok {
+				return head, ok, err
+			}
+		}
+		return "", false, nil
+	}
+	return walk(id)
+}
+
+// EndedSkips lists pred's open blocks and conditional-blocks dependents as skipped
+// ended: what a Carry would have moved had the target chain not ended, so the release
+// is recorded and not silent. Read-only.
+func EndedSkips(pred string) ([]CarrySkip, error) {
+	rows, err := core.Edges(pred, Up, "")
+	if err != nil {
+		return nil, err
+	}
+	var skipped []CarrySkip
+	for _, d := range rows {
+		if (d.Type == "blocks" || d.Type == "conditional-blocks") && d.Unclosed() {
+			skipped = append(skipped, CarrySkip{d.ID, "ended"})
+		}
+	}
+	return skipped, nil
 }

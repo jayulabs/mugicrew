@@ -53,9 +53,6 @@ var (
 	kindFallback lipgloss.Color
 	chipInk      lipgloss.Color
 	inProgSty    lipgloss.Style
-	prio0Tint    lipgloss.Color
-	prio1Tint    lipgloss.Color
-	tintInk      lipgloss.Color
 )
 
 // kindTag renders a bead's kind: a Container as a chip (black bold UPPERCASE on
@@ -396,7 +393,7 @@ func (g graphTab) masterRow(r row, width int, hot bool) string {
 	}
 	title = trunc(title, width-lipgloss.Width(pre)-lipgloss.Width(suf))
 	if !r.header {
-		st, _ := leafTitleStyle(g.beadByID(r.beadID), hot)
+		st, _, _ := leafRestyle(g.beadByID(r.beadID), hot)
 		title = st.Render(title)
 	} else {
 		title = containerTitle(g.beadByID(r.beadID), hot, title)
@@ -510,7 +507,7 @@ func (g graphData) liveBeads(bs []*bd.Bead, act map[string]bool) []*bd.Bead {
 	out := slices.DeleteFunc(slices.Clone(bs), func(b *bd.Bead) bool {
 		return act[b.ID] || !g.running(b)
 	})
-	slices.SortStableFunc(out, func(a, b *bd.Bead) int { return beadCmp(*a, *b) })
+	slices.SortStableFunc(out, func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) })
 	return out
 }
 
@@ -519,7 +516,7 @@ func (g graphData) liveBeads(bs []*bd.Bead, act map[string]bool) []*bd.Bead {
 // unblocked one in phase order (Spec D10, FR40). Read off the whole graph, so h
 // never changes it.
 func (g graphTab) initiativeProgress(id string) (landed, chains int, live string) {
-	cs := phaseOrder(g.memoOf().members[id])
+	cs := phaseOrder(g.memoOf().members[id], graphData{beads: g.beads}.rowCmp)
 	for _, c := range cs {
 		if slices.ContainsFunc(c, func(b bd.Bead) bool { return g.landingOf(&b) >= 0 }) {
 			landed++
@@ -688,7 +685,7 @@ func (g graphTab) detailBody() string {
 		mode = "HITL"
 	}
 	var h strings.Builder
-	fmt.Fprintf(&h, "%s  %s\n\n", g.sbrn(b, b.Title, !g.noDot, 0), softSt.Render(mode))
+	fmt.Fprintf(&h, "%s\n\n", g.withInherit(b, g.sbrn(b, b.Title, !g.noDot, 0)+"  "+softSt.Render(mode)))
 	field := func(k, v string) { h.WriteString(labelField(k, v) + "\n") }
 	field("owner", owner)
 	if b.HasLabel(registry.AutoApproveFailedLabel) {
@@ -950,6 +947,9 @@ var pauseCauses = []pauseCause{
 		id := b.ID
 		return id + " is being recovered, or a recover failed partway — re-run 'mugicrew recover " + id + "'"
 	}},
+	{cause: bd.PausedBehindMainline, hint: func(b bd.Bead) string {
+		return b.ID + ": " + bd.BehindMainlineRemedy(b.Parent)
+	}},
 	{cause: bd.PausedContext, hint: func(b bd.Bead) string {
 		return b.ID + " is held: " + contexts.PauseNote(b, bd.PausedContext)
 	}},
@@ -969,11 +969,11 @@ func (g graphData) runNowLabel(b *bd.Bead) string {
 	return ""
 }
 
-// confirmed is b's verdict, re-judged with force when the first one is blocked: what a
-// confirmed y/n press would act on.
+// confirmed is b's verdict, re-judged with force when the first one is blocked or behind
+// mainline: what a confirmed y/n press would act on.
 func (g graphData) confirmed(b *bd.Bead) loop.Verdict {
 	v := g.eligibility(b)
-	if v.Cause != loop.CauseBlocked {
+	if v.Cause != loop.CauseBlocked && v.Cause != loop.CauseBehindMainline {
 		return v
 	}
 	forced, _ := loop.Judge(*b, loop.ModeRunNow, g.widened(), loop.Inputs{Force: true}, snapView{g})
@@ -997,9 +997,22 @@ func (g graphData) runNowWhy(b *bd.Bead) string {
 		return id + "'s effort is not running — x recovers it"
 	}
 	if v := g.confirmed(b); !v.Runnable {
-		return causeHint(*b, v)
+		return g.withBehindNote(b, causeHint(*b, v))
 	}
 	return ""
+}
+
+// withBehindNote appends the crewmate's "Behind mainline:" note to a paused:behind-mainline
+// hint, read from the drawer's cached comments only (render never forks bd); with none
+// cached the hint stays the remedy alone.
+func (g graphData) withBehindNote(b *bd.Bead, hint string) string {
+	if !bd.PausedBy(*b, bd.PausedBehindMainline) {
+		return hint
+	}
+	if note := bd.BehindMainlineNoteOf(g.comments[commentKey{b.ID, b.CommentCount}].cs); note != "" {
+		hint += " — Behind mainline: " + note
+	}
+	return hint
 }
 
 // reviewDueOver is the I/O-free half of bd.ReviewDueOver over cp's collected children, for the
@@ -1154,40 +1167,34 @@ func prio(p int) string {
 	return prioText(p)
 }
 
-// prioTint is the badge background a member row takes from its container's priority
-// cp: 203 for P0, 217 for P1, none otherwise.
-func prioTint(cp int) (lipgloss.Color, bool) {
-	switch cp {
-	case 0:
-		return prio0Tint, true
-	case 1:
-		return prio1Tint, true
+// prioBadge is the priority badge from effective and own levels: P<eff> alone when they
+// match, else P<eff>‹<own> with the ‹<own> part dim. P<eff> takes prio's colours.
+func prioBadge(eff, own int) string { return badgeWith(dimSt, eff, own) }
+
+// badgeWith is prioBadge with the ‹<own> part in ownSt.
+func badgeWith(ownSt lipgloss.Style, eff, own int) string {
+	if eff == own {
+		return prio(eff)
 	}
-	return "", false
+	return prio(eff) + ownSt.Render("‹"+strconv.Itoa(own))
 }
 
-// tinted is st with prioTint(cp)'s background and a dark foreground, which the tint
-// would otherwise hide; st unchanged when there is no tint.
-func tinted(st lipgloss.Style, cp int) lipgloss.Style {
-	if c, ok := prioTint(cp); ok {
-		return st.Foreground(tintInk).Background(c)
+// styledBadge is prioBadge in st, for a leaf row whose title style isn't plain. An inert
+// restyle (closed, Draft) takes the whole badge; otherwise a P0/P1 effective digit keeps
+// prio's colour and the rest, the ‹own part included, takes st.
+func styledBadge(st lipgloss.Style, inert bool, eff, own int) string {
+	if inert || eff > 1 {
+		return st.Render(badgeText(eff, own))
 	}
-	return st
+	return badgeWith(st, eff, own)
 }
 
-// prioIn is prio for a member row of a container with priority cp.
-func prioIn(p, cp int) string {
-	if _, ok := prioTint(cp); !ok {
-		return prio(p)
+// badgeText is the badge's plain text: P<eff>, or P<eff>‹<own> when the levels differ.
+func badgeText(eff, own int) string {
+	if eff == own {
+		return prioText(eff)
 	}
-	st := lipgloss.NewStyle()
-	switch p {
-	case 0:
-		st = prio0Sty
-	case 1:
-		st = prio1Sty
-	}
-	return kept(tinted(st, cp).Render(prioText(p)))
+	return prioText(eff) + "‹" + strconv.Itoa(own)
 }
 
 // rowEnterWhy is why enter does nothing on a queue-tab bead row, "" when it

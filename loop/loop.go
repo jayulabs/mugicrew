@@ -36,7 +36,9 @@ import (
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/registry"
+	"jayulabs.org/mugicrew/release"
 	"jayulabs.org/mugicrew/route"
+	"jayulabs.org/mugicrew/selfexe"
 )
 
 // DefaultPool is the AFK pool size when the Workspace sets none (Spec FR3;
@@ -73,24 +75,39 @@ type Loop struct {
 	GitlabPoll                time.Duration // [gitlab] poll_interval, read with JiraPoll: the same for an mr latch (Spec mc-zfce.5 FR 19)
 	LandingPoll               time.Duration // [gitlab] landing_poll_interval, read with JiraPoll: a Landing whose effort ended sooner is not a candidate
 	Watch                     bool          // --watch: follow source lands; unwatched never checks for a build (ADR 0090 §4)
+	Upgrade                   Upgrader      // unattended Upgrade's seam; nil for none (Spec mc-d0jkl §4)
+	UpgradeGate               func() bool   // asked each tick: Upgrade runs only when it says opted in
+	SwapPath                  string        // an installed loop's startup path: a swap of the file there drains for a restart onto it (ADR 0406 §3); empty for none
 
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	inflight  map[string]bd.Bead  // effort id → bead
-	held      map[string]int      // bead id → consecutive effort.held skips (a restart loses at most PauseAfter-1)
-	failing   map[string]int      // bead id → consecutive failed efforts (ADR 0078; same restart loss)
-	onState   func(State)         // Run's callback; nil-safe
-	draining  bool                // set once a stop drains; onState is re-told the in-flight set as it shrinks
-	gen       atomic.Pointer[gen] // the current signal generation (ADR 0236); swapped under mu, read anywhere
-	running   atomic.Int32        // efforts in flight; drain waits on it, not on wg (ADR 0236 §5)
-	notify    chan struct{}       // non-blocking send after each effort ends: wakes drain
-	checking  bool                // a mainline eval/build is in flight (at most one)
-	failed    string              // main rev whose eval/build failed; never retried (ADR 0062 §3)
-	restart   *Restart            // the build of main made and not yet exec'd
-	built     chan struct{}       // closed once restart is set: polling ends for the restart drain
-	asked     bool                // a restart request is pending on the check in flight: its same-outPath ending logs restart.current (ADR 0289)
-	asks      chan struct{}       // SIGUSR2 requests, one slot so repeats merge; answered by request
-	restartTo string              // set while draining for a restart; a stop clears it (ADR 0062 §6), a cancel of that stop drain sets it again (ADR 0236 §3)
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	inflight      map[string]bd.Bead  // effort id → bead
+	held          map[string]int      // bead id → consecutive effort.held skips (a restart loses at most PauseAfter-1)
+	failing       map[string]int      // bead id → consecutive failed efforts (ADR 0078; same restart loss)
+	onState       func(State)         // Run's callback; nil-safe
+	draining      bool                // set once a stop drains; onState is re-told the in-flight set as it shrinks
+	gen           atomic.Pointer[gen] // the current signal generation (ADR 0236); swapped under mu, read anywhere
+	running       atomic.Int32        // efforts in flight; drain waits on it, not on wg (ADR 0236 §5)
+	notify        chan struct{}       // non-blocking send after each effort ends: wakes drain
+	checking      bool                // a mainline eval/build is in flight (at most one)
+	skipped       string              // the last human-step release logged as upgrade.skipped, once per value
+	waiting       string              // the target an upgrade.waiting was logged for
+	waitSince     time.Time           // when waiting was armed: the 24h cap counts from it
+	resumeCause   string              // overrides "cancel" in the next loop.resumed, set by an upgrade drain that reverted
+	upgradeTo     string              // set while the restart drain is an Upgrade's, until its install
+	upgradeFailed string              // the target whose npm install failed: not retried unattended until a newer one
+	failed        string              // main rev whose eval/build failed; never retried (ADR 0062 §3)
+	restart       *Restart            // the build of main made and not yet exec'd
+	built         chan struct{}       // closed once restart is set: polling ends for the restart drain
+	asked         bool                // a restart request is pending on the check in flight: its same-outPath ending logs restart.current (ADR 0289)
+	asks          chan struct{}       // SIGUSR2 requests, one slot so repeats merge; answered by request
+	swapID        selfexe.Identity    // SwapPath's identity at startup
+	swapKnown     bool                // swapID was read: without it nothing is compared
+	swapWaitedOn  string              // the last answer swapReady logged as swap.waiting, so a stall logs once
+	swapping      bool                // restart is a swap restart: Rev is filled in once the new binary answers --version
+	halted        chan struct{}       // closed once an unattended Upgrade's tripped doctor stops the loop: polling ends, no restart
+	stoppedFor    string              // why halted closed: the stop reason the lock body carries
+	restartTo     string              // set while draining for a restart; a stop clears it (ADR 0062 §6), a cancel of that stop drain sets it again (ADR 0236 §3)
 
 	holdChecked map[string]time.Time // Hold Errand id → last hold check end (ADR 0393); pruned when the Errand leaves the open set, memory only
 
@@ -110,11 +127,13 @@ const limitSlack = time.Minute
 // State is what the loop reports through Run's onState (ADR 0064 §3), and main
 // maps onto the lock body: the transitions, not a snapshot.
 type State struct {
-	State     string // looplock.On | looplock.Limited | looplock.Draining
-	Inflight  []bd.Bead
-	Rev       string // the build this image runs / rewrote to
-	RestartTo string // set only on a restart drain
-	FailedRev string // set only on an on loop whose build/eval failed
+	State         string // looplock.On | looplock.Limited | looplock.Draining
+	Inflight      []bd.Bead
+	Rev           string // the build this image runs / rewrote to
+	RestartTo     string // set only on a restart drain
+	FailedRev     string // set only on an on loop whose build/eval failed
+	UpgradeFailed string // set only on an on loop whose unattended Upgrade's npm install failed
+	StoppedFor    string // set only once a tripped doctor stopped the loop: the reason, naming mugicrew doctor fix
 
 	ResetsAt    time.Time // set only on a limited loop: when the Plan usage window resets
 	LimitSource string    // set only on a limited loop: message | usage | fallback
@@ -181,7 +200,7 @@ var ErrForced = errors.New("loop: force-stopped")
 // cancels it: Run logs loop.resumed {cause: cancel}, reports on (or limited) and
 // polls again with nothing abandoned, or drains for the restart again when the
 // stop had converted a restart drain; the next stop is a fresh drain (ADR 0236).
-func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) {
+func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (r *Restart, err error) {
 	if err := chdirRepoRoot(); err != nil {
 		return nil, err
 	}
@@ -195,14 +214,14 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 	l.GitlabPoll = cfglayer.GitlabPollInterval(".")
 	l.LandingPoll = cfglayer.LandingPollInterval(".")
 	l.report(State{State: looplock.On, Rev: l.Rev})
-	interval := l.Interval
-	if interval <= 0 {
-		interval = DefaultInterval
+	if l.SwapPath != "" {
+		l.swapID, err = selfexe.Identify(l.SwapPath)
+		l.swapKnown = err == nil
 	}
-	t := time.NewTicker(interval)
+	t := time.NewTicker(l.pollEvery())
 	defer t.Stop()
 	l.gen.Store(newGen())
-	l.built, l.notify, l.asks = make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
+	l.built, l.halted, l.notify, l.asks = make(chan struct{}), make(chan struct{}), make(chan struct{}, 1), make(chan struct{}, 1)
 	quit, stopped, backedUp := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	// joined, so nothing reads StopWindow after Run returns and no push outlives it into the exec
 	defer func() { close(quit); <-stopped; <-backedUp }()
@@ -213,17 +232,21 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 		ctx, cancel := context.WithCancel(context.Background()) // a stop cancels it, so each polling phase gets its own
 		for !l.leavingGen(g) {
 			l.checkMain(ctx, false)
+			l.checkSwap()
+			l.checkUpgrade()
 			l.poll()
 			select {
 			case <-l.asks:
 				l.request(ctx)
 			case <-g.stop:
 			case <-l.built:
+			case <-l.halted:
 			case <-t.C:
 			}
 		}
 		cancel()
-		r, resumed, err := l.drain(g)
+		var resumed bool
+		r, resumed, err = l.drain(g)
 		if !resumed {
 			return r, err
 		}
@@ -233,7 +256,11 @@ func (l *Loop) Run(sig <-chan os.Signal, onState func(State)) (*Restart, error) 
 			l.report(l.liveLocked(l.snapshotLocked()))
 		}
 		l.mu.Unlock()
-		slog.Info("loop.resumed", "cause", "cancel")
+		cause := "cancel"
+		if l.resumeCause != "" {
+			cause, l.resumeCause = l.resumeCause, ""
+		}
+		slog.Info("loop.resumed", "cause", cause)
 	}
 }
 
@@ -305,7 +332,9 @@ func (l *Loop) leaving() bool {
 
 // leavingGen is leaving for the generation g: Run polls on the one its phase
 // began with, so a stop cancelled before drain starts is still seen as one.
-func (l *Loop) leavingGen(g *gen) bool { return closed(g.stop) || closed(l.built) }
+func (l *Loop) leavingGen(g *gen) bool {
+	return closed(g.stop) || closed(l.built) || closed(l.halted)
+}
 
 // closed reports whether c is closed; a nil c never is.
 func closed(c chan struct{}) bool {
@@ -327,18 +356,18 @@ func (l *Loop) drain(g *gen) (r *Restart, resumed bool, err error) {
 	l.mu.Lock()
 	l.draining = true
 	r, stop := l.restart, g.stop
-	if closed(g.stop) {
+	if closed(g.stop) || l.stoppedFor != "" {
 		r = nil
 	}
 	if r != nil {
-		l.restartTo = r.Rev
+		l.restartTo = restartTo(r)
 	}
 	in := l.snapshotLocked()
 	l.tellLocked(in)
 	l.mu.Unlock()
 	attrs := []any{"inflight", len(in), "beads", bd.IDs(dispatch.Beads(in))}
 	if r != nil {
-		attrs = append(attrs, "restart_to", r.Rev)
+		attrs = append(attrs, "restart_to", restartTo(r))
 	}
 	slog.Info("loop.draining", attrs...)
 	select { // a request queued as the drain starts is answered by it
@@ -349,6 +378,7 @@ func (l *Loop) drain(g *gen) (r *Restart, resumed bool, err error) {
 	if r == nil {
 		stop = nil // a stop drain's first stop is spent: only force or cancel ends it early
 	}
+	var recheck <-chan time.Time // armed while a swap restart waits for the new binary
 wait:
 	for {
 		if l.running.Load() == 0 {
@@ -358,16 +388,48 @@ wait:
 			case closed(l.gen.Load().stop): // a stop racing the last effort still wins
 				return nil, false, nil
 			}
+			if r != nil {
+				ready, back := l.upgradeStep()
+				if back {
+					return nil, true, nil
+				}
+				if !ready { // a live session may last hours: look at the poll's cadence
+					recheck = time.After(l.pollEvery())
+					goto sleep
+				}
+				l.mu.Lock()
+				halted := l.stoppedFor != ""
+				l.mu.Unlock()
+				if halted { // the install's doctor tripped: stop without the restart
+					return nil, false, nil
+				}
+			}
+			if r != nil && !l.swapReady(r) {
+				recheck = time.After(swapRecheck)
+				goto sleep
+			}
+			if r != nil { // a stop sent during the install, doctor or probe wins: no restart
+				switch {
+				case closed(g.cancel):
+					return nil, true, nil
+				case closed(l.gen.Load().stop):
+					return nil, false, nil
+				}
+			}
 			// ponytail: a stop landing after this check, before the exec, is lost: the
 			// new image comes up on and `loop stop` must be re-run. Closing it means
 			// handing the stop to the exec's caller; do that if the window ever bites.
-			l.mu.Lock()
-			r = l.restart
-			l.mu.Unlock()
+			if r != nil {
+				l.mu.Lock()
+				r = l.restart
+				l.mu.Unlock()
+			}
 			return r, false, nil
 		}
+	sleep:
 		select {
 		case <-l.notify:
+		case <-recheck:
 		case <-l.asks:
 			l.mu.Lock()
 			restarting := l.restartTo != ""
@@ -399,7 +461,7 @@ wait:
 func (l *Loop) tellLocked(in []dispatch.Inflight) {
 	switch {
 	case l.draining:
-		l.report(State{State: looplock.Draining, Inflight: dispatch.Beads(in), Rev: l.Rev, RestartTo: l.restartTo})
+		l.report(State{State: looplock.Draining, Inflight: dispatch.Beads(in), Rev: l.Rev, RestartTo: l.restartTo, StoppedFor: l.stoppedFor})
 	case !l.limitedUntil.IsZero():
 		l.report(l.liveLocked(in))
 	}
@@ -409,9 +471,9 @@ func (l *Loop) tellLocked(in []dispatch.Inflight) {
 // on. Caller holds l.mu.
 func (l *Loop) liveLocked(in []dispatch.Inflight) State {
 	if l.limitedUntil.IsZero() {
-		return State{State: looplock.On, Rev: l.Rev, FailedRev: l.failed}
+		return State{State: looplock.On, Rev: l.Rev, FailedRev: l.failed, UpgradeFailed: l.upgradeFailed, StoppedFor: l.stoppedFor}
 	}
-	return State{State: looplock.Limited, Inflight: dispatch.Beads(in), Rev: l.Rev, FailedRev: l.failed, ResetsAt: l.limit.ResetsAt, LimitSource: l.limit.Source}
+	return State{State: looplock.Limited, Inflight: dispatch.Beads(in), Rev: l.Rev, FailedRev: l.failed, UpgradeFailed: l.upgradeFailed, StoppedFor: l.stoppedFor, ResetsAt: l.limit.ResetsAt, LimitSource: l.limit.Source}
 }
 
 // holdLocked extends the limited hold to lim's reset + 1m if that is later than the
@@ -663,7 +725,7 @@ func (l *Loop) tick() error {
 	if err != nil {
 		return err
 	}
-	cands = byContainerPriority(cands, open)
+	cands = byEffectivePriority(cands, open)
 	held := map[string]bool{}
 	l.mu.Lock()
 	for _, b := range l.inflight {
@@ -1386,26 +1448,22 @@ func countAFK(inProgress []bd.Bead, orphaned map[string]bool, wantOrphaned bool)
 	return n
 }
 
-// byContainerPriority stably orders candidates by (own priority, nearest
-// container's priority), both ascending, so bd ready's order (then readmits')
-// breaks full ties. The nearest container is the Checkpoint or Chart parent,
-// looked up in open; an Initiative or absent parent, or none, uses the bead's
-// own priority as the second key.
-func byContainerPriority(cands, open []bd.Bead) []bd.Bead {
-	prio := map[string]int{}
+// byEffectivePriority stably orders candidates by (effective priority, own
+// priority), both ascending, so bd ready's order (then readmits') breaks full
+// ties (ADR 0410 §5). Effective priority is derived over open, the beads the
+// tick already read; a chain that loops or leaves open just stops the walk.
+func byEffectivePriority(cands, open []bd.Bead) []bd.Bead {
+	byID := make(map[string]bd.Bead, len(open))
 	for _, b := range open {
-		if b.Kind == contract.KindCheckpoint || b.Kind == contract.KindChart {
-			prio[b.ID] = b.Priority
-		}
+		byID[b.ID] = b
 	}
-	key := func(b bd.Bead) int {
-		if p, ok := prio[b.Parent]; ok {
-			return p
-		}
-		return b.Priority
+	lookup := func(id string) (bd.Bead, bool) { b, ok := byID[id]; return b, ok }
+	eff := make(map[string]int, len(cands))
+	for _, b := range cands {
+		eff[b.ID], _ = bd.EffectivePriority(b, lookup)
 	}
 	return slices.SortedStableFunc(slices.Values(cands), func(a, b bd.Bead) int {
-		return cmp.Or(cmp.Compare(a.Priority, b.Priority), cmp.Compare(key(a), key(b)))
+		return cmp.Or(cmp.Compare(eff[a.ID], eff[b.ID]), cmp.Compare(a.Priority, b.Priority))
 	})
 }
 
@@ -1498,4 +1556,92 @@ func reapIntegrated(set *git.EffortSet) {
 		}
 		eventlog.RecordBranches([]bd.BranchOutcome{{Branch: branch, Err: reapDelete(repo, branch)}}, eventlog.BeadAttrs(b)...)
 	}
+}
+
+// swapRecheck is how often a swap restart drain, with nothing in flight, looks
+// again for the new binary.
+var swapRecheck = time.Second
+
+// swapStat is the regular-file check's stat, a seam for tests.
+var swapStat = os.Stat
+
+// swapVersion is `path --version`'s answer, a seam for tests.
+var swapVersion = func(path string) (string, error) { return selfexe.Version(path) }
+
+// swapRestartTo is the lock's RestartTo while a swap restart does not yet know
+// the version it restarts onto.
+const swapRestartTo = "new-binary" // looplock.swapSentinel
+
+// restartTo is what a restart drain reports as its target.
+func restartTo(r *Restart) string {
+	if r.Rev == "" {
+		return swapRestartTo
+	}
+	return r.Rev
+}
+
+// checkSwap is an installed loop's per-tick binary check (ADR 0406 §3): the file
+// at SwapPath changing identity, or vanishing, ends polling for a restart drain
+// onto that path. Stat only. Any loop with a SwapPath does it, opted in or not.
+func (l *Loop) checkSwap() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.SwapPath == "" || !l.swapKnown || l.restart != nil || !selfexe.Swapped(l.SwapPath, l.swapID) {
+		return
+	}
+	slog.Info("swap.detected", "path", l.SwapPath)
+	l.restart, l.swapping = &Restart{Bin: l.SwapPath}, true
+	close(l.built)
+}
+
+// swapReady is whether a swap restart may exec: always for any other restart; for
+// a swap, once the startup path is a regular file whose --version answers a strict
+// release, which becomes the restart's Rev (for logging). A missing or half-written
+// binary is not ready yet.
+func (l *Loop) swapReady(r *Restart) bool {
+	l.mu.Lock()
+	swapping := l.swapping
+	l.mu.Unlock()
+	if !swapping {
+		return true
+	}
+	fi, err := swapStat(r.Bin)
+	if err != nil || !fi.Mode().IsRegular() {
+		l.swapWaiting(r.Bin, "not a regular file")
+		return false
+	}
+	v, err := swapVersion(r.Bin)
+	if err != nil || !release.Strict(v) {
+		answer := v
+		if err != nil {
+			answer = err.Error()
+		}
+		l.swapWaiting(r.Bin, answer)
+		return false
+	}
+	l.mu.Lock()
+	r.Rev = v
+	l.mu.Unlock()
+	slog.Info("swap.ready", "rev", v)
+	return true
+}
+
+// swapWaiting logs why a swap restart is not ready, once per distinct answer, so the
+// event log explains a drain that never ends (a pre-release or a non-npm build at the path).
+func (l *Loop) swapWaiting(path, answer string) {
+	l.mu.Lock()
+	again := l.swapWaitedOn == answer
+	l.swapWaitedOn = answer
+	l.mu.Unlock()
+	if !again {
+		slog.Info("swap.waiting", "path", path, "answer", answer)
+	}
+}
+
+// pollEvery is the loop's poll interval.
+func (l *Loop) pollEvery() time.Duration {
+	if l.Interval <= 0 {
+		return DefaultInterval
+	}
+	return l.Interval
 }

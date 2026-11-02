@@ -2,6 +2,7 @@ package zoro
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
@@ -46,42 +48,32 @@ type stubCtx struct{ h contract.Harness }
 
 func (c stubCtx) Harness() contract.Harness { return c.h }
 
-// specSeamRec captures every seam call so the tests can assert the derived base,
-// the branch cut, the spawn, and the close without live bd/git.
+// specSeamRec captures the git legs reconcileSpec drives (base trailer, cut,
+// branch delete): the bd legs run against a seeded bdtest graph instead.
 type cutCall struct{ name, base string }
 type specSeamRec struct {
-	walked     []string  // causedBy: spec ids walked
 	trailers   []string  // landedBase: trailers grepped
 	cuts       []cutCall // cutBranch: (name, base)
-	spawned    []bd.Successor
-	closed     []string         // Spec ids closed (via closeOnPublish, outside an effort)
-	builds     int              // buildChildren: kind:build members the slicing fork laid on the Checkpoint
-	errands    int              // errandChildren: kind:errand dependents the Spec holds over discovered-from
-	seq        []string         // carry and close calls, in order: "carry <pred> <succ>" / "close <id>"
-	carryErr   error            // carry: the error bd.Carry returns
-	closeErr   error            // closeBead: the error closing the Checkpoint returns
-	branch     bd.BranchOutcome // branchOutcome: what the branch delete reports
-	branchSeen bool             // branchOutcome: whether the branch existed
+	deleted    []string  // branchOutcome: branches asked to delete
+	branch     bd.BranchOutcome
+	branchSeen bool // branchOutcome: whether the branch existed
 }
 
-// stubSpecSeams swaps reconcileSpec's bd/git legs for inert fakes so the flow runs
-// with no live bd or git. causedBy returns (chartID, found); landedBase returns
-// "landsha" unless baseErr is set (the missing-anchor hard fail). Restores the
-// real funcs on cleanup. Mirrors nami_test's stubChartSeams.
-func stubSpecSeams(t *testing.T, r *specSeamRec, chartID string, found bool, baseErr error) {
+// stubSpecSeams seeds the dispatched Spec, claimed as its dispatcher holds it, and
+// (when found) the Chart it is caused-by, into a bdtest graph, and swaps the git
+// legs for inert fakes: landedBase returns "landsha" unless baseErr is set (the
+// missing-anchor hard fail). Restores the real funcs on cleanup.
+func stubSpecSeams(t *testing.T, r *specSeamRec, chartID string, found bool, baseErr error) *bdtest.Fake {
 	t.Helper()
-	oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oErrands, oCarry := causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, errandChildren, carry
-	t.Cleanup(func() {
-		causedBy, landedBase, cutBranch, spawnSuccessor, showBead, closeOnPublish, buildChildren, errandChildren, carry = oCause, oLand, oCut, oSpawn, oShow, oPublish, oBuilds, oErrands, oCarry
-	})
-	carry = func(pred, succ string) ([]string, []bd.CarrySkip, error) {
-		r.seq = append(r.seq, "carry "+pred+" "+succ)
-		return nil, nil, r.carryErr
+	spec := openSpec()
+	seeds := []bd.Bead{}
+	if found {
+		spec.CausedBy = chartID
+		seeds = append(seeds, bd.Bead{ID: chartID, Kind: contract.KindChart, Status: "closed"})
 	}
-	causedBy = func(id string, _ contract.Kind) (string, bool, error) {
-		r.walked = append(r.walked, id)
-		return chartID, found, nil
-	}
+	f := bdtest.New(t, append(seeds, bdtest.Claimed(spec))...)
+	oLand, oCut, oBranch := landedBase, cutBranch, branchOutcome
+	t.Cleanup(func() { landedBase, cutBranch, branchOutcome = oLand, oCut, oBranch })
 	landedBase = func(trailer string) (string, error) {
 		r.trailers = append(r.trailers, trailer)
 		if baseErr != nil {
@@ -93,42 +85,55 @@ func stubSpecSeams(t *testing.T, r *specSeamRec, chartID string, found bool, bas
 		r.cuts = append(r.cuts, cutCall{name, base})
 		return true, nil
 	}
-	spawnSuccessor = func(_ string, s bd.Successor) (string, bool, error) {
-		r.spawned = append(r.spawned, s)
-		return "ws-cp", true, nil
-	}
-	// reconcileSpec never closes the Spec directly (Spec D6); sweep tests re-stub this.
-	swapClose := closeBead
-	t.Cleanup(func() { closeBead = swapClose })
-	closeBead = func(id, reason string) error {
-		if id == "ws-spec" {
-			t.Errorf("reconcileSpec must not close the Spec directly")
-		}
-		r.seq = append(r.seq, "closecp "+id+" "+reason)
-		return r.closeErr
-	}
-	oBranch := branchOutcome
-	t.Cleanup(func() { branchOutcome = oBranch })
 	branchOutcome = func(_ git.Repo, branch string) (bd.BranchOutcome, bool) {
-		r.seq = append(r.seq, "delete "+branch)
+		r.deleted = append(r.deleted, branch)
 		return r.branch, r.branchSeen
 	}
-	// Outside an effort (stubCtx) the flow publishes its own Drafts with the Spec's close.
-	closeOnPublish = func(ctx contract.Ctx, id, reason string, es []bd.Edge) error {
-		r.seq = append(r.seq, "close "+id)
-		if _, ok := ctx.(contract.Publisher); ok {
-			return bd.CloseOnPublish(ctx, id, reason, es)
-		}
-		r.closed = append(r.closed, id)
-		return nil
-	}
-	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Kind: contract.KindSpec, Status: "open"}, nil }
-	buildChildren = func(string) (int, error) { return r.builds, nil }
-	errandChildren = func(string) (int, error) { return r.errands, nil }
+	return f
 }
 
 func openSpec() bd.Bead {
 	return bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "open", Title: "a spec"}
+}
+
+// cpOf is the Checkpoint the Spec spawned, read back off the graph.
+func cpOf(t *testing.T) string {
+	t.Helper()
+	id, ok, err := bd.SuccessorOf("ws-spec", contract.KindCheckpoint)
+	if err != nil || !ok {
+		t.Fatalf("the Spec has no Checkpoint successor: %q %v %v", id, ok, err)
+	}
+	return id
+}
+
+// seedCheckpoint is a Checkpoint a prior pass already spawned for the Spec.
+func seedCheckpoint(f *bdtest.Fake) string {
+	f.Seed(bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, Title: "a spec",
+		Labels: []string{"kind:checkpoint"}, CausedBy: "ws-spec"})
+	return "ws-cp"
+}
+
+// layBuilds is the slicing fork laying n Builds onto the Spec's Checkpoint.
+func layBuilds(t *testing.T, f *bdtest.Fake, n int) {
+	t.Helper()
+	cp := cpOf(t)
+	for i := range n {
+		f.Seed(bd.Bead{ID: fmt.Sprintf("ws-b%d", i), Kind: contract.KindBuild, Status: "deferred", Parent: cp, Labels: []string{"kind:build"}})
+	}
+}
+
+// layErrands is the Spec holding n Errands over discovered-from.
+func layErrands(f *bdtest.Fake, n int) {
+	for i := range n {
+		f.Seed(bd.Bead{ID: fmt.Sprintf("ws-e%d", i), Kind: contract.KindErrand, Status: "deferred",
+			Labels: []string{"kind:errand"}, DiscoveredFrom: []string{"ws-spec"}})
+	}
+}
+
+// specClosure is how the Spec ended: its status and close reason.
+func specClosure(f *bdtest.Fake) (status, reason string) {
+	b := f.Bead("ws-spec")
+	return b.Status, b.CloseReason
 }
 
 // var _ contract.Crewmate = Zoro{} is asserted in zoro.go; Launch errors for
@@ -141,21 +146,29 @@ func TestLaunchErrorsForNonPivotKinds(t *testing.T) {
 	}
 }
 
-// stubPivotSeams swaps the reverse lookups Launch resolves (Checkpoint via
-// reverse blocks, Spec via related); an empty id reports not-found.
-func stubPivotSeams(t *testing.T, cp, spec string) {
+// seedPivot seeds the claimed pivot ws-pv into a bdtest graph with the Checkpoint it
+// blocks and the Spec it is related to; an empty id leaves that edge out.
+func seedPivot(t *testing.T, cp, spec string) *bdtest.Fake {
 	t.Helper()
-	oCp, oSpec := pivotCheckpoint, pivotSpec
-	t.Cleanup(func() { pivotCheckpoint, pivotSpec = oCp, oSpec })
-	pivotCheckpoint = func(string) (string, bool, error) { return cp, cp != "", nil }
-	pivotSpec = func(string) (string, bool, error) { return spec, spec != "", nil }
+	pv := bdtest.Claimed(bd.Bead{ID: "ws-pv", Kind: contract.KindPivot, Status: "open", Labels: []string{"kind:pivot"}})
+	if spec != "" {
+		pv.Related = []string{spec}
+	}
+	f := bdtest.New(t, pv)
+	if spec != "" {
+		f.Seed(bd.Bead{ID: spec, Kind: contract.KindSpec, Status: "closed", Labels: []string{"kind:spec"}})
+	}
+	if cp != "" {
+		f.Seed(bd.Bead{ID: cp, Kind: contract.KindCheckpoint, Status: "open", Container: true, Labels: []string{"kind:checkpoint"}, BlockedBy: []string{"ws-pv"}})
+	}
+	return f
 }
 
 // Launch(pivot) → one session anchored to the pivot whose prompt carries the
 // pivot, Go-resolved Checkpoint and Spec ids, the six-step flow, and the
 // dismiss/amend legs with their check-before-write guards (ADR 0046 §2–4).
 func TestLaunchPivotComposesSession(t *testing.T) {
-	stubPivotSeams(t, "ws-cp", "ws-sp")
+	seedPivot(t, "ws-cp", "ws-sp")
 	h := &recordingHarness{}
 	if _, err := (Zoro{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-pv", Kind: contract.KindPivot}); err != nil {
 		t.Fatalf("Launch: %v", err)
@@ -171,13 +184,13 @@ func TestLaunchPivotComposesSession(t *testing.T) {
 		"bd show ws-sp",                                    // 2. the Spec with its Amendments
 		"..checkpoint/ws-cp",                               // 2. the built diff
 		"intent holds", "already-built work becomes wrong", // 3. the amend line
-		"together",                              // 4. decide all together
-		"Re-read the open pivots",               // 5. newcomers first
-		"--parent ws-cp", "--no-inherit-labels", // dismiss/amend Critique on the Checkpoint
-		"dismissed: <gist>", // dismiss close
-		"AMENDMENT (<pivotID>): <FR> — <decision> — rejected: <options>",
-		"only if `bd comments ws-sp` has no comment", // amend idempotency
-		"amended: <gist>", // amend close
+		"together",                                                           // 4. decide all together
+		"Re-read the open pivots",                                            // 5. newcomers first
+		"mugicrew pivot dismiss <pivotID>", "mugicrew pivot amend <pivotID>", // dismiss/amend verbs
+		"`dismissed: <gist>`", // dismiss close
+		`--amendment "<FR> — <decision> — rejected: <options>"`,
+		"the Spec (ws-sp)",  // amend writes the Amendment on the Spec
+		"`amended: <gist>`", // amend close
 		"Check before each write",
 		"git worktree add",    // ADR only in its own worktree
 		"git worktree remove", // ...cleaned up after it lands
@@ -211,7 +224,7 @@ func TestLaunchPivotComposesSession(t *testing.T) {
 // open pivot (late ones too) and a decision summary table, and shows a confirm
 // or escalate body verbatim, again after every edit, before an explicit yes.
 func TestLaunchPivotPresentsSelfContainedCards(t *testing.T) {
-	stubPivotSeams(t, "ws-cp", "ws-sp")
+	seedPivot(t, "ws-cp", "ws-sp")
 	h := &recordingHarness{}
 	if _, err := (Zoro{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-pv", Kind: contract.KindPivot}); err != nil {
 		t.Fatalf("Launch: %v", err)
@@ -267,29 +280,36 @@ func TestLaunchPivotPresentsSelfContainedCards(t *testing.T) {
 // session with a blank id.
 func TestLaunchPivotUnresolvedErrors(t *testing.T) {
 	for _, c := range []struct{ cp, spec string }{{"", "ws-sp"}, {"ws-cp", ""}} {
-		stubPivotSeams(t, c.cp, c.spec)
+		seedPivot(t, c.cp, c.spec)
 		if _, err := (Zoro{}).Launch(stubCtx{&recordingHarness{}}, contract.Bead{ID: "ws-pv", Kind: contract.KindPivot}); err == nil {
 			t.Errorf("cp=%q spec=%q: Launch must error", c.cp, c.spec)
 		}
 	}
 }
 
-// Acceptance (a),(c),(d),(e): a Chart-backed open Spec derives its base from the
-// Chart's landed base, cuts checkpoint/<cp> from that derived SHA (never main),
-// forks the slicing session anchored to the Spec, and closes the Spec after the
-// fork returns.
+// Acceptance (a)-(e): a Chart-backed Spec spawns its Checkpoint under the Spec's
+// claim, derives the base from the Chart's landed base, cuts checkpoint/<cp> from
+// that derived SHA (never main), forks the slicing session anchored to the Spec,
+// and closes the Spec after the fork laid a Build.
 func TestReconcileSpecChartBackedCutsFromChartLandedBase(t *testing.T) {
-	r := &specSeamRec{} // no Builds yet; the slicing fork lays one, then the Spec closes
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	h := &recordingHarness{lay: func() { r.builds = 1 }}
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	h := &recordingHarness{lay: func() { layBuilds(t, f, 1) }}
+	f.Mutate("ws-spec", func(b *bd.Bead) { b.Priority = 4 })
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	// (a) base derived by walking Spec→Chart and grepping the Chart trailer.
-	if len(r.walked) != 1 || r.walked[0] != "ws-spec" {
-		t.Errorf("must walk caused-by from the Spec once, got %v", r.walked)
+	cp := cpOf(t)
+	if got := f.Bead(cp).Priority; got != 4 {
+		t.Errorf("Checkpoint priority = P%d, want the Spec's own P4", got)
 	}
+	// The Checkpoint is a container kind:checkpoint epic caused-by the Spec.
+	b := f.Bead(cp)
+	if b.CausedBy != "ws-spec" || b.Kind != contract.KindCheckpoint || !b.Container || b.Title != "a spec" || !b.HasLabel("kind:checkpoint") {
+		t.Errorf("Checkpoint = %+v, want a kind:checkpoint epic caused-by ws-spec titled like the Spec", b)
+	}
+	// (a) base derived by walking Spec→Chart and grepping the Chart trailer.
 	if len(r.trailers) != 1 || r.trailers[0] != "Chart: ws-chart" {
 		t.Errorf("Chart-backed Spec must grep the Chart landed base, got %v", r.trailers)
 	}
@@ -297,8 +317,8 @@ func TestReconcileSpecChartBackedCutsFromChartLandedBase(t *testing.T) {
 	if len(r.cuts) != 1 {
 		t.Fatalf("must cut exactly one branch, got %v", r.cuts)
 	}
-	if r.cuts[0].name != "checkpoint/ws-cp" {
-		t.Errorf("branch = %q, want checkpoint/ws-cp", r.cuts[0].name)
+	if r.cuts[0].name != "checkpoint/"+cp {
+		t.Errorf("branch = %q, want checkpoint/%s", r.cuts[0].name, cp)
 	}
 	if r.cuts[0].base != "landsha" || r.cuts[0].base == git.Mainline() {
 		t.Errorf("branch must cut from the derived SHA, never main, got %q", r.cuts[0].base)
@@ -311,8 +331,80 @@ func TestReconcileSpecChartBackedCutsFromChartLandedBase(t *testing.T) {
 		t.Errorf("slicing prompt must name the Spec, got %q", h.invs[0].Prompt)
 	}
 	// (e) Spec closed after the fork laid a Build (the artifact exists, FR22).
-	if len(r.closed) != 1 || r.closed[0] != "ws-spec" {
-		t.Errorf("Spec must be closed once after the fork laid a Build, got %v", r.closed)
+	if st, why := specClosure(f); st != "closed" || why != "sliced: "+cp {
+		t.Errorf("the Spec must close sliced: <checkpoint>, got %q %q", st, why)
+	}
+}
+
+// The Checkpoint spawn is serialized by the dispatched Spec's claim: without it
+// the fake refuses the spawn and the reconcile fails before any cut.
+func TestReconcileSpecSpawnRefusedWithoutTheSpecsClaim(t *testing.T) {
+	rec := &errRecorder{TB: t}
+	bdtest.New(rec, openSpec()) // open, unassigned: the dispatcher's claim is not held
+	r := &specSeamRec{}
+	oLand, oCut := landedBase, cutBranch
+	t.Cleanup(func() { landedBase, cutBranch = oLand, oCut })
+	landedBase = func(string) (string, error) { return "landsha", nil }
+	cutBranch = func(n, b string) (bool, error) { r.cuts = append(r.cuts, cutCall{n, b}); return true, nil }
+
+	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
+		t.Fatal("a Checkpoint spawn without the Spec's claim must fail")
+	}
+	if len(rec.errs) != 1 || !strings.Contains(rec.errs[0], "claim on ws-spec") {
+		t.Errorf("the fake must flag the unserialized spawn, got %v", rec.errs)
+	}
+	if _, ok, _ := bd.SuccessorOf("ws-spec", contract.KindCheckpoint); ok || len(r.cuts) != 0 {
+		t.Errorf("a refused spawn leaves no Checkpoint (%v) and cuts nothing (%v)", ok, r.cuts)
+	}
+}
+
+// errRecorder is a testing.TB that records Errorf instead of failing the test.
+type errRecorder struct {
+	testing.TB
+	errs []string
+}
+
+func (e *errRecorder) Errorf(format string, args ...any) {
+	e.errs = append(e.errs, fmt.Sprintf(format, args...))
+}
+
+// A failed caused-by read is an error, not a wrong base: nothing is spawned or cut.
+func TestReconcileSpecFailedCausedByReadSurfaces(t *testing.T) {
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	f.FailOn("Edges", "ws-spec", errors.New("dolt down"))
+
+	err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec())
+	if err == nil || !strings.Contains(err.Error(), "dolt down") {
+		t.Fatalf("err = %v, want the failed read", err)
+	}
+	if len(r.trailers)+len(r.cuts) != 0 {
+		t.Errorf("a failed read must derive no base (%v) and cut nothing (%v)", r.trailers, r.cuts)
+	}
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c, "Create") {
+			t.Errorf("a failed read must spawn nothing, saw %q", c)
+		}
+	}
+}
+
+// The Checkpoint copies the Spec's context: label (the repo: stamp rides with it).
+func TestReconcileSpecCheckpointCarriesTheSpecsLabels(t *testing.T) {
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	f.Mutate("ws-spec", func(b *bd.Bead) { b.Labels = []string{"context:apps-x"} })
+	spec := openSpec()
+	spec.Labels = []string{"context:apps-x"}
+	oOf := repoOf
+	t.Cleanup(func() { repoOf = oOf })
+	repoOf = func(bd.Bead) git.Repo { return "" }
+	h := &recordingHarness{lay: func() { layBuilds(t, f, 1) }}
+
+	if err := reconcileSpec(stubCtx{h}, spec); err != nil {
+		t.Fatalf("reconcileSpec: %v", err)
+	}
+	if b := f.Bead(cpOf(t)); !b.HasLabel("context:apps-x") || !b.HasLabel("kind:checkpoint") {
+		t.Errorf("Checkpoint labels = %v, want kind:checkpoint and context:apps-x", b.Labels)
 	}
 }
 
@@ -321,9 +413,8 @@ func TestReconcileSpecChartBackedCutsFromChartLandedBase(t *testing.T) {
 // the Spec must stay OPEN (not closed) for the loop to re-dispatch — the gate is
 // the artifact existing, not the session merely having run.
 func TestReconcileSpecEmptySkeletonLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{builds: 0, errands: 0} // fork returned nil but laid neither Builds nor Errands
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	h := &recordingHarness{} // nil err: the fork "succeeded"
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	h := &recordingHarness{} // nil err: the fork "succeeded" but laid neither Builds nor Errands
 
 	err := reconcileSpec(stubCtx{h}, openSpec())
 	if err == nil || !strings.Contains(err.Error(), "ws-spec") {
@@ -332,16 +423,16 @@ func TestReconcileSpecEmptySkeletonLeavesSpecOpen(t *testing.T) {
 	if len(h.invs) != 1 {
 		t.Fatalf("the slicing session must have been forked once, got %v", h.invs)
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("the Spec must stay OPEN when the fork laid nothing, got closed=%v", r.closed)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("the Spec must stay OPEN when the fork laid nothing")
 	}
 }
 
 // A Spec that already holds Errands and no Builds is not re-forked (the re-fork
 // republished a fresh copy of each Errand); it drains as an Errand-only Spec.
 func TestReconcileSpecSkipsForkWhenErrandsExist(t *testing.T) {
-	r := &specSeamRec{builds: 0, errands: 1}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	layErrands(f, 1)
 	h := &recordingHarness{}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
@@ -354,11 +445,8 @@ func TestReconcileSpecSkipsForkWhenErrandsExist(t *testing.T) {
 
 // A fork that lays only Errands is a fine slice: it drains as Errand-only.
 func TestReconcileSpecForkLayingOnlyErrandsIsNotAnError(t *testing.T) {
-	r := &specSeamRec{}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	calls := 0
-	errandChildren = func(string) (int, error) { calls++; return (calls - 1) * 2, nil } // none before the fork, two after
-	h := &recordingHarness{}
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	h := &recordingHarness{lay: func() { layErrands(f, 2) }}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -366,69 +454,72 @@ func TestReconcileSpecForkLayingOnlyErrandsIsNotAnError(t *testing.T) {
 	if len(h.invs) != 1 {
 		t.Errorf("slicing must fork once, ran %d", len(h.invs))
 	}
-	if len(r.closed) != 1 {
-		t.Errorf("the Errand-only Spec must close, got %v", r.closed)
+	if st, why := specClosure(f); st != "closed" || why != "sliced: "+cpOf(t) {
+		t.Errorf("the Errand-only Spec must close sliced: <checkpoint>, got %q %q", st, why)
 	}
 }
 
 // Errand-only: Carry, the Checkpoint closed nothing-to-land, the branch delete,
-// then the Spec's close handed to the publish — in that order.
+// then the Spec's close handed to the publish.
 func TestReconcileSpecErrandOnlyCarriesClosesCheckpointDeletesBranchThenClosesSpec(t *testing.T) {
-	r := &specSeamRec{errands: 2, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp"}}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	r := &specSeamRec{branchSeen: true}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	layErrands(f, 2)
+	f.Seed(bd.Bead{ID: "ws-dep", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}})
 
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	want := []string{"carry ws-spec ws-cp", "closecp ws-cp nothing to land: Errand-only Spec ws-spec", "delete checkpoint/ws-cp", "close ws-spec"}
-	if !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v", r.seq, want)
+	cp := cpOf(t)
+	if dep := f.Bead("ws-dep"); !slices.Contains(dep.BlockedBy, cp) {
+		t.Errorf("the dependent must be carried onto %s, blocked by %v", cp, dep.BlockedBy)
+	}
+	if b := f.Bead(cp); b.Status != "closed" || b.CloseReason != "nothing to land: Errand-only Spec ws-spec" {
+		t.Errorf("Checkpoint = %q %q, want closed nothing to land", b.Status, b.CloseReason)
+	}
+	if !slices.Equal(r.deleted, []string{"checkpoint/" + cp}) {
+		t.Errorf("deleted = %v, want checkpoint/%s", r.deleted, cp)
+	}
+	if st, why := specClosure(f); st != "closed" || why != "sliced: "+cp {
+		t.Errorf("Spec = %q %q, want closed sliced", st, why)
 	}
 }
 
 // Re-entry with the Checkpoint already closed nothing-to-land: no cut, no fork,
 // no second Checkpoint close; the Spec's close is handed to the publish.
 func TestReconcileSpecErrandOnlyReentrySkipsCutForkAndCheckpointClose(t *testing.T) {
-	r := &specSeamRec{errands: 2}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Errand-only Spec ws-spec"}, nil
-	}
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	const why = bd.NothingToLandReason + " Errand-only Spec ws-spec"
+	f.Mutate(cp, func(b *bd.Bead) { b.Status, b.CloseReason = "closed", why })
+	layErrands(f, 2)
 	h := &recordingHarness{}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	if len(r.cuts) != 0 || len(h.invs) != 0 {
-		t.Errorf("re-entry must not cut or fork, cuts=%v forks=%d", r.cuts, len(h.invs))
+	if len(r.cuts) != 0 || len(h.invs) != 0 || len(r.deleted) != 0 {
+		t.Errorf("re-entry must not cut, fork or delete, cuts=%v forks=%d deleted=%v", r.cuts, len(h.invs), r.deleted)
 	}
-	if want := []string{"close ws-spec"}; !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v", r.seq, want)
+	if st, reason := specClosure(f); st != "closed" || reason != "sliced: "+cp {
+		t.Errorf("Spec = %q %q, want closed sliced: %s", st, reason, cp)
+	}
+	if b := f.Bead(cp); b.CloseReason != why {
+		t.Errorf("the Checkpoint must not be closed again, reason %q", b.CloseReason)
 	}
 }
 
-// reentryClosedCheckpoint stubs a Checkpoint already closed nothing-to-land, with
-// the Spec's Errand count and Build count read before and after the re-fork.
-func reentryClosedCheckpoint(t *testing.T, r *specSeamRec, errandsAfter, buildsAfter int) {
+// reentryClosedCheckpoint seeds a Checkpoint already closed nothing-to-land and
+// returns the harness whose re-fork lays errandsAfter Errands and buildsAfter Builds.
+func reentryClosedCheckpoint(t *testing.T, r *specSeamRec, errandsAfter, buildsAfter int) (*bdtest.Fake, *recordingHarness) {
 	t.Helper()
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Status: "closed", CloseReason: bd.NothingToLandReason + " Errand-only Spec ws-spec"}, nil
-	}
-	errandCalls := 0
-	errandChildren = func(string) (int, error) {
-		errandCalls++
-		if errandCalls == 1 {
-			return 0, nil
-		}
-		return errandsAfter, nil
-	}
-	buildChildren = func(string) (int, error) {
-		if errandCalls == 0 {
-			return 0, nil
-		}
-		return buildsAfter, nil
-	}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	f.Mutate(cp, func(b *bd.Bead) {
+		b.Status, b.CloseReason = "closed", bd.NothingToLandReason+" Errand-only Spec ws-spec"
+	})
+	return f, &recordingHarness{lay: func() { layErrands(f, errandsAfter); layBuilds(t, f, buildsAfter) }}
 }
 
 // FR19: re-entry with the Checkpoint closed nothing-to-land and zero Errands (a
@@ -436,8 +527,7 @@ func reentryClosedCheckpoint(t *testing.T, r *specSeamRec, errandsAfter, buildsA
 // close or branch delete; the Spec's close follows the re-count.
 func TestReconcileSpecReentryZeroErrandsReforksThenClosesSpec(t *testing.T) {
 	r := &specSeamRec{}
-	reentryClosedCheckpoint(t, r, 2, 0)
-	h := &recordingHarness{}
+	f, h := reentryClosedCheckpoint(t, r, 2, 0)
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -445,103 +535,109 @@ func TestReconcileSpecReentryZeroErrandsReforksThenClosesSpec(t *testing.T) {
 	if len(h.invs) != 1 {
 		t.Errorf("re-entry with zero Errands must re-fork once, ran %d", len(h.invs))
 	}
-	if want := []string{"close ws-spec"}; !slices.Equal(r.seq, want) || len(r.cuts) != 0 {
-		t.Errorf("seq = %v cuts = %v, want only the Spec close", r.seq, r.cuts)
+	if st, _ := specClosure(f); st != "closed" || len(r.cuts)+len(r.deleted) != 0 {
+		t.Errorf("want only the Spec close, got status %q cuts %v deleted %v", st, r.cuts, r.deleted)
 	}
 }
 
 func TestReconcileSpecReentryReforkLayingNothingLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{}
-	reentryClosedCheckpoint(t, r, 0, 0)
-	h := &recordingHarness{}
+	f, h := reentryClosedCheckpoint(t, &specSeamRec{}, 0, 0)
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err == nil {
 		t.Fatal("a re-fork laying nothing must error")
 	}
-	if len(r.seq) != 0 {
-		t.Errorf("Spec must stay open, got %v", r.seq)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("Spec must stay open")
 	}
 }
 
 func TestReconcileSpecReentryReforkLayingBuildFailsLoud(t *testing.T) {
-	r := &specSeamRec{}
-	reentryClosedCheckpoint(t, r, 0, 1)
-	h := &recordingHarness{}
+	f, h := reentryClosedCheckpoint(t, &specSeamRec{}, 0, 1)
 
 	err := reconcileSpec(stubCtx{h}, openSpec())
 	if err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("a Build under the closed Checkpoint must fail loud, got %v", err)
 	}
-	if len(r.seq) != 0 {
-		t.Errorf("Spec must stay open, got %v", r.seq)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("Spec must stay open")
 	}
 }
 
 // An Errand-only Checkpoint closed for another reason fails loud; so does the
-// Builds arm's closed Checkpoint (above).
+// Builds arm's closed Checkpoint (below).
 func TestReconcileSpecErrandOnlyCheckpointClosedOtherwiseFailsLoud(t *testing.T) {
-	r := &specSeamRec{errands: 1}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Status: "closed", CloseReason: "Closed"}, nil
-	}
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	f.Mutate(cp, func(b *bd.Bead) { b.Status, b.CloseReason = "closed", "Closed" })
+	layErrands(f, 1)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("an Errand-only Checkpoint closed for another reason must hard-fail")
 	}
-	if len(r.seq) != 0 {
-		t.Errorf("nothing may carry, close or delete, got %v", r.seq)
+	if st, _ := specClosure(f); st == "closed" || len(r.deleted) != 0 {
+		t.Errorf("nothing may close or delete, spec %q deleted %v", st, r.deleted)
 	}
 }
 
 // A Carry error on the Errand-only arm closes nothing.
 func TestReconcileSpecErrandOnlyCarryErrorClosesNothing(t *testing.T) {
-	r := &specSeamRec{errands: 1, carryErr: errors.New("bd down")}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	layErrands(f, 1)
+	f.Seed(bd.Bead{ID: "ws-dep", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}})
+	f.FailOn("AddEdge", "*", errors.New("bd down"))
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a carry error must fail the reconcile")
 	}
-	if want := []string{"carry ws-spec ws-cp"}; !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v", r.seq, want)
+	if st, _ := specClosure(f); st == "closed" || f.Bead(cpOf(t)).Status == "closed" || len(r.deleted) != 0 {
+		t.Errorf("a failed carry must close and delete nothing, spec %q deleted %v", st, r.deleted)
 	}
 }
 
 // A refused branch delete never fails the pass; the Spec still closes.
 func TestReconcileSpecErrandOnlyRefusedBranchDeleteStillSucceeds(t *testing.T) {
-	r := &specSeamRec{errands: 1, branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/ws-cp", Err: errors.New("held by worktree")}}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	r := &specSeamRec{branchSeen: true, branch: bd.BranchOutcome{Branch: "checkpoint/x", Err: errors.New("held by worktree")}}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	layErrands(f, 1)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	if len(r.closed) != 1 {
-		t.Errorf("the Spec must still close, got %v", r.closed)
+	if st, _ := specClosure(f); st != "closed" {
+		t.Errorf("the Spec must still close, got %q", st)
 	}
 }
 
 // Builds and Errands together: the Checkpoint is not closed.
 func TestReconcileSpecBuildsAndErrandsLeaveCheckpointOpen(t *testing.T) {
-	r := &specSeamRec{builds: 1, errands: 1}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	layBuilds(t, f, 1)
+	layErrands(f, 1)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	for _, c := range r.seq {
-		if strings.HasPrefix(c, "closecp") || strings.HasPrefix(c, "delete") {
-			t.Errorf("unexpected %q with Builds present", c)
-		}
+	if st := f.Bead(cp).Status; st == "closed" || len(r.deleted) != 0 {
+		t.Errorf("Builds present: Checkpoint %q, deleted %v", st, r.deleted)
 	}
 }
 
 // Builds and Errands together take today's path: Carry, then the close.
 func TestReconcileSpecBuildsAndErrandsCarryThenClose(t *testing.T) {
-	r := &specSeamRec{builds: 1, errands: 2}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	h := &recordingHarness{}
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	layBuilds(t, f, 1)
+	layErrands(f, 2)
+	f.Seed(bd.Bead{ID: "ws-dep", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}})
 
-	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
+	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	if want := []string{"carry ws-spec ws-cp", "close ws-spec"}; !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v", r.seq, want)
+	if dep := f.Bead("ws-dep"); !slices.Contains(dep.BlockedBy, cp) {
+		t.Errorf("the dependent must be carried onto %s, blocked by %v", cp, dep.BlockedBy)
+	}
+	if st, why := specClosure(f); st != "closed" || why != "sliced: "+cp {
+		t.Errorf("Spec = %q %q", st, why)
 	}
 }
 
@@ -550,9 +646,10 @@ func TestReconcileSpecBuildsAndErrandsCarryThenClose(t *testing.T) {
 // it runs only the close leg. Mirrors reconcileChart's placeholder-body gate.
 // The roll-forward keeps a re-fork safe (FR21) but wasteful.
 func TestReconcileSpecSkipsForkWhenBuildsExist(t *testing.T) {
-	r := &specSeamRec{builds: 1} // Builds laid on a prior dispatch; the close leg never ran
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	h := &recordingHarness{} // no lay: if the fork ran, it'd be recorded
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	seedCheckpoint(f)
+	layBuilds(t, f, 1) // Builds laid on a prior dispatch; the close leg never ran
+	h := &recordingHarness{}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -560,8 +657,8 @@ func TestReconcileSpecSkipsForkWhenBuildsExist(t *testing.T) {
 	if len(h.invs) != 0 {
 		t.Errorf("must NOT re-fork the slicing session when Builds already exist, ran %d", len(h.invs))
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-spec" {
-		t.Errorf("must still close the Spec on the re-dispatch, got %v", r.closed)
+	if st, _ := specClosure(f); st != "closed" {
+		t.Errorf("must still close the Spec on the re-dispatch, got %q", st)
 	}
 }
 
@@ -570,23 +667,26 @@ func TestReconcileSpecSkipsForkWhenBuildsExist(t *testing.T) {
 // reconcileSpec fails loud and leaves the Spec OPEN rather
 // than burying a closed-Spec / closed-Checkpoint / open-Build corruption.
 func TestReconcileSpecClosedCheckpointFailsLoudLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{builds: 1} // Builds laid; the close leg is reached
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Status: "closed"}, nil }
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	layBuilds(t, f, 1) // Builds laid; the close leg is reached
+	f.Mutate(cp, func(b *bd.Bead) { b.Status = "closed" })
 
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a Checkpoint closed before the Spec must hard-fail")
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("the Spec must stay OPEN when the Checkpoint was clobbered, got closed=%v", r.closed)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("the Spec must stay OPEN when the Checkpoint was clobbered")
 	}
 }
 
 // Acceptance (b): a direct headless Spec cuts from its own anchor
 // (LandedBase(Spec:specID)) — no walk beyond confirming there is no Chart.
 func TestReconcileSpecHeadlessCutsFromSpecAnchor(t *testing.T) {
-	r := &specSeamRec{builds: 1}
-	stubSpecSeams(t, r, "", false, nil)
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "", false, nil)
+	seedCheckpoint(f)
+	layBuilds(t, f, 1)
 
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
@@ -608,8 +708,8 @@ func TestReconcileSpecMissingAnchorHardFailsCutsNothing(t *testing.T) {
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a missing anchor must hard-fail")
 	}
-	if len(r.spawned) != 0 {
-		t.Errorf("a missing anchor must spawn no Checkpoint, got %v", r.spawned)
+	if _, ok, _ := bd.SuccessorOf("ws-spec", contract.KindCheckpoint); ok {
+		t.Error("a missing anchor must spawn no Checkpoint")
 	}
 	if len(r.cuts) != 0 {
 		t.Errorf("a missing anchor must cut no branch, got %v", r.cuts)
@@ -625,8 +725,8 @@ func TestReconcileSpecForeignLandRefusesCutsNothing(t *testing.T) {
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); !errors.As(err, &fe) {
 		t.Fatalf("err = %v, want *ForeignLanding", err)
 	}
-	if len(r.spawned)+len(r.cuts) != 0 {
-		t.Errorf("a foreign land must spawn %v and cut %v nothing", r.spawned, r.cuts)
+	if _, ok, _ := bd.SuccessorOf("ws-spec", contract.KindCheckpoint); ok || len(r.cuts) != 0 {
+		t.Errorf("a foreign land must spawn (%v) and cut (%v) nothing", ok, r.cuts)
 	}
 }
 
@@ -634,8 +734,7 @@ func TestReconcileSpecForeignLandRefusesCutsNothing(t *testing.T) {
 // closes nothing. (The spawn/cut legs stay idempotent via SpawnSuccessorIfAbsent
 // and branch-if-absent CutBranch — their contracts, tested in bd/git.)
 func TestReconcileSpecClosedSpecSkipsForkAndClose(t *testing.T) {
-	r := &specSeamRec{}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
 	h := &recordingHarness{}
 	spec := openSpec()
 	spec.Status = "closed"
@@ -646,16 +745,15 @@ func TestReconcileSpecClosedSpecSkipsForkAndClose(t *testing.T) {
 	if len(h.invs) != 0 {
 		t.Errorf("a closed Spec must not re-fork the slicing session, ran %d", len(h.invs))
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("a closed Spec must not be closed again, got %v", r.closed)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("a closed Spec must not be closed again")
 	}
 }
 
 // A slicing-session failure propagates so the Spec stays open (not closed) — the
 // loop re-dispatches next tick.
 func TestReconcileSpecForkFailureLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
 	h := &recordingHarness{err: errors.New("slicing session crashed")}
 
 	if err := reconcileSpec(stubCtx{h}, openSpec()); err == nil {
@@ -664,8 +762,8 @@ func TestReconcileSpecForkFailureLeavesSpecOpen(t *testing.T) {
 	if len(h.invs) != 1 {
 		t.Errorf("the session must have been attempted once, got %d", len(h.invs))
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("the Spec must NOT be closed on a fork failure, got %v", r.closed)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("the Spec must NOT be closed on a fork failure")
 	}
 }
 
@@ -682,15 +780,14 @@ func (c *publishingCtx) EdgeOnPublish(bd.Edge)        {}
 // the publish instead of closing it itself, so the Draft Builds, their edges and
 // the close become visible in one batch.
 func TestReconcileSpecHandsCloseToPublish(t *testing.T) {
-	r := &specSeamRec{}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	ctx := &publishingCtx{stubCtx: stubCtx{&recordingHarness{lay: func() { r.builds = 2 }}}}
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	ctx := &publishingCtx{stubCtx: stubCtx{&recordingHarness{lay: func() { layBuilds(t, f, 2) }}}}
 
 	if err := reconcileSpec(ctx, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("reconcileSpec must not close the Spec itself in an effort, closed %v", r.closed)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("reconcileSpec must not close the Spec itself in an effort")
 	}
 	if len(ctx.closes) != 1 {
 		t.Errorf("the Spec's close must be handed to the publish once, got %d", len(ctx.closes))
@@ -700,37 +797,56 @@ func TestReconcileSpecHandsCloseToPublish(t *testing.T) {
 // Spec D2: the Spec's Ordering edges carry to its Checkpoint immediately
 // before the Spec's close, so its dependents wait for the Checkpoint to land.
 func TestReconcileSpecCarriesToCheckpointBeforeClose(t *testing.T) {
-	r := &specSeamRec{builds: 1}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	cp := seedCheckpoint(f)
+	layBuilds(t, f, 1)
+	f.Seed(
+		bd.Bead{ID: "ws-after", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}},
+		bd.Bead{ID: "ws-cond", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}, CondBlockedBy: []string{"ws-spec"}},
+	)
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err != nil {
 		t.Fatalf("reconcileSpec: %v", err)
 	}
-	if want := []string{"carry ws-spec ws-cp", "close ws-spec"}; !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v", r.seq, want)
+	for _, id := range []string{"ws-after", "ws-cond"} {
+		if b := f.Bead(id); !slices.Contains(b.BlockedBy, cp) || !slices.Contains(b.BlockedBy, "ws-spec") {
+			t.Errorf("%s blocked by %v, want the Spec kept as lineage and %s added", id, b.BlockedBy, cp)
+		}
+	}
+	if !slices.Contains(f.Bead("ws-cond").CondBlockedBy, cp) {
+		t.Error("a conditional-blocks dependent must carry as conditional-blocks")
+	}
+	if st, _ := specClosure(f); st != "closed" {
+		t.Errorf("the Spec must close after the carry, got %q", st)
 	}
 }
 
 // A carry error fails the reconcile before any close, so the Spec stays open for
 // the next reconcile to retry (FR18); a closed Spec carries nothing again.
 func TestReconcileSpecCarryErrorLeavesSpecOpen(t *testing.T) {
-	r := &specSeamRec{builds: 1, carryErr: errors.New("bd down")}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	seedCheckpoint(f)
+	layBuilds(t, f, 1)
+	f.Seed(bd.Bead{ID: "ws-after", Kind: contract.KindSpec, Status: "open", BlockedBy: []string{"ws-spec"}})
+	f.FailOn("AddEdge", "*", errors.New("bd down"))
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, openSpec()); err == nil {
 		t.Fatal("a carry error must fail the reconcile")
 	}
-	if want := []string{"carry ws-spec ws-cp"}; !slices.Equal(r.seq, want) {
-		t.Errorf("seq = %v, want %v (no close after a failed carry)", r.seq, want)
+	if st, _ := specClosure(f); st == "closed" {
+		t.Error("no close after a failed carry")
 	}
 
-	r = &specSeamRec{builds: 1}
-	stubSpecSeams(t, r, "ws-chart", true, nil)
+	f = stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+	seedCheckpoint(f)
+	layBuilds(t, f, 1)
 	spec := openSpec()
 	spec.Status = "closed"
 	if err := reconcileSpec(stubCtx{&recordingHarness{}}, spec); err != nil {
 		t.Fatalf("re-entrant reconcileSpec: %v", err)
 	}
-	if len(r.seq) != 0 {
-		t.Errorf("a closed Spec must not carry or close again, got %v", r.seq)
+	for _, c := range f.Calls() {
+		if strings.HasPrefix(c, "AddEdge") || strings.HasPrefix(c, "Batch") || strings.HasPrefix(c, "Close") {
+			t.Errorf("a closed Spec must not carry or close again, saw %q", c)
+		}
 	}
 }
 
@@ -825,7 +941,7 @@ func TestPivotPromptDraftsByPivot(t *testing.T) {
 	}
 	for _, want := range []string{
 		contract.DraftInstruction("ws-pv"),
-		"kind:critique," + contract.DraftedBy("ws-pv") + " -s deferred",
+		"--drafted-by ws-pv", // both verbs file their Critique as the lead pivot's Draft
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("pivot prompt missing %q", want)
@@ -836,15 +952,14 @@ func TestPivotPromptDraftsByPivot(t *testing.T) {
 // Run re-reads the dispatched Spec then reconciles it — the end-to-end dispatch
 // path over the seams.
 func TestRunReadsAndReconciles(t *testing.T) {
-	r := &specSeamRec{} // the fork lays a Build → the dispatch drives through to close
-	stubSpecSeams(t, r, "ws-chart", true, nil)
-	h := &recordingHarness{lay: func() { r.builds = 1 }}
+	f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil) // the fork lays a Build → the dispatch drives through to close
+	h := &recordingHarness{lay: func() { layBuilds(t, f, 1) }}
 
 	if err := (Zoro{}).Run(stubCtx{h}, contract.Bead{ID: "ws-spec", Kind: contract.KindSpec}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(h.invs) != 1 || len(r.closed) != 1 {
-		t.Errorf("Run must drive reconcileSpec to fork+close, got invs=%v closed=%v", h.invs, r.closed)
+	if st, _ := specClosure(f); len(h.invs) != 1 || st != "closed" {
+		t.Errorf("Run must drive reconcileSpec to fork+close, got invs=%v spec=%q", h.invs, st)
 	}
 }
 
@@ -934,35 +1049,24 @@ func TestZoroPromptsSkillFree(t *testing.T) {
 	}
 }
 
-// stubInitiative stands in for bd.InitiativeOf: a bead parented under ws-init is
-// in an unclosed Initiative; any other parent (none, or a closed one) yields none.
-func stubInitiative(t *testing.T) {
-	t.Helper()
-	o := initiativeOf
-	t.Cleanup(func() { initiativeOf = o })
-	initiativeOf = func(b bd.Bead) (string, error) {
-		if b.Parent == "ws-init" {
-			return "ws-init", nil
-		}
-		return "", nil
-	}
-}
-
 // Spec D2, FR11: the Checkpoint a Spec cuts is born inside the Spec's
 // Initiative, and outside one when the Spec has none.
 func TestReconcileSpecCheckpointJoinsTheSpecsInitiative(t *testing.T) {
 	for _, tc := range []struct{ parent, want string }{{"ws-init", "ws-init"}, {"ws-closed-init", ""}, {"", ""}} {
 		t.Run(tc.parent, func(t *testing.T) {
-			r := &specSeamRec{builds: 1}
-			stubSpecSeams(t, r, "ws-chart", true, nil)
-			stubInitiative(t)
+			f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+			f.Seed(
+				bd.Bead{ID: "ws-init", Kind: contract.KindInitiative, Status: "open"},
+				bd.Bead{ID: "ws-closed-init", Kind: contract.KindInitiative, Status: "closed"},
+			)
 			spec := openSpec()
 			spec.Parent = tc.parent
-			if err := reconcileSpec(stubCtx{&recordingHarness{}}, spec); err != nil {
+			h := &recordingHarness{lay: func() { layBuilds(t, f, 1) }}
+			if err := reconcileSpec(stubCtx{h}, spec); err != nil {
 				t.Fatalf("reconcileSpec: %v", err)
 			}
-			if len(r.spawned) != 1 || r.spawned[0].Parent != tc.want {
-				t.Errorf("spawned %+v, want one Checkpoint with Parent %q", r.spawned, tc.want)
+			if got := f.Bead(cpOf(t)).Parent; got != tc.want {
+				t.Errorf("Checkpoint Parent = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -982,15 +1086,11 @@ func TestCheckpointSuccessorCopiesTheSpecsContext(t *testing.T) {
 
 // Pivot's focus line is the labelled Checkpoint's alone, appended to the old prompt.
 func TestLaunchPivotFocus(t *testing.T) {
-	stubPivotSeams(t, "ws-cp", "ws-sp")
 	launch := func(label string, noShow bool) string {
-		oShow := showBead
-		t.Cleanup(func() { showBead = oShow })
-		showBead = func(id string) (bd.Bead, error) {
-			if noShow {
-				t.Fatal("bd show on a no-context Workspace")
-			}
-			return bd.Bead{ID: id, Labels: []string{label}}, nil
+		f := seedPivot(t, "ws-cp", "ws-sp")
+		f.Mutate("ws-cp", func(b *bd.Bead) { b.Labels = []string{label} })
+		if noShow {
+			f.FailOn("Show", "ws-cp", errors.New("bd show on a no-context Workspace"))
 		}
 		h := &recordingHarness{}
 		if _, err := (Zoro{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-pv", Kind: contract.KindPivot}); err != nil {
@@ -1020,9 +1120,8 @@ func TestLaunchPivotFocus(t *testing.T) {
 // unlabelled Spec, and the old render plus exactly the focus line under a labelled one.
 func TestSlicingFocusLineByteIdentity(t *testing.T) {
 	run := func(label string) string {
-		r := &specSeamRec{}
-		stubSpecSeams(t, r, "ws-chart", true, nil)
-		h := &recordingHarness{lay: func() { r.builds = 1 }}
+		f := stubSpecSeams(t, &specSeamRec{}, "ws-chart", true, nil)
+		h := &recordingHarness{lay: func() { layBuilds(t, f, 1) }}
 		spec := openSpec()
 		spec.Labels = []string{label}
 		if err := reconcileSpec(stubCtx{h}, spec); err != nil {
@@ -1052,8 +1151,10 @@ func TestSlicingFocusLineByteIdentity(t *testing.T) {
 // checkpoint branch is cut in the child; a trailer the child lacks is a hard error
 // that cuts nothing (Spec FR11, D2, D3).
 func TestReconcileSpecNestedReadsAndCutsInTheChild(t *testing.T) {
-	r := &specSeamRec{builds: 1}
-	stubSpecSeams(t, r, "", false, nil)
+	r := &specSeamRec{}
+	f := stubSpecSeams(t, r, "", false, nil)
+	seedCheckpoint(f)
+	layBuilds(t, f, 1)
 	var reads, cuts []string
 	var missing error
 	oOf, oLand, oCut := repoOf, repoLanded, repoCut
@@ -1105,7 +1206,7 @@ func TestCheckpointBaseDirectSpec(t *testing.T) {
 	for _, strat := range []string{git.LandStrategyLocal, git.LandStrategyGitlab} {
 		t.Run(strat, func(t *testing.T) {
 			swap(t, &landStrategy, func() (string, error) { return strat, nil })
-			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "", false, nil })
+			bdtest.New(t) // no Chart: the Spec is caused-by nothing
 			swap(t, &repoOf, func(bd.Bead) git.Repo { return "" })
 			var trailer error
 			swap(t, &landedBase, func(string) (string, error) { return "trailersha", trailer })
@@ -1129,7 +1230,7 @@ func TestCheckpointBaseNestedPinnedFetchesOnlyUnderGitlab(t *testing.T) {
 	for strat, want := range map[string]int{git.LandStrategyLocal: 0, git.LandStrategyGitlab: 1} {
 		t.Run(strat, func(t *testing.T) {
 			swap(t, &landStrategy, func() (string, error) { return strat, nil })
-			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "", false, nil })
+			bdtest.New(t) // no Chart: the Spec is caused-by nothing
 			swap(t, &repoOf, func(bd.Bead) git.Repo { return "kid" })
 			swap(t, &repoLanded, func(git.Repo, string) (string, error) { t.Fatal("trailer read"); return "", nil })
 			fetched := 0
@@ -1143,12 +1244,13 @@ func TestCheckpointBaseNestedPinnedFetchesOnlyUnderGitlab(t *testing.T) {
 
 func TestCheckpointBaseNestedChartGitlabFetchesFirst(t *testing.T) {
 	swap(t, &landStrategy, func() (string, error) { return git.LandStrategyGitlab, nil })
-	swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "k-c", true, nil })
+	bdtest.New(t,
+		bd.Bead{ID: "k-s", Kind: contract.KindSpec, Status: "open", CausedBy: "k-c"},
+		bd.Bead{ID: "k-c", Kind: contract.KindChart, Status: "closed", Description: "chart body"})
 	swap(t, &repoOf, func(bd.Bead) git.Repo { return "kid" })
 	var order []string
 	swap(t, &repoFetch, func(git.Repo) (string, error) { order = append(order, "fetch"); return "tip", nil })
 	swap(t, &repoLanded, func(_ git.Repo, tr string) (string, error) { order = append(order, tr); return "chartsha", nil })
-	swap(t, &showBead, func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: "chart body"}, nil })
 	if got, err := checkpointBase(bd.Bead{ID: "k-s"}); err != nil || got != "chartsha" || len(order) != 2 || order[0] != "fetch" {
 		t.Errorf("checkpointBase = %q, %v, order %v", got, err, order)
 	}
@@ -1160,19 +1262,20 @@ func TestCheckpointBaseChartPinThenTrailer(t *testing.T) {
 	for _, repo := range []git.Repo{"", "kid"} {
 		t.Run("repo="+string(repo), func(t *testing.T) {
 			swap(t, &landStrategy, func() (string, error) { return git.LandStrategyLocal, nil })
-			swap(t, &causedBy, func(string, contract.Kind) (string, bool, error) { return "ws-c", true, nil })
+			f := bdtest.New(t,
+				bd.Bead{ID: "ws-s", Kind: contract.KindSpec, Status: "open", CausedBy: "ws-c"},
+				bd.Bead{ID: "ws-c", Kind: contract.KindChart, Status: "closed"})
 			swap(t, &repoOf, func(bd.Bead) git.Repo { return repo })
-			var chartBody string
-			swap(t, &showBead, func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Description: chartBody}, nil })
+			setChart := func(body string) { f.Mutate("ws-c", func(b *bd.Bead) { b.Description = body }) }
 			var trailer error
 			swap(t, &landedBase, func(string) (string, error) { return "trailersha", trailer })
 			swap(t, &repoLanded, func(git.Repo, string) (string, error) { return "trailersha", trailer })
 			spec := bd.Bead{ID: "ws-s"}
-			chartBody = "body\nAnchor: pinsha\n"
+			setChart("body\nAnchor: pinsha\n")
 			if got, err := checkpointBase(spec); err != nil || got != "pinsha" {
 				t.Errorf("pinned: checkpointBase = %q, %v; want pinsha", got, err)
 			}
-			chartBody = "body"
+			setChart("body")
 			if got, err := checkpointBase(spec); err != nil || got != "trailersha" {
 				t.Errorf("legacy: checkpointBase = %q, %v; want trailersha", got, err)
 			}
@@ -1199,11 +1302,11 @@ func TestPivotPromptReadsSignalRaiser(t *testing.T) {
 		"the report was wrong",   // FR47: dismiss prose
 		"the Ask",                // FR47: in place of the unfinished FR
 		"Ask Critique",           // FR48–50
-		"rewrite it to whatever as-specced work is left",
-		"close it `dismissed: <pivotID>`",
+		"pass `--rewrite <askID>=<file>` for each Ask whose as-specced work remains",
+		"the verb closes the rest `dismissed: <pivotID>`",
 		"you never reopen the Signal",
-		"AMENDMENT (<pivotID>): …` comment on the Ask Critique", // FR49
-		"closes it as obsolete",                                 // FR50
+		"the verb comments the `AMENDMENT (<pivotID>): …` on each Ask Critique", // FR49
+		"closes it as obsolete",                                                 // FR50
 		"folds the Ask",
 	} {
 		if !strings.Contains(p, want) {
@@ -1231,21 +1334,45 @@ func TestPivotPromptReadsErrandRaiser(t *testing.T) {
 		"An Errand raiser: a `kind:errand` row", // Raised by read
 		"stuck comment",
 		"`Raised by Errand` line",
-		"pivot <pivotID> dismissed|amended: <gist>", // Errand comment on dismiss/amend
+		"the verb comments on each raising Errand", // Errand comment on dismiss/amend
 		"which Critique to wait for",
-		"the step may be wrong; amend it on resume", // ...
-		"skip the step-1 refile",                    // Ask Critique already exists
-		"the open `kind:errand` rows",               // held-Errand listing
-		"adopt it or leave it out",                  // confirm: put each to the human
-		"### <Errand title>",                        // confirm: Spec entry
-		"errand: <id>",                              // ...
-		"before: land",                              // ...
-		"no Steps body",                             // ...
-		"stays open for the human to abandon",       // left-out Errand
+		"pass no `--critique` to Dismiss or Amend", // Ask Critique already exists
+		"the open `kind:errand` rows",              // held-Errand listing
+		"adopt it or leave it out",                 // confirm: put each to the human
+		"### <Errand title>",                       // confirm: Spec entry
+		"errand: <id>",                             // ...
+		"before: land",                             // ...
+		"no Steps body",                            // ...
+		"stays open for the human to abandon",      // left-out Errand
 		"name each held Errand and whether the human wants it adopted", // escalate evidence
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("pivot prompt missing %q", want)
+		}
+	}
+}
+
+// ADR 0414: Dismiss and Amend are one verb invocation each, with no raw bd write left,
+// and the outcome-mixing rule and amend's ADR step stay.
+func TestPivotPromptDismissAmendCallVerbs(t *testing.T) {
+	p := strings.Join(strings.Fields(pivotPrompt("ws-pv", "ws-cp", "ws-sp")), " ")
+	for _, want := range []string{
+		`mugicrew pivot dismiss <pivotID> --gist "<gist>" [--critique "$critique"] [--rewrite <askID>="$rewrite"]... --drafted-by ws-pv`,
+		`mugicrew pivot amend <pivotID> --gist "<gist>" --amendment "<FR> — <decision> — rejected: <options>" [--critique "$critique"] --drafted-by ws-pv`,
+		"write no dismiss, amend or confirm",                      // outcome-mixing rule
+		"only if the amendment is architectural beyond this Spec", // ADR step
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("pivot prompt missing %q", want)
+		}
+	}
+	i, j := strings.Index(p, "### Dismiss"), strings.Index(p, "### Confirm")
+	if i < 0 || j < i {
+		t.Fatal("pivot prompt lost its Dismiss/Amend sections")
+	}
+	for _, raw := range []string{"bd create", "bd comments add", "bd close", "bd update <critiqueID>"} {
+		if strings.Contains(p[i:j], raw) {
+			t.Errorf("Dismiss/Amend still types %q", raw)
 		}
 	}
 }
@@ -1261,5 +1388,62 @@ func TestSlicingPromptRefusesRetiredTaskForms(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("slicing prompt missing retired-form refusal %q", want)
 		}
+	}
+}
+
+// seedRemnant seeds the Remnant ws-rm into a bdtest graph, related to the landed
+// Checkpoint cp; an empty cp leaves the edge out.
+func seedRemnant(t *testing.T, cp string) {
+	t.Helper()
+	rm := bd.Bead{ID: "ws-rm", Kind: contract.KindRemnant, Status: "open", Labels: []string{"kind:remnant"}}
+	if cp != "" {
+		rm.Related = []string{cp}
+	}
+	f := bdtest.New(t, rm)
+	if cp != "" {
+		f.Seed(bd.Bead{ID: cp, Kind: contract.KindCheckpoint, Status: "closed", Container: true, Labels: []string{"kind:checkpoint"}})
+	}
+}
+
+// Launch(remnant) → one session anchored to the Remnant whose prompt carries the
+// Go-resolved landed Checkpoint, the dry-run, the Renumber-wait variant, and exits
+// run only on the human's yes; drop is never run and points to X.
+func TestLaunchRemnantComposesSession(t *testing.T) {
+	seedRemnant(t, "ws-cp")
+	h := &recordingHarness{}
+	if _, err := (Zoro{}).Launch(stubCtx{h}, contract.Bead{ID: "ws-rm", Kind: contract.KindRemnant}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if h.launched.BeadID != "ws-rm" {
+		t.Errorf("Invocation must anchor to the Remnant, got %q", h.launched.BeadID)
+	}
+	p := strings.Join(strings.Fields(h.launched.Prompt), " ")
+	for _, want := range []string{
+		"bd update ws-rm --claim",
+		"bd show ws-cp",
+		"git merge-tree --write-tree --merge-base=<Tip>", // the dry-run
+		"replays clean",
+		"Renumber-wait variant", "Run no merge-tree", "will conflict with the Renumber's move",
+		"mugicrew remnant ws-rm offshoot", "mugicrew remnant ws-rm respin",
+		"only on the human's yes",
+		"Never run `drop`", "press X on the Remnant's row",
+		"leaves the Remnant open",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("remnant prompt lacks %q", want)
+		}
+	}
+	// drop appears only in prohibitions: never as a runnable line.
+	for _, l := range strings.Split(h.launched.Prompt, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "mugicrew remnant ws-rm drop") {
+			t.Errorf("prompt runs drop: %q", l)
+		}
+	}
+}
+
+func TestLaunchRemnantWithoutLandedCheckpointErrors(t *testing.T) {
+	seedRemnant(t, "")
+	if _, err := (Zoro{}).Launch(stubCtx{&recordingHarness{}}, contract.Bead{ID: "ws-rm", Kind: contract.KindRemnant}); err == nil {
+		t.Error("Launch of an unrelated Remnant must error")
 	}
 }

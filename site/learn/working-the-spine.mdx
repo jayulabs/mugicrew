@@ -1,0 +1,127 @@
+---
+id: working-the-spine
+title: Working the spine
+---
+
+import SurfaceTabs from '@site/src/components/SurfaceTabs';
+import Recording from '@site/src/components/Recording';
+
+# Working the spine
+
+This guide follows one piece of work from the first request to the commit on mainline: Signal → Chart → Spec → Checkpoint → Build, then Review and Approval, then the land. At each stage it says what the loop needs from you (HITL) and what the crew runs on its own (AFK), so you know when to act and when to wait.
+
+New to the terms? The [Bead glossary](/learn/bead-glossary) lists every kind. For the flow as a picture, see [the framework](/framework).
+
+Two rules hold throughout. Where a step is yours, the TUI tab gives the keys and the CLI tab gives the command; where the CLI has no verb for it, the tab says so and gives the command that reads the state. And the loop only dispatches AFK work while it runs, so start it once:
+
+<SurfaceTabs
+  tui={<p>Press <code>o</code> to start the loop. Launch with <code>mugicrew --watch</code> and <code>o</code> starts a watched loop.</p>}
+  cli={<pre><code className="language-bash">mugicrew loop start{'\n'}mugicrew loop status</code></pre>}
+/>
+
+## 1. File a Signal
+
+**You:** describe the request. Anything that could change the Workspace is a [Signal](/learn/bead-glossary#signal): a bug, an idea, a Jira ticket. **AFK:** nothing yet. A Signal sits in the Ideate tab as an open request until you choose to triage it.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>1</code> for the Ideate tab, then <code>n</code> to open the New menu and <code>s</code> for a Signal.</li><li>Type the title, press <code>tab</code>, then type the description.</li><li>Press <code>ctrl+s</code> to save. The Signal appears as a new row in the Ideate tab.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew signal new --title "Add a health-check endpoint" --description "A /healthz route for load balancers."</code></pre>}
+/>
+
+To file a Jira work item instead:
+
+<SurfaceTabs
+  tui={<p>Press <code>n</code> to open the New menu, then <code>j</code>.</p>}
+  cli={<pre><code className="language-bash">mugicrew intake jira &lt;KEY&gt;</code></pre>}
+/>
+
+A Jira Signal leaves this walk at triage: it becomes an [Initiative](/learn/organizing-with-initiatives) (or is rejected or marked a duplicate), never a Chart or a fast-lane Spec. See [Jira](/learn/customization/jira).
+
+<Recording name="first-signal">filing a Signal in the TUI, then opening it to triage.</Recording>
+
+## 2. Triage the Signal
+
+**You:** pick one Signal and start its triage; Luffy interviews you in a short session and records one of four outcomes. **AFK:** nothing until you start it: triage is human-gated.
+
+- **Accept:** the Signal becomes a [Chart](/learn/bead-glossary#chart) with a [Survey](/learn/bead-glossary#survey), for work that has fog to clear.
+- **Fast lane:** for a Signal that is already sharp, Luffy writes a [Spec](/learn/bead-glossary#spec) directly and the Chart stage is skipped. Review still applies in full.
+- **Reject:** the Signal closes with a reason and no successor.
+- **Duplicate:** the Signal is superseded by the original, which keeps both reports in one lineage.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>1</code> for the Ideate tab (or <code>4</code> for the Graph tab), then <code>j</code>/<code>k</code> to the Signal row.</li><li>Press <code>enter</code> to triage. A session opens in a pane; answer Luffy, who names the Destination and the outcome.</li><li>Leave the session when it finishes; the row closes and its successor appears.</li></ol>}
+  cli={<pre><code className="language-bash">mugicrew signal triage &lt;id&gt;</code></pre>}
+/>
+
+## 3. Defog the Chart
+
+**You:** work through the fog in the Chart's Survey: you start a charting session and answer the questions in it. **AFK:** the work the Survey seeds. [Research](/learn/bead-glossary#research) beads run on their own, and a [Prototype](/learn/bead-glossary#prototype) is built by Sanji; only a [Grilling](/learn/bead-glossary#grilling) bead needs you to be interviewed. A Chart with no fog is finished in place, with your assent.
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>2</code> for the Defog tab, then <code>j</code>/<code>k</code> to the Survey or Grilling row.</li><li>Press <code>d</code> to read the bead's detail first, then <code>enter</code> to launch the session (or <code>enter</code> to attach to one already running).</li><li>Answer the questions in the pane. Decisions are recorded on the Chart's branch.</li></ol>}
+  cli={<div><p>Defogging is a TUI session; the CLI has no verb to start one. Read its state instead:</p><pre><code className="language-bash">mugicrew ps{'\n'}mugicrew transcript &lt;bead&gt;</code></pre></div>}
+/>
+
+<Recording name="grilling">a Grilling session in the Defog tab, answering Nami's questions.</Recording>
+
+## 4. Approve and land the Chart
+
+**You:** read the Chart Packet and approve it; defog is the review, so a Chart has no Review pass. **AFK:** once every defog bead is resolved, the Chart is stamped defogged, its [Approval](/learn/bead-glossary#approval) is spawned, and its [Landing](/learn/bead-glossary#landing) runs after you approve. The Chart's decisions then land on mainline as one commit.
+
+The Approval opens the same way as a Checkpoint's; step 8 shows the keys. If you ask for more, the Chart is reworked with new defog beads and a fresh Approval.
+
+<SurfaceTabs
+  tui={<p>Press <code>2</code> for the Defog tab and open the Chart's Approval row; step 8 has the keys.</p>}
+  cli={<p>Approving a Chart is a TUI action; the CLI has no verb for it.</p>}
+/>
+
+## 5. The Spec
+
+**You:** nothing. **AFK:** a speccing session synthesizes the Chart and its closed defog beads into the Spec, a closed record of the plan sliced into Builds. Its body is never edited; later changes arrive as Amendments. (A fast-lane Signal gets its Spec from Luffy at triage instead.)
+
+<SurfaceTabs
+  tui={<p>Press <code>4</code> for the Graph tab and <code>d</code> on the Spec row to read the plan.</p>}
+  cli={<pre><code className="language-bash">mugicrew transcript &lt;spec-bead&gt;</code></pre>}
+/>
+
+## 6. The Checkpoint and its Builds
+
+**You:** keep the loop running. **AFK:** Zoro cuts the [Checkpoint](/learn/bead-glossary#checkpoint) branch and slices the Spec into [Builds](/learn/bead-glossary#build). Franky executes each Build on its own effort branch and integrates it onto the Checkpoint. A Build that proves the Spec wrong raises a [Pivot](/learn/bead-glossary#pivot) and a defect beyond a Build's slice raises a Critique; both wait for you only if the loop cannot settle them.
+
+<SurfaceTabs
+  tui={<p>Press <code>3</code> for the Execute tab. Rows with a live <code>●</code> are running now; press <code>t</code> on one to read its transcript.</p>}
+  cli={<pre><code className="language-bash">mugicrew ps{'\n'}mugicrew transcript &lt;build&gt;</code></pre>}
+/>
+
+## 7. Review and Critiques
+
+**You:** nothing, unless something sticks. **AFK:** when the Builds drain, Usopp reviews the Checkpoint at its exact commit. Each finding is a [Critique](/learn/bead-glossary#critique) that Franky resolves, after which a fresh [Review](/learn/bead-glossary#review) runs. A pass that closes with zero open Critiques is clean and spawns the Approval.
+
+<SurfaceTabs
+  tui={<p>Stay on the Execute tab (<code>3</code>). Review and Critique rows appear as the pass runs; press <code>d</code> on a row for its detail.</p>}
+  cli={<pre><code className="language-bash">mugicrew stats &lt;checkpoint&gt; --spine</code></pre>}
+/>
+
+## 8. Approve with the Decision Packet
+
+**You:** read the Decision Packet and approve. This is the one gate every change passes. **AFK:** Luffy writes the Packet (Background, Summary, Evidence, Merge Danger, Execution Notes, Approval History) before it reaches you. With `[approvals] auto_approve` on, the Approval is AFK too; the setting is in the Settings tab (`*`).
+
+<SurfaceTabs
+  tui={<ol><li>Press <code>3</code>, then <code>j</code>/<code>k</code> to the Approval row.</li><li>Press <code>d</code> to open the Decision Packet and <code>pgdn</code> to read down it; <code>d</code> closes it.</li><li>Press <code>enter</code> to open Luffy's session. Ask for changes, or take the approve action; asking for rework sends the Checkpoint back with new Critiques.</li></ol>}
+  cli={<div><p>Approving is a TUI action; the CLI has no verb for it. Read the Approval and its history:</p><pre><code className="language-bash">mugicrew transcript &lt;approval&gt;</code></pre></div>}
+/>
+
+<Recording name="approval">reading a Decision Packet in the Execute tab.</Recording>
+
+## 9. The land
+
+**You:** nothing on the default local strategy. **AFK:** once the Checkpoint is approved, drained and unblocked, Jinbe's [Landing](/learn/bead-glossary#landing) rebases and squashes it onto mainline as one commit, then closes the Checkpoint. A rebase conflict files a [Conflict](/learn/bead-glossary#conflict) for the crew to resolve. Landing through GitLab instead waits on you to un-draft the merge request.
+
+If mainline moved while you waited, refresh a branch before it lands:
+
+<SurfaceTabs
+  tui={<p>Press <code>n</code> for the New menu, then <code>r</code> to file a rebase of the selected Chart or Checkpoint.</p>}
+  cli={<pre><code className="language-bash">mugicrew rebase &lt;chart-or-checkpoint-id&gt;</code></pre>}
+/>
+
+When the loop stalls, the other guides pick up from here: every verb is on [CLI verbs](/learn/cli-verbs), and the README on [GitHub](https://github.com/jayulabs/mugicrew#readme) covers install. To try the loop before committing to it, see [/try](/try).

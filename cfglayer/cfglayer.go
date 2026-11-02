@@ -563,3 +563,47 @@ func Profiles(root string) Catalog {
 	out.Winners = agentprofile.Merge(layers...)
 	return out
 }
+
+type releaseLayer struct {
+	Release *struct {
+		Notice *bool
+	}
+}
+
+// ReleaseNotice is [release] notice: false turns off the Release notice, its
+// check included. The first layer that sets it wins, local before checked-in; a
+// missing or unusable layer falls through, and unset reads on.
+func ReleaseNotice(root string) bool {
+	for _, p := range []string{LocalPath(root), SharedPath(root)} {
+		var l releaseLayer
+		if Decode(p, &l) == Set && l.Release != nil && l.Release.Notice != nil {
+			return *l.Release.Notice
+		}
+	}
+	return true
+}
+
+// PersonalPath is the per-user layer, <os.UserConfigDir()>/mugicrew/config.toml;
+// "" (a missing layer) when the config dir can't be resolved.
+func PersonalPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "mugicrew", "config.toml")
+}
+
+type upgradeLayer struct {
+	Upgrade *struct {
+		Unattended *bool
+	}
+}
+
+// UnattendedUpgrade is [upgrade] unattended in the personal layer only: one
+// machine-wide binary is governed by one per-user setting, so neither Workspace
+// layer is consulted and a repo can't opt a machine in. Unset, missing, unusable
+// or mistyped reads off.
+func UnattendedUpgrade() bool {
+	var l upgradeLayer
+	return Decode(PersonalPath(), &l) == Set && l.Upgrade != nil && l.Upgrade.Unattended != nil && *l.Upgrade.Unattended
+}

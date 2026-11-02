@@ -95,3 +95,16 @@ func TestCheckupDropClosesAndLiftsFence(t *testing.T) {
 		t.Errorf("calls = %q", got)
 	}
 }
+
+func TestCheckupDropKeepsFenceAnotherCheckupHolds(t *testing.T) {
+	m, calls := checkupModel(t)
+	seam(t, &dropDrafts, func(b bd.Bead) error { return nil })
+	seam(t, &closeBead, func(id, r string) error { *calls = append(*calls, "closeBead "+id+" "+r); return nil })
+	seam(t, &openCheckupOn, func(string) (bd.Bead, bool, error) { return bd.Bead{ID: "other"}, true, nil })
+	m, _ = at(t, m, "ck", runeKey("x"))
+	m, cmd := send(t, m, runeKey("y"))
+	settle(t, m, cmd)
+	if got := strings.Join(*calls, ";"); got != "closeBead ck dropped" {
+		t.Errorf("calls = %q", got)
+	}
+}

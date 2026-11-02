@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -210,6 +212,7 @@ func (c counted) count() int { return c.n }
 func TestFrameFitsAndBudget(t *testing.T) {
 	for _, sz := range [][2]int{{40, 12}, {84, 24}, {200, 50}} {
 		m := sized(t, sz[0], sz[1])
+		m, _ = send(t, m, loadedMsg{}) // the bodies under test are the loaded ones
 		for i := range tabNames {
 			m, _ = send(t, m, runeKey(tabDefs[i].key))
 			for _, open := range []bool{false, true} {
@@ -657,5 +660,112 @@ func TestLogKindPickQueuesBehindRead(t *testing.T) {
 	m, _ = m.foldKinds(logKindsMsg{})
 	if len(m.modals) != 1 {
 		t.Fatalf("queued pick did not open: %+v", m.modals)
+	}
+}
+
+func TestLoadingIndicatorBeforeFirstSnapshot(t *testing.T) {
+	m := sized(t, 120, 30)
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "loading…") || !strings.Contains(v, "mugicrew") || !strings.Contains(v, "Ideate") {
+		t.Fatalf("fresh Model should show loading… under the header and tab strip:\n%s", v)
+	}
+	if strings.Contains(v, "HITL") || strings.Contains(v, "●") {
+		t.Errorf("crew counts and badges must be absent before the first load:\n%s", v)
+	}
+	for _, tab := range []int{tabLogs, tabSettings} {
+		n, _ := send(t, m, runeKey(tabDefs[tab].key))
+		if strings.Contains(ansi.Strip(n.View()), "loading…") {
+			t.Errorf("tab %d must not show the indicator", tab)
+		}
+	}
+	m, _ = send(t, m, loadedMsg{beads: stubBeads()})
+	v = ansi.Strip(m.View())
+	if strings.Contains(v, "loading…") || !strings.Contains(v, "HITL") {
+		t.Errorf("a loaded snapshot removes the indicator and shows counts:\n%s", v)
+	}
+	m, _ = send(t, m, errMsg{errors.New("dolt down")})
+	m, _ = send(t, m, loadedMsg{beads: stubBeads()})
+	if strings.Contains(ansi.Strip(m.View()), "loading…") {
+		t.Error("a later refresh must not bring the indicator back")
+	}
+}
+
+func TestLoadingIndicatorAfterFailedFirstLoad(t *testing.T) {
+	m := sized(t, 120, 30)
+	m, _ = send(t, m, errMsg{errors.New("dolt down")})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "bd read failed") || strings.Contains(v, "loading…") {
+		t.Fatalf("first-load error shows the notice alone:\n%s", v)
+	}
+	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyF5})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "loading…") {
+		t.Fatalf("f5 after a failed first load shows the indicator:\n%s", v)
+	}
+}
+
+func TestF5AfterLoadedSessionKeepsBdReadFailedNotice(t *testing.T) {
+	m := sized(t, 120, 30)
+	m, _ = send(t, m, loadedMsg{beads: stubBeads()})
+	m, _ = send(t, m, errMsg{errors.New("dolt down")})
+	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyF5})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "bd read failed") {
+		t.Fatalf("f5 after a loaded session keeps the notice until the retry answers:\n%s", v)
+	}
+	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "bd read failed") {
+		t.Errorf("a tab key must do nothing while the notice is up:\n%s", v)
+	}
+}
+
+// spinCmds counts the spinner frame messages a command yields, running a batch's members.
+func spinCmds(cmd tea.Cmd) int {
+	if cmd == nil {
+		return 0
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(2 * time.Second):
+		return 0
+	}
+	switch v := msg.(type) {
+	case spinMsg:
+		return 1
+	case tea.BatchMsg:
+		n := 0
+		for _, c := range v {
+			n += spinCmds(c)
+		}
+		return n
+	}
+	return 0
+}
+
+func TestSpinnerFramesAnimateThenStopAtFirstSnapshot(t *testing.T) {
+	m := sized(t, 120, 30)
+	before := ansi.Strip(m.View())
+	m, cmd := send(t, m, spinMsg{})
+	if spinCmds(cmd) != 1 {
+		t.Fatalf("a frame while unloaded must re-arm exactly one frame command")
+	}
+	if after := ansi.Strip(m.View()); after == before || !strings.Contains(after, "loading…") {
+		t.Errorf("a frame must advance the rendered spinner:\n%s\n--\n%s", before, after)
+	}
+	m, _ = send(t, m, loadedMsg{beads: stubBeads()})
+	if _, cmd = send(t, m, spinMsg{}); cmd != nil {
+		t.Errorf("a frame after the first snapshot must end the chain")
+	}
+}
+
+func TestF5AfterFailedFirstLoadKeepsOneFrameChain(t *testing.T) {
+	m := sized(t, 120, 30)
+	m, _ = send(t, m, errMsg{err: errors.New("bd down")})
+	m, cmd := send(t, m, tea.KeyMsg{Type: tea.KeyF5})
+	if n := spinCmds(cmd); n != 0 {
+		t.Errorf("f5 with the chain still running must not stack another, got %d", n)
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "loading…") {
+		t.Errorf("f5 shows the indicator again")
 	}
 }

@@ -48,8 +48,9 @@ Work in this order:
    - A Signal rejected with no successor makes the item "previously rejected:
      <title>", the close reason quoted on its own line, cut short with ...
      when long.
-   - A duplicate is followed to its original (the supersedes edge, else an id
-     in its close reason, else the same search's hits) and classified by these
+   - A duplicate is followed to its original (the supersedes edge, else a
+     `duplicate: <id>` reason, else an id elsewhere in its close reason, else
+     the same search's hits) and classified by these
      rules; fall back to "previously closed as duplicate: <title>".
    - Any other successor-less close is judged from its reason text: a bead the
      reason names as carrying the fix is walked as the successor; a bare

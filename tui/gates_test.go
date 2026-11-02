@@ -93,7 +93,7 @@ func TestRowLandsOnlyOnApprovedClose(t *testing.T) {
 	}{
 		{"approved", "land"},
 		{"rework: mc-1", ""},
-		{"Approval obsoleted: tip moved", ""},
+		{bd.ApprovalObsoletedReason, ""},
 		{"obsolete: x", ""},
 		{"", ""},
 	} {

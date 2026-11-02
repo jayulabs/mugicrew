@@ -1,6 +1,6 @@
 # ADR 0386: The light and high-contrast presets fill every color role with these values, and light's shades carry an explicit ink
 
-Status: Accepted
+Status: Accepted (its P0/P1 tint and tint-ink values are retired by ADR 0410 (mugicrew-effective-priority-is-the-most-urgent…))
 Date: 2026-10-28
 
 Chart Named color themes for the mugicrew TUI (mc-0f831) needed values for its light

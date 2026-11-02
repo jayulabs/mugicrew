@@ -13,7 +13,7 @@ import (
 // its ADR 0070 (mugicrew-one-bd-write-rule) write class:
 //   - a read takes no class;
 //   - a commutative or idempotent write takes none either (AddEdge, AddLabels, AddComment, Close);
-//   - a single insert takes none (Create);
+//   - a single insert takes none (Create), or the Serializer of its read-then-create (ADR 0413);
 //   - a CAS write takes its guard (Claim, Unclaim);
 //   - a read-then-write takes the Serializer it runs under (SetField, Delete, Reopen);
 //   - Batch is atomic.
@@ -86,6 +86,11 @@ const (
 	Metadata    Field = "metadata"
 	ParentField Field = "parent"
 	TitleField  Field = "title"
+	// Priority has no production caller: the TUI's +/- edit and Luffy's triage run
+	// bd update --priority directly, and the Forge Review tail no longer writes it
+	// (ADR 0410 (mugicrew-effective-priority-is-the-most-urgent…)); only bdtest's contract
+	// uses it. A successor's birth level rides CreateSpec.Priority instead.
+	Priority Field = "priority"
 )
 
 // CreateSpec is one bead Create inserts.
@@ -95,10 +100,25 @@ type CreateSpec struct {
 	Description string
 	Parent      string
 	Labels      []string
-	Deps        string // bd --deps value: "type:id,…"
+	Deps        []Edge // edges from the new bead: From is empty, To and Type name the target; Type "" is blocks
 	ExternalRef string
-	Deferred    bool // born a Draft
-	NoInherit   bool // --no-inherit-labels
+	Deferred    bool       // born a Draft
+	NoInherit   bool       // --no-inherit-labels
+	Priority    *int       // bd priority 0–4 at birth; nil is unset, so bd's default (P2) applies, apart from a real P0
+	Serializer  Serializer // a read-then-create's exclusion (ADR 0070 §1); nil is a plain single insert
+}
+
+// depArg renders a Dep as one bd create --deps entry. bd's --deps reads blocks:X reversed (X
+// blocks the new bead), so a blocks Dep is blocked-by:<to>; every other type is <type>:<to>.
+func depArg(d Edge) (string, error) {
+	if d.From != "" {
+		return "", fmt.Errorf("create dep %s -> %s: From must be empty, the edge starts at the new bead", d.From, d.To)
+	}
+	switch d.Type {
+	case "", "blocks":
+		return "blocked-by:" + d.To, nil
+	}
+	return d.Type + ":" + d.To, nil
 }
 
 // Op is one line of an atomic Batch.
@@ -295,11 +315,22 @@ func (cli) Create(s CreateSpec) (string, error) {
 	if s.Parent != "" {
 		args = append(args, "--parent", s.Parent)
 	}
-	if s.Deps != "" {
-		args = append(args, "--deps", s.Deps)
+	if len(s.Deps) > 0 {
+		deps := make([]string, len(s.Deps))
+		for i, d := range s.Deps {
+			a, err := depArg(d)
+			if err != nil {
+				return "", err
+			}
+			deps[i] = a
+		}
+		args = append(args, "--deps", strings.Join(deps, ","))
 	}
 	if s.ExternalRef != "" {
 		args = append(args, "--external-ref", s.ExternalRef)
+	}
+	if s.Priority != nil {
+		args = append(args, "--priority", strconv.Itoa(*s.Priority))
 	}
 	return run(append(args, "--title", s.Title, "--description", s.Description, "--silent")...)
 }

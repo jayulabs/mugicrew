@@ -84,7 +84,8 @@ func TestForgeReviewTagColourAndHome(t *testing.T) {
 func TestForgeReviewFields(t *testing.T) {
 	body := "MR: !42\nRead through note: 9001\n"
 	open := forgeReview("f", "open", "cp", landBody(body))
-	closed := forgeReview("g", "closed", "cp", landBody(body), closedWith("filed 2, folded 1, skipped 3: read through note 9001"))
+	closed := forgeReview("g", "closed", "cp", landBody(body), closedWith("completed: filed 2, folded 1, skipped 3; read through note 9001"))
+	legacy := forgeReview("l", "closed", "cp", landBody(body), closedWith("filed 2, folded 1, skipped 3: read through note 9001"))
 	join := func(b bd.Bead) string {
 		var out []string
 		for _, f := range forgeReviewFields(&b) {
@@ -97,6 +98,9 @@ func TestForgeReviewFields(t *testing.T) {
 	}
 	if got, want := join(closed), "mr=!42|read through=9001|counts=filed 2 · folded 1 · skipped 3"; got != want {
 		t.Errorf("closed = %q, want %q", got, want)
+	}
+	if got, want := join(legacy), "mr=!42|read through=9001|counts=filed 2 · folded 1 · skipped 3"; got != want {
+		t.Errorf("legacy = %q, want %q", got, want)
 	}
 	if f := forgeReviewFields(&bd.Bead{Kind: contract.KindBuild, Description: body}); f != nil {
 		t.Errorf("non-Forge Review fields = %v", f)

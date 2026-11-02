@@ -113,7 +113,7 @@ func SeedReroute(sig bd.Bead, checkpoint string, items []RerouteItem, merges []R
 	for i, it := range items {
 		switch {
 		case it.Pivot:
-			id, err := createDraft(sig.ID, bd.Successor{Kind: contract.KindPivot, Title: draftTitle(it.Body, sig.Title), Description: it.Body, DraftedBy: sig.ID, Metadata: string(meta)})
+			id, err := createDraft(sig.ID, bd.Successor{Kind: contract.KindPivot, Title: contract.DraftTitle(it.Body, sig.Title), Description: it.Body, DraftedBy: sig.ID, Metadata: string(meta)})
 			if err != nil {
 				return eventlog.Record("triage.reroute", "triage.failed", err, eventlog.BeadAttrs(sig)...)
 			}
@@ -131,7 +131,7 @@ func SeedReroute(sig bd.Bead, checkpoint string, items []RerouteItem, merges []R
 					deps = append(deps, "discovered-from:"+merges[m].Pivot)
 				}
 			}
-			id, err := createDraft(sig.ID, bd.Successor{Kind: contract.KindCritique, Title: draftTitle(it.Body, sig.Title), Description: it.Body, DraftedBy: sig.ID, Parent: host.ID}, deps...)
+			id, err := createDraft(sig.ID, bd.Successor{Kind: contract.KindCritique, Title: contract.DraftTitle(it.Body, sig.Title), Description: it.Body, DraftedBy: sig.ID, Parent: host.ID}, deps...)
 			if err != nil {
 				return eventlog.Record("triage.reroute", "triage.failed", err, eventlog.BeadAttrs(sig)...)
 			}
@@ -143,35 +143,6 @@ func SeedReroute(sig bd.Bead, checkpoint string, items []RerouteItem, merges []R
 		return err
 	}
 	return recordReroute(sig, host.ID, pivots, critiques, mergeIDs)
-}
-
-// draftTitle titles a reroute Draft from its body: the first heading, else the first
-// non-blank line (a pivot's is its "FR:" line), else fallback.
-func draftTitle(body, fallback string) string {
-	first := ""
-	for _, l := range strings.Split(body, "\n") {
-		l = strings.TrimSpace(l)
-		if l == "" {
-			continue
-		}
-		if h := strings.TrimLeft(l, "#"); h != l {
-			return clip(strings.TrimSpace(h))
-		}
-		if first == "" {
-			first = l
-		}
-	}
-	if first == "" {
-		return fallback
-	}
-	return clip(first)
-}
-
-func clip(s string) string {
-	if r := []rune(s); len(r) > 100 {
-		return string(r[:100])
-	}
-	return s
 }
 
 // firstOf is the first pivot, else the first Critique: the Signal's caused-by

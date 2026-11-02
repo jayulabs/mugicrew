@@ -276,8 +276,8 @@ Place the Signal before any outcome. In the first round, before any mugicrew rec
 
 - Any Phases change rewrites the Initiative body whole in one `+"`bd update %[1]s --description`"+`.
 - An unlabelled member settles its context first (ADR 0252 §4: unlabelled means undecided), before you compare it with siblings by context. With no contexts declared, every sibling is undecided and counts as one group.
-- Sibling rules: a same-context sibling in the target phase is never a co-member. If it is a Signal or Chart, merge: run `+"`bd dep remove %[6]s <sibling>`"+` first if any edge joins them, then `+"`bd supersede %[6]s --with <sibling>`"+`, and carry the gist with `+"`bd note <sibling> \"<gist>\"`"+` (Signal) or `+"`mugicrew chart append <sibling> Notes \"<gist>\"`"+` (Chart). If it is a Spec or Checkpoint, never merge into it: sequence the Signal into another phase (park). A sibling in another context may be a co-member; add `+"`bd dep add`"+` blocks edges where one needs the other's code landed.
-- Park: `+"`bd close %[6]s --reason \"later: <title> (phase line on %[1]s)\"`"+`, keeping the parent, plus a Phases line `+"`later: <title> (from %[6]s)`"+` in the same whole-body rewrite. Never `+"`bd supersede <signal> --with <initiative>`"+`: bd keeps one edge per pair, and removing the parent edge first drops membership. Parking works under Require Initiatives. If it closes the Initiative's last unclosed member, tell the human the Initiative is now drained and its cut row appears in the Inbox.
+- Sibling rules: a same-context sibling in the target phase is never a co-member. If it is a Signal or Chart, merge: run `+"`bd dep remove %[6]s <sibling>`"+` first only for an edge from the sibling to the Signal (a Signal-to-sibling edge is removed for you), then `+"`mugicrew duplicate %[6]s <sibling>`"+`, and carry the gist with `+"`bd note <sibling> \"<gist>\"`"+` (Signal) or `+"`mugicrew chart append <sibling> Notes \"<gist>\"`"+` (Chart). If it is a Spec or Checkpoint, never merge into it: sequence the Signal into another phase (park). A sibling in another context may be a co-member; add `+"`bd dep add`"+` blocks edges where one needs the other's code landed.
+- Park: `+"`bd close %[6]s --reason \"later: <title> (phase line on %[1]s)\"`"+`, keeping the parent, plus a Phases line `+"`later: <title> (from %[6]s)`"+` in the same whole-body rewrite. Never `+"`mugicrew duplicate <signal> <initiative>`"+` (nor raw `+"`bd supersede`"+`): bd keeps one edge per pair, and removing the parent edge first drops membership. Parking works under Require Initiatives. If it closes the Initiative's last unclosed member, tell the human the Initiative is now drained and its cut row appears in the Inbox.
 - DUPLICATE works as ever and keeps the parent.
 %[7]s`, ini.ID, ini.Title, bd.DoneWhen(ini.Description), phases(ini.Description), list.String(), signalID, belongOffer(signalID, required, others))
 }
@@ -605,6 +605,7 @@ func reconcileSignal(sig bd.Bead, context string) error {
 	if err != nil {
 		return err
 	}
+	// sig.ID is the drafter, so the Survey spawns under the Signal's claim (UnderClaim).
 	if _, _, err := spawnSurvey(chartID, sig.Title, sig.ID); err != nil {
 		return err
 	}
@@ -907,6 +908,7 @@ var (
 	landStrategy     = git.LandStrategyName
 	showSpec         = bd.Show
 	updateBody       = bd.Update
+	setDescription   = bd.SetDescription // the Anchor: pin write, which the luffy test swaps (the one shared-seam edit FR 25 allows, kept as a var so luffy's stubbed tests never reach the real core)
 	fetchForge       = func() (string, error) { return git.FetchMainline(git.ForgeRemote()) }
 	listAll          = bd.ListAll
 	carry            = bd.Carry
@@ -920,6 +922,6 @@ var stdout io.Writer = os.Stdout
 
 // anchorSeams binds the package seams for bd.Anchor; show reads the Spec bead.
 func anchorSeams(show func(string) (bd.Bead, error)) bd.AnchorSeams {
-	return bd.AnchorSeams{Strategy: landStrategy, Show: show, Update: updateBody, Fetch: fetchForge, RepoFetch: repoFetch,
+	return bd.AnchorSeams{Strategy: landStrategy, Show: show, SetDescription: setDescription, Fetch: fetchForge, RepoFetch: repoFetch,
 		Landed: repoLanded, Tip: repoTip}
 }

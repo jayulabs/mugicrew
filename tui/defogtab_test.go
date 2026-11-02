@@ -356,14 +356,14 @@ func TestDefogSharedKeys(t *testing.T) {
 func TestDefogHints(t *testing.T) {
 	m, _ := defogActModel(t)
 	for _, c := range []struct{ id, want string }{
-		{"ready", "enter launch · b bg · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
-		{"turn", "enter attach · d detail · p pause · x drop · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
-		{"blk", "d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · U unblock · J/K section"},
-		{"paused", "d detail · p unpause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
-		{"inh", "d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
-		{"afk", "enter run · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"ready", "enter launch · b bg · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"turn", "enter attach · d detail · p pause · x drop · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"blk", "d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · U unblock · J/K section"},
+		{"paused", "d detail · p unpause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"inh", "d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"afk", "enter run · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
 		{"c", "space fold · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"},
-		{"fail", "enter retry · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
+		{"fail", "enter retry · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section"},
 		{"dr", "enter spec · space fold · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · A release · B add blocker · J/K section"},
 		{"i:ini", "space fold · d detail · p pause · X cancel · e edit · +/- prio · c checkup · B add blocker · J/K section"},
 		{"c/closed", "space fold · d detail · J/K section"},
@@ -382,7 +382,7 @@ func TestDefogHints(t *testing.T) {
 		t.Errorf("closed child: hints %q, want d detail · t transcript · J/K section", got)
 	}
 	o := press(t, defogAt(t, m, "ready"), runeKey("d"))
-	if got := hintsOf(o); got != "enter launch · b bg · d close · pgup/pgdn scroll · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
+	if got := hintsOf(o); got != "enter launch · b bg · d close · pgup/pgdn scroll · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
 		t.Errorf("detail open: hints %q", got)
 	}
 }
@@ -512,7 +512,7 @@ func TestDefogBg(t *testing.T) {
 			t.Errorf("%s: cmd=%v modals=%d status=%q, want cmd=%v %q", c.id, cmd != nil, len(n.modals), statusOf(n), c.cmd, c.say)
 		}
 	}
-	if got := hintsOf(defogAt(t, m, "ready")); got != "enter launch · b bg · d detail · p pause · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
+	if got := hintsOf(defogAt(t, m, "ready")); got != "enter launch · b bg · d detail · p pause · X withdraw · t transcript · e edit · +/- prio · c checkup · a adopt · B add blocker · J/K section" {
 		t.Errorf("ready hints %q", got)
 	}
 	n := press(t, defogAt(t, m, "c/closed"), runeKey(" "))
@@ -562,17 +562,18 @@ func TestDefogEnterPausedBlockedAFKRefusesBeforeDialog(t *testing.T) {
 	}
 }
 
-// A leaf or child row's "P<n> title" follows closed > AFK mute > normal; the id
-// stays soft grey either way, so an AFK child and a HITL leaf differ only by the mute.
+// A leaf or child row's "P<n> title" follows closed > AFK mute > normal (an AFK badge
+// keeps the P0/P1 colour); the id stays soft grey either way, so an AFK child and a
+// HITL leaf differ only by the mute.
 func TestDefogMutesAFKTitles(t *testing.T) {
 	forceANSI256(t)
 	m := press(t, defogModel(t, 100, 30), runeKey("2"))
 	m = press(t, defogAt(t, m, "c/closed"), runeKey(" "))
 	v := unkept(m.View())
 	for name, want := range map[string]string{
-		"AFK child":    tinted(softSt, 1).Render("P1") + sep() + softSt.Render("t afk") + sep() + softSt.Render("afk"),
-		"HITL leaf":    tinted(prio1Sty, 1).Render("P1") + sep() + "t ready" + sep() + softSt.Render("ready"),
-		"closed child": tinted(closedSty, 1).Render("P1") + sep() + closedSty.Render("t closed") + sep() + softSt.Render("closed"),
+		"AFK child":    prio1Sty.Render("P1") + sep() + softSt.Render("t afk") + sep() + softSt.Render("afk"),
+		"HITL leaf":    prio1Sty.Render("P1") + sep() + "t ready" + sep() + softSt.Render("ready"),
+		"closed child": closedSty.Render("P1") + sep() + closedSty.Render("t closed") + sep() + softSt.Render("closed"),
 	} {
 		if !strings.Contains(v, want) {
 			t.Errorf("%s: view lacks %q:\n%s", name, want, v)
@@ -625,7 +626,7 @@ func TestDefogBlockerHighlight(t *testing.T) {
 	forceANSI256(t)
 	m := blockerDefog(t, 30)
 	v := m.View()
-	if !strings.Contains(v, blockerMk.Render("!")) || !strings.Contains(v, tinted(pinkFg, 1).Render("P1")+sep()+pinkFg.Render("t vis")) {
+	if !strings.Contains(v, blockerMk.Render("!")) || !strings.Contains(v, prio(1)+sep()+pinkFg.Render("t vis")) {
 		t.Errorf("visible blocker not pinked:\n%s", v)
 	}
 	// hid is on a visible row; fold c2 and its count shows, and hid joins the footer

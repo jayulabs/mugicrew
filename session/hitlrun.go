@@ -63,6 +63,7 @@ var (
 	listDrafts   = bd.Drafts
 	releaseClaim = bd.Unclaim
 	updateBead   = bd.Update
+	tieDrafts    = bd.TieDrafts
 )
 
 // hupGrace is how long a clean exit waits for a drop's hangup to land before
@@ -119,6 +120,14 @@ func sessionPlan(bead string) (publishPlan, error) {
 		return publishPlan{}, err
 	}
 	var done bool
+	var reason string
+	if b.Kind == contract.KindSurvey || b.Kind == contract.KindGrilling || b.Kind == contract.KindPrototype {
+		// Before anything reads or publishes the Drafts: a defog Draft filed without
+		// --deps still traces to the session bead that raised it.
+		if err := tieDrafts(bead, contract.KindGrilling, contract.KindResearch, contract.KindPrototype); err != nil {
+			return publishPlan{}, err
+		}
+	}
 	switch b.Kind {
 	case contract.KindSignal, contract.KindErrand:
 		if plan, ok, err := raiseSession(b); err != nil || ok {
@@ -126,59 +135,68 @@ func sessionPlan(bead string) (publishPlan, error) {
 			return plan, err
 		}
 		if b.Kind == contract.KindSignal {
-			done, err = signalCharted(bead)
+			done, reason, err = signalCharted(bead)
 		}
 	case contract.KindSurvey:
-		done, err = surveyDone(b)
+		done, reason, err = surveyDone(b)
 	case contract.KindApproval: // a gitlab fallback's exit opens the Draft MR; the Approval stays open
 		err = luffy.OpenFallbackMR(bead)
 	}
 	if err != nil || !done {
 		return publishPlan{}, err
 	}
-	return publishPlan{closing: &bd.Closing{ID: bead}}, nil
+	return publishPlan{closing: &bd.Closing{ID: bead, Reason: reason}}, nil
 }
 
-func signalCharted(bead string) (bool, error) {
-	for _, k := range []contract.Kind{contract.KindChart, contract.KindSpec, contract.KindInitiative} {
-		if _, ok, err := successorOf(bead, k); err != nil || ok {
-			return ok, err
+// signalCharted finds the Signal's successor (Chart, then Spec, then Initiative)
+// and the close reason naming it: charted:, specced: or initiative: <id>.
+func signalCharted(bead string) (bool, string, error) {
+	for _, o := range []struct {
+		kind   contract.Kind
+		reason string
+	}{{contract.KindChart, bd.ChartedReason}, {contract.KindSpec, bd.SpeccedReason}, {contract.KindInitiative, bd.InitiativeReason}} {
+		if id, ok, err := successorOf(bead, o.kind); err != nil || ok {
+			return ok, o.reason + " " + id, err
 		}
 	}
-	return false, nil
+	return false, "", nil
 }
 
-// surveyDone is whether the Survey closes in the clean-exit batch. Fog beats stamp:
+// surveyDone is whether the Survey closes in the clean-exit batch, and the reason
+// naming its outcome and Chart: pushed back:, seeded: or defogged: <chart id>. Fog beats stamp:
 // a stamped Chart with fog Drafted gains a line in the Survey's notes and then loses
 // chart:defogged, both before the batch (it can't read) and both idempotent. The
 // notes go first: the stamp is what a retry reads, so a failed unstamp still sees
 // the stamp and converges, where a failed notes write after the unstamp would not.
-func surveyDone(s bd.Bead) (bool, error) {
+func surveyDone(s bd.Bead) (bool, string, error) {
 	chart, err := showBead(s.Parent)
-	if err != nil || chart.Status == "closed" {
-		return err == nil, err
+	if err != nil {
+		return false, "", err
+	}
+	if chart.Status == "closed" {
+		return true, bd.PushedBackReason + " " + chart.ID, nil
 	}
 	drafts, err := listDrafts(s.ID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	fog := slices.ContainsFunc(drafts, func(d bd.Bead) bool { return d.Parent == s.Parent })
-	if !chart.HasLabel(contract.LabelDefogged) {
-		return fog, nil
-	}
 	if !fog {
-		return true, nil
+		return chart.HasLabel(contract.LabelDefogged), bd.DefoggedReason + " " + chart.ID, nil
+	}
+	if !chart.HasLabel(contract.LabelDefogged) {
+		return true, bd.SeededReason + " " + chart.ID, nil
 	}
 	const line = "stamp removed at settle: fog seeded"
 	if !bd.HasBodyLine(s.Notes, line) {
 		if err := updateBead(s.ID, []string{"--notes", bd.AppendBodyLine(s.Notes, line)}); err != nil {
-			return false, err
+			return false, "", err
 		}
 	}
 	if err := updateBead(chart.ID, []string{"--remove-label", contract.LabelDefogged}); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return true, nil
+	return true, bd.SeededReason + " " + chart.ID, nil
 }
 
 // settle is a clean exit's settle, run after its publish: a bead still

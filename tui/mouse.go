@@ -61,11 +61,32 @@ func MotionFilter(model tea.Model, msg tea.Msg) tea.Msg {
 		}
 		return msg
 	}
-	if ok && m.formLive() { // a form has no hover
-		return nil
+	if ok && m.formLive() { // only a change of shaded priority arrow matters
+		if m.formHover(mm.X, mm.Y).same(m.hover) {
+			return nil
+		}
+		return msg
 	}
 	if ok && m.modalLive() { // only a change of picker item matters
 		d := m.modals[len(m.modals)-1]
+		if d.kind == confirm { // only a change of hovered hint matters
+			if m.hintHover(mm.X, mm.Y).same(m.hover) {
+				return nil
+			}
+			return msg
+		}
+		if d.kind == xdialog { // only a change of hovered hint or of selected row matters
+			if i := m.xRowAt(d, mm.X, mm.Y); i >= 0 && !(d.xs.cancel != nil && d.xs.cancel.whyOn) {
+				if i == d.cur && !m.hover.opt {
+					return nil
+				}
+				return msg
+			}
+			if m.hintHover(mm.X, mm.Y).same(m.hover) {
+				return nil
+			}
+			return msg
+		}
 		if d.kind != picker {
 			return nil
 		}
@@ -103,14 +124,15 @@ type hover struct {
 	tab     int
 	hdr     bool         // the pointer is on a clickable header segment
 	head    headerSpan   // that segment; its first column names it
-	opt     bool         // the pointer is on a Loop menu option
-	optSpan loopOptCells // that option, in screen columns
+	opt     bool         // the pointer is on a Loop menu option or a dialog hint
+	optSpan loopOptCells // that option or hint, in screen columns
+	step    string       // the Settings step target under the pointer: its key, "" for none
 	t       hitTarget
 }
 
 // same is whether two hovers shade the same thing.
 func (h hover) same(o hover) bool {
-	return h.set == o.set && h.y == o.y && h.back == o.back && h.tabOn == o.tabOn && h.tab == o.tab && h.hdr == o.hdr && h.head == o.head && h.opt == o.opt && h.optSpan == o.optSpan && h.t.kind == o.t.kind && h.t.key == o.t.key
+	return h.set == o.set && h.y == o.y && h.back == o.back && h.tabOn == o.tabOn && h.tab == o.tab && h.hdr == o.hdr && h.head == o.head && h.opt == o.opt && h.optSpan == o.optSpan && h.step == o.step && h.t.kind == o.t.kind && h.t.key == o.t.key
 }
 
 // bodyHit is the hit-test of body line by on the active surface.
@@ -145,6 +167,9 @@ func (m Model) pointAt(x, y int) hover {
 	case hitRow, hitHeader, hitBlockerLink:
 		h.t = t
 	}
+	if st, ok := m.settingsStepAt(m.h-chromeH, x, by); ok && !st.inert {
+		h.step = st.key
+	}
 	return h
 }
 
@@ -171,8 +196,11 @@ func (m Model) headerClick(sp headerSpan) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.click = lastClick{target: target, at: now}
-	if sp.kind == headerLoop {
+	switch sp.kind {
+	case headerLoop:
 		return m.openLoopMenu()
+	case headerUpgrade:
+		return m.openUpgrade()
 	}
 	return m.sessionsOpen()
 }
@@ -248,6 +276,14 @@ func (m Model) hoverSettle() Model {
 	}
 	if m.loopMenuLive() {
 		m.hover = m.loopHover(m.hover.x, m.hover.y)
+		return m
+	}
+	if m.formLive() {
+		m.hover = m.formHover(m.hover.x, m.hover.y)
+		return m
+	}
+	if k := m.modals; m.modalLive() && (k[len(k)-1].kind == confirm || k[len(k)-1].kind == xdialog) {
+		m.hover = m.hintHover(m.hover.x, m.hover.y)
 		return m
 	}
 	if !m.mouseLive() {
@@ -363,9 +399,9 @@ func (m Model) modalCaptured() bool {
 }
 
 // formLive is whether the mouse acts on the top modal: capture is on, it is a Signal or
-// Initiative form, an input dialog or the New Surgery dialog, and the screen is at or above
-// the floor. Pickers, the Loop menu and confirms are live through modalLive; only the X
-// withdraw dialog stays mouse-dead.
+// Initiative form, an input dialog or the New Surgery dialog, and the screen is at or
+// above the floor. Pickers, the Loop menu, confirms and the X dialog are live through
+// modalLive.
 func (m Model) formLive() bool {
 	if !m.modalCaptured() {
 		return false
@@ -636,6 +672,9 @@ func (m Model) mouseEvent(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	y, ok := m.bodyLine(msg.Y)
 	if !ok {
 		return m, nil
+	}
+	if next, cmd, ok := m.stepClick(msg.X, y); ok {
+		return next, cmd
 	}
 	if next, ok := m.filterClick(msg.X, y); ok {
 		return next, nil

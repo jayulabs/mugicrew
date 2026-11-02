@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -210,4 +211,25 @@ func onPublish(ctx contract.Ctx, creator string, edges []Edge, closing *Closing)
 	}
 	_, err := Publish(creator, edges, closing)
 	return err
+}
+
+// TieDrafts is the session-tail backstop for a raiser's Drafts (drafted-by id) of the
+// given kinds: each not yet discovered-from id gains that edge, so a Draft the agent
+// filed without --deps still traces to the bead that raised it. Add-if-absent, so a
+// Draft born with the edge, or a re-run tail, writes nothing. Run it before the
+// raiser's Drafts publish or its bead closes.
+func TieDrafts(id string, kinds ...contract.Kind) error {
+	drafts, err := Drafts(id)
+	if err != nil {
+		return err
+	}
+	for _, d := range drafts {
+		if !slices.Contains(kinds, d.Kind) {
+			continue
+		}
+		if err := DiscoveredFrom(d.ID, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

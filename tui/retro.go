@@ -5,7 +5,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -13,10 +12,11 @@ import (
 	"jayulabs.org/mugicrew/contract"
 )
 
-// The spine read and the related edge, vars so tests touch no live bd.
+// The spine read and the Retrospective create (which writes the related edge in the
+// same bd create), vars so tests touch no live bd.
 var (
-	readSpine = bd.Spine
-	relate    = bd.Related
+	readSpine        = bd.Spine
+	newRetrospective = bd.NewRetrospective
 )
 
 func canRetro(b *bd.Bead) bool {
@@ -62,23 +62,15 @@ func (m Model) retrospective(b *bd.Bead) (tea.Model, tea.Cmd) {
 	})
 }
 
-// retroStart files the unparented "Retrospective <title>" discussion and its related
-// edge, then runs the discussion-created path. A failure names any orphan.
+// retroStart files the unparented "Retrospective <title>" discussion with its related
+// edge in one create, then runs the discussion-created path.
 func (m Model) retroStart(target bd.Bead, spine []string) (tea.Model, tea.Cmd) {
 	title := "Retrospective " + target.Title
-	body := "A Robin retrospective on " + target.ID + ", started from the TUI.\nTarget: " + target.ID + "\nSpine: " + strings.Join(spine, " ")
 	return m.startWrite(target.ID, "filing", func() writeDoneMsg {
-		id, err := newDiscussion(title, body)
-		if err == nil {
-			err = relate(id, target.ID)
-		}
+		id, err := newRetrospective(target, spine)
 		return writeDoneMsg{target.ID, func(m Model) (tea.Model, tea.Cmd) {
 			if err != nil {
-				s := "retrospective: " + err.Error()
-				if id != "" {
-					s += " (filed " + id + ")"
-				}
-				m.setStatus(s)
+				m.setStatus("retrospective: " + err.Error())
 				return m, m.load()
 			}
 			return m.discussionCreated(discussionCreatedMsg{b: bd.Bead{ID: id, Kind: contract.KindDiscussion, Status: "open", Title: title}})

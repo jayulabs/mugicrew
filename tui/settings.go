@@ -722,7 +722,36 @@ func fmtAutoExit(d time.Duration) string {
 }
 
 // settingRow is one setting: its name, its value in force, and a one-line gloss.
-type settingRow struct{ name, value, gloss string }
+// A stepped row has no value of its own: it is pre + val + post, val being what the ◀ ▶ stepper wraps (val "" = none),
+// lo and hi whether a side is at its bound.
+type settingRow struct {
+	name, value, gloss string
+	pre, val, post     string
+	lo, hi             bool
+}
+
+// text is the row's value as drawn: a stepped row's pre + val + post.
+func (r settingRow) text() string {
+	if r.val == "" {
+		return r.value
+	}
+	return r.pre + r.val + r.post
+}
+
+// stepRow is a stepped row: val between pre and post.
+func stepRow(name, gloss, pre, val, post string, lo, hi bool) settingRow {
+	return settingRow{name: name, gloss: gloss, pre: pre, val: val, post: post, lo: lo, hi: hi}
+}
+
+// cycleParts is a cycle row's text split around its stepped value: the staged value between
+// its staged markers, else val (the text's first word) and the source after it.
+func cycleParts(text, val string, staged bool, from, to, now string) (pre, v, post string) {
+	if staged {
+		pre, post = stagedParts(from, now)
+		return pre, to, post
+	}
+	return "", val, strings.TrimPrefix(text, val)
+}
 
 // settingRows are the tab's rows; a later setting appends one (FR37).
 func (m Model) settingRows() []settingRow {
@@ -730,55 +759,41 @@ func (m Model) settingRows() []settingRow {
 	if m.pool.Shared > 0 {
 		shared = fmt.Sprint(m.pool.Shared)
 	}
-	n := fmt.Sprint(m.pool.N)
+	curPool := m.pool.N
+	prePool, nPool, postPool := "", fmt.Sprint(m.pool.N), ""
 	if m.staged != 0 {
-		n = stagedValue(fmt.Sprint(m.stagedFrom), fmt.Sprint(m.staged), n)
+		curPool = m.staged
+		prePool, postPool = stagedParts(fmt.Sprint(m.stagedFrom), fmt.Sprint(m.pool.N))
+		nPool = fmt.Sprint(m.staged)
 	}
+	postPool += fmt.Sprintf("  (%s)  %d in flight", sourceText(m.pool.Source, m.pool.Unusable, shared), m.inflight) + orphanedText(m.orphaned)
 	eshared := ""
 	if m.exit.SharedSet {
 		eshared = fmtAutoExit(m.exit.Shared)
 	}
-	e := fmtAutoExit(m.exit.D)
+	curExit := m.exit.D
+	preExit, nExit, postExit := "", fmtAutoExit(m.exit.D), ""
 	if m.exitStaged {
-		e = stagedValue(fmtAutoExit(m.exitFrom), fmtAutoExit(m.stagedExit), e)
+		curExit = m.stagedExit
+		preExit, postExit = stagedParts(fmtAutoExit(m.exitFrom), fmtAutoExit(m.exit.D))
+		nExit = fmtAutoExit(m.stagedExit)
 	}
-	autoApproveValue := autoApproveText(m.approvals)
-	if m.autoApproveStaged {
-		autoApproveValue = stagedValue(m.autoApproveStage.from, m.autoApproveStage.to, onOff(m.approvals.On))
+	postExit += fmt.Sprintf("  (%s)", sourceText(m.exit.Source, m.exit.Unusable, eshared))
+	aaPre, aaVal, aaPost := cycleParts(autoApproveText(m.approvals), onOff(m.approvals.On), m.autoApproveStaged, m.autoApproveStage.from, m.autoApproveStage.to, onOff(m.approvals.On))
+	mPre, mVal, mPost := cycleParts(mouseText(m.mouse), onOff(m.mouse.On), m.mouseStaged, m.mouseStage.from, m.mouseStage.to, onOff(m.mouse.On))
+	tPre, tVal, tPost := cycleParts(themeText(m.theme), themeNow(m.theme), m.themeStaged, m.themeStage.from, m.themeStage.to, themeNow(m.theme))
+	return []settingRow{
+		stepRow(poolKey, "how many AFK efforts the loop and run-now start at once on this machine", prePool, nPool, postPool, curPool <= 1, false),
+		stepRow(autoExitKey, "how long a HITL session waits after its closing line before it exits by itself", preExit, nExit, postExit, curExit == 0, false),
+		{
+			name:  "Initiatives",
+			value: initiativesText(m.initiatives),
+			gloss: "shared [initiatives] in .mugicrew/config.toml: edit the file to change it",
+		},
+		stepRow("Auto-approve", "on lets the crew approve Approvals itself; enter saves a machine-local override of the checked-in setting", aaPre, aaVal, aaPost, false, false),
+		stepRow(mouseKey, "on captures the mouse in this TUI; Shift-drag (Option/Alt on some terminals) then selects text; enter saves a machine-local override", mPre, mVal, mPost, false, false),
+		stepRow(themeKey, "light expects a light terminal background; +/- previews live, esc reverts; enter saves a machine-local override", tPre, tVal, tPost, false, false),
 	}
-	mouseValue := mouseText(m.mouse)
-	if m.mouseStaged {
-		mouseValue = stagedValue(m.mouseStage.from, m.mouseStage.to, onOff(m.mouse.On))
-	}
-	themeValue := themeText(m.theme)
-	if m.themeStaged {
-		themeValue = stagedValue(m.themeStage.from, m.themeStage.to, themeNow(m.theme))
-	}
-	return []settingRow{{
-		name:  poolKey,
-		value: fmt.Sprintf("%s  (%s)  %d in flight", n, sourceText(m.pool.Source, m.pool.Unusable, shared), m.inflight) + orphanedText(m.orphaned),
-		gloss: "how many AFK efforts the loop and run-now start at once on this machine",
-	}, {
-		name:  autoExitKey,
-		value: fmt.Sprintf("%s  (%s)", e, sourceText(m.exit.Source, m.exit.Unusable, eshared)),
-		gloss: "how long a HITL session waits after its closing line before it exits by itself",
-	}, {
-		name:  "Initiatives",
-		value: initiativesText(m.initiatives),
-		gloss: "shared [initiatives] in .mugicrew/config.toml: edit the file to change it",
-	}, {
-		name:  "Auto-approve",
-		value: autoApproveValue,
-		gloss: "on lets the crew approve Approvals itself; enter saves a machine-local override of the checked-in setting",
-	}, {
-		name:  mouseKey,
-		value: mouseValue,
-		gloss: "on captures the mouse in this TUI; Shift-drag (Option/Alt on some terminals) then selects text; enter saves a machine-local override",
-	}, {
-		name:  themeKey,
-		value: themeValue,
-		gloss: "light expects a light terminal background; +/- previews live, esc reverts; enter saves a machine-local override",
-	}}
 }
 
 // initiativesText is the Initiatives row: both settings and the shared file they came from.
@@ -836,10 +851,16 @@ func sourceText(source, unusable, shared string) string {
 // stagedValue is a staged row's value, noting a refresh that moved the base under
 // the edit (Spec FR26).
 func stagedValue(from, to, now string) string {
+	pre, post := stagedParts(from, now)
+	return pre + to + post
+}
+
+// stagedParts is the text a staged value sits between: the stepper wraps the staged value.
+func stagedParts(from, now string) (pre, post string) {
 	if now != from {
-		return fmt.Sprintf("%s → %s (unsaved; file now %s)", from, to, now)
+		return from + " → ", fmt.Sprintf(" (unsaved; file now %s)", now)
 	}
-	return fmt.Sprintf("%s → %s (unsaved)", from, to)
+	return from + " → ", " (unsaved)"
 }
 
 // span is the selected row's pane lines [lo, hi): two when its reason wraps.
@@ -849,7 +870,15 @@ type span struct{ lo, hi int }
 // the selected row's span, and each line's row index (-1 for the title, blurb, rule,
 // blanks and mechanical — kinds): a gloss or a wrapped reason carries its row's.
 func (m Model) settingsLines() ([]string, span, []int) {
+	lines, sel, rowOf, _ := m.settingsLinesSteps()
+	return lines, sel, rowOf
+}
+
+// settingsLinesSteps is settingsLines with the selected row's step targets, their columns on
+// the row's own lines: what is drawn is what is hit (FR 31).
+func (m Model) settingsLinesSteps() ([]string, span, []int, []stepTarget) {
 	var lines []string
+	var steps []stepTarget
 	var rowOf []int
 	var sel span
 	row := 0
@@ -875,11 +904,33 @@ func (m Model) settingsLines() ([]string, span, []int) {
 		if i == m.setRow { // the row +/- act on
 			name = selSt.Render(name)
 		}
-		add(trunc(name+"  "+r.value, m.w), trunc(dimSt.Render("  "+r.gloss), m.w))
+		line := trunc(name+"  "+r.text(), m.w)
+		if i == m.setRow && r.val != "" && m.mouseLive() {
+			line, steps = m.steppedLine(name+"  ", r.pre, r.val, r.post, r.lo, r.hi)
+		}
+		gloss := trunc(dimSt.Render("  "+r.gloss), m.w)
+		if i == m.setRow && m.mouseLive() && m.rowStaged() {
+			var ts []stepTarget
+			gloss, ts = m.savedGloss(r.gloss)
+			steps = append(steps, ts...)
+		}
+		add(line, gloss)
 	}
 	inert("", lipgloss.NewStyle().Bold(true).Render("Kind profiles"),
 		trunc(dimSt.Render("  the Agent Profile each kind's sessions launch on; unset falls back to default; — runs no agent session"), m.w))
-	add(m.kindRowLines("default", m.setRow == firstKindRow)...)
+	addKind := func(key string, i int) {
+		ls, ts := m.kindRowLines(key, m.setRow == firstKindRow+i)
+		if m.setRow == firstKindRow+i {
+			steps = ts
+			if _, staged := m.kindStaged[key]; staged && m.mouseLive() {
+				extra, sts := saveTargets(len(ls), m.w, m.hoverStep())
+				ls = append(ls, trunc(extra, m.w))
+				steps = append(steps, sts...)
+			}
+		}
+		add(ls...)
+	}
+	addKind("default", 0)
 	inert(dimSt.Render("  " + strings.Repeat("─", max(min(m.w-2, 40), 0))))
 	i := 1 // kindKeys index; a — row has none, so the cursor and staging never reach it
 	for _, k := range registry.AllKinds() {
@@ -887,10 +938,78 @@ func (m Model) settingsLines() ([]string, span, []int) {
 			inert(trunc(dimSt.Render(fmt.Sprintf("%-14s —", k)), m.w))
 			continue
 		}
-		add(m.kindRowLines(string(k), m.setRow == firstKindRow+i)...)
+		addKind(string(k), i)
 		i++
 	}
-	return lines, sel, rowOf
+	return lines, sel, rowOf, steps
+}
+
+// hoverStep is the step key under the pointer, "" for none.
+func (m Model) hoverStep() string {
+	if !m.hover.set {
+		return ""
+	}
+	return m.hover.step
+}
+
+// hoverSide is the stepper side under the pointer, stepNone for none.
+func (m Model) hoverSide() int { return hovSide(m.hoverStep()) }
+
+// savedGloss is a staged row's gloss line: ✓ save  ✗ discard, then the gloss dimmed and
+// cut to the width; the targets sit on the row's line.
+func (m Model) savedGloss(gloss string) (string, []stepTarget) {
+	s, ts := saveTargets(1, m.w, m.hoverStep())
+	head := 2 + lipgloss.Width(saveLabel) + 2 + lipgloss.Width(discardLabel)
+	if room := m.w - head - 2; room > 0 {
+		s += dimSt.Render("  " + trunc(gloss, room))
+	}
+	return trunc(s, m.w), ts
+}
+
+// steppedLine is a selected row's first line: head, then pre, the ◀ val ▶ stepper and post,
+// cut to the width after the stepper, never before it: pre and val give way to keep both
+// arrows on screen. The targets sit at the stepper's columns on the line.
+func (m Model) steppedLine(head, pre, val, post string, lo, hi bool) (string, []stepTarget) {
+	hw := lipgloss.Width(head)
+	if pre != "" {
+		pre = trunc(pre, max(m.w-hw-6, 1))
+	}
+	val = trunc(val, max(m.w-hw-lipgloss.Width(pre)-4, 1))
+	s, ts := stepper(val, lo, hi, m.hoverSide())
+	start := hw + lipgloss.Width(pre)
+	for i := range ts {
+		ts[i].x0 += start
+		ts[i].x1 += start
+		ts[i].hx0 += start
+		ts[i].hx1 += start
+	}
+	line := head + pre + s
+	if room := m.w - lipgloss.Width(line); room > 0 {
+		line += trunc(post, room)
+	}
+	return line, ts[:]
+}
+
+// settingsStepAt is the step target the Settings body cell (x, y) of an h tall body lands
+// on, as View drew it from the current window; false off the Settings tab, on a ↑/↓ marker
+// line or anywhere no target is drawn.
+func (m Model) settingsStepAt(h, x, y int) (stepTarget, bool) {
+	if _, on := m.tabs[m.tab].(settingsTab); !on || m.focus.id != "" || !m.mouseLive() {
+		return stepTarget{}, false
+	}
+	lines, sel, rowOf, steps := m.settingsLinesSteps()
+	top := m.settingsWindow(lines, sel, rowOf, h)
+	end := min(top+h, len(lines))
+	k := top + y
+	if y < 0 || k >= end || top > 0 && y == 0 || end < len(lines) && k == end-1 {
+		return stepTarget{}, false
+	}
+	for _, t := range steps {
+		if sel.lo+t.line == k && x >= t.hx0 && x < t.hx1 {
+			return t, true
+		}
+	}
+	return stepTarget{}, false
 }
 
 // settingsTop is the pane's first line after moving just enough from top to
@@ -988,12 +1107,12 @@ func (m Model) settingsView(h int) string {
 	return strings.Join(vis, "\n")
 }
 
-// kindRowLines is one Kind profiles row (ADR 0137 §1-2, §5): the key padded to
-// 14, the in-force profile and its source or (built-in), and an unrunnable
-// reason on the same line if it fits, else on its own line indented two.
-func (m Model) kindRowLines(key string, selected bool) []string {
+// kindParts is a Kind profiles row's value split around the text the stepper wraps, and
+// target, what the row would launch on after a save: the marker speaks for it. The drawn
+// line and the hit-test share it.
+func (m Model) kindParts(key string) (pre, val, post, target string) {
 	r := loop.ResolveProfile(m.kinds.local, m.kinds.shared, key)
-	value := "(built-in)"
+	val = "(built-in)"
 	if r.Key != "" {
 		source, shared := "default", ""
 		if r.Key == key {
@@ -1002,35 +1121,50 @@ func (m Model) kindRowLines(key string, selected bool) []string {
 				shared = m.kinds.shared[key]
 			}
 		}
-		value = fmt.Sprintf("%s  (%s)", r.Name, sourceText(source, "", shared))
+		val, post = r.Name, fmt.Sprintf("  (%s)", sourceText(source, "", shared))
 	}
-	target := r.Name // what the row would launch on after a save: the marker speaks for it
+	target = r.Name
 	if st, ok := m.kindStaged[key]; ok {
-		target, value = st.to, st.to
+		target, val = st.to, st.to
 		if st.to == "" {
 			target = m.kindFallback(key)
-			value = "unset: " + cmp.Or(target, "(built-in)")
+			val = "unset: " + cmp.Or(target, "(built-in)")
 		}
-		value = stagedValue(st.from, value, m.kindEffective(key))
+		pre, post = stagedParts(st.from, m.kindEffective(key))
 	}
+	return pre, val, post, target
+}
+
+// kindRowLines is one Kind profiles row (ADR 0137 §1-2, §5): the key padded to
+// 14, the in-force profile and its source or (built-in), and an unrunnable
+// reason on the same line if it fits, else on its own line indented two. Selected
+// in Mouse mode it carries the ◀ ▶ stepper, whose targets it returns.
+func (m Model) kindRowLines(key string, selected bool) ([]string, []stepTarget) {
+	pre, val, post, target := m.kindParts(key)
 	name := fmt.Sprintf("%-14s", key)
 	if selected {
 		name = selSt.Render(name)
 	}
-	line := trunc(name+"  "+value, m.w)
+	var line string
+	var steps []stepTarget
+	if selected && m.mouseLive() {
+		line, steps = m.steppedLine(name+"  ", pre, val, post, false, false)
+	} else {
+		line = trunc(name+"  "+pre+val+post, m.w)
+	}
 	why, bad := m.kinds.reasons[target]
 	if target == "" || !bad {
-		return []string{line}
+		return []string{line}, steps
 	}
 	reason := warnSt.Render("unrunnable: " + why)
 	if lipgloss.Width(line)+2+lipgloss.Width(reason) <= m.w {
-		return []string{line + "  " + reason}
+		return []string{line + "  " + reason}, steps
 	}
 	lines := []string{line}
 	for _, l := range strings.Split(ansi.Wrap("unrunnable: "+why, max(m.w-2, 1), ""), "\n") {
 		lines = append(lines, "  "+warnSt.Render(l))
 	}
-	return lines
+	return lines, steps
 }
 
 var selSt lipgloss.Style

@@ -1,6 +1,6 @@
 # ADR 0380: mugicrew bd core types each write's ADR 0070 class into its signature, names three serializer kinds, and bdtest seals the bd CLI
 
-Status: Accepted
+Status: Accepted; Create's surface amended by ADR 0413
 Date: 2026-10-28
 
 Chart: Bead-level bd interface and bdtest fake, proven on dispatch. Settles the

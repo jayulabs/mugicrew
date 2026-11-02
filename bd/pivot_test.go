@@ -1,25 +1,14 @@
 package bd
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/contract"
 )
-
-// Blocks/Related are idempotent by construction: the argv is built only when the
-// edge is absent, so the run-twice case (edge already listed) adds nothing.
-func TestDepAddArgsIfAbsent(t *testing.T) {
-	for _, typ := range []string{"blocks", "related"} {
-		got := depAddArgsIfAbsent([]Bead{{ID: "mc-x"}}, "ws-cp", "ws-pv", typ)
-		if want := []string{"dep", "add", "ws-cp", "ws-pv", "-t", typ}; !reflect.DeepEqual(got, want) {
-			t.Errorf("%s absent: args = %v, want %v", typ, got, want)
-		}
-		if got := depAddArgsIfAbsent([]Bead{{ID: "mc-x"}, {ID: "ws-pv"}}, "ws-cp", "ws-pv", typ); got != nil {
-			t.Errorf("%s present: args = %v, want nil (no-op)", typ, got)
-		}
-	}
-}
 
 // OpenPivots filters a `bd dep list --json` read to open
 // kind:pivot only: closed pivots and other kinds (a Build blocker) drop out.
@@ -120,50 +109,6 @@ func TestReverseLookupArgsAndKind(t *testing.T) {
 	}
 }
 
-// Supersede (FR47): already superseded → no-op; a pre-existing same-direction
-// related edge is removed first (bd rejects supersede over it); no edge → just
-// supersede.
-func TestSupersedeArgs(t *testing.T) {
-	sup := []string{"supersede", "ws-old", "--with", "ws-new"}
-	rm := []string{"dep", "remove", "ws-old", "ws-new"}
-	cases := []struct {
-		name       string
-		superseded []Bead // old's down supersedes targets
-		all        []Bead // old's down targets, any type
-		want       [][]string
-	}{
-		{"already superseded", []Bead{{ID: "ws-new"}}, []Bead{{ID: "ws-new"}}, nil},
-		{"related edge first", nil, []Bead{{ID: "ws-chart"}, {ID: "ws-new"}}, [][]string{rm, sup}},
-		{"no edge", []Bead{{ID: "ws-other"}}, []Bead{{ID: "ws-chart"}, {ID: "ws-other"}}, [][]string{sup}},
-	}
-	for _, c := range cases {
-		if got := supersedeArgs(c.superseded, c.all, "ws-old", "ws-new"); !reflect.DeepEqual(got, c.want) {
-			t.Errorf("%s: args = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// A sweep-created bead carries caused-by its predecessor AND discovered-from its
-// origin pivot — the second edge is the re-run's idempotency key.
-func TestDiscoveredCreateArgs(t *testing.T) {
-	got := discoveredCreateArgs("ws-pv", "ws-chart", Successor{Kind: contract.KindSpec, Title: "t", Description: "d"})
-	want := []string{"create", "--type", "task", "--labels", "kind:spec", "--no-inherit-labels",
-		"--deps", "caused-by:ws-chart,discovered-from:ws-pv", "--title", "t", "--description", "d", "--silent"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("args = %v\nwant %v", got, want)
-	}
-	// A title or body spelling "--deps" must not catch the extra edge.
-	got = discoveredCreateArgs("ws-pv", "ws-chart", Successor{Kind: contract.KindSpec, Title: "--deps", Description: "--deps"})
-	want = []string{"create", "--type", "task", "--labels", "kind:spec", "--no-inherit-labels",
-		"--deps", "caused-by:ws-chart,discovered-from:ws-pv", "--title", "--deps", "--description", "--deps", "--silent"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("--deps title: args = %v\nwant %v", got, want)
-	}
-	if got := titleArg(discoveredCreateArgs("ws-pv", "ws-chart", Successor{Kind: contract.KindSpec, Title: "Spec: t"})); got != "t" {
-		t.Errorf("prefixed discovered --title = %q, want stripped", got)
-	}
-}
-
 // The title-keyed offshoot filer matches only a Signal with the exact title: a
 // crewmate's own offshoot Signal (Draft or closed) with another title never does.
 func TestSignalTitled(t *testing.T) {
@@ -197,5 +142,201 @@ func TestCarriersOnlyKeepsSignalSpecAndChart(t *testing.T) {
 	}
 	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("carriers = %v, want %v", ids, want)
+	}
+}
+
+// loopCore serves the reads the loop spawn helpers make: beads by id and the Signals
+// already discovered-from the cause.
+type loopCore struct {
+	Core
+	beads map[string]Bead
+	found []Bead
+}
+
+func (c loopCore) Show(id string) (Bead, error) {
+	b, ok := c.beads[id]
+	if !ok {
+		return Bead{}, fmt.Errorf("not found: %s", id)
+	}
+	return b, nil
+}
+
+func (c loopCore) Edges(string, Dir, string) ([]EdgeRow, error) {
+	rows := make([]EdgeRow, len(c.found))
+	for i, b := range c.found {
+		rows[i] = EdgeRow{Bead: b, Type: "discovered-from"}
+	}
+	return rows, nil
+}
+
+func useLoopCore(t *testing.T, c loopCore) *[][]string {
+	t.Helper()
+	ocore, orun := core, run
+	t.Cleanup(func() { core, run = ocore, orun })
+	core = c
+	var creates [][]string
+	run = func(args ...string) (string, error) { creates = append(creates, args); return "new", nil }
+	return &creates
+}
+
+// A loop offshoot is born in the cause's open Initiative, or unparented with the verb's
+// outside line; always open, discovered-from only, Order: none above the Initiative: line.
+func TestLoopOffshootPlacementArgv(t *testing.T) {
+	beads := map[string]Bead{
+		"cp":     {ID: "cp", Kind: contract.KindCheckpoint, Title: "CP", Parent: "init"},
+		"cpold":  {ID: "cpold", Kind: contract.KindCheckpoint, Title: "Old", Parent: "done"},
+		"cpbare": {ID: "cpbare", Kind: contract.KindCheckpoint, Title: "Bare"},
+		"init":   {ID: "init", Kind: contract.KindInitiative, Title: "Init", Status: "open"},
+		"done":   {ID: "done", Kind: contract.KindInitiative, Title: "Done", Status: "closed"},
+		"b1":     {ID: "b1", Kind: contract.KindBuild, Title: "B", Parent: "cp"},
+		"b2":     {ID: "b2", Kind: contract.KindBuild, Title: "B", Parent: "cpold"},
+		"b3":     {ID: "b3", Kind: contract.KindBuild, Title: "B", Parent: "cpbare"},
+		"b4":     {ID: "b4", Kind: contract.KindBuild, Title: "B4"},
+	}
+	for _, tc := range []struct{ cause, parent, line string }{
+		{"b1", "init", "Initiative: Init"},
+		{"b2", "", "Initiative: outside (Done is closed)"},
+		{"b3", "", "Initiative: outside (Bare has no Initiative)"},
+		{"b4", "", "Initiative: outside (B4 has no Initiative)"},
+	} {
+		for name, spawn := range map[string]func(string, string, string) (string, bool, error){
+			"any":    SpawnOffshootSignalIfAbsent,
+			"titled": SpawnOffshootSignalTitledIfAbsent,
+		} {
+			t.Run(tc.cause+"/"+name, func(t *testing.T) {
+				creates := useLoopCore(t, loopCore{beads: beads})
+				id, created, err := spawn(tc.cause, "Lost", "Body")
+				if err != nil || !created || id != "new" || len(*creates) != 1 {
+					t.Fatalf("spawn = %q, %v, %v with %d creates", id, created, err, len(*creates))
+				}
+				argv := (*creates)[0]
+				if p := argAfter(argv, "--parent"); p != tc.parent {
+					t.Errorf("--parent = %q, want %q", p, tc.parent)
+				}
+				if d := argAfter(argv, "--deps"); d != "discovered-from:"+tc.cause {
+					t.Errorf("--deps = %q, want only discovered-from", d)
+				}
+				for _, bad := range []string{"--status", "drafted-by"} {
+					if strings.Contains(strings.Join(argv, " "), bad) {
+						t.Errorf("argv %v carries %s", argv, bad)
+					}
+				}
+				if d := argAfter(argv, "--description"); d != "Body\n\nOrder: none\n"+tc.line {
+					t.Errorf("body = %q", d)
+				}
+			})
+		}
+	}
+}
+
+// Whatever an existing Signal's status or parent, it stands in for the create; the titled
+// helper accepts only a same-titled one.
+func TestLoopOffshootIdempotency(t *testing.T) {
+	beads := map[string]Bead{"c": {ID: "c", Kind: contract.KindBuild, Title: "C"}}
+	existing := []Bead{{ID: "old", Kind: contract.KindSignal, Title: "Lost", Status: "closed", Parent: "init"}}
+
+	creates := useLoopCore(t, loopCore{beads: beads, found: existing})
+	if id, created, err := SpawnOffshootSignalIfAbsent("c", "Other", "b"); err != nil || created || id != "old" || len(*creates) != 0 {
+		t.Errorf("any helper = %q, %v, %v, %d creates; want old, no create", id, created, err, len(*creates))
+	}
+	if id, created, err := SpawnOffshootSignalTitledIfAbsent("c", "Lost", "b"); err != nil || created || id != "old" || len(*creates) != 0 {
+		t.Errorf("titled same title = %q, %v, %v, %d creates; want old, no create", id, created, err, len(*creates))
+	}
+	if _, created, err := SpawnOffshootSignalTitledIfAbsent("c", "Other", "b"); err != nil || !created || len(*creates) != 1 {
+		t.Errorf("titled other title: created=%v err=%v creates=%d; want one create", created, err, len(*creates))
+	}
+}
+
+// retireCore is a Core stub for Retire: three overridden methods, the rest nil.
+type retireCore struct {
+	Core
+	beads  map[string]Bead
+	edges  []Bead // old's supersedes targets
+	closes [][2]string
+	forced bool
+	ran    [][]string // the supersedes written
+}
+
+func (c *retireCore) Supersede(id, with string) error {
+	c.ran = append(c.ran, []string{"supersede", id, with})
+	return nil
+}
+
+func (c *retireCore) Show(id string) (Bead, error) {
+	b, ok := c.beads[id]
+	if !ok {
+		return Bead{}, errors.New("not found: " + id)
+	}
+	return b, nil
+}
+
+func (c *retireCore) Close(ids []string, reason string, force bool) error {
+	c.closes, c.forced = append(c.closes, [2]string{ids[0], reason}), force
+	return nil
+}
+
+func (c *retireCore) Edges(string, Dir, string) ([]EdgeRow, error) {
+	rows := make([]EdgeRow, len(c.edges))
+	for i, b := range c.edges {
+		rows[i] = EdgeRow{Bead: b, Type: "supersedes"}
+	}
+	return rows, nil
+}
+
+func newRetire(t *testing.T, edges []Bead, beads ...Bead) (*retireCore, *[][]string) {
+	t.Helper()
+	c := &retireCore{beads: map[string]Bead{}, edges: edges}
+	for _, b := range beads {
+		c.beads[b.ID] = b
+	}
+	t.Cleanup(Use(c))
+	return c, &c.ran
+}
+
+var supersedeOldNew = []string{"supersede", "mc-old", "mc-new"}
+
+func TestRetireClosesAnOpenBeadWithTheReasonThenAddsTheEdge(t *testing.T) {
+	c, ran := newRetire(t, nil, Bead{ID: "mc-old", Status: "open"}, Bead{ID: "mc-new", Status: "open"})
+	if err := Retire("mc-old", "mc-new", "duplicate: mc-new"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.closes, [][2]string{{"mc-old", "duplicate: mc-new"}}) || !c.forced {
+		t.Errorf("closes = %v forced=%v, want one forced close with the reason", c.closes, c.forced)
+	}
+	if !reflect.DeepEqual(*ran, [][]string{supersedeOldNew}) {
+		t.Errorf("ran = %v, want the supersede", *ran)
+	}
+}
+
+func TestRetireOfAClosedBeadAddsOnlyTheEdge(t *testing.T) {
+	c, ran := newRetire(t, nil, Bead{ID: "mc-old", Status: "closed", CloseReason: "kept"}, Bead{ID: "mc-new", Status: "open"})
+	if err := Retire("mc-old", "mc-new", "duplicate: mc-new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.closes) != 0 {
+		t.Errorf("closes = %v, want none", c.closes)
+	}
+	if !reflect.DeepEqual(*ran, [][]string{supersedeOldNew}) {
+		t.Errorf("ran = %v, want the supersede", *ran)
+	}
+}
+
+func TestRetireWithTheEdgeAlreadyThereIsANoOp(t *testing.T) {
+	c, ran := newRetire(t, []Bead{{ID: "mc-new"}}, Bead{ID: "mc-old", Status: "closed"}, Bead{ID: "mc-new", Status: "open"})
+	if err := Retire("mc-old", "mc-new", "duplicate: mc-new"); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.closes) != 0 || len(*ran) != 0 {
+		t.Errorf("closes = %v ran = %v, want nothing written", c.closes, *ran)
+	}
+}
+
+func TestRetireRefusesAnUnknownNewIDBeforeAnyWrite(t *testing.T) {
+	c, ran := newRetire(t, nil, Bead{ID: "mc-old", Status: "open"})
+	if err := Retire("mc-old", "mc-typo", "duplicate: mc-typo"); err == nil {
+		t.Fatal("Retire of an unknown new id succeeded")
+	}
+	if len(c.closes) != 0 || len(*ran) != 0 {
+		t.Errorf("closes = %v ran = %v, want nothing written", c.closes, *ran)
 	}
 }

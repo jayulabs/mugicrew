@@ -1,4 +1,4 @@
-<!-- hand-kept · adapted from mattpocock/skills skills/engineering/pr (the pr skill's visual-choosing guidance and brevity rules); summarises ADR 0020 (Luffy's approval session) -->
+<!-- hand-kept · adapted from mattpocock/skills skills/engineering/pr (the pr skill's visual-choosing guidance and brevity rules); summarises ADR 0020 (Luffy's approval session), ADR 0407 (a respin's Packet) -->
 
 # The Decision Packet and the Chart Packet
 
@@ -53,6 +53,24 @@ Every earlier Approval on this Checkpoint: its pinned SHA, how it ended
 `rework:` close reason, or approved and then undone by a Landing conflict or
 failed gate build), and what changed before the next one. When this is the first
 Approval, one line says so.
+
+## A respin's Packet
+
+A respin is a Checkpoint whose body starts `Respin of`. It carries the work that a
+Forge merge stranded when it landed an earlier Checkpoint for the same Spec. Its
+branch is cut from mainline, so its diff already leaves out what landed. Add to the
+sections above:
+
+- **Background**: one line: "Respin of <landed Checkpoint title>, which a Forge
+  merge landed at <sha>. The Spec's work up to `Landed-tip` is already on mainline
+  and is not in this diff."
+- **Summary**: tag each row **replayed** (from the commit with a `Replayed:`
+  trailer, never approved) or **respin** (built by a member).
+- **Execution Notes**: the replay's outcome (clean, or the replay Conflict and how
+  it cleared) and the re-filed members by title.
+- **Approval History**: after this Checkpoint's own Approvals, one line for the
+  landed Checkpoint's last approved pin (`Landed-tip`), saying that nothing after it
+  was approved.
 
 ## The Chart Packet
 

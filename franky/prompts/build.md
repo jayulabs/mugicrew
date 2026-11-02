@@ -45,12 +45,20 @@ Then, in order:
    fix what it finds in this slice. This self-pass is your churn-reducer, not
    optional.
 
+If the slice adds a numbered file (an ADR, or a file a configured sequence
+matches, e.g. a migration), Read crew doc sequence-number.md and number it as it
+says, not by scanning.
+
 Implement ONLY this bead's slice. It is one vertical unit; the sibling Builds are
 other beads Franky runs separately.
 
 If you cannot build the slice, instead of implementing it run
 `bd comments add {{.BeadID}} "Not built: <why>"` and return, committing nothing.
 Franky's backstop pauses the bead for a human with your reason.
+
+If instead the slice needs code that is on mainline but missing from the Checkpoint
+branch, run `bd comments add {{.BeadID}} "Behind mainline: <what's missing>"` and
+return, committing nothing. Keep `Not built: <why>` for every other reason.
 
 ## A Critique that needs no change
 
@@ -122,6 +130,7 @@ your bead filled in:
   fix it here and do not let it derail this slice:
 
       bd create --type task --labels kind:critique,drafted-by:{{.BeadID}} -s deferred --no-inherit-labels --parent <checkpointID> \
+        --deps discovered-from:{{.BeadID}} \
         --title "<what's wrong>" --description "<the defect + where>"
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.

@@ -58,6 +58,8 @@ func parityGraph() graphData {
 		{ID: "chart-open", Kind: contract.KindChart, Container: true, Status: "open"}, {ID: "k2", Kind: contract.KindResearch, Parent: "chart-open", Status: "open"},
 		{ID: "chart-held", Kind: contract.KindChart, Container: true, Status: "open"}, {ID: "k3", Kind: contract.KindResearch, Parent: "chart-held", Status: "closed"},
 		{ID: "chart-landing", Kind: contract.KindChart, Container: true, Status: "open"}, {ID: "lnd2", Kind: contract.KindLanding, Parent: "chart-landing", Status: "open"},
+		cpOf("cp-behind"), {ID: "bm-build", Kind: contract.KindBuild, Parent: "cp-behind", Status: "open", BlockedBy: []string{"bm-dep"}},
+		{ID: "cp-other", Kind: contract.KindCheckpoint, Container: true, Status: "closed"}, {ID: "bm-dep", Kind: contract.KindBuild, Parent: "cp-other", Status: "closed"},
 		{ID: "dep", Kind: contract.KindResearch, Status: "open"},
 		{ID: "blk", Kind: contract.KindResearch, Status: "open", BlockedBy: []string{"dep"}},
 		{ID: "cond", Kind: contract.KindResearch, Status: "open", BlockedBy: []string{"dep"}, CondBlockedBy: []string{"dep"}},
@@ -74,7 +76,10 @@ func parityGraph() graphData {
 		frontier: fixtureReady(beads),
 		efforts:  &git.EffortSet{Branches: map[string]bool{"m8": true, "k3": true}},
 		landed:   map[string]string{"cp-landed": "f00"},
-		cpTips:   map[string]string{},
+		// cp-other landed after cp-behind was cut: its land commit is off cp-behind's tip.
+		blockLanded: map[string]string{"cp-other": "land1"},
+		contains:    map[string]bool{"land1@abc": false},
+		cpTips:      map[string]string{},
 	}
 	for _, b := range beads {
 		if b.Kind == contract.KindCheckpoint {
@@ -102,6 +107,11 @@ func liveOver(g graphData) loop.View {
 			return out, nil
 		},
 		LandedBase: func(trailer string) (string, error) {
+			for id, sha := range g.blockLanded {
+				if trailer == git.TrailerFor("checkpoint", id) {
+					return sha, nil
+				}
+			}
 			for id, sha := range g.landed {
 				if trailer == git.TrailerFor("checkpoint", id) || trailer == git.TrailerFor("chart", id) {
 					return sha, nil
@@ -110,21 +120,27 @@ func liveOver(g graphData) loop.View {
 			return "", git.ErrNotLanded
 		},
 		Head: func(string) (string, error) { return "abc", nil },
-		OpenBlockers: func(id string) ([]bd.Bead, error) {
-			var out []bd.Bead
-			for _, to := range byID[id].BlockedBy {
-				if x, ok := byID[to]; ok && x.Open() && !slices.Contains(byID[id].CondBlockedBy, to) {
-					out = append(out, x)
-				}
-			}
-			return out, nil
-		},
 		Show: func(id string) (bd.Bead, error) {
 			if b, ok := byID[id]; ok {
 				return b, nil
 			}
 			return bd.Bead{}, fmt.Errorf("no bead %s", id)
 		},
+		Blockers: func(id string) (open, closed []bd.Bead, err error) {
+			for _, to := range byID[id].BlockedBy {
+				x, ok := byID[to]
+				if !ok || slices.Contains(byID[id].CondBlockedBy, to) {
+					continue
+				}
+				if x.Open() {
+					open = append(open, x)
+				} else if x.Status == "closed" {
+					closed = append(closed, x)
+				}
+			}
+			return open, closed, nil
+		},
+		Contains:   func(_ bd.Bead, tip, sha string) (bool, error) { return g.contains[loop.ContainsKey(tip, sha)], nil },
 		EffortRefs: func() (*git.EffortSet, error) { return g.efforts, nil },
 	}, nil)
 }
@@ -246,5 +262,67 @@ func TestDetailPaneMarksIntegratedEffort(t *testing.T) {
 		if has := strings.Contains(got, "effort/"+id+" (integrated)"); has != want {
 			t.Errorf("%s: (integrated) marker = %v, want %v:\n%s", id, has, want, got)
 		}
+	}
+}
+
+// A Build whose Checkpoint tip lacks a landed cross-Checkpoint blocker's land commit reads
+// behind-mainline off the snapshot facts; the cause hint says so and names the holder, and
+// the forced re-judge (what a confirmed y/n runs) clears it.
+func TestBehindMainlineRowAndConfirm(t *testing.T) {
+	cp := bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Container: true, Status: "open"}
+	ocp := bd.Bead{ID: "ocp", Kind: contract.KindCheckpoint, Container: true, Status: "closed"}
+	dep := bd.Bead{ID: "dep", Kind: contract.KindBuild, Parent: "ocp", Status: "closed", Title: "Landed dep"}
+	mem := bd.Bead{ID: "mem", Kind: contract.KindBuild, Parent: "cp", Status: "open", BlockedBy: []string{"dep"}}
+	g := snapGraph(cp, ocp, dep, mem)
+	g.blockLanded = map[string]string{"ocp": "land1"}
+	g.contains = map[string]bool{"land1@abc": false}
+	b := g.beadByID("mem")
+	if v := g.eligibility(b); v.Cause != loop.CauseBehindMainline || len(v.Holders) != 1 || v.Holders[0].Bead.ID != "dep" {
+		t.Fatalf("verdict = %+v, want behind-mainline held by dep", v)
+	}
+	why := g.runNowWhy(b)
+	// confirmed re-judges with Force, so the row is runnable and the press asks y/n first.
+	if why != "" || g.runNowLabel(b) != "run" {
+		t.Errorf("confirmed: why %q label %q, want a runnable row", why, g.runNowLabel(b))
+	}
+	hint := causeHint(*b, g.eligibility(b))
+	for _, w := range []string{"checkpoint/cp", "behind mainline", "Landed dep", "dep", "r requests a rebase"} {
+		if !strings.Contains(hint, w) {
+			t.Errorf("hint %q lacks %q", hint, w)
+		}
+	}
+	g.contains = map[string]bool{"land1@abc": true}
+	if v := g.eligibility(b); !v.Runnable {
+		t.Errorf("land commit on the tip: verdict %+v, want runnable", v)
+	}
+}
+
+// A press on a behind-mainline Build opens the run-anyway y/n, as it does on a blocked one.
+func TestRunNowBehindMainlineOpensConfirm(t *testing.T) {
+	g := parityGraph()
+	n, cmd := Model{}.runNow(g, *g.beadByID("bm-build"))
+	if cmd != nil || len(n.(Model).modals) != 1 || n.(Model).modals[0].title != "Run behind-mainline bead now?" {
+		t.Errorf("cmd=%v modals=%+v, want the behind-mainline confirm", cmd != nil, n.(Model).modals)
+	}
+}
+
+// A closed blocker (and its landed Checkpoint) absent from the loaded beads but read by id
+// still holds the Build behind-mainline, and r targets the Build's Checkpoint.
+func TestBehindMainlineFromUnloadedBlocker(t *testing.T) {
+	cp := bd.Bead{ID: "cp", Kind: contract.KindCheckpoint, Container: true, Status: "open"}
+	mem := bd.Bead{ID: "mem", Kind: contract.KindBuild, Parent: "cp", Status: "open", BlockedBy: []string{"dep"}}
+	g := snapGraph(cp, mem)
+	g.behind = map[string]bd.Bead{
+		"dep": {ID: "dep", Kind: contract.KindBuild, Parent: "ocp", Status: "closed"},
+		"ocp": {ID: "ocp", Kind: contract.KindCheckpoint, Container: true, Status: "closed"},
+	}
+	g.blockLanded = map[string]string{"ocp": "land1"}
+	g.contains = map[string]bool{"land1@abc": false}
+	b := g.beadByID("mem")
+	if v := g.eligibility(b); v.Cause != loop.CauseBehindMainline {
+		t.Fatalf("verdict = %+v, want behind-mainline", v)
+	}
+	if got := g.rebaseTarget(b); got != "cp" {
+		t.Errorf("rebaseTarget = %q, want cp", got)
 	}
 }

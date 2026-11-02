@@ -11,7 +11,7 @@ import (
 var (
 	NewSignalWithRef = bd.NewSignalWithRef
 	CarrierOf        = bd.CarrierOf
-	Supersede        = bd.Supersede
+	Retire           = bd.Retire
 )
 
 // IntakeResult is what Intake filed. Key is the resolved key (it differs from
@@ -38,7 +38,7 @@ func Open(verb, root, typed string) (Item, string, error) {
 // Intake files Jira work item typed as a Signal titled <KEY>: <summary>
 // carrying external ref jira-<KEY> and a body that only points at the item (ADR
 // 0205). A failure before filing returns a zero result; filed-then-failed
-// (the supersede) returns the result with ID set and the error.
+// (the retire) returns the result with ID set and the error.
 func Intake(root, typed string) (IntakeResult, error) {
 	it, site, err := Open("intake jira", root, typed)
 	if err != nil {
@@ -55,8 +55,8 @@ func Intake(root, typed string) (IntakeResult, error) {
 		return IntakeResult{Key: it.Key}, fmt.Errorf("intake jira %s: %w", typed, err)
 	}
 	res := IntakeResult{ID: id, Key: it.Key}
-	if found { // a re-intake is kept as lineage, never a second effort (ADR 0006)
-		if err := Supersede(id, carrier.ID); err != nil {
+	if found { // a re-intake closes duplicate: <carrier> through the reason-first door, kept as lineage, never a second effort (ADR 0006, ADR 0399)
+		if err := Retire(id, carrier.ID, bd.DuplicateReason+" "+carrier.ID); err != nil {
 			return res, fmt.Errorf("intake jira %s: filed %s but could not supersede it onto %s: %w", typed, id, carrier.ID, err)
 		}
 		res.Carrier = carrier.ID

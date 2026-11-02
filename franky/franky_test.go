@@ -4,13 +4,13 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contexts/contextstest"
 	"jayulabs.org/mugicrew/contract"
@@ -42,53 +42,29 @@ type stubCtx struct{ h contract.Harness }
 
 func (c stubCtx) Harness() contract.Harness { return c.h }
 
-// frankySeamRec captures the bd legs so the tests can assert the close and the
-// pivot hand-off without live bd/git.
-type frankySeamRec struct {
-	closed    []string  // closed directly (closeBead)
-	reasons   []string  // close reasons, parallel to closed
-	pivots    []bd.Bead // the Checkpoint's open pivots (OpenPivots)
-	raised    []bd.Bead // open pivots discovered-from the bead (PivotsDiscoveredFrom)
-	raises    []string  // raisePivot calls: "<bead> <spec> <pivot ids>"
-	spec      string    // the Checkpoint's Spec via SpecOf ("" = none)
-	surgeries []bd.Bead // the Checkpoint's Surgeries via SurgeriesOf
-	notes     string    // the newest Rationale: note (RationaleNote)
-	noteReads []string  // beads whose comments were read for a rationale
-}
-
-func stubFrankySeams(t *testing.T, r *frankySeamRec) {
+// cpGraph seeds a Checkpoint "ws-cp" caused-by a Spec "ws-spec" (when withSpec) and
+// the given beads, and installs it as bd's core.
+func cpGraph(t *testing.T, withSpec bool, beads ...bd.Bead) *bdtest.Fake {
 	t.Helper()
-	oShow, oClose, oNote := showBead, closeBead, rationale
-	oPivots, oRaise, oSpec, oSurgery := openPivots, raiseIfPivoted, specOf, surgeriesOf
-	t.Cleanup(func() {
-		showBead, closeBead, rationale = oShow, oClose, oNote
-		openPivots, raiseIfPivoted, specOf, surgeriesOf = oPivots, oRaise, oSpec, oSurgery
-	})
-	closeBead = func(id, reason string) error {
-		r.closed = append(r.closed, id)
-		r.reasons = append(r.reasons, reason)
-		return nil
+	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true}
+	seed := []bd.Bead{cp}
+	if withSpec {
+		seed[0].CausedBy = "ws-spec"
+		seed = append(seed, bd.Bead{ID: "ws-spec", Title: "the spec", Kind: contract.KindSpec, Status: "closed"})
 	}
-	rationale = func(id string) string {
-		r.noteReads = append(r.noteReads, id)
-		return r.notes
-	}
-	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
-	// The find and the raise are bd.RaiseIfPivoted's (tested in bd); Franky's job
-	// is handing it the bead and the Spec resolved from the Checkpoint.
-	raiseIfPivoted = func(_ contract.Ctx, b bd.Bead, spec string) (bool, error) {
-		if len(r.raised) == 0 {
-			return false, nil
-		}
-		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(r.raised), ","))
-		return true, nil
-	}
-	specOf = func(string) (string, bool, error) { return r.spec, r.spec != "", nil }
-	surgeriesOf = func(string) ([]bd.Bead, error) { return r.surgeries, nil }
+	return bdtest.New(t, append(seed, beads...)...)
 }
 
 func openBuild() bd.Bead {
-	return bd.Bead{ID: "ws-build", Kind: contract.KindBuild, Status: "in_progress", Parent: "ws-cp"}
+	return bdtest.Claimed(bd.Bead{ID: "ws-build", Kind: contract.KindBuild, Parent: "ws-cp"})
+}
+
+func closeReason(f *bdtest.Fake, id string) string {
+	b := f.Bead(id)
+	if b.Open() {
+		return "<open>"
+	}
+	return b.CloseReason
 }
 
 // Launch errors for every kind but surgery — build, critique and conflict are AFK.
@@ -113,14 +89,7 @@ func (h *launchHarness) LaunchCommand(inv contract.Invocation) (contract.LaunchC
 
 // Spec D4: l on a Surgery launches a session over the surgery prompt.
 func TestLaunchSurgeryComposesSession(t *testing.T) {
-	r := &frankySeamRec{}
-	stubFrankySeams(t, r)
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Title: "t-" + id, Parent: "ws-cp"}, nil
-	}
-	oKids := childrenOfKind
-	t.Cleanup(func() { childrenOfKind = oKids })
-	childrenOfKind = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
+	cpGraph(t, true, bd.Bead{ID: "ws-surg", Title: "t-ws-surg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"})
 	h := &launchHarness{}
 	lc, err := Franky{}.Launch(stubCtx{h}, contract.Bead{ID: "ws-surg", Kind: contract.KindSurgery})
 	if err != nil {
@@ -202,23 +171,19 @@ func TestSurgeryPromptContextBlocks(t *testing.T) {
 // surgeryContext reads the Checkpoint, its Spec, closed sibling Surgeries and
 // open Builds and Critiques; the Surgery itself and closed Builds are left out.
 func TestSurgeryContextFromBd(t *testing.T) {
-	r := &frankySeamRec{spec: "ws-spec", surgeries: []bd.Bead{
-		{ID: "ws-s0", Status: "closed"}, {ID: "ws-surg", Status: "in_progress"}, {ID: "ws-s2", Status: "in_progress"},
-	}}
-	stubFrankySeams(t, r)
-	oKids := childrenOfKind
-	t.Cleanup(func() { childrenOfKind = oKids })
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Title: "t-" + id, Parent: "ws-cp"}, nil
-	}
-	childrenOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) {
-		return []bd.Bead{{ID: "open-" + string(k), Status: "open"}, {ID: "done-" + string(k), Status: "closed"}}, nil
-	}
+	cpGraph(t, true,
+		bd.Bead{ID: "ws-s0", Kind: contract.KindSurgery, Status: "closed", Parent: "ws-cp"},
+		bd.Bead{ID: "ws-surg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"},
+		bd.Bead{ID: "ws-s2", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"},
+		bd.Bead{ID: "open-build", Kind: contract.KindBuild, Status: "open", Parent: "ws-cp"},
+		bd.Bead{ID: "done-build", Kind: contract.KindBuild, Status: "closed", Parent: "ws-cp"},
+		bd.Bead{ID: "open-critique", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"},
+		bd.Bead{ID: "done-critique", Kind: contract.KindCritique, Status: "closed", Parent: "ws-cp"})
 	a, err := surgeryContext("ws-surg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Checkpoint != "ws-cp" || a.CheckpointTitle != "t-ws-cp" || a.SpecID != "ws-spec" || a.SpecTitle != "t-ws-spec" {
+	if a.Checkpoint != "ws-cp" || a.SpecID != "ws-spec" || a.SpecTitle != "the spec" {
 		t.Errorf("checkpoint/spec = %+v", a)
 	}
 	if got := bd.IDs(a.Earlier); !slices.Equal(got, []string{"ws-s0"}) {
@@ -297,7 +262,7 @@ func TestBuildPromptIntegratesEffortBranch(t *testing.T) {
 	if !promptguard.IntegratesBeforeClose(b) {
 		t.Error("build prompt must name mugicrew integrate before bd close")
 	}
-	for _, want := range []string{"effort/mc-x", "git log --oneline checkpoint/ws-cp..HEAD", "git rebase --continue", "git rebase --abort", `bd comments add mc-x "Not built: <why>"`} {
+	for _, want := range []string{"effort/mc-x", "git log --oneline checkpoint/ws-cp..HEAD", "git rebase --continue", "git rebase --abort", `bd comments add mc-x "Not built: <why>"`, `bd comments add mc-x "Behind mainline: <what's missing>"`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("build prompt lacks %q", want)
 		}
@@ -322,6 +287,17 @@ func TestPromptsRender(t *testing.T) {
 			if !strings.Contains(p, want) {
 				t.Errorf("prompt for %s must carry the pivot raise (%q)", id, want)
 			}
+		}
+		const anchor = "bd create --type task --labels kind:critique"
+		i := strings.Index(p, anchor)
+		if i < 0 {
+			if id == "mc-x" { // the Build prompt files Critiques; the conflict prompt does not
+				t.Errorf("prompt for %s lacks the Critique create (%q)", id, anchor)
+			}
+		} else if n := strings.Index(p[i:], "--title"); n < 0 {
+			t.Fatalf("prompt for %s: the Critique create has no --title", id)
+		} else if create := p[i : i+n]; !strings.Contains(create, "--deps discovered-from:"+id) {
+			t.Errorf("prompt for %s: the Critique create must carry --deps discovered-from:%s, got %q", id, id, create)
 		}
 		if strings.Contains(p, "bd label add") {
 			t.Errorf("prompt for %s still carries the human-label placeholder", id)
@@ -374,93 +350,90 @@ func TestAFKPromptsFileExternalWorkAsSignal(t *testing.T) {
 // Franky spawns no Review, even as the last open member — Jinbe spawns it from
 // drained-Checkpoint state.
 func TestFinishOnlyCloses(t *testing.T) {
-	for _, k := range []contract.Kind{contract.KindBuild, contract.KindCritique, contract.KindConflict} {
-		r := &frankySeamRec{}
-		stubFrankySeams(t, r)
+	for k, want := range map[contract.Kind]string{
+		contract.KindBuild: bd.BuiltReason, contract.KindCritique: bd.CompletedReason, contract.KindConflict: bd.ResolvedReason,
+	} {
 		b := openBuild()
 		b.Kind = k
+		f := cpGraph(t, false, b)
 		if err := finish(b); err != nil {
 			t.Fatalf("%s: finish: %v", k, err)
 		}
-		if len(r.closed) != 1 || r.closed[0] != "ws-build" {
-			t.Errorf("%s: closed %v, want [ws-build]", k, r.closed)
+		if got := closeReason(f, "ws-build"); got != want {
+			t.Errorf("%s: closed with %q, want %q", k, got, want)
+		}
+		if kids, _ := bd.ChildCount("ws-cp"); kids != 1 {
+			t.Errorf("%s: finish spawned a member, children = %d", k, kids)
 		}
 	}
 }
 
 // Spec D5, D6: a Critique with a Rationale: comment closes accepted: <it>; one
-// with none closes bare; no other kind reads comments or carries a reason.
+// with none closes completed; no other kind carries a reason from a comment.
 func TestFinishCritiqueAcceptedWithRationale(t *testing.T) {
-	r := &frankySeamRec{notes: "fixed the nil deref; declined the rename"}
-	stubFrankySeams(t, r)
 	b := openBuild()
 	b.Kind = contract.KindCritique
+	f := cpGraph(t, false, b)
+	f.AddComment("ws-build", "Rationale: fixed the nil deref; declined the rename")
 	if err := finish(b); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.reasons) != 1 || r.reasons[0] != "accepted: fixed the nil deref; declined the rename" {
-		t.Errorf("reasons = %q", r.reasons)
+	if got := closeReason(f, "ws-build"); got != "accepted: fixed the nil deref; declined the rename" {
+		t.Errorf("reason = %q", got)
 	}
 
-	r2 := &frankySeamRec{}
-	stubFrankySeams(t, r2)
+	f2 := cpGraph(t, false, b)
 	if err := finish(b); err != nil {
 		t.Fatal(err)
 	}
-	if len(r2.reasons) != 1 || r2.reasons[0] != "" {
-		t.Errorf("no rationale: reasons = %q, want bare close", r2.reasons)
+	if got := closeReason(f2, "ws-build"); got != bd.CompletedReason {
+		t.Errorf("no rationale: reason = %q, want completed", got)
 	}
 }
 
 func TestFinishNonCritiqueIgnoresRationale(t *testing.T) {
 	for _, k := range []contract.Kind{contract.KindBuild, contract.KindConflict} {
-		r := &frankySeamRec{notes: "should be ignored"}
-		stubFrankySeams(t, r)
 		b := openBuild()
 		b.Kind = k
+		f := cpGraph(t, false, b)
+		f.AddComment("ws-build", "Rationale: should be ignored")
 		if err := finish(b); err != nil {
 			t.Fatal(err)
 		}
-		if r.reasons[0] != "" || len(r.noteReads) != 0 {
-			t.Errorf("%s: reason %q, reads %v; want bare close, no comment read", k, r.reasons[0], r.noteReads)
+		want := bd.BuiltReason
+		if k == contract.KindConflict {
+			want = bd.ResolvedReason
 		}
-	}
-}
-
-func TestFinishClosedCritiqueIsNoOp(t *testing.T) {
-	r := &frankySeamRec{notes: "x"}
-	stubFrankySeams(t, r)
-	b := openBuild()
-	b.Kind = contract.KindCritique
-	b.Status = "closed"
-	if err := finish(b); err != nil || len(r.closed) != 0 {
-		t.Errorf("err=%v closed=%v, want no-op", err, r.closed)
+		if got := closeReason(f, "ws-build"); got != want {
+			t.Errorf("%s: reason %q, want close %q", k, got, want)
+		}
 	}
 }
 
 // Roll-forward idempotency: a re-dispatch after the close already happened (bead
-// re-read as closed) is a no-op — no double close.
+// re-read as closed) is a no-op — no double close, so a Critique's reason stands.
 func TestFinishClosedBeadIsNoOp(t *testing.T) {
-	r := &frankySeamRec{}
-	stubFrankySeams(t, r)
-	closed := openBuild()
-	closed.Status = "closed"
-
-	if err := finish(closed); err != nil {
-		t.Fatalf("finish: %v", err)
-	}
-	if len(r.closed) != 0 {
-		t.Errorf("a closed bead must be a no-op, got closed=%v", r.closed)
+	for _, k := range []contract.Kind{contract.KindBuild, contract.KindCritique} {
+		b := openBuild()
+		b.Kind = k
+		f := cpGraph(t, false, b)
+		f.AddComment("ws-build", "Rationale: x")
+		f.Mutate("ws-build", func(b *bd.Bead) { b.Status, b.CloseReason = "closed", "first close" })
+		closed := f.Bead("ws-build")
+		if err := finish(closed); err != nil {
+			t.Fatalf("%s: finish: %v", k, err)
+		}
+		if got := closeReason(f, "ws-build"); got != "first close" {
+			t.Errorf("%s: a closed bead must be left alone, reason now %q", k, got)
+		}
 	}
 }
 
 // Run(build) forks the implement agent then drives the tail through to the close.
+// A Rollback successor's parent is caused-by the Rollback, not a Spec: the prompt
+// carries the Spec SpecOf resolves through it (Spec Decision 6).
 func TestRunBuildForksThenCloses(t *testing.T) {
-	// A Rollback successor's parent is caused-by the Rollback, not a Spec: the
-	// prompt must carry the Spec SpecOf resolves through it (Spec Decision 6).
-	r := &frankySeamRec{spec: "ws-spec"}
-	stubFrankySeams(t, r)
-	showBead = func(id string) (bd.Bead, error) { return openBuild(), nil }
+	f := cpGraph(t, true, openBuild())
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
@@ -472,69 +445,63 @@ func TestRunBuildForksThenCloses(t *testing.T) {
 	if !strings.Contains(h.invs[0].Prompt, "bd show ws-spec") {
 		t.Errorf("build prompt must carry the SpecOf-resolved Spec, got %q", h.invs[0].Prompt)
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-build" {
-		t.Errorf("build must close itself, got %v", r.closed)
+	if got := closeReason(f, "ws-build"); got != bd.BuiltReason {
+		t.Errorf("build must close itself built, got %q", got)
 	}
 }
 
 // A fork failure propagates so the bead stays open (not closed) — the loop
-// re-dispatches next tick. No close.
+// re-dispatches next tick.
 func TestRunForkFailureLeavesBeadOpen(t *testing.T) {
-	r := &frankySeamRec{}
-	stubFrankySeams(t, r)
-	showBead = func(id string) (bd.Bead, error) { return openBuild(), nil }
+	f := cpGraph(t, true, openBuild())
 	h := &recordingHarness{err: errors.New("build session crashed")}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err == nil {
 		t.Fatal("a fork failure must propagate")
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("a fork failure must not touch the graph, got closed=%v", r.closed)
+	if got := f.Bead("ws-build"); !got.Open() {
+		t.Errorf("a fork failure must not close the bead, got %q", got.Status)
 	}
 }
 
 // A raise: the agent created (or merged into) a pivot discovered-from its bead.
-// Franky hands the bead, its Checkpoint's Spec and the raised pivots to the raise
-// (which wires the gate and closes 'pivoted:') and does not close
-// itself — for the implement and conflict tails alike.
-func TestRunPivotRaiseHandsOffWithoutReview(t *testing.T) {
+// Franky raises it against the Checkpoint's Spec — the gate edges land in the
+// graph and the bead closes 'pivoted:' — for the implement and conflict tails alike.
+func TestRunPivotRaiseGatesCheckpointAndClosesPivoted(t *testing.T) {
 	for name, b := range map[string]bd.Bead{
 		"build":    openBuild(),
-		"conflict": {ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\n"},
+		"conflict": bdtest.Claimed(bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: cafef00d\n"}),
 	} {
-		r := &frankySeamRec{spec: "ws-spec", raised: []bd.Bead{{ID: "ws-piv"}}}
-		stubFrankySeams(t, r)
-		showBead = func(string) (bd.Bead, error) { return b, nil }
+		piv := bdtest.Draft(b.ID, bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, DiscoveredFrom: []string{b.ID}})
+		f := cpGraph(t, true, b, piv)
 
 		if err := (Franky{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: b.ID, Kind: b.Kind}); err != nil {
 			t.Fatalf("%s Run: %v", name, err)
 		}
-		if want := []string{b.ID + " ws-spec ws-piv"}; !reflect.DeepEqual(r.raises, want) {
-			t.Errorf("%s raises = %v, want %v", name, r.raises, want)
+		if got := closeReason(f, b.ID); got != "pivoted: ws-piv" {
+			t.Errorf("%s closed with %q, want pivoted: ws-piv", name, got)
 		}
-		if len(r.closed) != 0 {
-			t.Errorf("%s a pivoted pass must close nothing itself, got closed=%v", name, r.closed)
+		if p := f.Bead("ws-piv"); !slices.Contains(p.Related, "ws-spec") {
+			t.Errorf("%s: the pivot must relate to the Spec, got %+v", name, p)
+		}
+		if cp := f.Bead("ws-cp"); !slices.Contains(cp.BlockedBy, "ws-piv") {
+			t.Errorf("%s: the Checkpoint must be gated on the pivot, got %v", name, cp.BlockedBy)
 		}
 	}
 }
 
 // The pivot raise resolves the Spec through bd.SpecOf, so a successor Checkpoint a
-// Rollback caused (ADR 0048 §2) still relates its pivot to the original Spec.
-// The seam is stubbed as SpecOf answers a Rollback-caused parent: the Spec reached
-// through the Rollback, which no one-hop caused-by read would find.
-func TestPivotRaiseResolvesSpecThroughSpecOf(t *testing.T) {
-	if reflect.ValueOf(specOf).Pointer() != reflect.ValueOf(bd.SpecOf).Pointer() {
-		t.Error("franky's Spec seam must default to bd.SpecOf, not a one-hop caused-by walk")
-	}
-	r := &frankySeamRec{raised: []bd.Bead{{ID: "ws-piv"}}}
-	stubFrankySeams(t, r)
-	specOf = func(id string) (string, bool, error) {
-		if id != "ws-cp" {
-			return "", false, nil
-		}
-		return "ws-orig-spec", true, nil // ws-cp →caused-by→ Rollback →related→ old Checkpoint →caused-by→ Spec
-	}
-	showBead = func(string) (bd.Bead, error) { return openBuild(), nil }
+// Rollback caused (ADR 0048 §2) still relates its pivot to the original Spec:
+// ws-cp →caused-by→ Rollback →related→ old Checkpoint →caused-by→ Spec, which no
+// one-hop caused-by read would find.
+func TestPivotRaiseResolvesSpecThroughRollback(t *testing.T) {
+	piv := bdtest.Draft("ws-build", bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, DiscoveredFrom: []string{"ws-build"}})
+	f := bdtest.New(t,
+		bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, CausedBy: "ws-rb"},
+		bd.Bead{ID: "ws-rb", Kind: contract.KindRollback, Status: "closed", Related: []string{"ws-old"}},
+		bd.Bead{ID: "ws-old", Kind: contract.KindCheckpoint, Status: "closed", Container: true, CausedBy: "ws-orig-spec"},
+		bd.Bead{ID: "ws-orig-spec", Kind: contract.KindSpec, Status: "closed"},
+		openBuild(), piv)
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
@@ -543,18 +510,28 @@ func TestPivotRaiseResolvesSpecThroughSpecOf(t *testing.T) {
 	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "bd show ws-orig-spec") {
 		t.Errorf("the build prompt must name the resolved Spec, got %v", h.invs)
 	}
-	if want := []string{"ws-build ws-orig-spec ws-piv"}; !reflect.DeepEqual(r.raises, want) {
-		t.Errorf("the pivot must relate to the resolved Spec, got %v", r.raises)
+	if p := f.Bead("ws-piv"); !slices.Contains(p.Related, "ws-orig-spec") {
+		t.Errorf("the pivot must relate to the resolved Spec, got %+v", p)
+	}
+}
+
+// A pivot with no Spec to relate to is a loud failure: the bead stays open.
+func TestRunPivotRaiseWithoutSpecFails(t *testing.T) {
+	piv := bdtest.Draft("ws-build", bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, DiscoveredFrom: []string{"ws-build"}})
+	f := cpGraph(t, false, openBuild(), piv)
+	if err := (Franky{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err == nil {
+		t.Fatal("a raise with no Spec must fail")
+	}
+	if !f.Bead("ws-build").Open() {
+		t.Error("the bead must stay open")
 	}
 }
 
 // Run(conflict) reads the Base: pin off the bead body and hands it to the resolve
 // agent, then drives the same tail.
 func TestRunConflictReadsBasePin(t *testing.T) {
-	r := &frankySeamRec{spec: "ws-spec"}
-	stubFrankySeams(t, r)
-	conf := bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\n"}
-	showBead = func(id string) (bd.Bead, error) { return conf, nil }
+	conf := bdtest.Claimed(bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: cafef00d\n"})
+	cpGraph(t, true, conf)
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-conf", Kind: contract.KindConflict}); err != nil {
@@ -571,10 +548,7 @@ func TestRunConflictReadsBasePin(t *testing.T) {
 // A Critique carrying a Base: pin (the failed-gate-build Critique) rebases onto
 // that pinned base before the test-first fix, in the one session.
 func TestRunCritiqueBasePinRebasesThenFixes(t *testing.T) {
-	r := &frankySeamRec{spec: "ws-spec"}
-	stubFrankySeams(t, r)
-	crit := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\ngate failed: TestX"}
-	showBead = func(id string) (bd.Bead, error) { return crit, nil }
+	cpGraph(t, true, bdtest.Claimed(bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Parent: "ws-cp", Description: "Base: cafef00d\ngate failed: TestX"}))
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-crit", Kind: contract.KindCritique}); err != nil {
@@ -592,10 +566,7 @@ func TestRunCritiqueBasePinRebasesThenFixes(t *testing.T) {
 
 // A Critique with no Base: pin (Usopp's finding) keeps the plain implement leg.
 func TestRunCritiqueWithoutBasePinSkipsRebase(t *testing.T) {
-	r := &frankySeamRec{spec: "ws-spec"}
-	stubFrankySeams(t, r)
-	crit := bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "a review finding"}
-	showBead = func(id string) (bd.Bead, error) { return crit, nil }
+	cpGraph(t, true, bdtest.Claimed(bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Parent: "ws-cp", Description: "a review finding"}))
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-crit", Kind: contract.KindCritique}); err != nil {
@@ -608,11 +579,7 @@ func TestRunCritiqueWithoutBasePinSkipsRebase(t *testing.T) {
 
 // A conflict bead with no Base: pin is malformed — fail loud, fork nothing.
 func TestRunConflictNoBasePinFailsLoud(t *testing.T) {
-	r := &frankySeamRec{}
-	stubFrankySeams(t, r)
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp", Description: "no pin here"}, nil
-	}
+	cpGraph(t, true, bdtest.Claimed(bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "no pin here"}))
 	h := &recordingHarness{}
 
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-conf", Kind: contract.KindConflict}); err == nil {
@@ -625,10 +592,7 @@ func TestRunConflictNoBasePinFailsLoud(t *testing.T) {
 
 // An unowned kind is a loud error, mirroring Nami.Run.
 func TestRunUnknownKindErrors(t *testing.T) {
-	stubFrankySeams(t, &frankySeamRec{})
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Kind: contract.KindReview, Status: "open"}, nil
-	}
+	bdtest.New(t, bd.Bead{ID: "x", Kind: contract.KindReview, Status: "open"})
 	if err := (Franky{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: "x", Kind: contract.KindReview}); err == nil {
 		t.Error("a kind Franky doesn't own must error")
 	}
@@ -636,52 +600,58 @@ func TestRunUnknownKindErrors(t *testing.T) {
 
 // FR49: a confirm sweep closes the bead out from under its running effort. Whether
 // the fork then returns cleanly or fails, the re-read sees it closed and the tail
-// is a no-op — no error, no edge, no Review, no close.
+// is a no-op — no error, no gate edge, no second close.
 func TestRunOverSweepClosedBeadIsNoOp(t *testing.T) {
-	for name, forkErr := range map[string]error{"fork failed": errors.New("session killed")} {
-		r := &frankySeamRec{raised: []bd.Bead{{ID: "ws-piv"}}, spec: "ws-spec"}
-		stubFrankySeams(t, r)
-		reads := 0
-		showBead = func(string) (bd.Bead, error) {
-			b := openBuild()
-			if reads++; reads > 1 { // closed by the sweep after the dispatch read
-				b.Status = "closed"
-			}
-			return b, nil
-		}
-		if err := (Franky{}).Run(stubCtx{&recordingHarness{err: forkErr}}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
-			t.Errorf("%s: Run = %v, want nil (swept is done)", name, err)
-		}
-		if len(r.closed)+len(r.raises) != 0 {
-			t.Errorf("%s: swept bead touched the graph: closed=%v raises=%v", name, r.closed, r.raises)
-		}
+	piv := bdtest.Draft("ws-build", bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, DiscoveredFrom: []string{"ws-build"}})
+	f := cpGraph(t, true, openBuild(), piv)
+	h := &sweepHarness{f: f, recordingHarness: recordingHarness{err: errors.New("session killed")}}
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
+		t.Errorf("Run = %v, want nil (swept is done)", err)
+	}
+	if got := closeReason(f, "ws-build"); got != "swept" {
+		t.Errorf("swept bead reason = %q, want it left as swept", got)
+	}
+	if cp := f.Bead("ws-cp"); len(cp.BlockedBy) != 0 {
+		t.Errorf("swept bead gated the Checkpoint: %v", cp.BlockedBy)
 	}
 }
 
-// surgeryEndRec fakes the bd and git legs EndSurgery drives: the beads it shows
-// and the branch's commit count. events orders the closes.
+// sweepHarness closes the bead mid-session, as a confirm sweep would.
+type sweepHarness struct {
+	recordingHarness
+	f *bdtest.Fake
+}
+
+func (h *sweepHarness) Run(ctx contract.Ctx, inv contract.Invocation) (contract.Result, error) {
+	h.f.Mutate(inv.BeadID, func(b *bd.Bead) { b.Status, b.CloseReason = "closed", "swept" })
+	return h.recordingHarness.Run(ctx, inv)
+}
+
+// surgeryEndRec fakes the git legs EndSurgery drives: the branch's commit count
+// and what integrate moves onto it. The beads are a bdtest graph.
 type surgeryEndRec struct {
-	beads   map[string]bd.Bead
-	commits int
-	mine    int    // this Surgery's own trailered squashes among commits
-	kids    int    // the Checkpoint's children, closed included
-	effort  int    // commits on effort/<id> only, that integrate moves onto the branch
-	intErr  error  // integrate's failure
-	branch  string // the branch counted
-	events  []string
-	reasons map[string]string
+	f                 *bdtest.Fake
+	commits           int
+	mine              int    // this Surgery's own trailered squashes among commits
+	effort            int    // commits on effort/<id> only, that integrate moves onto the branch
+	intErr            error  // integrate's failure
+	branch            string // the branch counted
+	integrated        bool
+	sgOpenAtIntegrate bool // the Surgery was still open when integrate ran
 }
 
-func stubSurgeryEnd(t *testing.T, r *surgeryEndRec) {
+// stubSurgeryEnd seeds the Surgery under its Checkpoint, plus extra children of the
+// Checkpoint (earlier Surgeries, Builds), and stubs the git and integrate seams.
+func stubSurgeryEnd(t *testing.T, r *surgeryEndRec, edit func(sg, cp *bd.Bead), siblings ...bd.Bead) {
 	t.Helper()
-	r.reasons = map[string]string{}
-	oShow, oClose, oAhead, oInt, oMine, oKids := showBead, closeBead, commitsAhead, integrateSurgery, commitsByTrailer, checkpointChildCount
-	t.Cleanup(func() {
-		showBead, closeBead, commitsAhead, integrateSurgery, commitsByTrailer, checkpointChildCount = oShow, oClose, oAhead, oInt, oMine, oKids
-	})
-	if r.kids == 0 {
-		r.kids = 1
+	sg := bd.Bead{ID: "ws-sg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"}
+	cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true}
+	if edit != nil {
+		edit(&sg, &cp)
 	}
+	r.f = bdtest.New(t, append([]bd.Bead{sg, cp}, siblings...)...)
+	oAhead, oInt, oMine := commitsAhead, integrateSurgery, commitsByTrailer
+	t.Cleanup(func() { commitsAhead, integrateSurgery, commitsByTrailer = oAhead, oInt, oMine })
 	commitsByTrailer = func(_ git.Repo, base, branch, trailer string) (int, error) {
 		r.branch = branch
 		if trailer != "Surgery: ws-sg" {
@@ -689,52 +659,38 @@ func stubSurgeryEnd(t *testing.T, r *surgeryEndRec) {
 		}
 		return r.mine, nil
 	}
-	checkpointChildCount = func(string) (int, error) { return r.kids, nil }
 	integrateSurgery = func(sg bd.Bead, _ git.Repo) error {
-		r.events = append(r.events, "integrate "+sg.ID)
+		r.integrated = true
+		r.sgOpenAtIntegrate = r.f.Bead(sg.ID).Open()
 		if r.intErr == nil {
 			r.commits, r.mine, r.effort = r.commits+r.effort, r.mine+r.effort, 0
 		}
 		return r.intErr
-	}
-	showBead = func(id string) (bd.Bead, error) {
-		b, ok := r.beads[id]
-		if !ok {
-			return bd.Bead{}, errors.New("no bead " + id)
-		}
-		return b, nil
-	}
-	closeBead = func(id, reason string) error {
-		r.events = append(r.events, "close "+id)
-		r.reasons[id] = reason
-		return nil
 	}
 	commitsAhead = func(_ git.Repo, base, branch string) (int, error) {
 		return r.commits, nil
 	}
 }
 
-func surgeryBeads() map[string]bd.Bead {
-	return map[string]bd.Bead{
-		"ws-sg": {ID: "ws-sg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"},
-		"ws-cp": {ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true},
-	}
+// state is whether Surgery and Checkpoint read open, as "sg=<reason|open> cp=<reason|open>".
+func (r *surgeryEndRec) state() string {
+	return "sg=" + closeReason(r.f, "ws-sg") + " cp=" + closeReason(r.f, "ws-cp")
 }
 
 // N > 0: the Surgery only closes, spawning no Review — Jinbe spawns it once the
 // Checkpoint drains (Spec D8) — and the Checkpoint stays open.
 func TestEndSurgeryWithCommitsOnlyCloses(t *testing.T) {
-	r := &surgeryEndRec{beads: surgeryBeads(), commits: 3, mine: 3}
-	stubSurgeryEnd(t, r)
+	r := &surgeryEndRec{commits: 3, mine: 3}
+	stubSurgeryEnd(t, r, nil)
 
 	if err := EndSurgery("ws-sg"); err != nil {
 		t.Fatalf("EndSurgery: %v", err)
 	}
-	if want := []string{"integrate ws-sg", "close ws-sg"}; !slices.Equal(r.events, want) {
-		t.Fatalf("events = %v, want %v", r.events, want)
+	if want := "sg=ended cp=<open>"; r.state() != want {
+		t.Fatalf("state = %s, want %s", r.state(), want)
 	}
-	if r.reasons["ws-sg"] != "" {
-		t.Errorf("Surgery close reason = %q, want none", r.reasons["ws-sg"])
+	if !r.sgOpenAtIntegrate {
+		t.Error("the Surgery must still be open when integrate runs")
 	}
 	if r.branch != "checkpoint/ws-cp" {
 		t.Errorf("counted %q, want checkpoint/ws-cp", r.branch)
@@ -743,17 +699,15 @@ func TestEndSurgeryWithCommitsOnlyCloses(t *testing.T) {
 
 // N = 0: the Surgery closes abandoned, then its empty Checkpoint.
 func TestEndSurgeryWithNoCommitsClosesBoth(t *testing.T) {
-	r := &surgeryEndRec{beads: surgeryBeads()}
-	stubSurgeryEnd(t, r)
+	r := &surgeryEndRec{}
+	stubSurgeryEnd(t, r, nil)
 
 	if err := EndSurgery("ws-sg"); err != nil {
 		t.Fatalf("EndSurgery: %v", err)
 	}
-	if want := []string{"integrate ws-sg", "close ws-sg", "close ws-cp"}; !slices.Equal(r.events, want) {
-		t.Fatalf("events = %v, want %v", r.events, want)
-	}
-	if !strings.HasPrefix(r.reasons["ws-sg"], "abandoned") {
-		t.Errorf("Surgery close reason = %q, want abandoned", r.reasons["ws-sg"])
+	const why = "abandoned: surgery ended with no commits"
+	if want := "sg=" + why + " cp=" + why; r.state() != want {
+		t.Fatalf("state = %s, want %s", r.state(), want)
 	}
 }
 
@@ -761,16 +715,24 @@ func TestEndSurgeryWithNoCommitsClosesBoth(t *testing.T) {
 // other children (a stacked surgery Checkpoint's earlier Surgery), keep the
 // Checkpoint open (Spec D8).
 func TestEndSurgeryZeroCommitsKeepsSharedCheckpoint(t *testing.T) {
+	const why = "abandoned: surgery ended with no commits"
+	earlier := bd.Bead{ID: "ws-sg0", Kind: contract.KindSurgery, Status: "closed", Parent: "ws-cp"}
 	for name, r := range map[string]*surgeryEndRec{
-		"builds ahead":    {beads: surgeryBeads(), commits: 2, kids: 3},
-		"earlier sibling": {beads: surgeryBeads(), kids: 2},
+		"builds ahead":    {commits: 2},
+		"earlier sibling": {},
 	} {
-		stubSurgeryEnd(t, r)
+		var sibs []bd.Bead
+		if name == "earlier sibling" {
+			sibs = append(sibs, earlier)
+		} else {
+			sibs = append(sibs, bd.Bead{ID: "ws-b1", Kind: contract.KindBuild, Status: "closed", Parent: "ws-cp"})
+		}
+		stubSurgeryEnd(t, r, nil, sibs...)
 		if err := EndSurgery("ws-sg"); err != nil {
 			t.Fatalf("%s: EndSurgery: %v", name, err)
 		}
-		if want := []string{"integrate ws-sg", "close ws-sg"}; !slices.Equal(r.events, want) {
-			t.Errorf("%s: events = %v, want %v", name, r.events, want)
+		if want := "sg=" + why + " cp=<open>"; r.state() != want {
+			t.Errorf("%s: state = %s, want %s", name, r.state(), want)
 		}
 	}
 }
@@ -779,50 +741,55 @@ func TestEndSurgeryZeroCommitsKeepsSharedCheckpoint(t *testing.T) {
 // effort/<id> reach the Checkpoint and the Surgery reads as done, not empty. A
 // failed integrate closes nothing.
 func TestEndSurgeryIntegratesBeforeCounting(t *testing.T) {
-	r := &surgeryEndRec{beads: surgeryBeads(), effort: 2}
-	stubSurgeryEnd(t, r)
+	r := &surgeryEndRec{effort: 2}
+	stubSurgeryEnd(t, r, nil)
 	if err := EndSurgery("ws-sg"); err != nil {
 		t.Fatalf("EndSurgery: %v", err)
 	}
-	if want := []string{"integrate ws-sg", "close ws-sg"}; !slices.Equal(r.events, want) {
-		t.Fatalf("events = %v, want %v", r.events, want)
-	}
-	if r.reasons["ws-sg"] != "" {
-		t.Errorf("Surgery close reason = %q, want none", r.reasons["ws-sg"])
+	if want := "sg=ended cp=<open>"; r.state() != want {
+		t.Fatalf("state = %s, want %s", r.state(), want)
 	}
 
-	r = &surgeryEndRec{beads: surgeryBeads(), effort: 2, intErr: errors.New("integrate: conflict")}
-	stubSurgeryEnd(t, r)
+	r = &surgeryEndRec{effort: 2, intErr: errors.New("integrate: conflict")}
+	stubSurgeryEnd(t, r, nil)
 	if err := EndSurgery("ws-sg"); err == nil {
 		t.Error("EndSurgery = nil after a failed integrate")
 	}
-	if want := []string{"integrate ws-sg"}; !slices.Equal(r.events, want) {
-		t.Errorf("events = %v, want %v: a failed integrate closes nothing", r.events, want)
+	if want := "sg=<open> cp=<open>"; r.state() != want {
+		t.Errorf("state = %s, want %s: a failed integrate closes nothing", r.state(), want)
 	}
 }
 
 // The verb refuses anything but an open Surgery under a Checkpoint, touching nothing.
 func TestEndSurgeryRefusesBadBeads(t *testing.T) {
-	for name, edit := range map[string]func(map[string]bd.Bead){
-		"wrong kind": func(m map[string]bd.Bead) { b := m["ws-sg"]; b.Kind = contract.KindBuild; m["ws-sg"] = b },
-		"closed":     func(m map[string]bd.Bead) { b := m["ws-sg"]; b.Status = "closed"; m["ws-sg"] = b },
-		"no parent":  func(m map[string]bd.Bead) { b := m["ws-sg"]; b.Parent = ""; m["ws-sg"] = b },
-		"non-checkpoint parent": func(m map[string]bd.Bead) {
-			b := m["ws-cp"]
-			b.Kind = contract.KindChart
-			m["ws-cp"] = b
-		},
+	for name, edit := range map[string]func(sg, cp *bd.Bead){
+		"wrong kind":            func(sg, _ *bd.Bead) { sg.Kind = contract.KindBuild },
+		"closed":                func(sg, _ *bd.Bead) { sg.Status = "closed" },
+		"no parent":             func(sg, _ *bd.Bead) { sg.Parent = "" },
+		"non-checkpoint parent": func(_, cp *bd.Bead) { cp.Kind = contract.KindChart },
 	} {
-		beads := surgeryBeads()
-		edit(beads)
-		r := &surgeryEndRec{beads: beads, commits: 1, mine: 1}
-		stubSurgeryEnd(t, r)
+		r := &surgeryEndRec{commits: 1, mine: 1}
+		stubSurgeryEnd(t, r, edit)
+		before := r.state()
 		if err := EndSurgery("ws-sg"); err == nil {
 			t.Errorf("%s: EndSurgery = nil, want a refusal", name)
 		}
-		if len(r.events) != 0 {
-			t.Errorf("%s: a refusal must touch nothing, got %v", name, r.events)
+		if r.integrated || r.state() != before {
+			t.Errorf("%s: a refusal must touch nothing, state %s -> %s, integrated=%v", name, before, r.state(), r.integrated)
 		}
+	}
+}
+
+// A read fault on the Checkpoint surfaces and closes nothing.
+func TestEndSurgeryCheckpointReadFaultClosesNothing(t *testing.T) {
+	r := &surgeryEndRec{commits: 1, mine: 1}
+	stubSurgeryEnd(t, r, nil)
+	r.f.FailOn("Show", "ws-cp", errors.New("dolt down"))
+	if err := EndSurgery("ws-sg"); err == nil {
+		t.Fatal("EndSurgery = nil after a failed Checkpoint read")
+	}
+	if want := "sg=<open> cp=<open>"; r.state() != want {
+		t.Errorf("state = %s, want %s", r.state(), want)
 	}
 }
 
@@ -916,12 +883,7 @@ var emptyShow = regexp.MustCompile("bd show [^a-z<]")
 // A Build on a Spec-less Checkpoint with a Surgery member gets the Surgery as its
 // context (Spec D6), resolved through bd.SurgeriesOf.
 func TestRunImplementResolvesSurgeryWhenNoSpec(t *testing.T) {
-	if reflect.ValueOf(surgeriesOf).Pointer() != reflect.ValueOf(bd.SurgeriesOf).Pointer() {
-		t.Error("franky's Surgeries seam must default to bd.SurgeriesOf")
-	}
-	r := &frankySeamRec{surgeries: []bd.Bead{{ID: "ws-surg", Title: "t"}}}
-	stubFrankySeams(t, r)
-	showBead = func(string) (bd.Bead, error) { return openBuild(), nil }
+	cpGraph(t, false, openBuild(), bd.Bead{ID: "ws-surg", Title: "t", Kind: contract.KindSurgery, Status: "closed", Parent: "ws-cp"})
 	h := &recordingHarness{}
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -950,33 +912,17 @@ var ctxFocus = "\n\n" + contexts.FocusLine(map[string]string{"mugicrew": "apps/m
 // ADR 0157: build, conflict and surgery prompts are the old render, plus exactly the
 // focus line under a labelled container; no table or an unlabelled one changes nothing.
 func TestFrankyFocusLine(t *testing.T) {
-	run := func(label string, noShow bool) []string {
-		r := &frankySeamRec{spec: "ws-spec"}
-		stubFrankySeams(t, r)
-		oKids := childrenOfKind
-		t.Cleanup(func() { childrenOfKind = oKids })
-		childrenOfKind = func(string, contract.Kind) ([]bd.Bead, error) { return nil, nil }
-		// The Surgery launch reads its Checkpoint for its own packet
-		// (surgeryContext), so only the build run guards the container read.
-		launching := false
-		showBead = func(id string) (bd.Bead, error) {
-			if noShow && !launching && id != "ws-build" {
-				t.Fatal("bd show for a container on a no-context Workspace")
-			}
-			if id == "ws-cp" {
-				return bd.Bead{ID: id, Labels: []string{label}}, nil
-			}
-			b := openBuild()
-			if id == "ws-surg" {
-				b.ID = "ws-surg"
-			}
-			return b, nil
+	run := func(label string) []string {
+		cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, CausedBy: "ws-spec"}
+		if label != "" {
+			cp.Labels = []string{label}
 		}
+		bdtest.New(t, cp, bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"}, openBuild(),
+			bd.Bead{ID: "ws-surg", Kind: contract.KindSurgery, Status: "in_progress", Parent: "ws-cp"})
 		h := &recordingHarness{}
 		if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
 			t.Fatal(err)
 		}
-		launching = true
 		lh := &launchHarness{}
 		if _, err := (Franky{}).Launch(stubCtx{lh}, contract.Bead{ID: "ws-surg", Kind: contract.KindSurgery}); err != nil {
 			t.Fatal(err)
@@ -984,12 +930,12 @@ func TestFrankyFocusLine(t *testing.T) {
 		return []string{h.invs[0].Prompt, lh.inv.Prompt}
 	}
 	ctxRepo(t, "")
-	base := run("", true)
+	base := run("")
 	ctxRepo(t, ctxCfg)
-	if got := run("kind:checkpoint", false); !slices.Equal(got, base) {
+	if got := run("kind:checkpoint"); !slices.Equal(got, base) {
 		t.Error("unlabelled container changed a prompt")
 	}
-	got := run("context:mugicrew", false)
+	got := run("context:mugicrew")
 	for i := range base {
 		if got[i] != base[i]+ctxFocus {
 			t.Errorf("prompt %d is not old + focus line", i)
@@ -1000,27 +946,18 @@ func TestFrankyFocusLine(t *testing.T) {
 // ADR 0157: critique and conflict runs are the old render, plus exactly the focus
 // line under a labelled container; no table or an unlabelled one changes nothing.
 func TestFrankyFocusLineCritiqueConflict(t *testing.T) {
-	beads := map[string]bd.Bead{
-		"ws-crit": {ID: "ws-crit", Kind: contract.KindCritique, Status: "in_progress", Parent: "ws-cp", Description: "a review finding"},
-		"ws-conf": {ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp", Description: "Base: cafef00d\n"},
-	}
-	run := func(label string, noShow bool) []string {
-		r := &frankySeamRec{spec: "ws-spec"}
-		stubFrankySeams(t, r)
-		showBead = func(id string) (bd.Bead, error) {
-			if id == "ws-cp" {
-				if noShow {
-					t.Fatal("bd show for a container on a no-context Workspace")
-				}
-				return bd.Bead{ID: id, Labels: []string{label}}, nil
-			}
-			return beads[id], nil
+	run := func(label string) []string {
+		cp := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Container: true, CausedBy: "ws-spec"}
+		if label != "" {
+			cp.Labels = []string{label}
 		}
+		bdtest.New(t, cp, bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"},
+			bdtest.Claimed(bd.Bead{ID: "ws-crit", Kind: contract.KindCritique, Parent: "ws-cp", Description: "a review finding"}),
+			bdtest.Claimed(bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp", Description: "Base: cafef00d\n"}))
 		var out []string
-		for _, k := range []contract.Kind{contract.KindCritique, contract.KindConflict} {
+		for _, b := range []contract.Bead{{ID: "ws-crit", Kind: contract.KindCritique}, {ID: "ws-conf", Kind: contract.KindConflict}} {
 			h := &recordingHarness{}
-			id := map[contract.Kind]string{contract.KindCritique: "ws-crit", contract.KindConflict: "ws-conf"}[k]
-			if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: id, Kind: k}); err != nil {
+			if err := (Franky{}).Run(stubCtx{h}, b); err != nil {
 				t.Fatal(err)
 			}
 			out = append(out, h.invs[0].Prompt)
@@ -1028,12 +965,12 @@ func TestFrankyFocusLineCritiqueConflict(t *testing.T) {
 		return out
 	}
 	ctxRepo(t, "")
-	base := run("", true)
+	base := run("")
 	ctxRepo(t, ctxCfg)
-	if got := run("kind:checkpoint", false); !slices.Equal(got, base) {
+	if got := run("kind:checkpoint"); !slices.Equal(got, base) {
 		t.Error("unlabelled container changed a prompt")
 	}
-	got := run("context:mugicrew", false)
+	got := run("context:mugicrew")
 	for i := range base {
 		if got[i] != base[i]+ctxFocus {
 			t.Errorf("prompt %d is not old + focus line", i)
@@ -1053,11 +990,8 @@ func TestSurgeryPromptEscapesDottedID(t *testing.T) {
 // (Spec FR 25): the repo and trunk the reads take are the child's.
 func TestEndSurgeryReadsAndIntegratesInTheChild(t *testing.T) {
 	_, kid := contextstest.Workspace(t)
-	r := &surgeryEndRec{beads: surgeryBeads(), commits: 3, mine: 3}
-	cp := r.beads["ws-cp"]
-	cp.Labels = []string{contextstest.Label}
-	r.beads["ws-cp"] = cp
-	stubSurgeryEnd(t, r)
+	r := &surgeryEndRec{commits: 3, mine: 3}
+	stubSurgeryEnd(t, r, func(_, cp *bd.Bead) { cp.Labels = []string{contextstest.Label} })
 	var got []git.Repo
 	oInt, oMine := integrateSurgery, commitsByTrailer
 	integrateSurgery = func(sg bd.Bead, repo git.Repo) error { got = append(got, repo); return oInt(sg, repo) }
@@ -1079,11 +1013,8 @@ func TestEndSurgeryReadsAndIntegratesInTheChild(t *testing.T) {
 // A requested rebase has no failed Landing behind it: the conflict prompt carries
 // the requested arm and the shared close path closes it as for any conflict.
 func TestRunRequestedConflictClosesWithoutLanding(t *testing.T) {
-	r := &frankySeamRec{spec: "ws-spec"}
-	stubFrankySeams(t, r)
-	conf := bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Status: "in_progress", Parent: "ws-cp",
-		Description: "requested rebase\nBase: cafef00d\nTip: t1p\nvariant: requested"}
-	showBead = func(id string) (bd.Bead, error) { return conf, nil }
+	f := cpGraph(t, true, bdtest.Claimed(bd.Bead{ID: "ws-conf", Kind: contract.KindConflict, Parent: "ws-cp",
+		Description: "requested rebase\nBase: cafef00d\nTip: t1p\nvariant: requested"}))
 	h := &recordingHarness{}
 	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-conf", Kind: contract.KindConflict}); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -1091,8 +1022,20 @@ func TestRunRequestedConflictClosesWithoutLanding(t *testing.T) {
 	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "variant: requested") {
 		t.Fatalf("prompt lacks requested arm: %v", h.invs)
 	}
-	if len(r.closed) != 1 {
-		t.Errorf("want the conflict closed once, got %v", r.closed)
+	if got := closeReason(f, "ws-conf"); got != bd.ResolvedReason {
+		t.Errorf("want the conflict closed resolved, got %q", got)
+	}
+}
+
+// A replay Conflict's prompt names the three-way merge-tree and the seed trailers,
+// and tells Franky not to rebase onto the base.
+func TestConflictPromptReplayArm(t *testing.T) {
+	p := conflictPrompt(promptArgs{BeadID: "mc-x", Base: "b4se"})
+	for _, want := range []string{"variant: replay", "git merge-tree --write-tree --merge-base=<Replay-from> b4se <Tip>",
+		"Seed-trailer:", "Replayed: <Replay-from>..<Tip>", "Remnant: <id>", "ONE seed commit"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
 	}
 }
 
@@ -1138,5 +1081,103 @@ func TestFrankyPromptsConventionalCommit(t *testing.T) {
 		if strings.HasPrefix(name, "conflict/") && !strings.Contains(p, "Keep every commit message and its trailers") {
 			t.Errorf("%s prompt must keep replayed commits' messages and trailers", name)
 		}
+	}
+}
+
+// Spec mc-4cjq1 FR 15: a prompt that may write a numbered file points at
+// crew doc sequence-number.md. The map takes every such prompt.
+func TestNumberedFileWritersPointAtSequenceNumber(t *testing.T) {
+	prompts := map[string]string{
+		"franky build": implementPrompt(promptArgs{BeadID: "mc-x", Checkpoint: "ws-cp", SpecID: "ws-spec"}),
+	}
+	// The other crews' prompts are unexported embeds; read their sources.
+	for name, path := range map[string]string{
+		"nami charting":        "../nami/prompts/charting.md",
+		"nami grilling-source": "../nami/prompts/grilling-source.md",
+		"zoro pivot":           "../zoro/prompts/pivot.md",
+		"sanji prototype":      "../sanji/prompts/prototype.md",
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompts[name] = string(b)
+	}
+	for name, p := range prompts {
+		if !strings.Contains(strings.Join(strings.Fields(p), " "), "crew doc sequence-number.md") {
+			t.Errorf("%s prompt does not reference crew doc sequence-number.md", name)
+		}
+	}
+}
+
+// A failed caused-by read is an error, not "no Spec": the build forks nothing and
+// stays open for the next tick (FR 6).
+func TestRunSpecReadFaultForksNothing(t *testing.T) {
+	f := cpGraph(t, true, openBuild())
+	f.FailOn("Edges", "ws-cp", errors.New("dolt down"))
+	h := &recordingHarness{}
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err == nil {
+		t.Fatal("a failed Spec read must fail the run")
+	}
+	if len(h.invs) != 0 || !f.Bead("ws-build").Open() {
+		t.Errorf("forked %d sessions, build open = %v; want none, open", len(h.invs), f.Bead("ws-build").Open())
+	}
+}
+
+// The Critique backstop runs once, before any raise or close, on the completed
+// path and the pivoted path alike: a Critique Draft filed without --deps comes out
+// discovered-from the Build, and its edge is written before the bead closes.
+func TestTailTiesCritiquesBeforeRaiseOrClose(t *testing.T) {
+	for _, pivoted := range []bool{false, true} {
+		crit := bdtest.Draft("ws-build", bd.Bead{ID: "ws-crit", Kind: contract.KindCritique})
+		beads := []bd.Bead{openBuild(), crit}
+		if pivoted {
+			beads = append(beads, bdtest.Draft("ws-build", bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, DiscoveredFrom: []string{"ws-build"}}))
+		}
+		f := cpGraph(t, true, beads...)
+		if err := (Franky{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: "ws-build", Kind: contract.KindBuild}); err != nil {
+			t.Fatalf("pivoted=%v Run: %v", pivoted, err)
+		}
+		if c := f.Bead("ws-crit"); !slices.Contains(c.DiscoveredFrom, "ws-build") {
+			t.Errorf("pivoted=%v: the Critique must be discovered-from ws-build, got %+v", pivoted, c)
+		}
+		if f.Bead("ws-build").Open() {
+			t.Errorf("pivoted=%v: the build must close", pivoted)
+		}
+		if !f.EdgeBeforeClose("ws-crit", "ws-build", "ws-build") {
+			t.Errorf("pivoted=%v: the tie must precede the close, calls %v", pivoted, f.Calls())
+		}
+	}
+}
+
+// closingHarness stands in for a Critique session that closes its own bead
+// (franky/prompts/build.md: "rejected:", "accepted:", "deferred:").
+type closingHarness struct {
+	recordingHarness
+	close func()
+}
+
+func (h *closingHarness) Run(ctx contract.Ctx, inv contract.Invocation) (contract.Result, error) {
+	h.close()
+	return h.recordingHarness.Run(ctx, inv)
+}
+
+// A Critique session that closes its own bead still gets the backstop: dispatch
+// publishes that bead's Drafts, so a kind:critique Draft filed without --deps
+// must come out discovered-from the Critique.
+func TestTailTiesCritiquesWhenSessionClosesItsOwnBead(t *testing.T) {
+	crit := bdtest.Claimed(bd.Bead{ID: "ws-self", Kind: contract.KindCritique, Parent: "ws-cp"})
+	draft := bdtest.Draft("ws-self", bd.Bead{ID: "ws-new", Kind: contract.KindCritique})
+	f := cpGraph(t, true, crit, draft)
+	h := &closingHarness{close: func() {
+		if err := f.Close([]string{"ws-self"}, "rejected: not needed", false); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := (Franky{}).Run(stubCtx{h}, contract.Bead{ID: "ws-self", Kind: contract.KindCritique}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if c := f.Bead("ws-new"); !slices.Contains(c.DiscoveredFrom, "ws-self") {
+		t.Errorf("the Draft must be discovered-from ws-self, got %+v", c)
 	}
 }

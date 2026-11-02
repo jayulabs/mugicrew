@@ -68,6 +68,19 @@ jobs:
               exit 1
             fi
           done
+          hs=$(node -p "const h=((require('./npm/mugicrew/package.json').mugicrew||{}).humanStep); h?JSON.stringify(h):''")
+          if [ -n "$hs" ]; then
+            hsv=$(node -p "JSON.parse(process.argv[1]).version" "$hs")
+            hsd=$(node -p "JSON.parse(process.argv[1]).doc||''" "$hs")
+            if [ "$hsv" != "$VERSION" ]; then
+              echo "human-step mismatch: humanStep.version is $hsv, mugicrew is $VERSION" >&2
+              exit 1
+            fi
+            case "$hsd" in
+              docs/upgrading.md|docs/upgrading.md#*) ;;
+              *) echo "human-step mismatch: humanStep.doc is '$hsd', want a path under docs/upgrading.md" >&2; exit 1 ;;
+            esac
+          fi
           mkdir -p dist
           for t in linux-x64:linux:amd64 linux-arm64:linux:arm64 darwin-arm64:darwin:arm64 darwin-x64:darwin:amd64; do
             IFS=: read -r pkg goos goarch <<<"$t"

@@ -60,7 +60,7 @@ or Chart; don't wait until the Checkpoint exists.
 
 ## Initiative member form
 
-For Luffy filing a phase Signal into an Initiative: a raw create with `--parent <initiative id>`:
+For Luffy filing a phase Signal into an Initiative: a raw create with `--parent <initiative id>`. Use it for planned phase lines only; found work uses the Offshoot form. The member carries only its parent because it has no finder (no `discovered-from`) and, with phases cut only once the Initiative is drained, nothing open to order against (no order edge):
 
     bd create --type task -s deferred --no-inherit-labels -l kind:signal,drafted-by:<your bead id> \
       --parent <initiative id> --title "<the work, no kind prefix>" --description "<what and why>"

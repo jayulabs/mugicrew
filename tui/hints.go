@@ -23,7 +23,7 @@ const (
 // keyed by the help key; hintOf tells apart the verbs that share one.
 var hintRank = map[string]float64{
 	"enter": 0, "esc": 1, "d": 2, "space": 3, "b": 4, "w": 4.5, "x": 5, "X": 5.5, "t": 6, "p": 7, "/": 8,
-	"z": 9, "s": 10, "f": 11, "c": 12, "e": 13, "a/A": 14, "a": 14, "A": 14, "B": 14, "U": 14, "u": 16, "+/-": 19,
+	"z": 9, "s": 10, "f": 11, "c": 12, "e": 13, "a/A": 14, "a": 14, "A": 14, "B": 14, "U": 14, "u": 16, "+/-": 19, "+": 19, "-": 19,
 }
 
 const tabExtraRank = 12.0 // v, e errors, w, b group by, +/- stage, and any verb with no rank

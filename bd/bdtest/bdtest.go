@@ -30,7 +30,9 @@ type Fake struct {
 	mu       sync.Mutex
 	beads    map[string]*bd.Bead
 	comments map[string][]bd.Comment
-	fail     map[string]error // "verb id" (or "verb *") → injected error
+	children map[string]int      // children minted per parent, for dotted ids
+	supers   map[string][]string // supersedes edges, from → to: bd.Bead models no such edge
+	fail     map[string]error    // "verb id" (or "verb *") → injected error
 	calls    []string
 	minted   int
 }
@@ -38,7 +40,7 @@ type Fake struct {
 // New seeds a graph with beads and makes it bd's core until the test ends. It pins the bd
 // actor to Actor, so bd.Mine() and the fake's claims agree.
 func New(t testing.TB, beads ...bd.Bead) *Fake {
-	f := &Fake{t: t, beads: map[string]*bd.Bead{}, comments: map[string][]bd.Comment{}, fail: map[string]error{}}
+	f := &Fake{t: t, beads: map[string]*bd.Bead{}, comments: map[string][]bd.Comment{}, supers: map[string][]string{}, children: map[string]int{}, fail: map[string]error{}}
 	f.Seed(beads...)
 	t.Cleanup(bd.Use(f))
 	t.Cleanup(bd.PinActor(Actor))
@@ -103,6 +105,21 @@ func (f *Fake) Calls() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.calls)
+}
+
+// CallIndex is the position in Calls of the first call satisfying match, or -1.
+func (f *Fake) CallIndex(match func(call string) bool) int {
+	return slices.IndexFunc(f.Calls(), match)
+}
+
+// EdgeBeforeClose reports whether the AddEdge from→to call precedes the first
+// Close or Batch call touching id; both calls must exist.
+func (f *Fake) EdgeBeforeClose(from, to, id string) bool {
+	edge := f.CallIndex(func(c string) bool { return c == "AddEdge "+from+","+to })
+	closed := f.CallIndex(func(c string) bool {
+		return (strings.HasPrefix(c, "Close ") || strings.HasPrefix(c, "Batch ")) && strings.Contains(c, id)
+	})
+	return edge >= 0 && closed >= 0 && edge < closed
 }
 
 // enter logs the call and returns an injected fault, under f.mu.
@@ -248,7 +265,11 @@ func edgesFrom(b *bd.Bead) [][2]string {
 		es = append(es, [2]string{b.Parent, "parent-child"})
 	}
 	for _, id := range b.BlockedBy {
-		es = append(es, [2]string{id, "blocks"})
+		if slices.Contains(b.CondBlockedBy, id) {
+			es = append(es, [2]string{id, "conditional-blocks"})
+		} else {
+			es = append(es, [2]string{id, "blocks"})
+		}
 	}
 	for _, id := range b.Related {
 		es = append(es, [2]string{id, "related"})
@@ -276,16 +297,23 @@ func (f *Fake) Edges(id string, dir bd.Dir, typ string) ([]bd.EdgeRow, error) {
 			rows = append(rows, bd.EdgeRow{Bead: clone(*far), Type: t})
 		}
 	}
+	from := func(oid string) [][2]string {
+		es := edgesFrom(f.beads[oid])
+		for _, to := range f.supers[oid] {
+			es = append(es, [2]string{to, "supersedes"})
+		}
+		return es
+	}
 	if dir == bd.Down {
-		if b, ok := f.beads[id]; ok {
-			for _, e := range edgesFrom(b) {
+		if _, ok := f.beads[id]; ok {
+			for _, e := range from(id) {
 				add(f.beads[e[0]], e[1])
 			}
 		}
 		return rows, nil
 	}
 	for _, oid := range sortedKeys(f.beads) {
-		for _, e := range edgesFrom(f.beads[oid]) {
+		for _, e := range from(oid) {
 			if e[0] == id {
 				add(f.beads[oid], e[1])
 			}
@@ -306,17 +334,85 @@ func (f *Fake) Comments(id string) ([]bd.Comment, error) {
 	return slices.Clone(f.comments[id]), nil
 }
 
-// AddEdge records from → to of type typ; the contract suite builds its graphs with it.
+// AddEdge records from → to of type typ. It runs bd dep add's CLI pre-check on dotted IDs, then
+// the storage rules addEdge shares with Supersede and Batch.
 func (f *Fake) AddEdge(from, to, typ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.enter("AddEdge", from, to); err != nil {
 		return err
 	}
+	// bd's CLI pre-check (cmd/bd/dep.go isDisallowedHierarchicalDependency): any edge from a dotted
+	// descendant onto its dotted ancestor, bar a parent-child onto the immediate parent. Only dep add
+	// runs it; create --deps does not.
+	if strings.HasPrefix(from, to+".") && !(typ == "parent-child" && !strings.Contains(strings.TrimPrefix(from, to+"."), ".")) {
+		return fmt.Errorf("bd dep add %s %s -t %s: exit status 1: cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", from, to, typ, from, to)
+	}
 	return f.addEdge(from, to, typ)
 }
 
-// addEdge is AddEdge's write, under f.mu.
+// held is the type of the edge from → to, or "" when the pair holds none; one ordered pair
+// holds one edge, whatever its type.
+func (f *Fake) held(from, to string) string {
+	for _, e := range f.edgesOf(from) {
+		if e[0] == to {
+			return e[1]
+		}
+	}
+	return ""
+}
+
+// edgesOf is id's outgoing edges, supersedes included.
+func (f *Fake) edgesOf(id string) [][2]string {
+	b, ok := f.beads[id]
+	if !ok {
+		return nil
+	}
+	es := edgesFrom(b)
+	for _, to := range f.supers[id] {
+		es = append(es, [2]string{to, "supersedes"})
+	}
+	return es
+}
+
+// isAncestor is whether anc is a proper ancestor of id, through parent edges.
+func (f *Fake) isAncestor(anc, id string) bool {
+	seen := map[string]bool{}
+	for b := f.beads[id]; b != nil && b.Parent != "" && !seen[b.ID]; b = f.beads[b.Parent] {
+		seen[b.ID] = true
+		if b.Parent == anc {
+			return true
+		}
+	}
+	return false
+}
+
+// reaches is whether to leads back to from along blocks, conditional-blocks and parent-child
+// edges, the only ones bd's cycle check walks.
+func (f *Fake) reaches(start, goal string) bool {
+	seen := map[string]bool{}
+	var walk func(id string) bool
+	walk = func(id string) bool {
+		if id == goal {
+			return true
+		}
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		for _, e := range f.edgesOf(id) {
+			if (e[1] == "blocks" || e[1] == "conditional-blocks" || e[1] == "parent-child") && walk(e[0]) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(start)
+}
+
+// addEdge is AddEdge's write, under f.mu, with bd's storage rules: a same-type re-add is a no-op,
+// a pair holds one edge, and a blocking edge may not tie a bead to its ancestor, its descendant
+// or a cycle.
 func (f *Fake) addEdge(from, to, typ string) error {
 	b, ok := f.beads[from]
 	if !ok {
@@ -325,9 +421,32 @@ func (f *Fake) addEdge(from, to, typ string) error {
 	if _, ok := f.beads[to]; !ok {
 		return notFound(to)
 	}
+	refuse := func(format string, a ...any) error {
+		return fmt.Errorf("bd dep add %s %s -t %s: exit status 1: "+format, append([]any{from, to, typ}, a...)...)
+	}
+	if typ == "blocks" || typ == "conditional-blocks" {
+		switch {
+		case f.isAncestor(to, from):
+			return refuse("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear", from, to, to)
+		case f.isAncestor(from, to):
+			return refuse("%s cannot be blocked by its descendant %s: blocked status cascades to descendants, so %s would inherit the block and never close", from, to, to)
+		}
+	}
+	switch held := f.held(from, to); {
+	case held == typ:
+		return nil
+	case held != "":
+		return refuse("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add", from, to, held, typ)
+	}
+	if (typ == "blocks" || typ == "conditional-blocks" || typ == "parent-child") && f.reaches(to, from) {
+		return refuse("adding dependency would create a cycle")
+	}
 	switch typ {
-	case "blocks", "conditional-blocks":
+	case "blocks":
 		b.BlockedBy = append(b.BlockedBy, to)
+	case "conditional-blocks":
+		b.BlockedBy = append(b.BlockedBy, to)
+		b.CondBlockedBy = append(b.CondBlockedBy, to)
 	case "related":
 		b.Related = append(b.Related, to)
 	case "caused-by":
@@ -336,6 +455,8 @@ func (f *Fake) addEdge(from, to, typ string) error {
 		b.DiscoveredFrom = append(b.DiscoveredFrom, to)
 	case "parent-child":
 		b.Parent = to
+	case "supersedes":
+		f.supers[from] = append(f.supers[from], to)
 	default:
 		return fmt.Errorf("bdtest: edge type %q not modelled", typ)
 	}
@@ -349,9 +470,37 @@ func (f *Fake) Create(s bd.CreateSpec) (string, error) {
 	if err := f.enter("Create"); err != nil {
 		return "", err
 	}
+	if s.Serializer != nil { // a create without one is a plain single insert
+		if err := f.serialized("Create "+s.Title, s.Serializer); err != nil {
+			return "", err
+		}
+	}
+	for _, d := range s.Deps {
+		if d.From != "" {
+			return "", fmt.Errorf("bdtest: create dep %s -> %s: From must be empty", d.From, d.To)
+		}
+		if _, ok := f.beads[d.To]; !ok {
+			return "", notFound(d.To)
+		}
+	}
+	minted, kids := f.minted, f.children[s.Parent]
 	f.minted++
-	b := bd.Bead{ID: "bdct-" + strconv.Itoa(f.minted), Status: "open", Title: s.Title, Description: s.Description,
+	id := "bdct-" + strconv.Itoa(f.minted)
+	if s.Parent != "" { // bd mints a child's id under its parent's: parent.N
+		for { // skip suffixes a seeded child already holds; never overwrite one
+			f.children[s.Parent]++
+			id = s.Parent + "." + strconv.Itoa(f.children[s.Parent])
+			if _, taken := f.beads[id]; !taken {
+				break
+			}
+		}
+	}
+	b := bd.Bead{ID: id, Status: "open", Title: s.Title, Description: s.Description,
 		Parent: s.Parent, Labels: slices.Clone(s.Labels), ExternalRef: s.ExternalRef, Container: s.Type == "epic"}
+	b.Priority = 2 // bd's default when a create names none
+	if s.Priority != nil {
+		b.Priority = *s.Priority
+	}
 	if s.Deferred {
 		b.Status = "deferred"
 	}
@@ -361,6 +510,20 @@ func (f *Fake) Create(s bd.CreateSpec) (string, error) {
 		}
 	}
 	f.beads[b.ID] = &b
+	for _, d := range s.Deps { // the edge rules AddEdge runs, bar the dotted-ID pre-check (create --deps skips it)
+		typ := d.Type
+		if typ == "" {
+			typ = "blocks"
+		}
+		if err := f.addEdge(b.ID, d.To, typ); err != nil { // a refused Dep leaves no bead
+			delete(f.beads, b.ID)
+			f.minted = minted
+			if s.Parent != "" {
+				f.children[s.Parent] = kids
+			}
+			return "", err
+		}
+	}
 	return b.ID, nil
 }
 
@@ -382,13 +545,39 @@ func (f *Fake) AddLabels(id string, labels ...string) error {
 	return nil
 }
 
-func (f *Fake) Close(ids []string, reason string, _ bool) error {
+func (f *Fake) Close(ids []string, reason string, force bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.enter("Close", ids...); err != nil {
 		return err
 	}
+	if !force { // bd refuses a plain close of a bead with an open blocker or child; supersede does not
+		for _, id := range ids {
+			if b, ok := f.beads[id]; ok && b.Status != "closed" {
+				// bd 1.3.0 counts any child not closed (open, in_progress, deferred)
+				if n := f.openChildren(id); n > 0 {
+					return fmt.Errorf("cannot close %s: %d open child issue(s); close children first or use --force to override", id, n)
+				}
+				for _, blk := range b.BlockedBy {
+					if o, ok := f.beads[blk]; ok && o.Status != "closed" {
+						return fmt.Errorf("cannot close blocked issue: %s is blocked by [%s] (use --force to override)", id, blk)
+					}
+				}
+			}
+		}
+	}
 	return f.closeIDs(ids, reason)
+}
+
+// openChildren counts id's children that are not closed, under f.mu.
+func (f *Fake) openChildren(id string) int {
+	n := 0
+	for _, c := range f.beads {
+		if c.Parent == id && c.Status != "closed" {
+			n++
+		}
+	}
+	return n
 }
 
 // closeIDs is Close's write, under f.mu: all or none.
@@ -460,6 +649,8 @@ func (f *Fake) removeEdge(from, to string) error {
 	}
 	drop := func(id string) bool { return id == to }
 	b.BlockedBy = slices.DeleteFunc(b.BlockedBy, drop)
+	b.CondBlockedBy = slices.DeleteFunc(b.CondBlockedBy, drop)
+	f.supers[from] = slices.DeleteFunc(f.supers[from], drop)
 	b.Related = slices.DeleteFunc(b.Related, drop)
 	b.DiscoveredFrom = slices.DeleteFunc(b.DiscoveredFrom, drop)
 	if b.CausedBy == to {
@@ -471,7 +662,10 @@ func (f *Fake) removeEdge(from, to string) error {
 	return nil
 }
 
-// Supersede closes id as replaced by with.
+// Supersede follows bd supersede: the supersedes edge is added first, and a refusal (the pair
+// already holds an edge of another type) leaves old untouched; a repeat adds nothing. An open
+// id is then closed with an empty reason (bd writes none); an id already closed keeps its
+// status and reason.
 func (f *Fake) Supersede(id, with string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -481,7 +675,17 @@ func (f *Fake) Supersede(id, with string) error {
 	if _, ok := f.beads[with]; !ok {
 		return notFound(with)
 	}
-	return f.closeIDs([]string{id}, "Superseded by "+with)
+	b, ok := f.beads[id]
+	if !ok {
+		return notFound(id)
+	}
+	if err := f.addEdge(id, with, "supersedes"); err != nil {
+		return fmt.Errorf("failed to add supersede link: %w", err)
+	}
+	if b.Status != "closed" {
+		b.Status, b.CloseReason = "closed", ""
+	}
+	return nil
 }
 
 // RemoveLabel drops label from every id; an id lacking it is untouched, an unknown id fails.
@@ -620,6 +824,12 @@ func (f *Fake) SetField(id string, fl bd.Field, v string, s bd.Serializer) error
 		b.Title = v
 	case bd.ParentField:
 		b.Parent = v
+	case bd.Priority:
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("bdtest: priority %q: %w", v, err)
+		}
+		b.Priority = n
 	case bd.Metadata:
 		var m bd.Meta
 		if err := json.Unmarshal([]byte(v), &m); err != nil {
@@ -677,6 +887,7 @@ func (f *Fake) Reopen(id string, s bd.Serializer) error {
 func clone(b bd.Bead) bd.Bead {
 	b.Labels = slices.Clone(b.Labels)
 	b.BlockedBy = slices.Clone(b.BlockedBy)
+	b.CondBlockedBy = slices.Clone(b.CondBlockedBy)
 	b.Related = slices.Clone(b.Related)
 	b.DiscoveredFrom = slices.Clone(b.DiscoveredFrom)
 	return b

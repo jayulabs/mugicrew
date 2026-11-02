@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -46,14 +45,6 @@ func (a forgeArgs) Draft() string { return contract.DraftInstruction(a.ReviewID)
 
 func forgeReviewPrompt(a forgeArgs) string { return contract.Render(forgeReviewTmpl, a) }
 
-// Seams over the graph legs the Forge Review tail drives.
-var (
-	childrenOfKind = bd.ChildrenOfKind
-	draftsOf       = bd.Drafts
-	updateBead     = bd.Update
-	landingsOf     = bd.LandingsOf
-)
-
 var (
 	judgeNote = regexp.MustCompile(`<note\s[^>]*\bid="([^"]+)"[^>]*\bstatus="JUDGE"`)
 )
@@ -81,7 +72,7 @@ func ledgerOf(notes string) map[string]string {
 // filedFrom lists the container's beads of kind carrying a "Source: !<iid> …" line
 // for this MR, with the note ids those lines name.
 func filedFrom(containerID string, kind contract.Kind, iid int) ([]filedBead, error) {
-	kids, err := childrenOfKind(containerID, kind)
+	kids, err := bd.ChildrenOfKind(containerID, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +108,7 @@ func runForgeReview(ctx contract.Ctx, bead bd.Bead) error {
 		return fmt.Errorf("usopp: forge-review bead %s body lacks its MR: or Read through note: line", bead.ID)
 	}
 	judge := judgeIDs(bead.Description)
-	container, err := showBead(bead.Parent)
+	container, err := bd.Show(bead.Parent)
 	if err != nil {
 		return err
 	}
@@ -132,7 +123,7 @@ func runForgeReview(ctx contract.Ctx, bead bd.Bead) error {
 	if err != nil {
 		return err
 	}
-	fresh, _, _, open, err := runSession(ctx, inv, showBead)
+	fresh, _, _, open, err := bd.RunSession(ctx, inv, bd.Show)
 	if err != nil || !open {
 		return err
 	}
@@ -140,7 +131,7 @@ func runForgeReview(ctx contract.Ctx, bead bd.Bead) error {
 }
 
 // forgeReviewTail checks the ledger against the JUDGE notes and the Drafts, then
-// publishes: Draft priorities to the container's, the pending Landing obsolete when
+// publishes: the pending Landing obsolete when
 // anything was filed, and the close reason that counts the pass.
 func forgeReviewTail(ctx contract.Ctx, bead, container bd.Bead, judge []string, mark string) error {
 	ledger := ledgerOf(bead.Notes)
@@ -156,37 +147,32 @@ func forgeReviewTail(ctx contract.Ctx, bead, container bd.Bead, judge []string, 
 	if len(missing) > 0 {
 		return fmt.Errorf("usopp: forge-review %s ledger misses JUDGE note(s) %s", bead.ID, strings.Join(missing, ", "))
 	}
-	drafts, err := draftsOf(bead.ID)
+	drafts, err := bd.Drafts(bead.ID)
 	if err != nil {
 		return err
 	}
 	if counts["file"] > 0 && len(drafts) == 0 {
 		return fmt.Errorf("usopp: forge-review %s ledger files notes but filed no Draft", bead.ID)
 	}
-	for _, d := range drafts {
-		if err := updateBead(d.ID, []string{"--priority", strconv.Itoa(container.Priority)}); err != nil {
-			return err
-		}
-	}
 	if len(drafts) > 0 {
-		landings, err := landingsOf(bead.Parent)
+		landings, err := bd.LandingsOf(bead.Parent)
 		if err != nil {
 			return err
 		}
 		for _, l := range landings {
 			if l.Open() {
-				if err := closeBead(l.ID, "obsolete: review comment"); err != nil {
+				if err := bd.Close(l.ID, "obsolete: review comment"); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	reason := fmt.Sprintf("%s: read through note %s", contract.ForgeReviewCounts{Filed: len(drafts), Folded: counts["fold"], Skipped: counts["skip"]}, mark)
+	reason := fmt.Sprintf("completed: %s; read through note %s", contract.ForgeReviewCounts{Filed: len(drafts), Folded: counts["fold"], Skipped: counts["skip"]}, mark)
 	event := "forge_review.filed"
 	if len(drafts) == 0 && counts["fold"] == 0 {
-		reason = fmt.Sprintf("nothing actionable: read %d notes through %s", len(judge), mark)
+		reason = fmt.Sprintf("completed: nothing actionable; read %d notes through %s", len(judge), mark)
 		event = "forge_review.empty"
 	}
 	slog.Info(event, append(eventlog.BeadAttrs(bead), "filed", len(drafts), "folded", counts["fold"], "skipped", counts["skip"], "through", mark)...)
-	return closeOnPublish(ctx, bead.ID, reason, nil)
+	return bd.CloseOnPublish(ctx, bead.ID, reason, nil)
 }

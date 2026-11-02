@@ -413,6 +413,9 @@ func (r Repo) reuseEffort(id, container, pin string) {
 // rebases from instead of guessing it from the container.
 const cutRefPrefix = "refs/mugicrew/cut/"
 
+// CutRef is the ref holding id's recorded cut point.
+func CutRef(id string) string { return cutRefPrefix + id }
+
 // recordCut writes id's cut ref at the commit its branch was cut at.
 func recordCut(r Repo, id, at string) error {
 	sha, err := r.run("rev-parse", at+"^{commit}")
@@ -784,6 +787,29 @@ func SetGraphID(id string) (restore func()) {
 // commit-message trailer, ParseCommit greps it back. Pure, checkable without git.
 func CommitPin(sha string) string { return "Commit: " + sha }
 
+// WithCommitPin is body carrying exactly the pin "Commit: <sha>": the first Commit:
+// line replaced in place, or one appended when the body has none. changed is false
+// when the body already holds that pin, so a caller skips the write. Every other
+// line stays in order. Pure.
+func WithCommitPin(body, sha string) (next string, changed bool) {
+	pin := CommitPin(sha)
+	lines := strings.Split(body, "\n")
+	for i, l := range lines {
+		if _, ok := strings.CutPrefix(strings.TrimSpace(l), "Commit:"); !ok {
+			continue
+		}
+		if l == pin {
+			return body, false
+		}
+		lines[i] = pin
+		return strings.Join(lines, "\n"), true
+	}
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return body + pin, true
+}
+
 // PatchIDPin is the body line that sits beside the Commit: pin: "Patch-id: <id>",
 // the patch-id of the content the Chart would land (ChartPatchID); ParsePatchID
 // reads it back. Pure.
@@ -962,6 +988,13 @@ func NewestByTrailer(branch, trailer string) (string, error) {
 // NewestByTrailer is the package NewestByTrailer in the child.
 func (r Repo) NewestByTrailer(branch, trailer string) (string, error) {
 	return r.run(trailerLogArgs(branch, trailer)...)
+}
+
+// NewestByTrailerKey is the sha of the newest commit on branch with a message line
+// starting `key: `, of any value, "" when none carries it. The grep reads the whole
+// message, not only its trailer paragraph.
+func (r Repo) NewestByTrailerKey(branch, key string) (string, error) {
+	return r.run("log", branch, "--extended-regexp", "--grep=^"+regexp.QuoteMeta(key)+": ", "--format=%H", "-n", "1")
 }
 
 // cutBranchArgs is the pure argv that creates a branch WITHOUT switching HEAD.
@@ -3313,6 +3346,16 @@ func (r Repo) LandedTip(sha string) (tip string, ok bool) {
 func (r Repo) IsAncestor(a, b string) bool {
 	_, err := r.run("merge-base", "--is-ancestor", a, b)
 	return err == nil
+}
+
+// Contains is whether commit sha is an ancestor of (or is) tip in the child. Unlike IsAncestor
+// it keeps a failed read apart from "no": git's exit 1 is no, any other failure an error.
+func (r Repo) Contains(tip, sha string) (bool, error) {
+	_, err := r.run("merge-base", "--is-ancestor", sha, tip)
+	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // HasCommit is whether the child holds commit sha locally.

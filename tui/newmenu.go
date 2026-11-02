@@ -33,7 +33,8 @@ var (
 
 // newOpts builds the menu's rows in the fixed order s, j, i, u, r, t, d; the j row shows only
 // with a [jira] site, the u row only when its target list is not empty and the r row only
-// when the selection captured at open is an open Chart or Checkpoint and the t row only
+// when the selection captured at open is an open Chart or Checkpoint, or a behind-mainline Build
+// (which targets its Checkpoint), and the t row only
 // when it is a Signal, Chart, Spec, Checkpoint or Initiative (ADR 0241 §3).
 func (m Model) newOpts() []gotoOpt {
 	cp, ini := m.surgeryContext() // captured at open, so the form's default pick is where the human was
@@ -55,8 +56,7 @@ func (m Model) newOpts() []gotoOpt {
 	if m.surgerySet {
 		opts = append(opts, gotoOpt{keys: []string{"u"}, desc: "New Surgery", run: func(m Model) (Model, tea.Cmd) { return m.openSurgery(cp, ini) }})
 	}
-	if sel := m.selection(); sel != nil && canRebase(sel) {
-		id := sel.ID // pinned at open, like the Surgery row
+	if id := m.gateData().rebaseTarget(m.selection()); id != "" { // pinned at open, like the Surgery row
 		opts = append(opts, gotoOpt{keys: []string{"r"}, desc: "New rebase request", run: func(m Model) (Model, tea.Cmd) { return m.rebaseRequest(id) }})
 	}
 	if sel := m.selection(); canRetro(sel) {

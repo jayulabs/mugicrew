@@ -2740,3 +2740,26 @@ func TestParseLandedLog(t *testing.T) {
 		t.Errorf("non-gitlab keeps every Graph: got %v", got)
 	}
 }
+
+// WithCommitPin replaces the first Commit: line in place, appends when absent, and
+// reports no change when the body already holds the pin.
+func TestWithCommitPin(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+		changed          bool
+	}{
+		{"no line", "Review the slice.\n", "Review the slice.\nCommit: new", true},
+		{"empty body", "", "Commit: new", true},
+		{"no trailing newline", "Review", "Review\nCommit: new", true},
+		{"one line", "Review\nCommit: old\n", "Review\nCommit: new\n", true},
+		{"line in the middle", "a\nCommit: old\nb\nnote\n", "a\nCommit: new\nb\nnote\n", true},
+		{"same pin", "a\nCommit: new\nb\n", "a\nCommit: new\nb\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := WithCommitPin(tc.body, "new")
+			if got != tc.want || changed != tc.changed {
+				t.Errorf("WithCommitPin(%q) = (%q, %v), want (%q, %v)", tc.body, got, changed, tc.want, tc.changed)
+			}
+		})
+	}
+}

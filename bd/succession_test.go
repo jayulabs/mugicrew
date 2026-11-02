@@ -60,21 +60,6 @@ func TestSuccessorCreateArgsLeafIsErrand(t *testing.T) {
 	}
 }
 
-// findKindInDeps is idempotency's guard: a matching-kind dependent means no
-// second successor is spawned.
-func TestFindKindInDepsMatchesKind(t *testing.T) {
-	depList := `[{"id":"ws-chart","labels":["kind:chart"]},{"id":"ws-other","labels":["kind:unowned"]}]`
-	if id, ok := findKindInDeps([]byte(depList), contract.KindChart); !ok || id != "ws-chart" {
-		t.Errorf("findKindInDeps = (%q,%v), want (ws-chart,true)", id, ok)
-	}
-	if _, ok := findKindInDeps([]byte(depList), contract.KindResearch); ok {
-		t.Error("findKindInDeps matched a kind that isn't present")
-	}
-	if _, ok := findKindInDeps([]byte(`[]`), contract.KindChart); ok {
-		t.Error("no dependents → no successor found")
-	}
-}
-
 // A chart-conflict child is spawned on the PARENT edge (--parent, not caused-by),
 // so it counts in OpenChildren and undrains the Chart (ADR 0011).
 func TestChildCreateArgsUseParentEdge(t *testing.T) {
@@ -230,13 +215,13 @@ func TestParseBeadsBlockedBy(t *testing.T) {
 // close_reason rides the same JSON-to-Bead mapping (Spec FR6); a bead
 // without the key parses to "".
 func TestParseBeadsCloseReason(t *testing.T) {
-	blob := `[{"id":"mc-a","status":"closed","close_reason":"superseded by mc-b"},{"id":"mc-b","status":"open"}]`
+	blob := `[{"id":"mc-a","status":"closed","close_reason":"duplicate: mc-b"},{"id":"mc-b","status":"open"}]`
 	beads, err := parseBeads([]byte(blob))
 	if err != nil {
 		t.Fatalf("parseBeads: %v", err)
 	}
-	if got := beads[0].CloseReason; got != "superseded by mc-b" {
-		t.Errorf("CloseReason = %q, want %q", got, "superseded by mc-b")
+	if got := beads[0].CloseReason; got != "duplicate: mc-b" {
+		t.Errorf("CloseReason = %q, want %q", got, "duplicate: mc-b")
 	}
 	if got := beads[1].CloseReason; got != "" {
 		t.Errorf("absent close_reason = %q, want empty", got)
@@ -440,6 +425,7 @@ func TestCarrySkipReason(t *testing.T) {
 		{"mc-x cannot be blocked by its ancestor ws-cp: ws-cp cannot close until its descendants finish, so the gate would never clear", "hierarchy"},
 		{"mc-x cannot be blocked by its descendant ws-cp: blocked status cascades to descendants, so ws-cp would inherit the block and never close", "hierarchy"},
 		{"adding dependency would create a cycle", "cycle"},
+		{"cannot add dependency: mc-x.1 is already a child of mc-x. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", "hierarchy"},
 		{`dependency mc-x -> ws-cp already exists with type "related" (requested "blocks"); remove it first with 'bd dep remove' then re-add`, "type-clash"},
 		{"issue mc-x not found", ""},
 		{"database is locked", ""},
@@ -509,7 +495,7 @@ func TestCarry(t *testing.T) {
 		{"dep", "add", "ws-kid", "ws-cp", "-t", "blocks"},
 		{"dep", "add", "ws-loop", "ws-cp", "-t", "blocks"},
 		{"dep", "add", "ws-lin", "ws-cp", "-t", "blocks"},
-		{"dep", "list", "ws-spec", "--direction=down", "-t", "blocks", "--json"},
+		{"dep", "list", "ws-spec", "--direction=down", "--json", "-t", "blocks"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("calls = %v\nwant %v", calls, want)
@@ -759,7 +745,7 @@ func TestInitiativeOf(t *testing.T) {
 // kind:survey task (not a container) carrying contract.SurveyBody, a Draft by
 // the Chart's own drafter so it publishes and deletes with the Chart.
 func TestSurveyChildShape(t *testing.T) {
-	want := Successor{Kind: contract.KindSurvey, Title: "Fix the frobnicator", Description: contract.SurveyBody, DraftedBy: "ws-sig"}
+	want := Successor{Kind: contract.KindSurvey, Title: "Fix the frobnicator", Description: contract.SurveyBody, DraftedBy: "ws-sig", Serializer: UnderClaim("ws-sig")}
 	if got := surveyChild("Fix the frobnicator", "ws-sig"); got != want {
 		t.Errorf("surveyChild = %+v, want %+v", got, want)
 	}
@@ -803,7 +789,8 @@ func TestSpawnSurveyIfAbsentGuardsOnAnyStatus(t *testing.T) {
 			}
 			continue
 		}
-		want := childCreateArgs("ws-ch", surveyChild("Fix it", "ws-sig"))
+		want := []string{"create", "--type", "task", "--labels", "kind:survey,drafted-by:ws-sig", "-s", "deferred", "--no-inherit-labels",
+			"--parent", "ws-ch", "--title", "Fix it", "--description", contract.SurveyBody, "--silent"}
 		if id != "ws-ch.9" || !reflect.DeepEqual(created[0], want) {
 			t.Errorf("%s: create %v → %q, want %v → ws-ch.9", tc.name, created[0], id, want)
 		}
@@ -955,7 +942,7 @@ func TestSpawnBlockingErrandIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 		}
 		return "[]", nil
 	}
-	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "Closed MR: !3\n")
+	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "Closed MR: !3\n", "")
 	if err != nil || !created || id != "ws-errand" {
 		t.Fatalf("got %q %v %v", id, created, err)
 	}
@@ -966,6 +953,61 @@ func TestSpawnBlockingErrandIfAbsentCreatesTheEdgeAtomically(t *testing.T) {
 		if c[0] == "create" && !strings.Contains(strings.Join(c, " "), "--deps blocks:ws-cp") {
 			t.Errorf("create lacks the blocks edge: %v", c)
 		}
+	}
+}
+
+// A raiser Landing rides the same create as a second --deps pair; none leaves blocks alone;
+// the related re-file stays a separate write; an open hold with the key is returned unwritten.
+func TestSpawnBlockingErrandIfAbsentDepsCarryTheRaiser(t *testing.T) {
+	for _, c := range []struct{ raiser, want string }{
+		{"", "blocks:ws-cp"},
+		{"ws-land", "blocks:ws-cp,discovered-from:ws-land"},
+	} {
+		orig := run
+		var creates [][]string
+		var related []string
+		run = func(args ...string) (string, error) {
+			switch {
+			case args[0] == "show":
+				return `[{"id":"ws-cp","title":"cp","status":"open","labels":["kind:checkpoint"]}]`, nil
+			case args[0] == "dep" && args[1] == "list" && args[2] == "ws-cp":
+				return `[{"id":"old","status":"closed","labels":["kind:errand"],"description":"Closed MR: !3\n","closed_at":"2026-10-01T10:00:00Z"}]`, nil
+			case args[0] == "dep" && args[1] == "list":
+				return "[]", nil
+			case args[0] == "dep" && args[1] == "add":
+				related = append(related, strings.Join(args[2:], " "))
+			case args[0] == "create":
+				creates = append(creates, args)
+				return "ws-new", nil
+			}
+			return "", nil
+		}
+		_, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "Closed MR: !3\n", c.raiser)
+		run = orig
+		if err != nil || !created || len(creates) != 1 {
+			t.Fatalf("raiser %q: created=%v err=%v creates=%d", c.raiser, created, err, len(creates))
+		}
+		i := slices.Index(creates[0], "--deps")
+		if i < 0 || creates[0][i+1] != c.want {
+			t.Errorf("raiser %q: create %v, want --deps %s", c.raiser, creates[0], c.want)
+		}
+		if !slices.Equal(related, []string{"ws-new old -t related"}) {
+			t.Errorf("raiser %q: dep adds %v, want the related re-file alone", c.raiser, related)
+		}
+	}
+	orig := run
+	t.Cleanup(func() { run = orig })
+	run = func(args ...string) (string, error) {
+		if args[0] == "dep" && args[1] == "list" && args[2] == "ws-cp" {
+			return `[{"id":"live","status":"open","labels":["kind:errand"],"description":"Closed MR: !3\n"}]`, nil
+		}
+		if args[0] == "create" || (args[0] == "dep" && args[1] == "add") {
+			t.Errorf("write %v for an open hold with the same key", args)
+		}
+		return "[]", nil
+	}
+	if id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "b", "ws-land"); err != nil || created || id != "live" {
+		t.Errorf("got %q %v %v, want the open hold unwritten", id, created, err)
 	}
 }
 
@@ -1000,7 +1042,7 @@ func TestSpawnBlockingErrandIfAbsentLinksTheMostRecentlyClosedSameKeyErrand(t *t
 			}
 			return "", nil
 		}
-		_, created, err := SpawnBlockingErrandIfAbsent("ws-cp", key, "t", key)
+		_, created, err := SpawnBlockingErrandIfAbsent("ws-cp", key, "t", key, "")
 		run = orig
 		if err != nil || created != c.created {
 			t.Fatalf("%s: created=%v err=%v", name, created, err)
@@ -1229,7 +1271,7 @@ func TestSpawnBlockingErrandIfAbsentMatchesAnOldFormatOpenBody(t *testing.T) {
 		}
 		return `[{"id":"old","status":"open","labels":["kind:errand"],"description":"MR !3 was closed.\nClosed MR: !3\nFix: reopen it.\n"}]`, nil
 	}
-	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "new body")
+	id, created, err := SpawnBlockingErrandIfAbsent("ws-cp", "Closed MR: !3\n", "t", "new body", "")
 	if err != nil || created || id != "old" {
 		t.Errorf("got %q %v %v, want the old open Errand", id, created, err)
 	}
@@ -1250,6 +1292,21 @@ func TestAwaitingUndraft(t *testing.T) {
 	for name, c := range cases {
 		if got := AwaitingUndraft(c.b); got != c.want {
 			t.Errorf("%s: AwaitingUndraft = %v, want %v", name, got, c.want)
+		}
+	}
+}
+
+func TestPivotCloseReasons(t *testing.T) {
+	for _, c := range []struct{ got, want string }{
+		{ConfirmedReason, "confirmed"},
+		{EscalatedReason, "escalated"},
+		{DismissedCloseReason("wrong FR"), "dismissed: wrong FR"},
+		{DismissedCloseReason("ws-pv"), "dismissed: ws-pv"},
+		{AmendedCloseReason("FR 3"), "amended: FR 3"},
+		{SiblingSupersededReason("ws-pv"), "superseded: ws-pv"},
+	} {
+		if c.got != c.want {
+			t.Errorf("got %q, want %q", c.got, c.want)
 		}
 	}
 }

@@ -1,0 +1,80 @@
+---
+id: discussions
+title: Discussions for meta-analysis
+---
+
+import SurfaceTabs from '@site/src/components/SurfaceTabs';
+
+# Discussions for meta-analysis
+
+Analyse the crew's work without derailing it. A [Discussion](/learn/bead-glossary#discussion) is a session you hold with Robin, the crewmate who explains your Workspace, and a [Retrospective](/learn/bead-glossary#retrospective) is a Discussion on a finished piece of work. Neither changes your code: anything worth doing leaves as a [Signal](/learn/bead-glossary#signal) for you to triage. New to the terms? Start with [Basic concepts](/learn/basic-concepts).
+
+## Start a Discussion
+
+Only you start a Discussion; the loop never does. It is a free-standing bead, off the spine, so it joins no [Chart](/learn/bead-glossary#chart), [Checkpoint](/learn/bead-glossary#checkpoint) or [Initiative](/learn/bead-glossary#initiative).
+
+<SurfaceTabs
+  tui={
+    <>
+      <p>Press <code>n</code> to open the New menu, then <code>d</code> (New Discussion). The screen creates a Discussion titled with the current date and time and opens Robin's session. You lead; Robin answers what you ask.</p>
+      <p>To come back to one, press <code>D</code>: the Discussions list shows <code>+ New discussion</code> first, then every open Discussion, newest first, each with its state (<code>your turn</code>, <code>needs approval</code>, <code>live</code>, <code>exited</code> or <code>no session</code>). Press <code>enter</code> on one to rejoin it, or <code>x</code> to drop it.</p>
+    </>
+  }
+  cli={
+    <>
+      <p>No <code>mugicrew</code> verb starts a Discussion. Open the TUI and follow the TUI tab.</p>
+      <pre><code className="language-bash">mugicrew</code></pre>
+    </>
+  }
+/>
+
+When you are finished, say so. Robin titles the Discussion by its topic, writes a summary into its notes and closes it. Leaving early with `/exit` does not close it: the Discussion stays open for you to rejoin.
+
+## Hold a Retrospective
+
+A Retrospective is a Discussion on a **target**: a Signal, Chart, Spec, Checkpoint or Initiative whose whole [spine](/learn/basic-concepts#the-spine) has no open bead. Robin reads the sessions that spine ran and drafts Signals from patterns that recur in two or more of them. It starts at once and does not ask what to do.
+
+<SurfaceTabs
+  tui={
+    <>
+      <p>Move the cursor to the finished target in the Graph tab (key <code>4</code>), press <code>n</code> to open the New menu, then <code>t</code> (New retrospective). The <code>t</code> row appears only on a Signal, Chart, Spec, Checkpoint or Initiative.</p>
+      <p>The screen checks the spine, then asks <em>Start a retrospective on …?</em> Confirm to open Robin's session. If any bead of the spine is still open, the status line says so and nothing starts.</p>
+    </>
+  }
+  cli={
+    <>
+      <p>No <code>mugicrew</code> verb starts a Retrospective. Open the TUI and follow the TUI tab. To read what Robin reads, render one session of the spine yourself:</p>
+      <pre><code className="language-bash">mugicrew transcript --no-follow --no-pager &lt;bead&gt;</code></pre>
+    </>
+  }
+/>
+
+A Retrospective keeps its title, "Retrospective" followed by the target's title, and is tied to its target. Robin reports how many sessions it read and how many beads it could not cover, for instance a session pruned or a bead closed before the event log began, and says when the patterns are partial.
+
+## What Robin can read
+
+Robin is read-only. It runs at the Workspace root, in no worktree, and writes no file: not a glossary, not an ADR, not code.
+
+- **The Workspace layout.** The glossaries, then the ADRs, then the crew docs, `README.md` and `CONTRIBUTING.md`, read on demand. When your Workspace declares Contexts, Robin sees each one's name and path and reads that Context's own glossary and ADRs when asked.
+- **The bead graph and history.** The graph through read-only `bd` verbs, the code, and `git log`, `git show` and `git blame`.
+- **Live services.** Robin finds out how to query your Workspace's own services from its docs. It runs a query that is plainly a read (a status, a list, an HTTP GET) without asking, and shows each one. Anything that could write, or that it cannot tell is a read, it proposes in chat and runs only on your explicit yes. It never queries at launch, never asks you for a secret, and uses only access you already have set up.
+- **The web**, last: it cites each web claim by URL, and where the web and your Workspace disagree about your Workspace, your Workspace wins.
+
+Robin cites a source for each claim, and labels what it cannot source as inference. When a doc and the code disagree, it shows both and offers the drift as a Signal instead of picking a side.
+
+Robin cannot write files, run builds or tests, create any bead kind but a Signal or an Initiative, publish what it drafts, or touch a bead it did not draft.
+
+## Where outcomes land
+
+Robin proposes in chat first. Only on your explicit yes does it file a draft, one per yes: a Signal, or an Initiative seeded with a finish line. Each draft records the Discussion it came from as its origin, and when the session ends cleanly the drafts are published as open beads.
+
+You can ask Robin to edit, merge or discard a draft it filed in the same Discussion. If you drop a Discussion instead, its unpublished drafts are deleted.
+
+From there nothing is special: published Signals wait in the graph for triage like any other.
+
+<SurfaceTabs
+  tui={<p>Open the Graph tab (key <code>4</code>). The new Signals appear as rows; press <code>enter</code> on one to triage it in an interactive session.</p>}
+  cli={<pre><code className="language-bash">mugicrew signal triage &lt;id&gt;</code></pre>}
+/>
+
+The crew's code never changes from a Discussion. A term you settle with Robin becomes a Signal, not a glossary edit; the change itself then runs the usual [spine](/learn/basic-concepts#the-spine).

@@ -235,7 +235,10 @@ func TestExecCheckpointsRowContainerLook(t *testing.T) {
 				t.Fatal("no Specs-section leaf row")
 			}
 			ls, _ := et.body(*leaf, tagW, false, "")
-			col := func(s, title string) int { return lipgloss.Width(s[:strings.Index(s, title)]) }
+			// the "‹<own>" suffix of an inherited badge widens its row; the kind column is what aligns
+			col := func(s, title string) int {
+				return lipgloss.Width(s[:strings.Index(s, title)]) - strings.Count(s[:strings.Index(s, title)], "‹")*2
+			}
 			if a, b := col(s, r.b.Title), col(ls, leaf.b.Title); a != b {
 				t.Errorf("title column %d, leaf row's %d", a, b)
 			}
@@ -246,7 +249,7 @@ func TestExecCheckpointsRowContainerLook(t *testing.T) {
 			t.Fatalf("no Checkpoints-section row for %s", id)
 		}
 	}
-	// regression (FR8): an AFK leaf row rendered by the Execute tab keeps its muted badge
+	// regression (FR8): an AFK leaf row rendered by the Execute tab keeps its P0 colour
 	g.beads = append(g.beads, dbead("lb0", contract.KindBuild, "in_progress", "cpA", 0))
 	g.live = map[string]bool{"lb0": true}
 	et = execTab{g: g}
@@ -256,10 +259,9 @@ func TestExecCheckpointsRowContainerLook(t *testing.T) {
 			continue
 		}
 		found = true
-		cp, _ := g.containerPrio(r.b)
 		s, _ := et.body(r, 6, false, "")
-		if strings.Contains(s, prio(0)) || !strings.Contains(s, tinted(softSt, cp).Render("P0")) {
-			t.Errorf("leaf badge not muted: %q", s)
+		if !strings.Contains(s, prio(0)) {
+			t.Errorf("leaf badge lost P0 colour: %q", s)
 		}
 	}
 	if !found {

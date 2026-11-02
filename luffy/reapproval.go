@@ -17,9 +17,6 @@ var (
 	gatePivotsOf = func(container string) ([]bd.Bead, error) { return bd.BlockersOfKind(container, contract.KindPivot) }
 )
 
-// amendedPrefix prefixes the close reason of a pivot that amended the Spec.
-const amendedPrefix = "amended:"
-
 // reapproval is the verdict on an Approval that finds its MR already un-drafted with
 // auto-approve off (Spec FR 19–24, 26): skip closes it approved with History; otherwise
 // the MR is set back to Draft with History (empty when no pivot caused it) and it waits.
@@ -67,7 +64,7 @@ func decideReapproval(kind contract.Kind, self bd.Bead, approvals, pivots []bd.B
 	}
 	var changed *bd.Bead
 	for i, p := range pivots {
-		if p.Open() || !strings.HasPrefix(p.CloseReason, amendedPrefix) || p.Closed.Before(cutoff.Created) {
+		if p.Open() || !strings.HasPrefix(p.CloseReason, bd.AmendedReason) || p.Closed.Before(cutoff.Created) {
 			continue
 		}
 		if changed == nil || p.Closed.After(changed.Closed) {

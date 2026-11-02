@@ -2,13 +2,12 @@ package usopp
 
 import (
 	"errors"
-	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/promptguard"
 )
@@ -35,75 +34,48 @@ older
 </note>
 </discussion>`
 
-// frRec captures the seams runForgeReview drives.
+// frRec is the seeded Forge Review graph: the container (a Checkpoint at priority 1), the
+// dispatched Forge Review (claimed by this process) and whatever the test adds.
 type frRec struct {
-	container bd.Bead
-	own       bd.Bead
-	kids      map[contract.Kind][]bd.Bead
-	drafts    []bd.Bead
-	landings  []bd.Bead
-	updates   []string
-	closed    []string
-	reasons   []string
-	ownClosed string
+	f *bdtest.Fake
+	t *testing.T
 }
 
-func stubForgeReview(t *testing.T, r *frRec) {
+func newFR(t *testing.T, notes string, extra ...bd.Bead) *frRec {
 	t.Helper()
-	oShow, oClose, oKids, oDrafts, oUpdate, oLandings, oPublish := showBead, closeBead, childrenOfKind, draftsOf, updateBead, landingsOf, closeOnPublish
-	t.Cleanup(func() {
-		showBead, closeBead, childrenOfKind, draftsOf, updateBead, landingsOf, closeOnPublish = oShow, oClose, oKids, oDrafts, oUpdate, oLandings, oPublish
-	})
-	showBead = func(id string) (bd.Bead, error) {
-		if id == r.container.ID {
-			return r.container, nil
-		}
-		return r.own, nil
-	}
-	childrenOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) { return r.kids[k], nil }
-	draftsOf = func(string) ([]bd.Bead, error) { return r.drafts, nil }
-	updateBead = func(id string, args []string) error {
-		r.updates = append(r.updates, id+" "+strings.Join(args, " "))
-		return nil
-	}
-	landingsOf = func(string) ([]bd.Bead, error) { return r.landings, nil }
-	closeBead = func(id, reason string) error {
-		r.closed = append(r.closed, id)
-		r.reasons = append(r.reasons, reason)
-		return nil
-	}
-	closeOnPublish = func(_ contract.Ctx, id, reason string, _ []bd.Edge) error {
-		r.ownClosed = id + ": " + reason
-		return nil
-	}
+	own := bdtest.Claimed(bd.Bead{ID: "ws-fr", Kind: contract.KindForgeReview, Parent: "ws-cp", Description: frSnapshot, Notes: notes})
+	container := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Priority: 1}
+	return &frRec{f: bdtest.New(t, append([]bd.Bead{container, own}, extra...)...), t: t}
 }
 
-func newFRRec() *frRec {
-	return &frRec{
-		container: bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Priority: 1},
-		own:       bd.Bead{ID: "ws-fr", Kind: contract.KindForgeReview, Status: "in_progress", Parent: "ws-cp", Description: frSnapshot},
-		kids:      map[contract.Kind][]bd.Bead{},
-	}
-}
-
-func runFR(t *testing.T, r *frRec, h *recordingHarness) error {
-	t.Helper()
-	stubForgeReview(t, r)
+func (r *frRec) run(h *recordingHarness) error {
+	r.t.Helper()
 	return Usopp{}.Run(stubCtx{h}, contract.Bead{ID: "ws-fr", Kind: contract.KindForgeReview})
 }
 
-func TestForgeReviewPromptCarriesSnapshotFiledBeadsDraftBlockAndRubric(t *testing.T) {
-	r := newFRRec()
-	r.kids[contract.KindCritique] = []bd.Bead{
-		{ID: "ws-c1", Status: "closed", CloseReason: "not needed: by design", Description: "Source: !12 d0 700\n> x"},
-		{ID: "ws-c2", Status: "open", Description: "Source: !99 d9 1\nSource: !12 d0 701"},
-		{ID: "ws-c3", Status: "open", Description: "unrelated Source: !12 inline"},
-		{ID: "ws-c4", Status: "open", Description: "no sources", Notes: "Source: !12 d0 702"},
+// draft is a Draft of the Forge Review at priority 2, the container's being 1.
+func draft(id string) bd.Bead {
+	return bdtest.Draft("ws-fr", bd.Bead{ID: id, Kind: contract.KindCritique, Priority: 2, Parent: "ws-cp"})
+}
+
+// closeReason is the Forge Review's close reason, "" while it is open.
+func (r *frRec) closeReason() string {
+	b := r.f.Bead("ws-fr")
+	if b.Open() {
+		return ""
 	}
+	return b.CloseReason
+}
+
+func TestForgeReviewPromptCarriesSnapshotFiledBeadsDraftBlockAndRubric(t *testing.T) {
+	r := newFR(t, "901 file k1 — ask\n902 fold ws-c1 — bot\n903 skip — praise",
+		bd.Bead{ID: "ws-c1", Kind: contract.KindCritique, Parent: "ws-cp", Status: "closed", CloseReason: "not needed: by design", Description: "Source: !12 d0 700\n> x"},
+		bd.Bead{ID: "ws-c2", Kind: contract.KindCritique, Parent: "ws-cp", Status: "open", Description: "Source: !99 d9 1\nSource: !12 d0 701"},
+		bd.Bead{ID: "ws-c3", Kind: contract.KindCritique, Parent: "ws-cp", Status: "open", Description: "unrelated Source: !12 inline"},
+		bd.Bead{ID: "ws-c4", Kind: contract.KindCritique, Parent: "ws-cp", Status: "open", Description: "no sources", Notes: "Source: !12 d0 702"},
+		draft("d-1"))
 	h := &recordingHarness{}
-	r.own.Notes = "901 file k1 — ask\n902 fold ws-c1 — bot\n903 skip — praise"
-	r.drafts = []bd.Bead{{ID: "d-1"}}
-	if err := runFR(t, r, h); err != nil {
+	if err := r.run(h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(h.invs) != 1 {
@@ -140,71 +112,68 @@ func TestForgeReviewPromptSkillFree(t *testing.T) {
 	promptguard.Check(t, "forge-review", p)
 }
 
-func TestForgeReviewFiledClosesWithCountsAtContainerPriorityAndObsoletesLanding(t *testing.T) {
-	r := newFRRec()
-	r.own.Notes = "901 file k1 — ask\n902 file k1 — same\n903 skip — praise"
-	r.drafts = []bd.Bead{{ID: "dr-1"}}
-	r.landings = []bd.Bead{{ID: "ws-land", Status: "open"}, {ID: "ws-oldland", Status: "closed"}}
-	if err := runFR(t, r, &recordingHarness{}); err != nil {
+func TestForgeReviewFiledClosesWithCountsAndObsoletesLandingWithoutStampingPriority(t *testing.T) {
+	r := newFR(t, "901 file k1 — ask\n902 file k1 — same\n903 skip — praise", draft("dr-1"),
+		bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-cp", Status: "open"},
+		bd.Bead{ID: "ws-oldland", Kind: contract.KindLanding, Parent: "ws-cp", Status: "closed", CloseReason: "merged"})
+	if err := r.run(&recordingHarness{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if want := "ws-fr: filed 1, folded 0, skipped 1: read through note 903"; r.ownClosed != want {
-		t.Errorf("close = %q, want %q", r.ownClosed, want)
+	if want := "completed: filed 1, folded 0, skipped 1; read through note 903"; r.closeReason() != want {
+		t.Errorf("close = %q, want %q", r.closeReason(), want)
 	}
-	if want := []string{"dr-1 --priority " + strconv.Itoa(1)}; !reflect.DeepEqual(r.updates, want) {
-		t.Errorf("updates = %v, want %v", r.updates, want)
+	if d := r.f.Bead("dr-1"); d.Priority != 2 || d.Status != "open" {
+		t.Errorf("the Draft must publish at its default priority, not the container's, got %+v", d)
 	}
-	if !reflect.DeepEqual(r.closed, []string{"ws-land"}) || r.reasons[0] != "obsolete: review comment" {
-		t.Errorf("closed %v %v, want the open Landing obsolete: review comment", r.closed, r.reasons)
+	if l := r.f.Bead("ws-land"); l.Open() || l.CloseReason != "obsolete: review comment" {
+		t.Errorf("the open Landing must close obsolete: review comment, got %+v", l)
+	}
+	if l := r.f.Bead("ws-oldland"); l.CloseReason != "merged" {
+		t.Errorf("a closed Landing must stay as it was, got %+v", l)
 	}
 }
 
 func TestForgeReviewFoldedCountsAndNothingActionable(t *testing.T) {
-	r := newFRRec()
-	r.own.Notes = "901 fold ws-c1 — dup\n902 fold ws-c1 — dup\n903 skip — praise"
-	r.landings = []bd.Bead{{ID: "ws-land", Status: "open"}}
-	if err := runFR(t, r, &recordingHarness{}); err != nil {
+	r := newFR(t, "901 fold ws-c1 — dup\n902 fold ws-c1 — dup\n903 skip — praise",
+		bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-cp", Status: "open"})
+	if err := r.run(&recordingHarness{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if want := "ws-fr: filed 0, folded 2, skipped 1: read through note 903"; r.ownClosed != want {
-		t.Errorf("close = %q, want %q", r.ownClosed, want)
+	if want := "completed: filed 0, folded 2, skipped 1; read through note 903"; r.closeReason() != want {
+		t.Errorf("close = %q, want %q", r.closeReason(), want)
 	}
-	if len(r.closed) != 0 {
-		t.Errorf("no Draft: the pending Landing must stay open, closed %v", r.closed)
+	if !r.f.Bead("ws-land").Open() {
+		t.Error("no Draft: the pending Landing must stay open")
 	}
 
-	r = newFRRec()
-	r.own.Notes = "901 skip — a\n902 skip — b\n903 skip — c"
-	r.landings = []bd.Bead{{ID: "ws-land", Status: "open"}}
-	if err := runFR(t, r, &recordingHarness{}); err != nil {
+	r = newFR(t, "901 skip — a\n902 skip — b\n903 skip — c",
+		bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-cp", Status: "open"})
+	if err := r.run(&recordingHarness{}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if want := "ws-fr: nothing actionable: read 3 notes through 903"; r.ownClosed != want {
-		t.Errorf("close = %q, want %q", r.ownClosed, want)
+	if want := "completed: nothing actionable; read 3 notes through 903"; r.closeReason() != want {
+		t.Errorf("close = %q, want %q", r.closeReason(), want)
 	}
-	if len(r.closed) != 0 || len(r.updates) != 0 {
-		t.Errorf("empty pass wrote %v %v", r.closed, r.updates)
+	if !r.f.Bead("ws-land").Open() {
+		t.Error("empty pass closed the Landing")
 	}
 }
 
 func TestForgeReviewLedgerMissingAJudgeNoteFailsTheRun(t *testing.T) {
-	r := newFRRec()
-	r.own.Notes = "901 file k1 — ask\n902 skip — x" // 903 missing
-	r.drafts = []bd.Bead{{ID: "dr-1"}}
-	r.landings = []bd.Bead{{ID: "ws-land", Status: "open"}}
-	err := runFR(t, r, &recordingHarness{})
+	r := newFR(t, "901 file k1 — ask\n902 skip — x", draft("dr-1"), // 903 missing
+		bd.Bead{ID: "ws-land", Kind: contract.KindLanding, Parent: "ws-cp", Status: "open"})
+	err := r.run(&recordingHarness{})
 	if err == nil || !strings.Contains(err.Error(), "903") {
 		t.Fatalf("err = %v, want one naming the missing note 903", err)
 	}
-	if r.ownClosed != "" || len(r.closed) != 0 || len(r.updates) != 0 {
-		t.Errorf("a failed pass must write nothing: close %q, closed %v, updates %v", r.ownClosed, r.closed, r.updates)
+	if d := r.f.Bead("dr-1"); r.closeReason() != "" || d.Priority != 2 || d.Status != "deferred" || !r.f.Bead("ws-land").Open() {
+		t.Errorf("a failed pass must write nothing: close %q, draft %+v", r.closeReason(), d)
 	}
 }
 
 func TestForgeReviewFileVerdictWithoutDraftFailsTheRun(t *testing.T) {
-	r := newFRRec()
-	r.own.Notes = "901 file k1 — ask\n902 skip — x\n903 skip — y"
-	if err := runFR(t, r, &recordingHarness{}); err == nil {
+	r := newFR(t, "901 file k1 — ask\n902 skip — x\n903 skip — y")
+	if err := r.run(&recordingHarness{}); err == nil {
 		t.Fatal("a file verdict with no Draft must fail the run")
 	}
 }
@@ -217,11 +186,10 @@ func TestForgeReviewContextNotesAreNotJudged(t *testing.T) {
 }
 
 func TestForgeReviewHarnessErrorLeavesBeadOpen(t *testing.T) {
-	r := newFRRec()
-	r.own.Notes = "901 skip — a\n902 skip — b\n903 skip — c"
-	err := runFR(t, r, &recordingHarness{err: errors.New("boom")})
-	if err == nil || r.ownClosed != "" {
-		t.Errorf("err %v, closed %q: want an error and no close", err, r.ownClosed)
+	r := newFR(t, "901 skip — a\n902 skip — b\n903 skip — c")
+	err := r.run(&recordingHarness{err: errors.New("boom")})
+	if err == nil || r.closeReason() != "" {
+		t.Errorf("err %v, close %q: want an error and no close", err, r.closeReason())
 	}
 }
 
@@ -234,24 +202,14 @@ func TestForgeReviewRoutesThroughUsoppAndRejectsLaunch(t *testing.T) {
 // FR49 wiring: a confirm sweep closes the forge-review while the session fails; the
 // runner reports it done, so the tail writes nothing.
 func TestForgeReviewSweptDuringFailedRunIsDone(t *testing.T) {
-	r := newFRRec()
-	stubForgeReview(t, r)
-	reads := 0
-	inner := showBead
-	showBead = func(id string) (bd.Bead, error) {
-		b, err := inner(id)
-		if id == "ws-fr" {
-			if reads++; reads > 1 { // closed by the sweep after the dispatch read
-				b.Status = "closed"
-			}
-		}
-		return b, err
-	}
-	err := Usopp{}.Run(stubCtx{&recordingHarness{err: errors.New("session killed")}}, contract.Bead{ID: "ws-fr", Kind: contract.KindForgeReview})
-	if err != nil {
+	r := newFR(t, "901 file k1 — a\n902 skip — b\n903 skip — c", draft("dr-1"))
+	h := &recordingHarness{err: errors.New("session killed"), onRun: func(contract.Invocation) {
+		r.f.Mutate("ws-fr", func(b *bd.Bead) { b.Status = "closed"; b.CloseReason = "swept" })
+	}}
+	if err := r.run(h); err != nil {
 		t.Errorf("Run = %v, want nil (swept is done)", err)
 	}
-	if len(r.closed)+len(r.updates) != 0 || r.ownClosed != "" {
-		t.Errorf("swept forge-review touched the graph: %+v", r)
+	if d := r.f.Bead("dr-1"); r.closeReason() != "swept" || d.Priority != 2 || d.Status != "deferred" {
+		t.Errorf("swept forge-review touched the graph: close %q, draft %+v", r.closeReason(), d)
 	}
 }

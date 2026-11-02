@@ -3,7 +3,11 @@
 // (ADR 0193, ADR 0194, ADR 0381 (robin-may-draft-a-bodyless-initiative…)). She
 // owns the one kind `discussion`, a free-standing HITL bead: the loop never
 // dispatches it, a human launches it, and Run is a loud error. Her session runs
-// at RepoRoot (route's default): no worktree, commits or integrate. Launch marks
+// at RepoRoot (route's default): no worktree, commits or integrate. Launch
+// primes her prompt with the Workspace layout (names and paths of the declared
+// Contexts, appended after the rendered prompt; layout.go), and her prompt
+// governs live-service queries (plain reads on her own, writes on the
+// human's yes) and the web. Launch marks
 // the invocation read-only from the registry row, the one source of truth
 // launch and resume both read (ADR 0191).
 package robin
@@ -82,10 +86,19 @@ func launchPrompt(id string) (string, error) {
 		return "", fmt.Errorf("robin.Launch: read %s: %w", id, err)
 	}
 	if _, ok := git.ParseLine(b.Description, "Target:"); !ok {
-		return discussionPrompt(id), nil
+		return withLayout(discussionPrompt(id)), nil
 	}
 	if spine, _ := git.ParseLine(b.Description, "Spine:"); strings.TrimSpace(spine) == "" {
 		return "", fmt.Errorf("robin.Launch: retrospective %s has a Target: line but no Spine: line", id)
 	}
-	return retrospectiveTmpl + "\n" + discussionPrompt(id), nil
+	return withLayout(retrospectiveTmpl + "\n" + discussionPrompt(id)), nil
+}
+
+// withLayout appends the Workspace layout to a rendered prompt, or returns it
+// as is when no Context is usable.
+func withLayout(prompt string) string {
+	if l := layout(workspaceContexts()); l != "" {
+		return prompt + "\n\n" + l
+	}
+	return prompt
 }

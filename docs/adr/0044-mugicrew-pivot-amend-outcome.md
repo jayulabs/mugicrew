@@ -1,6 +1,7 @@
 # ADR 0044: mugicrew pivot amend outcome
 
 Status: Accepted
+Amended by: ADR 0414 (mugicrew-pivot-dismiss-and-amend-are-go-verbs…) (§3–5: `mugicrew pivot amend` writes the Amendment; its rejected "new Go plumbing" option is withdrawn)
 Date: 2026-10-04
 
 Amends: ADR 0005 §3–4 (adds a fourth triage outcome; restates "closed record"),

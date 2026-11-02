@@ -11,20 +11,6 @@ import (
 	"jayulabs.org/mugicrew/git"
 )
 
-// Seams over the sweep's bd/git legs (the zoro test swaps them, like reconcileSpec's).
-var (
-	spawnDiscovered = bd.SpawnDiscoveredIfAbsent
-	supersede       = bd.Supersede
-	openChildBeads  = bd.OpenChildBeads
-	forceClose      = bd.ForceClose
-	openPivots      = bd.OpenPivots
-	spawnSurvey     = bd.SpawnSurveyIfAbsent
-	carryEdge       = bd.DiscoveredFrom
-	filedChildren   = func(cp string) ([]bd.Bead, error) {
-		return bd.ChildrenOfKind(cp, contract.FiledKind(contract.KindCheckpoint))
-	}
-)
-
 // Confirm is the confirm sweep (`mugicrew pivot confirm`, FR39–42, ADR 0043 §8,
 // ADR 0046 §5): the triage session has written the corrected Spec body with the
 // human; Go files it and retires the old Checkpoint. In order, each leg guarded so
@@ -36,7 +22,7 @@ var (
 //  2. a fast-laned (Chart-less) Spec: pin its fresh Anchor: <sha> on the Spec bead
 //     through bd.Anchor, as Luffy's fast lane does, under every land strategy (no
 //     commit lands on main), so its Checkpoint cuts from that tip;
-//  3. Supersede(old Spec, new Spec), then record each --carries Critique as new Spec
+//  3. Retire(old Spec, new Spec, "superseded: <new>"), then record each --carries Critique as new Spec
 //     discovered-from Critique (carryCritiques), then carry the Checkpoint's Ordering
 //     edges to the new Spec (ADR 0085), so its dependents wait for the corrected work;
 //  4. force-close every open member, then the frozen Checkpoint, obsolete;
@@ -58,7 +44,7 @@ func Confirm(pivotID, title, body string, carries []string) error {
 	if err != nil {
 		return err
 	}
-	if err := supersede(oldSpec, newSpec); err != nil {
+	if err := bd.Retire(oldSpec, newSpec, bd.SupersededReason+" "+newSpec); err != nil {
 		return err
 	}
 	if err := carryCritiques(newSpec, carries); err != nil {
@@ -70,7 +56,7 @@ func Confirm(pivotID, title, body string, carries []string) error {
 	if err := closeOut(cp, pivotID, bd.ObsoleteSuperseded(oldSpec, newSpec, pivotID)); err != nil {
 		return err
 	}
-	return closeBead(pivotID, "confirmed")
+	return bd.Close(pivotID, bd.ConfirmedReason)
 }
 
 // Escalate is the escalate sweep (`mugicrew pivot escalate`, FR43–46, ADR 0043
@@ -83,7 +69,7 @@ func Confirm(pivotID, title, body string, carries []string) error {
 //     — a Draft by the pivot, like Confirm's Spec — and seed its Survey under it,
 //     also a Draft by the pivot (Spec mc-r832 D5);
 //  2. cut chart/<new> from main, as reconcileSignal does for a first Chart;
-//  3. a charted Spec: Supersede(old Chart, new Chart). A fast-laned Spec skips
+//  3. a charted Spec: Retire(old Chart, new Chart, "superseded: <new>"). A fast-laned Spec skips
 //     this — caused-by the Signal is the new Chart's only link (the recorded
 //     decision: ADR 0046 §6 asks nothing more, and no Spec→Chart supersede edge
 //     exists anywhere else in the graph);
@@ -101,7 +87,7 @@ func Escalate(pivotID, evidence string, carries []string) error {
 	if err := checkCarries("escalate", cp, pivotID, carries); err != nil {
 		return err
 	}
-	oldChart, charted, err := causedBy(oldSpec, contract.KindChart)
+	oldChart, charted, err := bd.CausedBy(oldSpec, contract.KindChart)
 	if err != nil {
 		return err
 	}
@@ -109,39 +95,42 @@ func Escalate(pivotID, evidence string, carries []string) error {
 	if charted {
 		from = oldChart
 	}
-	sigID, ok, err := causedBy(from, contract.KindSignal)
+	sigID, ok, err := bd.CausedBy(from, contract.KindSignal)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return fmt.Errorf("pivot escalate: %s has no caused-by Signal to hang the fresh Chart on", from)
 	}
-	sig, err := showBead(sigID)
+	sig, err := bd.Show(sigID)
 	if err != nil {
 		return err
 	}
 	// The fresh Chart joins the chain's Initiative, read off its Checkpoint (the
 	// unclosed head adoption moves), never the closed original Signal (Spec D2).
-	head, err := showBead(cp)
+	head, err := bd.Show(cp)
 	if err != nil {
 		return err
 	}
-	parent, err := initiativeOf(head)
+	parent, err := bd.InitiativeOf(head)
 	if err != nil {
 		return err
 	}
-	newChart, _, err := spawnDiscovered(pivotID, sigID, bd.Successor{
+	newChart, _, err := bd.SpawnDiscoveredIfAbsent(pivotID, sigID, bd.Successor{
 		Kind: contract.KindChart, Container: true, Title: sig.Title,
 		Description: escalatedChartBody(oldSpec, pivotID, evidence),
 		DraftedBy:   pivotID, // published by the triage session's hitl-run, after chart/<new> is cut (Spec D11 row 14)
 		Parent:      parent,
 		Context:     bd.ContextOf(head),
 		Repo:        bd.RepoStampOf(head),
+		// Born at the obsoleted Checkpoint's priority, not the Signal's (ADR 0419 §3).
+		PrioritySource: cp,
+		Serializer:     bd.UnderClaim(pivotID),
 	})
 	if err != nil {
 		return err
 	}
-	if _, _, err := spawnSurvey(newChart, sig.Title, pivotID); err != nil {
+	if _, _, err := bd.SpawnSurveyIfAbsent(newChart, sig.Title, pivotID); err != nil {
 		return err
 	}
 	chartBranch := git.BranchName(string(contract.KindChart), newChart)
@@ -156,7 +145,7 @@ func Escalate(pivotID, evidence string, carries []string) error {
 		return err
 	}
 	if charted {
-		if err := supersede(oldChart, newChart); err != nil {
+		if err := bd.Retire(oldChart, newChart, bd.SupersededReason+" "+newChart); err != nil {
 			return err
 		}
 	}
@@ -169,7 +158,7 @@ func Escalate(pivotID, evidence string, carries []string) error {
 	if err := closeOut(cp, pivotID, bd.ObsoleteEscalated(oldSpec, newChart, pivotID)); err != nil {
 		return err
 	}
-	return closeBead(pivotID, "escalated")
+	return bd.Close(pivotID, bd.EscalatedReason)
 }
 
 // escalatedChartBody seeds the fresh Chart in the wayfinder-map shape the charting
@@ -201,7 +190,7 @@ Escalation evidence (pivot %[2]s):
 // non-empty; a closed pivot is a finished sweep (open=false, no error). It resolves
 // the pivot's Checkpoint and Spec.
 func openSweep(verb, what, pivotID, text string) (cp, spec string, open bool, err error) {
-	pivot, err := showBead(pivotID)
+	pivot, err := bd.Show(pivotID)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -210,6 +199,9 @@ func openSweep(verb, what, pivotID, text string) (cp, spec string, open bool, er
 	}
 	if !pivot.Open() {
 		return "", "", false, nil
+	}
+	if pivot.Status != "in_progress" || pivot.Assignee == "" {
+		return "", "", false, fmt.Errorf("pivot %s: %s is not claimed; run `bd update %s --claim` first", verb, pivotID, pivotID)
 	}
 	if strings.TrimSpace(text) == "" {
 		return "", "", false, fmt.Errorf("pivot %s: empty %s for %s", verb, what, pivotID)
@@ -221,14 +213,14 @@ func openSweep(verb, what, pivotID, text string) (cp, spec string, open bool, er
 // pivotTargets is the pivot's Checkpoint (reverse blocks) and Spec (related) —
 // the same pair Launch resolves.
 func pivotTargets(pivotID string) (cp, spec string, err error) {
-	cp, ok, err := pivotCheckpoint(pivotID)
+	cp, ok, err := bd.PivotCheckpoint(pivotID)
 	if err != nil {
 		return "", "", err
 	}
 	if !ok {
 		return "", "", fmt.Errorf("pivot %s blocks no Checkpoint", pivotID)
 	}
-	spec, ok, err = pivotSpec(pivotID)
+	spec, ok, err = bd.PivotSpec(pivotID)
 	if err != nil {
 		return "", "", err
 	}
@@ -243,20 +235,20 @@ func pivotTargets(pivotID string) (cp, spec string, err error) {
 // The Spec is a Draft by the pivot, so the loop can't slice it before its anchor
 // pin is written; the triage session's hitl-run publishes it (Spec D11 rows 12–13).
 func spawnCorrectedSpec(pivotID, cp, oldSpecID, title, body string) (string, error) {
-	pred, charted, err := causedBy(oldSpecID, contract.KindChart)
+	pred, charted, err := bd.CausedBy(oldSpecID, contract.KindChart)
 	if err != nil {
 		return "", err
 	}
 	if !charted {
 		var ok bool
-		if pred, ok, err = causedBy(oldSpecID, contract.KindSignal); err != nil {
+		if pred, ok, err = bd.CausedBy(oldSpecID, contract.KindSignal); err != nil {
 			return "", err
 		} else if !ok {
 			return "", fmt.Errorf("pivot confirm: Spec %s has no caused-by Chart or Signal to hang the corrected Spec on", oldSpecID)
 		}
 	}
 	if title == "" {
-		old, err := showBead(oldSpecID)
+		old, err := bd.Show(oldSpecID)
 		if err != nil {
 			return "", err
 		}
@@ -264,20 +256,20 @@ func spawnCorrectedSpec(pivotID, cp, oldSpecID, title, body string) (string, err
 	}
 	// Like Escalate's Chart, the Spec joins the Initiative of the chain's unclosed
 	// head (the Checkpoint), never the closed Signal (Spec D2).
-	head, err := showBead(cp)
+	head, err := bd.Show(cp)
 	if err != nil {
 		return "", err
 	}
-	parent, err := initiativeOf(head)
+	parent, err := bd.InitiativeOf(head)
 	if err != nil {
 		return "", err
 	}
-	id, _, err := spawnDiscovered(pivotID, pred, bd.Successor{Kind: contract.KindSpec, Title: title, Description: body, DraftedBy: pivotID, Parent: parent, Context: bd.ContextOf(head), Repo: bd.RepoStampOf(head)})
+	id, _, err := bd.SpawnDiscoveredIfAbsent(pivotID, pred, bd.Successor{Kind: contract.KindSpec, Title: title, Description: body, DraftedBy: pivotID, Parent: parent, Context: bd.ContextOf(head), Repo: bd.RepoStampOf(head), PrioritySource: cp, Serializer: bd.UnderClaim(pivotID)})
 	if err != nil || charted {
 		return id, err
 	}
 	trailer := baseTrailer(contract.KindSpec, id)
-	_, err = bd.Anchor(bd.AnchorSeams{Strategy: landStrategy, Show: showBead, Update: updateBody, Fetch: fetchForge, RepoFetch: repoFetch, Landed: repoLanded, Tip: repoTip}, repoOf(head), id, trailer)
+	_, err = bd.Anchor(bd.AnchorSeams{Strategy: landStrategy, Show: bd.Show, SetDescription: bd.SetDescription, Under: bd.UnderClaim(pivotID), Fetch: fetchForge, RepoFetch: repoFetch, Landed: repoLanded, Tip: repoTip}, repoOf(head), id, trailer)
 	return id, err
 }
 
@@ -289,7 +281,7 @@ func checkCarries(verb, cp, pivotID string, carries []string) error {
 	if len(carries) == 0 {
 		return nil
 	}
-	kids, err := filedChildren(cp)
+	kids, err := bd.ChildrenOfKind(cp, contract.FiledKind(contract.KindCheckpoint))
 	if err != nil {
 		return err
 	}
@@ -314,7 +306,7 @@ func checkCarries(verb, cp, pivotID string, carries []string) error {
 // any Watch pass sees the mark before the Critique closes (FR 21).
 func carryCritiques(succ string, carries []string) error {
 	for _, id := range carries {
-		if err := carryEdge(succ, id); err != nil {
+		if err := bd.DiscoveredFrom(succ, id); err != nil {
 			return err
 		}
 	}
@@ -326,7 +318,7 @@ func carryCritiques(succ string, carries []string) error {
 // 0085). An error fails the sweep before the obsolete close; a re-run re-carries
 // (add-only, so a no-op) until the pivot's close makes the sweep a no-op.
 func carryCheckpoint(cp, succ string) error {
-	moved, skipped, err := carry(cp, succ)
+	moved, skipped, err := bd.Carry(cp, succ)
 	return eventlog.RecordCarry(bd.Bead{ID: cp, Kind: contract.KindCheckpoint}, succ, moved, skipped, err)
 }
 
@@ -335,7 +327,7 @@ func carryCheckpoint(cp, succ string) error {
 // with an open blocker (a sibling member; the pivots themselves, and closing those
 // first would unfreeze the Checkpoint mid-sweep) — then the open sibling pivots. The lead pivot is the caller's to close.
 func closeOut(cp, pivotID, reason string) error {
-	members, err := openChildBeads(cp)
+	members, err := bd.OpenChildBeads(cp)
 	if err != nil {
 		return err
 	}
@@ -343,26 +335,26 @@ func closeOut(cp, pivotID, reason string) error {
 		if m.Kind == contract.KindMRWatch { // outlives the sweep to answer the MR's reviewers
 			continue
 		}
-		if err := forceClose(m.ID, reason); err != nil { // a member blocked by an open sibling refuses a plain close
+		if err := bd.ForceClose(m.ID, reason); err != nil { // a member blocked by an open sibling refuses a plain close
 			return err
 		}
 	}
-	c, err := showBead(cp)
+	c, err := bd.Show(cp)
 	if err != nil {
 		return err
 	}
 	if c.Open() {
-		if err := forceClose(cp, reason); err != nil {
+		if err := bd.ForceClose(cp, reason); err != nil {
 			return err
 		}
 	}
-	siblings, err := openPivots(cp)
+	siblings, err := bd.OpenPivots(cp)
 	if err != nil {
 		return err
 	}
 	for _, s := range siblings {
 		if s.ID != pivotID {
-			if err := closeBead(s.ID, "superseded: "+pivotID); err != nil {
+			if err := bd.Close(s.ID, bd.SiblingSupersededReason(pivotID)); err != nil {
 				return err
 			}
 		}

@@ -40,6 +40,9 @@ const checkupUsage = "usage: mugicrew checkup <bead> [--problem \"<one line>\"]"
 // paused:checkup, then starts (or resumes) the HITL session and attaches the
 // terminal. Every refusal is exit 1; there is no --force.
 func runCheckup(argv []string, errw io.Writer) int {
+	if len(argv) > 0 && argv[0] == "close" {
+		return runCheckupClose(argv[1:], errw)
+	}
 	fs := flag.NewFlagSet("checkup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	problem := fs.String("problem", "", "the symptom, one line")
@@ -54,6 +57,64 @@ func runCheckup(argv []string, errw io.Writer) int {
 		return 1
 	}
 	if err := checkup(checkupSeams, id, *problem); err != nil {
+		fmt.Fprintln(errw, err)
+		return 1
+	}
+	return 0
+}
+
+// checkupCloseIO is runCheckupClose's seams, a var so main's tests script them.
+type checkupCloseIO struct {
+	ListByID func(ids []string) ([]bd.Bead, error) // list rows carry Related; bd show's dependency shape does not parse into it
+	Closing  chopper.CheckupClosing
+}
+
+var checkupCloseSeams = checkupCloseIO{
+	ListByID: bd.ListByID,
+	Closing:  chopper.CheckupClosing{Close: bd.Close, OpenOn: bd.OpenCheckupOn, Unpause: bd.Unpause},
+}
+
+var checkupCloseUsage = fmt.Sprintf("usage: mugicrew checkup close <checkup> --reason \"%s <what changed>\" | \"%s <why>\"",
+	chopper.ReasonRepaired, chopper.ReasonNotABeadFault)
+
+// runCheckupClose is `mugicrew checkup close <checkup> --reason R`: Chopper's one
+// Checkup close. It refuses a bead that is not an open Checkup and any reason but
+// repaired: or not a bead fault: with a detail (dropped is the TUI's), writing
+// nothing; every refusal is exit 1. Otherwise it closes through the shared closer.
+func runCheckupClose(argv []string, errw io.Writer) int {
+	fs := flag.NewFlagSet("checkup close", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	reason := fs.String("reason", "", "the close reason")
+	var id string
+	err := fs.Parse(argv)
+	if err == nil && fs.NArg() > 0 { // the id may sit before the flags
+		id = fs.Arg(0)
+		err = fs.Parse(fs.Args()[1:])
+	}
+	if err != nil || id == "" || fs.NArg() > 0 || !chopper.SessionReasonOK(*reason) {
+		fmt.Fprintln(errw, checkupCloseUsage)
+		return 1
+	}
+	var ck bd.Bead
+	rows, err := checkupCloseSeams.ListByID([]string{id})
+	if err == nil && len(rows) == 0 {
+		err = fmt.Errorf("no such bead %s", id)
+	}
+	if err == nil {
+		ck = rows[0]
+	}
+	if err == nil && ck.Kind != contract.KindCheckup {
+		err = fmt.Errorf("%s is a %s, not a Checkup", id, ck.Kind)
+	}
+	if err == nil && !ck.Open() {
+		err = fmt.Errorf("%s is already closed", id)
+	}
+	if err != nil {
+		fmt.Fprintln(errw, err)
+		fmt.Fprintln(errw, checkupCloseUsage)
+		return 1
+	}
+	if err := chopper.CloseCheckup(checkupCloseSeams.Closing, ck, *reason); err != nil {
 		fmt.Fprintln(errw, err)
 		return 1
 	}

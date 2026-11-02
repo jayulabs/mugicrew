@@ -23,8 +23,10 @@ func TestSpecOfCP(t *testing.T) {
 		dbead("c3", cp, "open", "", 1, causedBy("sig")),
 		dbead("c4", cp, "open", "", 1, causedBy("gone")),
 		dbead("c5", cp, "open", "", 1),
+		dbead("rm", contract.KindRemnant, "closed", "", 1, func(b *bd.Bead) { b.Related = []string{"c1"} }),
+		dbead("c6", cp, "open", "", 1, causedBy("rm")),
 	}}
-	for id, want := range map[string]string{"c1": "spec", "c2": "spec", "c3": "", "c4": "", "c5": ""} {
+	for id, want := range map[string]string{"c1": "spec", "c2": "spec", "c6": "spec", "c3": "", "c4": "", "c5": ""} {
 		got := ""
 		if s := g.specOfCP(g.beadByID(id)); s != nil {
 			got = s.ID

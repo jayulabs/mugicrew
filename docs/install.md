@@ -19,6 +19,28 @@ once the key is set. `--mouse on|off` answers for a script; with no terminal and
 flag the key stays unset, which reads as off. `mugicrew init workspace` never
 touches it.
 
+## Release notice
+
+An npm-installed mugicrew (not a from-source build) asks the npm registry at most
+once every 24 hours whether a newer `@jayulabs/mugicrew` release exists, in the
+background and silently on any failure. When one does, a human-facing command run
+on a terminal ends with one stderr line naming it and `mugicrew upgrade`. It never
+shows for `--version`, `--help`, piped output or crewmate sessions. The answer is
+cached in `mugicrew/release.json` under your user cache dir.
+
+Two opt-outs each turn off both the check and the notice: `[release] notice =
+false` in `.mugicrew/config.toml` (the machine-local file wins over the checked-in
+one), and `MUGICREW_RELEASE_NOTICE=0` (or `off`/`false`), which wins over config.
+
+### Unattended Upgrade
+
+The notice only tells, unless you opt a loop into upgrading itself: set
+`[upgrade] unattended = true` in `~/.config/mugicrew/config.toml` or
+`MUGICREW_UNATTENDED_UPGRADE=1`. It applies only to an `npm i -g` install, and
+`MUGICREW_RELEASE_NOTICE=0` turns it off with the check. The gates, what the loop
+log and TUI show, and recovery from a failed version or a tripped doctor are in
+[upgrading](upgrading.md#unattended-upgrade).
+
 ## First human in a Workspace
 
 `mugicrew init workspace` writes the settings the whole Workspace shares into
@@ -55,6 +77,11 @@ claims look foreign. `$BEADS_ACTOR` still overrides it for one shell. Confirm wi
 `mugicrew doctor`: the `bd actor` row shows the actor, and warns with the exact line
 to add while the Device name is missing. mugicrew keeps working under the bare name
 meanwhile.
+
+A running loop and the processes it spawns (reconcile, integrate, crewmates) keep
+the actor resolved when it started: each user verb exports it as `$BEADS_ACTOR`
+for its children. Changing `actor:` takes effect on the next loop or TUI start, so
+restart the loop after editing it.
 
 Then run `mugicrew doctor fix`: it reassigns your in-progress claims made under the
 bare name to the full actor, so your own live work doesn't read as claimed elsewhere.
@@ -295,9 +322,16 @@ Run it once right after the first push, then periodically. It is untracked.
    (or after step 1 in the same one), never before step 1:
 
    ```bash
-   scratch=$(mktemp -d) && export BEADS_DIR=$scratch/.beads
+   scratch=$(mktemp -d) && cd "$scratch" && export BEADS_DIR=$scratch/.beads
    bd config get issue_prefix   # must not print your real graph's prefix; stop if it does
    ```
+
+   Steps 3–5's scratch-shell commands run from `$scratch`; don't `cd` back into
+   the repo before step 3's `bd init`. bd ignores a `BEADS_DIR` whose directory
+   doesn't exist yet (step 3's `bd init` creates it) and resolves `.beads` upward
+   from the cwd. So a guard that prints the real prefix means the shell is still
+   inside the repo, or `BEADS_DIR` still points at the real graph. `cd` into
+   `$scratch`, re-run the guard, and do not continue to step 3 until it passes.
 
 3. Clone the copy into the scratch graph and copy its project id into
    `metadata.json` (else bd refuses with a project identity mismatch). Use
@@ -328,7 +362,8 @@ Run it once right after the first push, then periodically. It is untracked.
    (the restored count). Then pick one bead id from `bd list` and check that
    `bd show <id>`, `bd ready` and `bd list` all exit 0 with no `table not found`.
    No write is checked.
-5. Tear down: `bd dolt stop` in the scratch shell, then `rm -rf $scratch`.
+5. Tear down: `bd dolt stop` in the scratch shell, then `cd` out of `$scratch`
+   and `rm -rf $scratch`.
 
 The `events` table and the other tables bd lists in `dolt_ignore` come back
 empty from step 3's `bd migrate schema`; their contents (the events audit trail,

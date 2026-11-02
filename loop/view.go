@@ -13,10 +13,10 @@ import (
 // Seams under the live adapter's reads, so the loop's tests run with no live bd/git. The
 // adapter itself is a var (newLiveView) so a test can swap in an in-memory View.
 var (
-	listChildren = bd.ListChildren
-	landedBase   = git.LandedBase
-	headOf       = git.Head
-	openBlockers = bd.OpenBlockers
+	listChildren  = bd.ListChildren
+	landedBase    = git.LandedBase
+	headOf        = git.Head
+	splitBlockers = bd.SplitBlockers
 )
 
 // LiveReads are the raw bd/git reads under the live adapter. NewLiveViewOver takes them so a
@@ -25,9 +25,13 @@ type LiveReads struct {
 	ListChildren func(id string) ([]bd.Bead, error)
 	LandedBase   func(trailer string) (string, error)
 	Head         func(ref string) (string, error)
-	OpenBlockers func(id string) ([]bd.Bead, error)
-	Show         func(id string) (bd.Bead, error)
-	EffortRefs   func() (*git.EffortSet, error)
+	// Blockers is one edge read split by status; the closed half is used only for a Build.
+	Blockers func(id string) (open, closed []bd.Bead, err error)
+	// Contains answers in the repo of the Checkpoint it is given; nil reads as contained, so
+	// a row never holds on a guess.
+	Contains   func(cp bd.Bead, tip, sha string) (bool, error)
+	Show       func(id string) (bd.Bead, error)
+	EffortRefs func() (*git.EffortSet, error)
 }
 
 // seamReads reads through the package seam vars at call time, so a test swapping one still
@@ -37,9 +41,12 @@ func seamReads() LiveReads {
 		ListChildren: func(id string) ([]bd.Bead, error) { return listChildren(id) },
 		LandedBase:   func(t string) (string, error) { return landedBase(t) },
 		Head:         func(r string) (string, error) { return headOf(r) },
-		OpenBlockers: func(id string) ([]bd.Bead, error) { return openBlockers(id) },
-		Show:         func(id string) (bd.Bead, error) { return showBead(id) },
-		EffortRefs:   func() (*git.EffortSet, error) { return effortRefsAcross() },
+		Blockers:     func(id string) (open, closed []bd.Bead, err error) { return splitBlockers(id) },
+		Contains: func(cp bd.Bead, tip, sha string) (bool, error) {
+			return contexts.RepoOf(cp).Contains(tip, sha)
+		},
+		Show:       func(id string) (bd.Bead, error) { return showBead(id) },
+		EffortRefs: func() (*git.EffortSet, error) { return effortRefsAcross() },
 	}
 }
 
@@ -183,6 +190,17 @@ func (v *liveView) CheckpointTip(id string) (string, error) {
 	return tip, nil
 }
 
+// Contains is the ancestry read in cp's repo; a failed one is an error (ADR 0379).
+func (v *liveView) Contains(cp bd.Bead, tip, sha string) (bool, error) {
+	if v.reads.Contains == nil {
+		return true, nil
+	}
+	return v.reads.Contains(cp, tip, sha)
+}
+
+// SameRepo is whether a and b resolve to the same repo context.
+func (v *liveView) SameRepo(a, b bd.Bead) bool { return contexts.RepoOf(a) == contexts.RepoOf(b) }
+
 func (v *liveView) Blockers(b bd.Bead) ([]Blocker, error) {
 	v.mu.Lock()
 	out, ok := v.blockers[b.ID]
@@ -190,13 +208,18 @@ func (v *liveView) Blockers(b bd.Bead) ([]Blocker, error) {
 	if ok {
 		return out, nil
 	}
-	open, err := v.reads.OpenBlockers(b.ID)
+	open, closed, err := v.reads.Blockers(b.ID)
 	if err != nil {
 		return nil, err
 	}
 	out = make([]Blocker, len(open))
 	for i, x := range open {
 		out[i] = Blocker{Bead: x, Edge: EdgeBlocks}
+	}
+	if b.Kind == contract.KindBuild { // the behind-mainline leg reads landed code
+		for _, x := range closed {
+			out = append(out, Blocker{Bead: x, Edge: EdgeBlocks})
+		}
 	}
 	v.mu.Lock()
 	v.blockers[b.ID] = out

@@ -71,10 +71,15 @@ whole-description bd update:
 5. Seed fog, or finish in place with no fog. To seed fog, spawn at least one
    defog bead — mixed kinds, one or more — each a Draft child of the Chart:
      bd create --type task -s deferred -l kind:<grilling|research|prototype>,drafted-by:%[1]s \
-       --parent %[4]s --no-inherit-labels --title "..." --description "..."
+       --parent %[4]s --no-inherit-labels --deps discovered-from:%[1]s --title "..." --description "..."
    If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
-6. Wire ordering only where it's real (crew doc chart-body.md):
-     bd dep add <blocked-bead> <blocking-bead>
+6. Order only where it's real (crew doc chart-body.md): write the gate in the
+   same create, adding blocked-by:<blocking-bead> to --deps:
+     --deps discovered-from:%[1]s,blocked-by:<blocking-bead>
+   A defog bead your settling makes moot leaves the frontier through
+   mugicrew obsolete <bead> --by %[1]s (closes "%[5]s <id>"), or through
+   mugicrew supersede <bead> --with <new bead> when its question moved or it
+   duplicates another (closes "%[6]s <new id>"); never by a raw bd call.
 7. Stop. Charting is one session's work: you seed the fog and you resolve no
    defog bead yourself. Keeping the Chart, you close neither bead: mugicrew
    publishes your Drafts and closes the Survey when this session exits cleanly.
@@ -104,7 +109,8 @@ The Destination is Luffy's scope call. You may push back on it only these ways:
 - **Finish in place** a Chart with no fog left, whether or not it needs an ADR:
   you could write its whole Spec now. Only on the human's explicit assent to
   "no fog"; never on your own judgment. Then, in order:
-  1. Write any ADR the decisions need on your effort branch.
+  1. Write any ADR the decisions need on your effort branch (Read crew doc
+     sequence-number.md before numbering one).
   2. Record the decisions in the Survey's notes:
        bd update %[1]s --notes "<decisions>"
   3. For each decision, append a line naming the Survey:
@@ -118,8 +124,13 @@ The Destination is Luffy's scope call. You may push back on it only these ways:
   back and ask the human "still no fog?". On assent, re-run chart finish and
   exit clean. Otherwise draft fog (settling removes the stamp), or hand the Chart
   back for a wrong Destination.
-- **Reject** (bd close %[4]s --force --reason "<why>") or **duplicate**
-  (bd supersede %[4]s --with <original-id>) only on the human's explicit assent.
+- **Reject** (bd close %[4]s --force --reason "rejected: <why>") or **duplicate**
+  (mugicrew duplicate %[4]s <original-id>) only on the human's explicit assent.
+  Any sub-reason for a reject goes in the detail after "rejected: " and is never
+  a prefix of its own. mugicrew duplicate writes "duplicate: <original-id>" as
+  the reason before it adds the supersedes edge, refuses an unknown original or
+  a self-duplicate before any write, and closes the Chart even though the Survey
+  is still open.
 
 Do exactly one of: keep the Chart with its fog seeded, finish it in place, hand
 it back, reject it, or mark it a duplicate, before you finish. A push-back

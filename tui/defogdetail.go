@@ -109,7 +109,7 @@ func (t defogTab) rowText(r dRow) string {
 	if b.Kind == contract.KindChart {
 		title = chartName(b.Title)
 	}
-	h.WriteString(g.sbrn(b, title, true, 0) + "\n\n")
+	h.WriteString(g.withInherit(b, g.sbrn(b, title, true, 0)) + "\n\n")
 	if r.kind == dMR {
 		if url := git.RecordedMRLink(b.Description); url != "" { // read through the helper only: never derived from the iid, path or host
 			field(&h, "MR link", url)
@@ -124,7 +124,7 @@ func (t defogTab) rowText(r dRow) string {
 		}
 	}
 	if b.Kind == contract.KindChart {
-		hitl, afk, _ := chartKids(g.beads, b)
+		hitl, afk, _ := g.chartKids(b)
 		secs, order := chartSections(b.Description)
 		field(&h, "counts", fmt.Sprintf("fog %d · HITL %d · AFK %d", nonBlank(secs["not yet specified"]), len(hitl), len(afk)))
 		if r.kind == dCW || r.kind == dACW {

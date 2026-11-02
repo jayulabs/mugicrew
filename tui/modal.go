@@ -293,10 +293,13 @@ func (m Model) modalView() string {
 	return m.modalBox(d)
 }
 
-// dialogLayout is where the top modal d, a form, input dialog or surgery, draws its fields.
+// dialogLayout is where the top modal d, a form, input dialog, surgery or X dialog, draws its fields.
 func (m Model) dialogLayout(d dialog) formLayout {
 	if d.kind == surgery {
 		return m.layoutOf(m.surgeryBox(d))
+	}
+	if d.kind == xdialog {
+		return m.layoutOf(m.xBox(d))
 	}
 	return m.layoutOf(m.boxOf(d))
 }
@@ -332,7 +335,7 @@ func (m Model) boxOf(d dialog) (string, []formField) {
 	if d.kind == form {
 		styleW = m.formWidth() - 2
 	}
-	hint := lipgloss.NewStyle().Width(styleW - 2).Render(flatHints(d.bindings(), styleW-2))
+	hint, _ := hintLine(d.bindings(), styleW-2)
 	if d.kind == loopMenu {
 		hint, _ = m.loopOptsLineSpans(m.loopOptsInner())
 		d.body = m.loopMenuBody(styleW - 2)

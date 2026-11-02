@@ -66,7 +66,7 @@ func TestLookupUnknownKindIsLoudError(t *testing.T) {
 func TestSessionKindsSortedAndExcludesMechanical(t *testing.T) {
 	want := []contract.Kind{
 		"approval", "build", "chart", "chart-conflict", "checkup", "conflict", "critique", "discussion",
-		"errand", "forge-review", "grilling", "initiative", "pivot", "prototype", "research", "review",
+		"errand", "forge-review", "grilling", "initiative", "pivot", "prototype", "remnant", "research", "review",
 		"signal", "spec", "surgery", "survey",
 	}
 	got := SessionKinds()

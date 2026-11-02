@@ -75,8 +75,8 @@ func TestClosingLine(t *testing.T) {
 // Spec D1: StripKindPrefix removes every leading kind prefix, driven
 // from Kinds so a new Kind const is covered without touching this test.
 func TestStripKindPrefix(t *testing.T) {
-	if len(Kinds) != 25 {
-		t.Fatalf("len(Kinds) = %d, want 25", len(Kinds))
+	if len(Kinds) != 26 {
+		t.Fatalf("len(Kinds) = %d, want 26", len(Kinds))
 	}
 	for _, k := range Kinds {
 		if got := StripKindPrefix(string(k) + ": Foo misses bar"); got != "Foo misses bar" {
@@ -101,6 +101,20 @@ func TestStripKindPrefix(t *testing.T) {
 	} {
 		if got := StripKindPrefix(in); got != want {
 			t.Errorf("StripKindPrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDraftTitle(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{"\n## Heading\ntext", "Heading"},
+		{"\nFR: first line\n# later", "later"},
+		{"FR: only", "FR: only"},
+		{"  \n", "fb"},
+		{strings.Repeat("é", 120), strings.Repeat("é", 100)},
+	} {
+		if got := DraftTitle(tc.body, "fb"); got != tc.want {
+			t.Errorf("DraftTitle(%q) = %q, want %q", tc.body, got, tc.want)
 		}
 	}
 }

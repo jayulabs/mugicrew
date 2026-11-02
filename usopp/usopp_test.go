@@ -5,13 +5,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
@@ -19,15 +20,19 @@ import (
 )
 
 // recordingHarness is the fake contract.Harness the handler tests dispatch
-// through: it records every AFK invocation and can be made to fail. No live
-// Claude Code. Mirrors franky_test's recordingHarness.
+// through: it records every AFK invocation, can run a hook standing in for the
+// agent's writes, and can be made to fail. No live Claude Code.
 type recordingHarness struct {
-	invs []contract.Invocation
-	err  error
+	invs  []contract.Invocation
+	err   error
+	onRun func(contract.Invocation) // the agent's graph writes
 }
 
 func (h *recordingHarness) Run(_ contract.Ctx, inv contract.Invocation) (contract.Result, error) {
 	h.invs = append(h.invs, inv)
+	if h.onRun != nil {
+		h.onRun(inv)
+	}
 	return contract.Result{}, h.err
 }
 func (h *recordingHarness) LaunchCommand(contract.Invocation) (contract.LaunchCommand, error) {
@@ -42,124 +47,71 @@ type stubCtx struct{ h contract.Harness }
 
 func (c stubCtx) Harness() contract.Harness { return c.h }
 
-// usoppSeamRec captures the bd/git legs so the tests can assert the clean→Approval
-// transition, the spawn-before-close ordering, and the pinned Approval shape
-// without live bd/git. Mirrors frankySeamRec.
-type usoppSeamRec struct {
-	openCritiques int    // openChildrenOfKind(_, KindCritique) result
-	head          string // pinned HEAD returned by the head seam
-	spawned       []bd.Successor
-	closed        []string
-	events        []string  // "spawn"/"close" in call order — proves spawn-before-close
-	spawnExisting bool      // model SpawnChildIfAbsent finding an existing open Approval
-	openApprovals []bd.Bead // existing OPEN Approval children the obsoletion scans
-	reasons       []string  // close reasons, parallel to closed
-	pivots        []bd.Bead // the Checkpoint's open pivots (OpenPivots)
-	raised        []bd.Bead // open pivots discovered-from the Review (PivotsDiscoveredFrom)
-	raises        []string  // raisePivot calls: "<bead> <spec> <pivot ids>"
+// publishingCtx is a dispatched effort's Ctx: it carries the contract.Publisher.
+type publishingCtx struct {
+	stubCtx
+	closes []string
+	edges  []string
 }
 
-func stubUsoppSeams(t *testing.T, r *usoppSeamRec) {
+func (c *publishingCtx) CloseOnPublish(reason string) { c.closes = append(c.closes, reason) }
+func (c *publishingCtx) EdgeOnPublish(e bd.Edge) {
+	c.edges = append(c.edges, e.Type+" "+e.From+" "+e.To)
+}
+
+// recT is a testing.TB that records Errorf instead of failing the test, so a test can
+// provoke the fake's ADR 0070 refusal and assert on it.
+type recT struct {
+	testing.TB
+	errs []string
+}
+
+func (r *recT) Errorf(format string, args ...any) { r.errs = append(r.errs, format) }
+
+// stubGit points the git seams at pin and no changed paths.
+func stubGit(t *testing.T, pin string) {
 	t.Helper()
-	oShow, oClose, oSpawn, oOpen, oOpenBeads, oSpec, oHead := showBead, closeBead, spawnChild, openChildrenOfKind, openChildrenBeadsOfKind, specOf, head
-	oPivots, oRaise, oPublish, oSurgery := openPivots, raiseIfPivoted, closeOnPublish, surgeriesOf
-	t.Cleanup(func() {
-		showBead, closeBead, spawnChild, openChildrenOfKind, openChildrenBeadsOfKind, specOf, head = oShow, oClose, oSpawn, oOpen, oOpenBeads, oSpec, oHead
-		openPivots, raiseIfPivoted, closeOnPublish, surgeriesOf = oPivots, oRaise, oPublish, oSurgery
-	})
-	surgeriesOf = func(string) ([]bd.Bead, error) { return nil, nil }
-	oChanged := changedPaths
-	t.Cleanup(func() { changedPaths = oChanged })
+	oHead, oChanged := head, changedPaths
+	t.Cleanup(func() { head, changedPaths = oHead, oChanged })
+	head = func(string) (string, error) { return pin, nil }
 	changedPaths = func(string, string) ([]string, error) { return nil, nil }
-	openPivots = func(string) ([]bd.Bead, error) { return r.pivots, nil }
-	// The find and the raise are bd.RaiseIfPivoted's (tested in bd); Usopp's job is
-	// handing it the Review and the resolved Spec.
-	raiseIfPivoted = func(_ contract.Ctx, b bd.Bead, spec string) (bool, error) {
-		if len(r.raised) == 0 {
-			return false, nil
-		}
-		r.raises = append(r.raises, b.ID+" "+spec+" "+strings.Join(bd.IDs(r.raised), ","))
-		return true, nil
-	}
-	// Outside an effort (stubCtx) the flow publishes the Review's close itself; in
-	// one, bd.CloseOnPublish only hands it to the Publisher.
-	closeOnPublish = func(ctx contract.Ctx, id, reason string, es []bd.Edge) error {
-		if _, ok := ctx.(contract.Publisher); ok {
-			return bd.CloseOnPublish(ctx, id, reason, es)
-		}
-		r.events = append(r.events, "close")
-		r.closed = append(r.closed, id)
-		r.reasons = append(r.reasons, reason)
-		return nil
-	}
-	openChildrenBeadsOfKind = func(_ string, k contract.Kind) ([]bd.Bead, error) {
-		if k == contract.KindApproval {
-			return r.openApprovals, nil
-		}
-		return nil, nil
-	}
-	closeBead = func(id, reason string) error {
-		if id == "ws-rev" {
-			t.Errorf("the Review's close must go through the publish, not a direct close (Spec D6)")
-		}
-		r.events = append(r.events, "close")
-		r.closed = append(r.closed, id)
-		r.reasons = append(r.reasons, reason)
-		return nil
-	}
-	spawnChild = func(_ string, s bd.Successor) (string, bool, error) {
-		r.events = append(r.events, "spawn")
-		r.spawned = append(r.spawned, s)
-		return "ws-appr", !r.spawnExisting, nil
-	}
-	openChildrenOfKind = func(_ string, k contract.Kind) (int, error) {
-		if k == contract.KindCritique {
-			return r.openCritiques, nil
-		}
-		return 0, nil
-	}
-	specOf = func(string) (string, bool, error) { return "ws-spec", true, nil }
-	head = func(string) (string, error) { return r.head, nil }
-	showBead = func(id string) (bd.Bead, error) {
-		if id == "ws-cp" {
-			return bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Title: "the checkpoint title"}, nil
-		}
-		return openReview(), nil
-	}
-}
-
-// The Review prompt's Spec id comes from bd.SpecOf, so a successor Checkpoint a
-// Rollback caused (ADR 0048 §2) is reviewed against the original Spec, not "".
-func TestReviewResolvesSpecThroughSpecOf(t *testing.T) {
-	if reflect.ValueOf(specOf).Pointer() != reflect.ValueOf(bd.SpecOf).Pointer() {
-		t.Error("usopp's Spec seam must default to bd.SpecOf, not a one-hop caused-by walk")
-	}
-	r := &usoppSeamRec{head: "beefcafe", raised: []bd.Bead{{ID: "ws-piv"}}}
-	stubUsoppSeams(t, r)
-	// Stubbed as SpecOf answers a Rollback-caused parent: the Spec reached through
-	// the Rollback, which no one-hop caused-by read would find.
-	specOf = func(id string) (string, bool, error) {
-		if id != "ws-cp" {
-			return "", false, nil
-		}
-		return "ws-orig-spec", true, nil
-	}
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
-	h := &recordingHarness{}
-
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "ws-orig-spec") {
-		t.Errorf("the review prompt must name the resolved Spec, got %v", h.invs)
-	}
-	if want := []string{"ws-rev ws-orig-spec ws-piv"}; !reflect.DeepEqual(r.raises, want) {
-		t.Errorf("the pivot must relate to the resolved Spec, got %v", r.raises)
-	}
 }
 
 func openReview() bd.Bead {
 	return bd.Bead{ID: "ws-rev", Kind: contract.KindReview, Status: "in_progress", Parent: "ws-cp"}
+}
+
+func checkpoint(extra ...func(*bd.Bead)) bd.Bead {
+	b := bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Title: "the checkpoint title", CausedBy: "ws-spec"}
+	for _, e := range extra {
+		e(&b)
+	}
+	return b
+}
+
+// reviewGraph seeds the Checkpoint, its Spec and the dispatched Review, which this
+// process holds (bdtest.Claimed), so a write under its claim passes the fake.
+func reviewGraph(t *testing.T, extra ...bd.Bead) *bdtest.Fake {
+	t.Helper()
+	return bdtest.New(t, append([]bd.Bead{
+		checkpoint(),
+		{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"},
+		bdtest.Claimed(openReview()),
+	}, extra...)...)
+}
+
+func approvals(t *testing.T) []bd.Bead {
+	t.Helper()
+	as, err := bd.ChildrenOfKind("ws-cp", contract.KindApproval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return as
+}
+
+func runReviewBead(t *testing.T, h *recordingHarness) error {
+	t.Helper()
+	return Usopp{}.Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview})
 }
 
 // Launch errors for every kind — review is AFK, not launchable.
@@ -224,24 +176,20 @@ func TestReviewPromptSkillFree(t *testing.T) {
 	}
 }
 
-// Clean pass: zero open critiques ⇒ Approval spawned FIRST (pinned), THEN Review
-// closed — so "predecessor closed, successor missing" is unreachable.
+// Clean pass: zero open critiques ⇒ the pinned Approval is spawned under the Review's
+// claim and the Review closes after it.
 func TestApproveIfCleanSpawnsPinnedApprovalBeforeClose(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "cafef00d"); err != nil {
+	f := reviewGraph(t)
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if len(r.events) != 2 || r.events[0] != "spawn" || r.events[1] != "close" {
-		t.Fatalf("must spawn the Approval BEFORE closing the Review, got %v", r.events)
+	as := approvals(t)
+	if len(as) != 1 {
+		t.Fatalf("a clean pass must spawn exactly one Approval, got %v", as)
 	}
-	if len(r.spawned) != 1 {
-		t.Fatalf("a clean pass must spawn exactly one Approval, got %v", r.spawned)
-	}
-	appr := r.spawned[0]
-	if appr.Kind != contract.KindApproval || appr.Container {
-		t.Errorf("Approval must be a kind:approval leaf, got %+v", appr)
+	appr := as[0]
+	if appr.Kind != contract.KindApproval || appr.Container || appr.Parent != "ws-cp" {
+		t.Errorf("Approval must be a kind:approval leaf under the Checkpoint, got %+v", appr)
 	}
 	if appr.Title != "the checkpoint title" {
 		t.Errorf("Approval title = %q, want the Checkpoint's title verbatim", appr.Title)
@@ -249,73 +197,139 @@ func TestApproveIfCleanSpawnsPinnedApprovalBeforeClose(t *testing.T) {
 	if pin, ok := git.ParseCommit(appr.Description); !ok || pin != "cafef00d" {
 		t.Errorf("Approval must carry the Commit: pin captured at review start, got %q", appr.Description)
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-rev" {
-		t.Errorf("must close the Review after spawning, got %v", r.closed)
+	if appr.CausedBy != "ws-rev" {
+		t.Errorf("Approval must be caused-by the clean Review, got %q", appr.CausedBy)
+	}
+	if got := f.Bead("ws-rev"); got.Open() {
+		t.Errorf("the Review must close after spawning, got %+v", got)
+	}
+}
+
+// The spawn lands before the close: a failed close leaves the Approval and the open
+// Review, so "predecessor closed, successor missing" is unreachable.
+func TestApproveIfCleanSpawnPrecedesClose(t *testing.T) {
+	f := reviewGraph(t)
+	f.FailOn("Batch", "ws-rev", errors.New("batch down"))
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err == nil {
+		t.Fatal("a failed close must surface")
+	}
+	if len(approvals(t)) != 1 || !f.Bead("ws-rev").Open() {
+		t.Errorf("want the Approval spawned and the Review still open, got approvals=%v review=%+v", approvals(t), f.Bead("ws-rev"))
+	}
+}
+
+// The Approval spawn runs under the dispatched Review's claim: with it unheld the fake
+// refuses the spawn, and nothing is created or closed.
+func TestApproveIfCleanRefusesTheSpawnWithTheClaimUnheld(t *testing.T) {
+	rec := &recT{TB: t}
+	f := bdtest.New(rec, checkpoint(), bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"}, openReview())
+	review := openReview()
+	review.Status = "open" // not claimed
+	f.Seed(review)
+	if err := approveIfClean(stubCtx{}, review, "cafef00d"); err == nil {
+		t.Fatal("an unclaimed Review must not spawn the Approval")
+	}
+	if len(rec.errs) != 1 {
+		t.Errorf("want one ADR 0070 violation, got %v", rec.errs)
+	}
+	if as, _ := bd.ChildrenOfKind("ws-cp", contract.KindApproval); len(as) != 0 || !f.Bead("ws-rev").Open() {
+		t.Errorf("a refused spawn must write nothing, got approvals=%v", as)
 	}
 }
 
 // Dirty pass: ≥1 open critique ⇒ Review still closed, but NO Approval spawned.
 func TestApproveIfCleanClosesWithoutApprovalWhenCritiquesOpen(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 2}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "cafef00d"); err != nil {
+	f := reviewGraph(t,
+		bd.Bead{ID: "ws-c1", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"},
+		bd.Bead{ID: "ws-c2", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"})
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if len(r.spawned) != 0 {
-		t.Errorf("open critiques must NOT spawn an Approval, got %v", r.spawned)
+	if as := approvals(t); len(as) != 0 {
+		t.Errorf("open critiques must NOT spawn an Approval, got %v", as)
 	}
-	if len(r.closed) != 1 {
-		t.Errorf("the Review must still close on a dirty pass, got %v", r.closed)
+	if f.Bead("ws-rev").Open() {
+		t.Error("the Review must still close on a dirty pass")
 	}
 }
 
 // A frozen Checkpoint (open pivot) gets NO Approval even on a clean pass, so the
 // HITL Approval never reaches the Inbox under a pivot (FR14) — the Review still closes.
 func TestApproveIfCleanOpenPivotHoldsApproval(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0, pivots: []bd.Bead{{ID: "ws-piv"}}}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "cafef00d"); err != nil {
+	f := reviewGraph(t, bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, Status: "open"})
+	if err := bd.Blocks("ws-cp", "ws-piv"); err != nil {
+		t.Fatal(err)
+	}
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if len(r.spawned) != 0 {
-		t.Errorf("an open pivot must hold the Approval back, got %v", r.spawned)
+	if as := approvals(t); len(as) != 0 {
+		t.Errorf("an open pivot must hold the Approval back, got %v", as)
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-rev" {
-		t.Errorf("the Review must still close under a pivot, got %v", r.closed)
+	if f.Bead("ws-rev").Open() {
+		t.Error("the Review must still close under a pivot")
 	}
 }
 
-// A raise: the review agent created (or merged into) a pivot discovered-from the
-// Review. Usopp hands the Review, its Spec and the pivots to the raise (which
-// wires the gate and closes 'pivoted:') and spawns NO Approval.
+// A raise: the review agent created a pivot discovered-from the Review. Usopp hands
+// the Review, its Spec and the pivot to the raise (the gate edges, the 'pivoted:'
+// close) and spawns NO Approval.
 func TestRunPivotRaiseHandsOffWithoutApproval(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0, head: "beefcafe", raised: []bd.Bead{{ID: "ws-piv"}}}
-	stubUsoppSeams(t, r)
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
-
-	if err := (Usopp{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
+	h := &recordingHarness{onRun: func(contract.Invocation) {
+		f.Seed(bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, Status: "open", DiscoveredFrom: []string{"ws-rev"}})
+	}}
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if want := []string{"ws-rev ws-spec ws-piv"}; !reflect.DeepEqual(r.raises, want) {
-		t.Errorf("raises = %v, want %v", r.raises, want)
+	if as := approvals(t); len(as) != 0 {
+		t.Errorf("a pivoted review must spawn no Approval, got %v", as)
 	}
-	if len(r.spawned)+len(r.closed) != 0 {
-		t.Errorf("a pivoted review must spawn no Approval and close nothing itself, got spawned=%v closed=%v", r.spawned, r.closed)
+	rev := f.Bead("ws-rev")
+	if rev.Open() || rev.CloseReason != "pivoted: ws-piv" {
+		t.Errorf("the Review must close pivoted, got %+v", rev)
+	}
+	if got := f.Bead("ws-cp").BlockedBy; !slices.Equal(got, []string{"ws-piv"}) {
+		t.Errorf("the Checkpoint must be gated by the pivot, got %v", got)
+	}
+	if got := f.Bead("ws-piv").Related; !slices.Equal(got, []string{"ws-spec"}) {
+		t.Errorf("the pivot must relate to the resolved Spec, got %v", got)
 	}
 }
 
-// a no-op create (SpawnChildIfAbsent's guard) — no double approve, Review closed.
-func TestApproveIfCleanIdempotentUnderRedispatch(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0, spawnExisting: true}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "cafef00d"); err != nil {
-		t.Fatalf("approveIfClean: %v", err)
+// The Review prompt's Spec id and the pivot's relation come from bd.SpecOf, so a
+// successor Checkpoint a Rollback caused (ADR 0048 §2) is reviewed against the
+// original Spec, not "".
+func TestReviewResolvesSpecThroughTheRollback(t *testing.T) {
+	stubGit(t, "beefcafe")
+	cp := checkpoint(func(b *bd.Bead) { b.CausedBy = "ws-rb" })
+	bdtest.New(t, cp,
+		bd.Bead{ID: "ws-rb", Kind: contract.KindRollback, Status: "closed", Related: []string{"ws-old-cp"}},
+		bd.Bead{ID: "ws-old-cp", Kind: contract.KindCheckpoint, Status: "closed", CausedBy: "ws-orig-spec"},
+		bd.Bead{ID: "ws-orig-spec", Kind: contract.KindSpec, Status: "closed"},
+		bdtest.Claimed(openReview()))
+	h := &recordingHarness{}
+	if err := runReviewBead(t, h); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if len(r.spawned) != 1 || len(r.closed) != 1 {
-		t.Errorf("re-dispatch must spawn-if-absent once and close, got spawned=%v closed=%v", r.spawned, r.closed)
+	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "ws-orig-spec") {
+		t.Errorf("the review prompt must name the resolved Spec, got %v", h.invs)
+	}
+}
+
+// A re-dispatch finding the Approval already open at the pin reuses it: no second
+// Approval, and the Review closes.
+func TestApproveIfCleanIdempotentUnderRedispatch(t *testing.T) {
+	f := reviewGraph(t)
+	for range 2 {
+		if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err != nil {
+			t.Fatalf("approveIfClean: %v", err)
+		}
+		f.Mutate("ws-rev", func(b *bd.Bead) { *b = bdtest.Claimed(openReview()) }) // the next dispatch
+	}
+	if as := approvals(t); len(as) != 1 {
+		t.Errorf("re-dispatch must converge on one Approval, got %v", as)
 	}
 }
 
@@ -323,186 +337,215 @@ func TestApproveIfCleanIdempotentUnderRedispatch(t *testing.T) {
 // spawning, so SpawnChildIfAbsent can't reuse an Approval pinned to a superseded
 // commit — the FR31 self-heal. The fresh Approval is pinned at the new HEAD.
 func TestApproveIfCleanObsoletesStaleApproval(t *testing.T) {
-	r := &usoppSeamRec{
-		openCritiques: 0,
-		openApprovals: []bd.Bead{{ID: "ws-appr-old", Kind: contract.KindApproval, Status: "open", Description: git.CommitPin("oldsha")}},
-	}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "newsha"); err != nil {
+	f := reviewGraph(t, bd.Bead{ID: "ws-appr-old", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Description: git.CommitPin("oldsha")})
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "newsha"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if !contains(r.closed, "ws-appr-old") {
-		t.Errorf("a stale-pinned open Approval must be obsoleted, closed=%v", r.closed)
+	if old := f.Bead("ws-appr-old"); old.Open() {
+		t.Errorf("a stale-pinned open Approval must be obsoleted, got %+v", old)
 	}
-	if len(r.spawned) != 1 {
-		t.Fatalf("a fresh Approval must be spawned, got %v", r.spawned)
+	if got := f.Bead("ws-appr-old").CloseReason; got != bd.ApprovalObsoletedReason {
+		t.Errorf("obsoleted Approval reason = %q, want %q", got, bd.ApprovalObsoletedReason)
 	}
-	if pin, ok := git.ParseCommit(r.spawned[0].Description); !ok || pin != "newsha" {
-		t.Errorf("the respawned Approval must pin the new HEAD, got %q", r.spawned[0].Description)
+	open, err := bd.OpenChildrenOfKindBeads("ws-cp", contract.KindApproval)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("a fresh Approval must be spawned, got %v, %v", open, err)
 	}
-	if !contains(r.closed, "ws-rev") {
-		t.Errorf("the Review must still close, closed=%v", r.closed)
+	if pin, ok := git.ParseCommit(open[0].Description); !ok || pin != "newsha" {
+		t.Errorf("the respawned Approval must pin the new HEAD, got %q", open[0].Description)
+	}
+	if f.Bead("ws-rev").Open() {
+		t.Error("the Review must still close")
 	}
 }
 
 // An open Approval ALREADY at HEAD is NOT obsoleted — SpawnChildIfAbsent reuses it,
 // so a plain re-dispatch (HEAD unchanged) neither churns nor double-approves.
 func TestApproveIfCleanKeepsApprovalAlreadyAtHead(t *testing.T) {
-	r := &usoppSeamRec{
-		openCritiques: 0,
-		spawnExisting: true,
-		openApprovals: []bd.Bead{{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Description: git.CommitPin("samehead")}},
-	}
-	stubUsoppSeams(t, r)
-
-	if err := approveIfClean(stubCtx{}, openReview(), "samehead"); err != nil {
+	f := reviewGraph(t, bd.Bead{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Description: git.CommitPin("samehead")})
+	if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "samehead"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if contains(r.closed, "ws-appr") {
-		t.Errorf("an Approval already at HEAD must NOT be obsoleted, closed=%v", r.closed)
+	if !f.Bead("ws-appr").Open() {
+		t.Error("an Approval already at HEAD must NOT be obsoleted")
 	}
-	if len(r.closed) != 1 || r.closed[0] != "ws-rev" {
-		t.Errorf("only the Review should close, got %v", r.closed)
+	if as := approvals(t); len(as) != 1 {
+		t.Errorf("only the existing Approval should remain, got %v", as)
 	}
-}
-
-func contains(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
+	if f.Bead("ws-rev").Open() {
+		t.Error("the Review should close")
 	}
-	return false
 }
 
 // Run(review) pins the branch HEAD, forks the read-only review agent anchored to
 // the bead, then drives the clean→Approval transition through to spawn+close.
 func TestRunReviewPinsForksThenApproves(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0, head: "beefcafe"}
-	stubUsoppSeams(t, r)
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
 	h := &recordingHarness{}
-
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(h.invs) != 1 || h.invs[0].BeadID != "ws-rev" || !strings.Contains(h.invs[0].Prompt, "beefcafe") {
 		t.Fatalf("review must fork the agent anchored to the bead, carrying the pinned SHA, got %v", h.invs)
 	}
-	if len(r.events) != 2 || r.events[0] != "spawn" || r.events[1] != "close" {
-		t.Errorf("review must drive the spawn-before-close transition, got %v", r.events)
+	as := approvals(t)
+	if len(as) != 1 || f.Bead("ws-rev").Open() {
+		t.Fatalf("review must spawn the Approval and close, got approvals=%v", as)
 	}
-	if pin, ok := git.ParseCommit(r.spawned[0].Description); !ok || pin != "beefcafe" {
-		t.Errorf("the Approval must be pinned at the HEAD captured at review start, got %q", r.spawned[0].Description)
+	if pin, ok := git.ParseCommit(as[0].Description); !ok || pin != "beefcafe" {
+		t.Errorf("the Approval must be pinned at the HEAD captured at review start, got %q", as[0].Description)
 	}
 }
 
 // A fork failure propagates so the Review stays open (not closed) — the loop
 // re-dispatches next tick. No spawn, no close.
 func TestRunForkFailureLeavesReviewOpen(t *testing.T) {
-	r := &usoppSeamRec{openCritiques: 0, head: "beefcafe"}
-	stubUsoppSeams(t, r)
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
 	h := &recordingHarness{err: errors.New("review session crashed")}
-
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err == nil {
+	if err := runReviewBead(t, h); err == nil {
 		t.Fatal("a fork failure must propagate")
 	}
-	if len(r.closed) != 0 || len(r.spawned) != 0 {
-		t.Errorf("a fork failure must not touch the graph, got closed=%v spawned=%v", r.closed, r.spawned)
+	if len(approvals(t)) != 0 || !f.Bead("ws-rev").Open() {
+		t.Error("a fork failure must not touch the graph")
 	}
 }
 
 // A re-dispatch after the Review already closed is a no-op — no re-fork, no double
 // approve, no double close.
 func TestRunClosedReviewIsNoOp(t *testing.T) {
-	r := &usoppSeamRec{head: "beefcafe"}
-	stubUsoppSeams(t, r)
+	stubGit(t, "beefcafe")
 	closed := openReview()
 	closed.Status = "closed"
-	showBead = func(string) (bd.Bead, error) { return closed, nil }
+	reviewGraph(t, closed)
 	h := &recordingHarness{}
-
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(h.invs) != 0 || len(r.spawned) != 0 || len(r.closed) != 0 {
-		t.Errorf("a closed Review must be a no-op, got invs=%v spawned=%v closed=%v", h.invs, r.spawned, r.closed)
+	if len(h.invs) != 0 || len(approvals(t)) != 0 {
+		t.Errorf("a closed Review must be a no-op, got invs=%v approvals=%v", h.invs, approvals(t))
 	}
 }
 
 // An unowned kind is a loud error, mirroring Franky.Run.
 func TestRunUnknownKindErrors(t *testing.T) {
-	stubUsoppSeams(t, &usoppSeamRec{})
-	showBead = func(id string) (bd.Bead, error) {
-		return bd.Bead{ID: id, Kind: contract.KindBuild, Status: "open"}, nil
-	}
+	bdtest.New(t, bd.Bead{ID: "x", Kind: contract.KindBuild, Status: "open"})
 	if err := (Usopp{}).Run(stubCtx{&recordingHarness{}}, contract.Bead{ID: "x", Kind: contract.KindBuild}); err == nil {
 		t.Error("a kind Usopp doesn't own must error")
 	}
 }
 
 // FR49 wiring: a confirm sweep closes the Review mid-session and the fork fails; the
-// runner reports it done: no error, no Approval, no edge, no close.
+// runner reports it done: no error, no Approval, no edge.
 func TestRunOverSweepClosedReviewIsNoOp(t *testing.T) {
-	for name, forkErr := range map[string]error{"fork failed": errors.New("session killed")} {
-		r := &usoppSeamRec{head: "beefcafe", raised: []bd.Bead{{ID: "ws-piv"}}}
-		stubUsoppSeams(t, r)
-		reads := 0
-		showBead = func(string) (bd.Bead, error) {
-			b := openReview()
-			if reads++; reads > 1 { // closed by the sweep after the dispatch read
-				b.Status = "closed"
-			}
-			return b, nil
-		}
-		if err := (Usopp{}).Run(stubCtx{&recordingHarness{err: forkErr}}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
-			t.Errorf("%s: Run = %v, want nil (swept is done)", name, err)
-		}
-		if len(r.closed)+len(r.spawned)+len(r.raises) != 0 {
-			t.Errorf("%s: swept Review touched the graph: closed=%v spawned=%v raises=%v", name, r.closed, r.spawned, r.raises)
-		}
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t, bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, Status: "open", DiscoveredFrom: []string{"ws-rev"}})
+	h := &recordingHarness{err: errors.New("session killed"), onRun: func(contract.Invocation) {
+		f.Mutate("ws-rev", func(b *bd.Bead) { b.Status = "closed"; b.CloseReason = "swept" })
+	}}
+	if err := runReviewBead(t, h); err != nil {
+		t.Errorf("Run = %v, want nil (swept is done)", err)
 	}
-}
-
-// publishingCtx is a dispatched effort's Ctx: it carries the contract.Publisher.
-type publishingCtx struct {
-	stubCtx
-	closes []string
-	edges  []string
-}
-
-func (c *publishingCtx) CloseOnPublish(reason string) { c.closes = append(c.closes, reason) }
-func (c *publishingCtx) EdgeOnPublish(e bd.Edge) {
-	c.edges = append(c.edges, e.Type+" "+e.From+" "+e.To)
+	if len(approvals(t)) != 0 || f.Bead("ws-rev").CloseReason != "swept" || len(f.Bead("ws-cp").BlockedBy) != 0 {
+		t.Error("swept Review touched the graph")
+	}
 }
 
 // Spec D6 / FR 23: in a dispatched effort approveIfClean hands the Review's close
 // to the publish, so the drafted critiques and the close become visible together;
 // the Approval stays a one-call create.
 func TestApproveIfCleanHandsCloseToPublish(t *testing.T) {
-	r := &usoppSeamRec{}
-	stubUsoppSeams(t, r)
+	f := reviewGraph(t)
 	ctx := &publishingCtx{}
-	if err := approveIfClean(ctx, openReview(), "cafef00d"); err != nil {
+	if err := approveIfClean(ctx, f.Bead("ws-rev"), "cafef00d"); err != nil {
 		t.Fatalf("approveIfClean: %v", err)
 	}
-	if len(r.closed) != 0 || len(ctx.closes) != 1 || ctx.closes[0] != "" {
-		t.Errorf("the Review's close must be handed to the publish once, closed=%v handed=%v", r.closed, ctx.closes)
+	as := approvals(t)
+	if len(as) != 1 {
+		t.Fatal("a clean pass still spawns the Approval directly")
 	}
-	if len(r.spawned) != 1 {
-		t.Errorf("a clean pass still spawns the Approval directly, got %v", r.spawned)
+	if !f.Bead("ws-rev").Open() || len(ctx.closes) != 1 || ctx.closes[0] != "clean: "+as[0].ID {
+		t.Errorf("the Review's close must be handed to the publish once, as clean: <approval id> (want %q), handed=%v", "clean: "+as[0].ID, ctx.closes)
+	}
+}
+
+func critiques(n int) []bd.Bead {
+	var out []bd.Bead
+	for i := 1; i <= n; i++ {
+		out = append(out, bd.Bead{ID: "ws-crit" + strconv.Itoa(i), Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"})
+	}
+	return out
+}
+
+func TestReviewCloseReason(t *testing.T) {
+	c, p := critiques(2), []bd.Bead{{ID: "ws-p1"}, {ID: "ws-p2"}}
+	for name, tc := range map[string]struct {
+		critiques, pivots []bd.Bead
+		approval, want    string
+	}{
+		"clean":              {nil, nil, "ws-appr", "clean: ws-appr"},
+		"one critique":       {c[:1], nil, "", "critiqued: ws-crit1"},
+		"several critiques":  {c, nil, "", "critiqued: ws-crit1, ws-crit2"},
+		"pivots only":        {nil, p, "", "held: pivot ws-p1, ws-p2"},
+		"critiques + pivots": {c[:1], p, "", "critiqued: ws-crit1"},
+	} {
+		if got := reviewCloseReason(tc.critiques, tc.pivots, tc.approval); got != tc.want {
+			t.Errorf("%s: reason = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// Every outcome closes with its named reason.
+func TestApproveIfCleanClosesWithNamedReason(t *testing.T) {
+	pivot := bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, Status: "open"}
+	for name, tc := range map[string]struct {
+		extra  []bd.Bead
+		pivot  bool
+		reused bool
+		want   string // "" = clean: <the Approval's id>
+	}{
+		"clean":            {},
+		"reused approval":  {extra: []bd.Bead{{ID: "ws-appr", Kind: contract.KindApproval, Status: "open", Parent: "ws-cp", Description: git.CommitPin("cafef00d")}}, reused: true},
+		"critiques":        {extra: critiques(2), want: "critiqued: ws-crit1, ws-crit2"},
+		"pivots":           {extra: []bd.Bead{pivot}, pivot: true, want: "held: pivot ws-piv"},
+		"critiques+pivots": {extra: append(critiques(1), pivot), pivot: true, want: "critiqued: ws-crit1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := reviewGraph(t, tc.extra...)
+			if tc.pivot {
+				if err := bd.Blocks("ws-cp", "ws-piv"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := approveIfClean(stubCtx{}, f.Bead("ws-rev"), "cafef00d"); err != nil {
+				t.Fatalf("approveIfClean: %v", err)
+			}
+			want := tc.want
+			if want == "" {
+				as := approvals(t)
+				if len(as) != 1 {
+					t.Fatalf("a clean pass must leave one Approval, got %v", as)
+				}
+				if tc.reused && as[0].ID != "ws-appr" {
+					t.Errorf("the Approval at head must be reused, got %v", as)
+				}
+				want = "clean: " + as[0].ID
+			}
+			if got := f.Bead("ws-rev").CloseReason; got != want {
+				t.Errorf("reason = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
 // An in-process effort killed under abort (ADR 0083, FR45) surfaces as a failure:
 // a harness Run error makes Usopp's Run return non-nil, never a success.
 func TestRunPropagatesHarnessError(t *testing.T) {
-	stubUsoppSeams(t, &usoppSeamRec{head: "beefcafe"})
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
+	stubGit(t, "beefcafe")
+	reviewGraph(t)
 	h := &recordingHarness{err: errors.New("claude -p: signal: terminated")}
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err == nil {
+	if err := runReviewBead(t, h); err == nil {
 		t.Fatal("a harness Run error must make Usopp's Run fail")
 	}
 }
@@ -556,13 +599,12 @@ var emptyShow = regexp.MustCompile("bd show [^a-z<]")
 // runReview on a Spec-less Checkpoint with a Surgery member hands the review the
 // Surgery as its intent source (Spec D6), re-reviews included.
 func TestReviewResolvesSurgeryWhenNoSpec(t *testing.T) {
-	r := &usoppSeamRec{head: "beefcafe"}
-	stubUsoppSeams(t, r)
-	specOf = func(string) (string, bool, error) { return "", false, nil }
-	surgeriesOf = func(id string) ([]bd.Bead, error) { return []bd.Bead{{ID: "ws-surg", Title: "t"}}, nil }
-	showBead = func(string) (bd.Bead, error) { return openReview(), nil }
+	stubGit(t, "beefcafe")
+	bdtest.New(t, checkpoint(func(b *bd.Bead) { b.CausedBy = "" }),
+		bd.Bead{ID: "ws-surg", Title: "t", Kind: contract.KindSurgery, Status: "open", Parent: "ws-cp"},
+		bdtest.Claimed(openReview()))
 	h := &recordingHarness{}
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(h.invs) != 1 || !strings.Contains(h.invs[0].Prompt, "- ws-surg: t") || strings.Contains(h.invs[0].Prompt, "kind:pivot") {
@@ -590,15 +632,11 @@ var ctxFocus = "\n\n" + contexts.FocusLine(map[string]string{"mugicrew": "apps/m
 // labelled Checkpoint; no table or an unlabelled one changes nothing.
 func TestReviewFocusLine(t *testing.T) {
 	run := func(label string) string {
-		stubUsoppSeams(t, &usoppSeamRec{head: "beefcafe"})
-		showBead = func(id string) (bd.Bead, error) {
-			if id == "ws-cp" {
-				return bd.Bead{ID: id, Kind: contract.KindCheckpoint, Status: "open", Labels: []string{label}}, nil
-			}
-			return openReview(), nil
-		}
+		stubGit(t, "beefcafe")
+		bdtest.New(t, checkpoint(func(b *bd.Bead) { b.Labels = []string{label} }),
+			bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"}, bdtest.Claimed(openReview()))
 		h := &recordingHarness{}
-		if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+		if err := runReviewBead(t, h); err != nil {
 			t.Fatal(err)
 		}
 		return h.invs[0].Prompt
@@ -614,19 +652,17 @@ func TestReviewFocusLine(t *testing.T) {
 	}
 }
 
-// FR 23 / D5: a no-context Workspace never reads the Checkpoint.
+// FR 23 / D5: a no-context Workspace never reads the Checkpoint before the launch.
 func TestReviewNoContextsNeverShowsCheckpoint(t *testing.T) {
-	stubUsoppSeams(t, &usoppSeamRec{head: "beefcafe"})
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
 	ctxRepo(t, "")
-	h := &recordingHarness{}
-	showBead = func(id string) (bd.Bead, error) {
-		// The Approval spawn after the run may title itself from the Checkpoint; the launch may not.
-		if id == "ws-cp" && len(h.invs) == 0 {
-			t.Fatal("bd show on the Checkpoint before launch with no contexts declared")
+	h := &recordingHarness{onRun: func(contract.Invocation) {
+		if slices.Contains(f.Calls(), "Show ws-cp") {
+			t.Error("bd show on the Checkpoint before launch with no contexts declared")
 		}
-		return openReview(), nil
-	}
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	}}
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -636,8 +672,9 @@ func TestReviewNoContextsNeverShowsCheckpoint(t *testing.T) {
 // how many times the changed-paths seam ran.
 func runFocused(t *testing.T, labels []string, paths []string) (string, int) {
 	t.Helper()
-	r := &usoppSeamRec{head: "beefcafe"}
-	stubUsoppSeams(t, r)
+	stubGit(t, "beefcafe")
+	bdtest.New(t, checkpoint(func(b *bd.Bead) { b.Labels = labels }),
+		bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"}, bdtest.Claimed(openReview()))
 	root := t.TempDir()
 	if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
@@ -649,16 +686,7 @@ func runFocused(t *testing.T, labels []string, paths []string) (string, int) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	show := showBead
-	showBead = func(id string) (bd.Bead, error) {
-		if id == "ws-cp" {
-			return bd.Bead{ID: "ws-cp", Kind: contract.KindCheckpoint, Status: "open", Labels: labels}, nil
-		}
-		return show(id)
-	}
 	calls := 0
-	old := changedPaths
-	t.Cleanup(func() { changedPaths = old })
 	changedPaths = func(base, rev string) ([]string, error) {
 		calls++
 		if rev != "beefcafe" {
@@ -667,7 +695,7 @@ func runFocused(t *testing.T, labels []string, paths []string) (string, int) {
 		return paths, nil
 	}
 	h := &recordingHarness{}
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	return h.invs[0].Prompt, calls
@@ -696,7 +724,7 @@ func TestReviewListsOutOfScopePathsOnlyForALabelledCheckpoint(t *testing.T) {
 // A repo = context's Checkpoint is reviewed in the child: its branch head is the pin,
 // no out-of-scope paths are computed, and the prompt carries the repo addendum.
 func TestReviewOfANestedCheckpointPinsAndScopesInTheChild(t *testing.T) {
-	stubUsoppSeams(t, &usoppSeamRec{head: "workspacepin"})
+	stubGit(t, "workspacepin")
 	ctxRepo(t, "[context.c]\nrepo = \"vendor/c\"\n")
 	child, _ := os.Getwd()
 	child += "/vendor/c"
@@ -713,15 +741,11 @@ func TestReviewOfANestedCheckpointPinsAndScopesInTheChild(t *testing.T) {
 	git("commit", "-q", "--allow-empty", "-m", "r")
 	git("branch", "checkpoint/ws-cp")
 	childHead := git("rev-parse", "checkpoint/ws-cp")
-	showBead = func(id string) (bd.Bead, error) {
-		if id == "ws-cp" {
-			return bd.Bead{ID: id, Kind: contract.KindCheckpoint, Status: "open", Labels: []string{"context:c"}}, nil
-		}
-		return openReview(), nil
-	}
+	bdtest.New(t, checkpoint(func(b *bd.Bead) { b.Labels = []string{"context:c"} }),
+		bd.Bead{ID: "ws-spec", Kind: contract.KindSpec, Status: "closed"}, bdtest.Claimed(openReview()))
 	changedPaths = func(string, string) ([]string, error) { t.Fatal("changedPaths for a repo context"); return nil, nil }
 	h := &recordingHarness{}
-	if err := (Usopp{}).Run(stubCtx{h}, contract.Bead{ID: "ws-rev", Kind: contract.KindReview}); err != nil {
+	if err := runReviewBead(t, h); err != nil {
 		t.Fatal(err)
 	}
 	p := h.invs[0].Prompt
@@ -732,5 +756,154 @@ func TestReviewOfANestedCheckpointPinsAndScopesInTheChild(t *testing.T) {
 	}
 	if strings.Contains(p, "workspacepin") {
 		t.Error("pinned the Workspace's head")
+	}
+}
+
+// The Critique backstop runs once, before any raise or close, on the clean,
+// with-Critiques and pivoted paths alike: a Critique Draft the Review filed without
+// --deps comes out discovered-from it, the edge written before the Review closes.
+func TestTailTiesCritiquesBeforeRaiseOrClose(t *testing.T) {
+	cases := map[string]struct {
+		extra   []bd.Bead
+		pivoted bool
+	}{
+		"clean":          {},
+		"with-critiques": {extra: []bd.Bead{{ID: "ws-c1", Kind: contract.KindCritique, Status: "open", Parent: "ws-cp"}}},
+		"pivoted":        {pivoted: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			stubGit(t, "beefcafe")
+			f := reviewGraph(t, c.extra...)
+			h := &recordingHarness{onRun: func(contract.Invocation) {
+				f.Seed(bdtest.Draft("ws-rev", bd.Bead{ID: "ws-crit", Kind: contract.KindCritique}))
+				if c.pivoted {
+					f.Seed(bd.Bead{ID: "ws-piv", Kind: contract.KindPivot, Status: "open", DiscoveredFrom: []string{"ws-rev"}})
+				}
+			}}
+			if err := runReviewBead(t, h); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if crit := f.Bead("ws-crit"); !slices.Contains(crit.DiscoveredFrom, "ws-rev") {
+				t.Errorf("the Critique must be discovered-from the Review, got %+v", crit)
+			}
+			if f.Bead("ws-rev").Open() {
+				t.Error("the Review must close")
+			}
+			if !f.EdgeBeforeClose("ws-crit", "ws-rev", "ws-rev") {
+				t.Errorf("tie must come before any raise or close, calls %v", f.Calls())
+			}
+		})
+	}
+}
+
+// A Review session that closes its own bead still gets the backstop: dispatch
+// publishes that bead's Drafts, so a kind:critique Draft filed without --deps
+// must come out discovered-from the Review.
+func TestTailTiesCritiquesWhenSessionClosesItsOwnBead(t *testing.T) {
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
+	h := &recordingHarness{onRun: func(contract.Invocation) {
+		f.Seed(bdtest.Draft("ws-rev", bd.Bead{ID: "ws-crit", Kind: contract.KindCritique}))
+		if err := f.Close([]string{"ws-rev"}, "done", false); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := runReviewBead(t, h); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if crit := f.Bead("ws-crit"); !slices.Contains(crit.DiscoveredFrom, "ws-rev") {
+		t.Errorf("the Critique must be discovered-from the Review, got %+v", crit)
+	}
+}
+
+// Both Critique creates (per-finding and aggregate) carry the Review's edge.
+func TestReviewPromptCritiqueCreatesCarryReviewEdge(t *testing.T) {
+	p := reviewPrompt(reviewArgs{ReviewID: "ws-rev", CheckpointID: "ws-cp", SpecID: "ws-spec", Branch: "checkpoint/ws-cp", Pin: "deadbeef"})
+	i := strings.Index(p, "bd create --type task --labels kind:critique")
+	if i < 0 {
+		t.Fatal("review prompt lacks the per-finding Critique create")
+	}
+	n := strings.Index(p[i:], "--title")
+	if n < 0 {
+		t.Fatal("per-finding Critique create has no --title")
+	}
+	create := p[i : i+n]
+	if !strings.Contains(create, "--deps discovered-from:ws-rev") {
+		t.Errorf("per-finding create lacks the Review edge: %q", create)
+	}
+	j := strings.Index(p, "aggregate")
+	if j < 0 {
+		t.Fatal("review prompt lacks the aggregate Critique section")
+	}
+	m := strings.Index(p[j:], "severity gate")
+	if m < 0 {
+		t.Fatal("review prompt lacks the severity gate after the aggregate section")
+	}
+	agg := p[j : j+m]
+	if !strings.Contains(agg, "--deps discovered-from:ws-rev") {
+		t.Errorf("aggregate create lacks the Review edge: %q", agg)
+	}
+}
+
+func reviewDescWrites(f *bdtest.Fake) int {
+	n := 0
+	for _, c := range f.Calls() {
+		if c == "SetField ws-rev" {
+			n++
+		}
+	}
+	return n
+}
+
+func countCommitLines(body string) int {
+	n := 0
+	for _, l := range strings.Split(body, "\n") {
+		if strings.HasPrefix(l, "Commit:") {
+			n++
+		}
+	}
+	return n
+}
+
+// Review start writes one Commit: line onto the Review before the session forks, and
+// the clean tail's Approval carries the same pin.
+func TestRunReviewWritesThePinBeforeTheFork(t *testing.T) {
+	stubGit(t, "beefcafe")
+	f := reviewGraph(t)
+	var atFork string
+	h := &recordingHarness{onRun: func(contract.Invocation) { atFork = f.Bead("ws-rev").Description }}
+	if err := runReviewBead(t, h); err != nil {
+		t.Fatal(err)
+	}
+	if pin, ok := git.ParseCommit(atFork); !ok || pin != "beefcafe" || countCommitLines(atFork) != 1 {
+		t.Errorf("at fork the Review body = %q, want exactly one Commit: beefcafe", atFork)
+	}
+	if got, _ := git.ParseCommit(approvals(t)[0].Description); got != "beefcafe" {
+		t.Errorf("Approval pin = %q, want the Review's", got)
+	}
+}
+
+// A re-dispatch replaces the line with the new head, writes nothing at the same head,
+// and keeps every other line (Jinbe's not-carried note).
+func TestRunReviewRedispatchRewritesThePin(t *testing.T) {
+	note := "Renumber not carried: reason."
+	f := reviewGraph(t)
+	f.Mutate("ws-rev", func(b *bd.Bead) { b.Description = "Review.\n" + git.CommitPin("old") + "\n" + note })
+	stubGit(t, "newhead")
+	h := &recordingHarness{err: errors.New("crash")} // leaves the Review open
+	if err := runReviewBead(t, h); err == nil {
+		t.Fatal("session error must propagate")
+	}
+	want := "Review.\nCommit: newhead\n" + note
+	if got := f.Bead("ws-rev").Description; got != want {
+		t.Fatalf("after a session error the body = %q, want the pin written and note kept: %q", got, want)
+	}
+	before := reviewDescWrites(f)
+	if err := runReviewBead(t, h); err == nil {
+		t.Fatal("session error must propagate")
+	}
+	if reviewDescWrites(f) != before {
+		t.Error("a re-dispatch at the same head must not write the description")
 	}
 }

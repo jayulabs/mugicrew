@@ -4,7 +4,9 @@
 // derived landed base → one Checkpoint epic spawned in succession →
 // checkpoint/<id> cut from that base → an AFK slicing agent forked over the Spec
 // (it lays the Builds itself, ADR 0015) → the Spec closed. Launch opens the one
-// HITL kind, pivot: the triage session over a frozen Checkpoint (ADR 0046).
+// HITL kind, pivot: the triage session over a frozen Checkpoint (ADR 0046). The
+// triage session ends in one of four sweep verbs: pivot confirm, escalate, dismiss
+// or amend (Confirm, Escalate, Dismiss, Amend).
 package zoro
 
 import (
@@ -32,7 +34,7 @@ var _ contract.Crewmate = Zoro{}
 // Nami.Run — Run IS reconcile for the dispatched bead; fresh graph each dispatch,
 // spec §5/§8.2).
 func (Zoro) Run(ctx contract.Ctx, bead contract.Bead) error {
-	b, err := showBead(bead.ID)
+	b, err := bd.Show(bead.ID)
 	if err != nil {
 		return err
 	}
@@ -44,6 +46,9 @@ func (Zoro) Run(ctx contract.Ctx, bead contract.Bead) error {
 // Spec (related) so the agent never works out the reverse-edge lookup. Placement
 // is the route default (RepoRoot). Any other kind is a loud error.
 func (Zoro) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand, error) {
+	if bead.Kind == contract.KindRemnant {
+		return launchRemnant(ctx, bead)
+	}
 	if bead.Kind != contract.KindPivot {
 		return nil, fmt.Errorf("zoro.Launch: kind %q is not a launchable HITL kind", bead.Kind)
 	}
@@ -51,7 +56,7 @@ func (Zoro) Launch(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand
 	if err != nil {
 		return nil, fmt.Errorf("zoro.Launch: %w", err)
 	}
-	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(pivotPrompt(bead.ID, cp, spec), cp, showBead))
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(pivotPrompt(bead.ID, cp, spec), cp, bd.Show))
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +76,34 @@ var pivotTmpl string
 
 func pivotPrompt(pivotID, checkpointID, specID string) string {
 	return fmt.Sprintf(pivotTmpl, pivotID, checkpointID, specID, contract.DraftInstruction(pivotID))
+}
+
+// remnantPrompt is the walk-through a launched Remnant runs: read the body, show
+// the stranded diff, dry-run the replay (or show the Renumber wait), recommend one
+// exit and run offshoot or respin only on the human's yes; drop is the human's X.
+//
+//go:embed prompts/remnant.md
+var remnantTmpl string
+
+func remnantPrompt(remnantID, landedID string) string {
+	return fmt.Sprintf(remnantTmpl, remnantID, landedID)
+}
+
+// launchRemnant composes the HITL command for a Remnant, resolving the landed
+// Checkpoint it is related to so the session reads it without a reverse lookup.
+func launchRemnant(ctx contract.Ctx, bead contract.Bead) (contract.LaunchCommand, error) {
+	cp, ok, err := bd.RemnantLanded(bead.ID)
+	if err != nil {
+		return nil, fmt.Errorf("zoro.Launch: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("zoro.Launch: Remnant %s is related to no landed Checkpoint", bead.ID)
+	}
+	inv, err := contract.NewInvocation(bead.ID, contexts.FocusByID(remnantPrompt(bead.ID, cp), cp, bd.Show))
+	if err != nil {
+		return nil, err
+	}
+	return ctx.Harness().LaunchCommand(inv)
 }
 
 // slicingPrompt is the fork-of-to-tickets workflow the AFK slicing session runs
@@ -122,29 +155,16 @@ func checkpointSuccessor(spec bd.Bead) bd.Successor {
 	}
 }
 
-// Seams over the bd/git legs reconcileSpec drives, so the Spec→Checkpoint-skeleton
-// flow (derive base → spawn → cut → slicing session → close) is testable with a
-// fake harness and no live bd/git. These alias the real package funcs; the zoro
-// test swaps them — the same package-level var seam nami.go exposes.
+// Seams over the git legs reconcileSpec and the sweeps drive, so the Spec→Checkpoint-
+// skeleton flow (derive base → spawn → cut → slicing session → close) is testable with
+// a fake harness and no live git. These alias the real package funcs; the zoro test
+// swaps them. The bd legs are no seams: tests seed a bdtest graph.
 var (
-	causedBy       = bd.CausedBy
-	landedBase     = git.LandedBase
-	landStrategy   = git.LandStrategyName
-	updateBody     = bd.Update
-	fetchForge     = func() (string, error) { return git.FetchMainline(git.ForgeRemote()) }
-	cutBranch      = git.CutBranch
-	spawnSuccessor = bd.SpawnSuccessorIfAbsent
-	showBead       = bd.Show
-	closeBead      = bd.Close
-	closeOnPublish = bd.CloseOnPublish
-	branchOutcome  = deleteCheckpointBranch
-	buildChildren  = bd.BuildChildren
-	errandChildren = bd.ErrandChildren
-	carry          = bd.Carry
-	initiativeOf   = bd.InitiativeOf
-
-	pivotCheckpoint = bd.PivotCheckpoint
-	pivotSpec       = bd.PivotSpec
+	landedBase    = git.LandedBase
+	landStrategy  = git.LandStrategyName
+	fetchForge    = func() (string, error) { return git.FetchMainline(git.ForgeRemote()) }
+	cutBranch     = git.CutBranch
+	branchOutcome = deleteCheckpointBranch
 
 	// The child-repo legs of a nested context's bead (Spec D2, D3); repoOf reads
 	// no config for an unlabelled bead.
@@ -173,7 +193,7 @@ func baseTrailer(kind contract.Kind, id string) string {
 // under both strategies (pre-change Specs, Specs anchored before a strategy
 // flip); with neither it is a hard error, NEVER a rev-parse main fallback.
 func checkpointBase(spec bd.Bead) (string, error) {
-	chartID, found, err := causedBy(spec.ID, contract.KindChart)
+	chartID, found, err := bd.CausedBy(spec.ID, contract.KindChart)
 	if err != nil {
 		return "", err
 	}
@@ -182,7 +202,7 @@ func checkpointBase(spec bd.Bead) (string, error) {
 		kind, id = contract.KindChart, chartID
 	}
 	if found { // a pin-landed Chart (ADR 0358) records its base on the bead; a trailer-landed one has none
-		chart, err := showBead(chartID)
+		chart, err := bd.Show(chartID)
 		if err != nil {
 			return "", err
 		}
@@ -240,22 +260,27 @@ func checkpointBase(spec bd.Bead) (string, error) {
 // A fork failure propagates, and a fork that laid zero Builds returns without
 // closing, so either way the Spec stays open and the loop re-dispatches — the
 // same gate reconcileChart applies to the Spec-body-authored Chart close.
+//
+// It runs under the Spec's claim, which its dispatcher takes: the Checkpoint
+// spawn is serialized by bd.UnderClaim(spec). A hand-run mugicrew reconcile
+// <spec> holds no claim and is outside that contract.
 func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 	base, err := checkpointBase(spec)
 	if err != nil {
 		return err
 	}
 	succ := checkpointSuccessor(spec)
-	if succ.Parent, err = initiativeOf(spec); err != nil {
+	succ.Serializer = bd.UnderClaim(spec.ID)
+	if succ.Parent, err = bd.InitiativeOf(spec); err != nil {
 		return err
 	}
-	checkpointID, _, err := spawnSuccessor(spec.ID, succ)
+	checkpointID, _, err := bd.SpawnSuccessorIfAbsent(spec.ID, succ)
 	if err != nil {
 		return err
 	}
 	// Re-entry: an Errand-only Spec's Checkpoint already closed nothing-to-land on a
 	// prior pass skips the cut and the fork and goes straight to the Spec's close.
-	cp, err := showBead(checkpointID)
+	cp, err := bd.Show(checkpointID)
 	if err != nil {
 		return err
 	}
@@ -266,7 +291,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 		// A failed publish (effort.fail / Chopper recover) may have deleted the
 		// Draft Errands: re-count, and re-slice when none remain (FR19). The fork's
 		// after: land edges target the closed Checkpoint and release at once.
-		errands, err := errandChildren(spec.ID)
+		errands, err := bd.ErrandChildren(spec.ID)
 		if err != nil {
 			return err
 		}
@@ -278,10 +303,10 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			if _, err := ctx.Harness().Run(ctx, inv); err != nil {
 				return err
 			}
-			if errands, err = errandChildren(spec.ID); err != nil {
+			if errands, err = bd.ErrandChildren(spec.ID); err != nil {
 				return err
 			}
-			builds, err := buildChildren(checkpointID)
+			builds, err := bd.BuildChildren(checkpointID)
 			if err != nil {
 				return err
 			}
@@ -292,7 +317,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 				return fmt.Errorf("reconcileSpec: slicing laid neither a Build nor an Errand for spec %s; leaving it open", spec.ID)
 			}
 		}
-		return closeOnPublish(ctx, spec.ID, "", nil)
+		return bd.CloseOnPublish(ctx, spec.ID, bd.SlicedReason+" "+checkpointID, nil)
 	}
 	if r := repoOf(spec); r != "" {
 		if err = stampCut(spec, checkpointID, r, checkpointBranch(checkpointID)); err == nil {
@@ -310,11 +335,11 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 		// reconcileChart's placeholder-body gate). A re-fork is safe for Builds
 		// (FR21) but republishes Errands, whose drafted-by label publishing strips, so
 		// a Spec holding Errands is never re-forked.
-		builds, err := buildChildren(checkpointID)
+		builds, err := bd.BuildChildren(checkpointID)
 		if err != nil {
 			return err
 		}
-		errands, err := errandChildren(spec.ID)
+		errands, err := bd.ErrandChildren(spec.ID)
 		if err != nil {
 			return err
 		}
@@ -328,10 +353,10 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			}
 			// Re-read: gate the close on an artifact existing, not on the fork
 			// returning nil (FR22, ADR 0015).
-			if builds, err = buildChildren(checkpointID); err != nil {
+			if builds, err = bd.BuildChildren(checkpointID); err != nil {
 				return err
 			}
-			if errands, err = errandChildren(spec.ID); err != nil {
+			if errands, err = bd.ErrandChildren(spec.ID); err != nil {
 				return err
 			}
 			if builds+errands == 0 {
@@ -345,7 +370,7 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			// if it did (or a human/land closed it early), closing the Spec here would
 			// bury a closed-Spec / closed-Checkpoint / open-Build corruption silently.
 			// Fail loud and leave the Spec open so a human sees it, never a quiet close.
-			cp, err := showBead(checkpointID)
+			cp, err := bd.Show(checkpointID)
 			if err != nil {
 				return err
 			}
@@ -355,35 +380,35 @@ func reconcileSpec(ctx contract.Ctx, spec bd.Bead) error {
 			// Carry the Spec's Ordering edges to the Checkpoint just before the close,
 			// outside the publish batch (ADR 0085): its dependents then wait for the
 			// Checkpoint to land. A carry error leaves the Spec open for a retry.
-			moved, skipped, err := carry(spec.ID, checkpointID)
+			moved, skipped, err := bd.Carry(spec.ID, checkpointID)
 			if err := eventlog.RecordCarry(spec, checkpointID, moved, skipped, err); err != nil {
 				return err
 			}
-			return closeOnPublish(ctx, spec.ID, "", nil)
+			return bd.CloseOnPublish(ctx, spec.ID, bd.SlicedReason+" "+checkpointID, nil)
 		}
 		if errands > 0 {
 			// Errand-only: nothing lands, so the Checkpoint closes empty and its branch
 			// goes (ADR 0015 close gate, amended). Carry first, as the Builds arm does:
 			// a carry error closes nothing and leaves both beads open for the retry.
-			cp, err := showBead(checkpointID)
+			cp, err := bd.Show(checkpointID)
 			if err != nil {
 				return err
 			}
 			if !cp.Open() {
 				return fmt.Errorf("reconcileSpec: checkpoint %s is closed before spec %s — an Errand-only Spec closes it itself; leaving Spec open", checkpointID, spec.ID)
 			}
-			moved, skipped, err := carry(spec.ID, checkpointID)
+			moved, skipped, err := bd.Carry(spec.ID, checkpointID)
 			if err := eventlog.RecordCarry(spec, checkpointID, moved, skipped, err); err != nil {
 				return err
 			}
-			if err := closeBead(checkpointID, bd.NothingToLandReason+" Errand-only Spec "+spec.ID); err != nil {
+			if err := bd.Close(checkpointID, bd.NothingToLandReason+" Errand-only Spec "+spec.ID); err != nil {
 				return err
 			}
 			// A branch outcome never fails the pass, and no land lock is taken.
 			if out, ok := branchOutcome(repoOf(spec), checkpointBranch(checkpointID)); ok {
 				eventlog.RecordBranches([]bd.BranchOutcome{out}, "checkpoint", checkpointID, "spec", spec.ID)
 			}
-			return closeOnPublish(ctx, spec.ID, "", nil)
+			return bd.CloseOnPublish(ctx, spec.ID, bd.SlicedReason+" "+checkpointID, nil)
 		}
 	}
 	return nil

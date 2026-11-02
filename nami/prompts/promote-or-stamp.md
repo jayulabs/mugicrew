@@ -33,6 +33,10 @@ Judge from the graph, not from memory:
   attempts), and kind:chart-conflict children (resolved rebases). None of them
   records a defog decision, so each settles no answer.
 
+  Count a closed defog child as answering fog only if it closed with %[6]s.
+  A child closed %[7]s is skipped: it answered nothing. A child with
+  any other reason is legacy and read as before (no migration).
+
   Closed children close the promote-side spin: a Not-yet-specified bullet can read
   as open while a now-closed child already answered it, if charting never
   back-updated the body. Without the closed children in hand you WILL

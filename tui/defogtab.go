@@ -173,7 +173,7 @@ func defogCharts(beads []bd.Bead) (cs []*bd.Bead) {
 			continue
 		}
 		if b.HasLabel("chart:defogged") {
-			if hitl, afk, _ := chartKids(beads, &beads[i]); len(hitl) == 0 && len(afk) == 0 {
+			if hitl, afk, _ := (graphData{beads: beads}).chartKids(&beads[i]); len(hitl) == 0 && len(afk) == 0 {
 				continue
 			}
 		}
@@ -184,7 +184,8 @@ func defogCharts(beads []bd.Bead) (cs []*bd.Bead) {
 
 // chartKids splits a Chart's own children into open HITL leaves (Survey first),
 // open AFK beads and closed ones, each in beadCmp order. Drafts and events are out.
-func chartKids(beads []bd.Bead, c *bd.Bead) (hitl, afk, closed []*bd.Bead) {
+func (g graphData) chartKids(c *bd.Bead) (hitl, afk, closed []*bd.Bead) {
+	beads := g.beads
 	for i, b := range beads {
 		if b.Parent != c.ID || b.Event || b.Status == "deferred" {
 			continue
@@ -198,7 +199,7 @@ func chartKids(beads []bd.Bead, c *bd.Bead) (hitl, afk, closed []*bd.Bead) {
 			afk = append(afk, &beads[i])
 		}
 	}
-	byCmp := func(a, b *bd.Bead) int { return beadCmp(*a, *b) }
+	byCmp := func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) }
 	slices.SortStableFunc(hitl, func(a, b *bd.Bead) int {
 		if (a.Kind == contract.KindSurvey) != (b.Kind == contract.KindSurvey) {
 			return boolInt(b.Kind == contract.KindSurvey) - boolInt(a.Kind == contract.KindSurvey)
@@ -250,7 +251,7 @@ func (g graphData) defogAct() []dRow {
 func (g graphData) defogBands() (wait, front, paused []dRow) {
 	var rows, afkPaused []dRow
 	for _, c := range defogCharts(g.beads) {
-		hitl, afk, _ := chartKids(g.beads, c)
+		hitl, afk, _ := g.chartKids(c)
 		for _, l := range hitl {
 			rows = append(rows, dRow{kind: dAct, key: "act:" + l.ID, b: l, chart: c, depth: 1})
 		}
@@ -282,7 +283,7 @@ func (g graphData) defogBands() (wait, front, paused []dRow) {
 			paused = append(paused, dRow{kind: dACA, key: "act:" + b.ID, b: b, chart: c, afk: true, depth: 1})
 		}
 	}
-	slices.SortStableFunc(paused, func(a, b dRow) int { return beadCmp(*a.b, *b.b) })
+	slices.SortStableFunc(paused, func(a, b dRow) int { return g.rowCmp(*a.b, *b.b) })
 	return
 }
 
@@ -319,7 +320,7 @@ func (g graphData) defogLive(flip map[string]bool) []dRow {
 	var cands []*bd.Bead
 	of := map[string]*bd.Bead{}
 	for _, c := range g.openCharts() {
-		hitl, afk, _ := chartKids(g.beads, c)
+		hitl, afk, _ := g.chartKids(c)
 		for _, b := range append(append([]*bd.Bead{c}, hitl...), afk...) {
 			cands, of[b.ID] = append(cands, b), c
 		}
@@ -381,7 +382,7 @@ func (g graphData) openCharts() []*bd.Bead {
 		if c := rank[a.ID] - rank[b.ID]; c != 0 {
 			return c
 		}
-		return beadCmp(*a, *b)
+		return g.rowCmp(*a, *b)
 	})
 	return cs
 }
@@ -428,7 +429,8 @@ func (g graphData) finishedCharts() []*bd.Bead {
 
 // chartOutcome is a closed Chart's outcome word and what decided it (ADR 0204 §4), first
 // match: landed (a Spec is caused by it; sha from its landed: Landing, "" if none), handed
-// back:, rejected, superseded (empty reason), else closed.
+// back:, rejected, superseded (a duplicate: or superseded: reason, or bd supersede's empty
+// one), else closed; the prefixes are ADR 0399 (mugicrew-every-spine-close-names-its-outcome…).
 func (g graphData) chartOutcome(c *bd.Bead) (word, sha, why string) {
 	for _, b := range g.beads {
 		if b.Kind == contract.KindSpec && b.CausedBy == c.ID {
@@ -447,7 +449,7 @@ func (g graphData) chartOutcome(c *bd.Bead) (word, sha, why string) {
 		return "handed back", "", why
 	case strings.HasPrefix(c.CloseReason, "rejected"):
 		return "rejected", "", why
-	case c.CloseReason == "":
+	case strings.HasPrefix(c.CloseReason, bd.DuplicateReason), strings.HasPrefix(c.CloseReason, bd.SupersededReason), c.CloseReason == "":
 		return "superseded", "", why
 	}
 	return "closed", "", why
@@ -456,6 +458,7 @@ func (g graphData) chartOutcome(c *bd.Bead) (word, sha, why string) {
 // defogTree is the Initiative groups with their count, and the freestanding Charts'
 // rows (depth 1, under the No Initiative header) with theirs; folds hide neither count.
 func defogTree(beads []bd.Bead, flip map[string]bool) (groups []dRow, nGroups int, loose []dRow, nLoose int) {
+	g := graphData{beads: beads}
 	inits := map[string]*bd.Bead{}
 	for i, b := range beads {
 		if b.Kind == contract.KindInitiative {
@@ -476,17 +479,17 @@ func defogTree(beads []bd.Bead, flip map[string]bool) (groups []dRow, nGroups in
 			ids = append(ids, id)
 		}
 	}
-	slices.SortStableFunc(ids, func(a, b string) int { return beadCmp(*inits[a], *inits[b]) })
+	slices.SortStableFunc(ids, func(a, b string) int { return g.rowCmp(*inits[a], *inits[b]) })
 	// charts are the Charts' rows with their leaves, at depth d.
 	charts := func(cs []*bd.Bead, d int) (rows []dRow) {
-		slices.SortStableFunc(cs, func(a, b *bd.Bead) int { return beadCmp(*a, *b) })
+		slices.SortStableFunc(cs, func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) })
 		for _, c := range cs {
 			cr := dRow{kind: dChart, key: c.ID, b: c, chart: c, depth: d}
 			rows = append(rows, cr)
 			if collapsed(flip, cr) {
 				continue
 			}
-			hitl, afk, closed := chartKids(beads, c)
+			hitl, afk, closed := g.chartKids(c)
 			for _, l := range hitl {
 				rows = append(rows, dRow{kind: dLeaf, key: l.ID, b: l, chart: c, depth: d + 1})
 			}

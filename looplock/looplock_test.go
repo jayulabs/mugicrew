@@ -462,3 +462,51 @@ func TestStatusTextWorkedExample(t *testing.T) {
 		t.Errorf("Text = %q; want %q", got, want)
 	}
 }
+
+// A failed unattended Upgrade shows in the status lines and text, beside any stale build.
+func TestStatusShowsUpgradeFailed(t *testing.T) {
+	st := Status{State: On, Pid: 7, UpgradeFailed: "1.3.0"}
+	if got := st.Text(); !strings.Contains(got, "upgrade failed: npm install of 1.3.0 failed") {
+		t.Errorf("Text = %q", got)
+	}
+}
+
+// A stop reason written while held is read once the lock is unheld, shown by Text,
+// and cleared by the next start.
+func TestStoppedForSurvivesTheLoopUntilNextStart(t *testing.T) {
+	p := tempPath(t)
+	lk, err := Acquire(p, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const why = "upgraded to 1.3.0 but its doctor tripped; run `mugicrew doctor fix`"
+	lk.Write(Status{State: Draining, StoppedFor: why})
+	lk.Close()
+	st, err := Read(p)
+	if err != nil || st.State != Off || st.StoppedFor != why {
+		t.Fatalf("Read after stop = %+v, %v; want off with StoppedFor", st, err)
+	}
+	if !strings.Contains(st.Text(), "stopped: "+why) {
+		t.Errorf("Text = %q; want the stop reason", st.Text())
+	}
+	lk, err = Acquire(p, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Close()
+	if st, _ := Read(p); st.StoppedFor != "" {
+		t.Errorf("Read after next start = %+v; want StoppedFor cleared", st)
+	}
+}
+
+func TestOnto(t *testing.T) {
+	for in, want := range map[string]string{
+		"fedcba9876543210": "main fedcba9",
+		"new-binary":       "the new binary",
+		"0.7.0":            "v0.7.0",
+	} {
+		if got := Onto(in); got != want {
+			t.Errorf("Onto(%q) = %q; want %q", in, got, want)
+		}
+	}
+}

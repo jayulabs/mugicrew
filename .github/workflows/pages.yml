@@ -3,7 +3,16 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ['site/**', '.github/workflows/pages.yml']
+    # every source the site renders: a doc or glossary edit redeploys without touching site/
+    paths:
+      - 'site/**'
+      - 'docs/install.md'
+      - 'docs/configuration.md'
+      - 'docs/gitlab.md'
+      - 'docs/jira.md'
+      - 'GLOSSARY.md'
+      - 'main.go'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:

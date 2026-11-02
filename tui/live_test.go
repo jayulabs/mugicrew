@@ -148,8 +148,8 @@ func header(m Model) string { return lines(m.View())[0] }
 // A load folds the sessions, beads and loop into the header's right side (FR6).
 func TestHeaderCountsFromLoad(t *testing.T) {
 	m := sized(t, 120, 30)
-	if h := header(m); !strings.Contains(h, dimSt.Render("0 HITL")) || !strings.Contains(h, dimSt.Render("0 AFK")) || !strings.HasSuffix(strings.TrimRight(h, " "), "loop off") {
-		t.Errorf("before any load: header = %q, want dim 0 HITL, 0 AFK and loop off", h)
+	if h := header(m); strings.Contains(h, "HITL") || strings.Contains(h, "AFK") || !strings.HasSuffix(strings.TrimRight(h, " "), "loop off") {
+		t.Errorf("before any load: header = %q, want no crew counts and loop off", h)
 	}
 	sessions := map[string]session.Info{
 		"a": {State: session.Alive},
@@ -939,4 +939,124 @@ func idsOf(bs []bd.Bead) []string {
 		out = append(out, b.ID)
 	}
 	return out
+}
+
+// A deep descendant whose Initiative lies outside the loaded set gets its effective
+// level after the ancestor read, with still one ListByID per reload.
+func TestLoadReadsOpenContainerAncestorForEffectivePriority(t *testing.T) {
+	m := sized(t, 100, 30)
+	open := []bd.Bead{
+		{ID: "cp", Status: "open", Kind: contract.KindCheckpoint, Priority: 2, Parent: "ini"},
+		{ID: "b", Status: "open", Kind: contract.KindBuild, Priority: 3, Parent: "cp"},
+	}
+	var byID [][]string
+	defer func(o1, o2 func() ([]bd.Bead, error), o3 func([]string) ([]bd.Bead, error), o4 func() ([]string, error)) {
+		listOpen, readReady, listByID, defaultIDs = o1, o2, o3, o4
+	}(listOpen, readReady, listByID, defaultIDs)
+	defaultIDs = func() ([]string, error) { return nil, nil }
+	listOpen = func() ([]bd.Bead, error) { return open, nil }
+	readReady = func() ([]bd.Bead, error) { return nil, nil }
+	listByID = func(ids []string) ([]bd.Bead, error) {
+		if !slices.Contains(ids, "ini") {
+			return nil, nil
+		}
+		byID = append(byID, ids)
+		return []bd.Bead{{ID: "ini", Status: "open", Kind: contract.KindInitiative, Priority: 0}}, nil
+	}
+	msg, ok := m.loadSlow()().(loadedMsg)
+	if !ok {
+		t.Fatal("load did not return a loadedMsg")
+	}
+	if len(byID) != 1 {
+		t.Errorf("ListByID calls = %v, want one", byID)
+	}
+	m, _ = send(t, m, msg)
+	g := m.gateData()
+	if lvl, src := g.effectivePriority(g.beadByID("b")); lvl != 0 || src != "ini" {
+		t.Errorf("effective = P%d from %q, want P0 from ini", lvl, src)
+	}
+	if g.beadIndex("ini") >= 0 {
+		t.Error("fetched ancestor was folded into the rows")
+	}
+}
+
+// A doctor-stop reason read from the lock shows on the tab bar, the loop menu rows
+// and the status line while the loop is off, and clears once the next loop writes
+// its lock without it.
+func TestLoopStoppedForShowsUntilNextStart(t *testing.T) {
+	const why = "upgraded to 1.3.0 but its doctor tripped; run `mugicrew doctor fix`"
+	m := sized(t, 200, 30)
+	m.loop = looplock.Status{State: looplock.Off, StoppedFor: why}
+	if got := ansi.Strip(m.loopSegment()); got != "loop stopped" {
+		t.Errorf("segment = %q, want loop stopped", got)
+	}
+	if rows := ansi.Strip(strings.Join(loopStatusRows(m.loop, 100), "\n")); !strings.Contains(rows, "mugicrew doctor fix") {
+		t.Errorf("loop rows %q lack the reason", rows)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, why) {
+		t.Errorf("status line lacks the reason:\n%s", v)
+	}
+	m.status = "closed a bead"
+	if v := ansi.Strip(m.View()); !strings.Contains(v, why) {
+		t.Errorf("a later status message hid the reason:\n%s", v)
+	}
+	m.status = ""
+	m.loop = looplock.Status{State: looplock.On, Pid: 1}
+	if v := ansi.Strip(m.View()); strings.Contains(v, "doctor fix") {
+		t.Errorf("reason still shown after the next loop start:\n%s", v)
+	}
+}
+
+// readBehind captures the land sha of the container behind a Build's closed cross-Checkpoint
+// blocker, and whether the Checkpoint tip holds it; the Build's own Checkpoint is skipped.
+func TestReadBehindCapturesLandAndAncestry(t *testing.T) {
+	oL, oC := readLanded, readContains
+	t.Cleanup(func() { readLanded, readContains = oL, oC })
+	readLanded = func(lines []string) (map[string]string, error) {
+		return map[string]string{git.TrailerFor("checkpoint", "ocp"): "land1"}, nil
+	}
+	readContains = func(cp bd.Bead, tip, sha string) (bool, error) { return tip == "t2", nil }
+	beads := []bd.Bead{
+		{ID: "cp", Kind: contract.KindCheckpoint, Container: true, Status: "open"},
+		{ID: "ocp", Kind: contract.KindCheckpoint, Container: true, Status: "closed"},
+		{ID: "dep", Kind: contract.KindBuild, Parent: "ocp", Status: "closed"},
+		{ID: "sib", Kind: contract.KindBuild, Parent: "cp", Status: "closed"},
+		{ID: "b", Kind: contract.KindBuild, Parent: "cp", Status: "open", BlockedBy: []string{"dep", "sib"}},
+	}
+	landed, contains := readBehind(beads, nil, map[string]string{"cp": "t1"})
+	if landed["ocp"] != "land1" || len(landed) != 1 || contains["land1@t1"] || len(contains) != 1 {
+		t.Errorf("landed %v contains %v, want ocp→land1 and land1@t1 not on the tip", landed, contains)
+	}
+	if _, contains = readBehind(beads, nil, map[string]string{"cp": "t2"}); !contains["land1@t2"] {
+		t.Errorf("contains %v, want land1@t2 on the tip", contains)
+	}
+}
+
+// A closed blocker in a landed Checkpoint that the default closed set doesn't load is read
+// by id with its parent, so readBehind still captures the land sha and ancestry.
+func TestReadBehindBeadsFetchesUnloadedClosedBlocker(t *testing.T) {
+	oL, oC := readLanded, readContains
+	t.Cleanup(func() { readLanded, readContains = oL, oC })
+	readLanded = func([]string) (map[string]string, error) {
+		return map[string]string{git.TrailerFor("checkpoint", "ocp"): "land1"}, nil
+	}
+	readContains = func(bd.Bead, string, string) (bool, error) { return false, nil }
+	seam(t, &listByID, func(ids []string) ([]bd.Bead, error) {
+		return withIDs([]bd.Bead{
+			{ID: "dep", Kind: contract.KindBuild, Parent: "ocp", Status: "closed"},
+			{ID: "ocp", Kind: contract.KindCheckpoint, Container: true, Status: "closed"},
+		}, ids), nil
+	})
+	beads := []bd.Bead{
+		{ID: "cp", Kind: contract.KindCheckpoint, Container: true, Status: "open"},
+		{ID: "b", Kind: contract.KindBuild, Parent: "cp", Status: "open", BlockedBy: []string{"dep"}},
+	}
+	extra := readBehindBeads(beads)
+	if len(extra) != 2 {
+		t.Fatalf("extra %v, want dep and ocp", extra)
+	}
+	landed, contains := readBehind(beads, extra, map[string]string{"cp": "t1"})
+	if landed["ocp"] != "land1" || contains["land1@t1"] || len(contains) != 1 {
+		t.Errorf("landed %v contains %v, want ocp→land1 off the tip", landed, contains)
+	}
 }

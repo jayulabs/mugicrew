@@ -85,7 +85,7 @@ func TestLaunchDiscussionComposesReadOnlySession(t *testing.T) {
 		"changing a Draft's status or labels",
 		"priority, type or edges",
 		"writing to or deleting any bead not labelled drafted-by:ws-disc",
-		"bd close ws-disc",
+		"bd close ws-disc --reason completed",
 		contract.ClosingLine(),
 		"propose\nSignals and Initiatives, nothing else.",
 		"You create no bead kind but a Signal or an Initiative.",
@@ -97,12 +97,21 @@ func TestLaunchDiscussionComposesReadOnlySession(t *testing.T) {
 		"never --parent a Signal",
 		"never file a member Signal into it",
 		"never cut phases",
+		"plainly a read",
+		"Never query at launch",
+		"Show each query you ran",
+		"run only on the human's explicit yes",
+		"Never ask\nfor a secret",
+		"WebFetch and\nWebSearch for any URL (cite each web claim by URL)",
+		"then the code and live\nstate (what actually runs), then git log",
+		"then the web last",
+		"Workspace wins; show the drift",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	for _, gone := range []string{"You create no bead kind but a Signal.", "only on the human's yes", "propose\nthe edit in chat", "propose\nSignals, nothing else", "propose Signals, nothing else"} {
+	for _, gone := range []string{"You create no bead kind but a Signal.", "only on the human's yes", "propose\nthe edit in chat", "propose\nSignals, nothing else", "propose Signals, nothing else", "builds, tests, the web", "preload nothing:"} {
 		if strings.Contains(p, gone) {
 			t.Errorf("prompt still contains %q", gone)
 		}
@@ -141,7 +150,7 @@ func TestLaunchRetrospectiveFramesTheDiscussion(t *testing.T) {
 	if !strings.HasPrefix(rest, retrospectiveTmpl+"\n"+discussionPrompt("ws-disc")) {
 		t.Errorf("prompt must be framing + discussion prompt after the preamble:\n%s", p)
 	}
-	for _, want := range []string{"bd show", "wc -c", "40 %", "bd search", "Seen once:", "Already on the graph:", "bd close ws-disc"} {
+	for _, want := range []string{"bd show", "wc -c", "40 %", "bd search", "Seen once:", "Already on the graph:", "bd close ws-disc --reason completed"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)
 		}
@@ -175,5 +184,14 @@ func TestRetrospectiveFramingDoesNotAskToSaveOutput(t *testing.T) {
 	}
 	if !strings.Contains(f, "| wc -c") {
 		t.Error("framing must measure by piping each render to wc -c")
+	}
+}
+
+func TestDiscussionDoneClosesCompletedAfterRetitle(t *testing.T) {
+	p := discussionPrompt("ws-disc")
+	note := strings.Index(p, "bd update ws-disc --title")
+	closeAt := strings.Index(p, "bd close ws-disc --reason completed")
+	if note < 0 || closeAt < 0 || note > closeAt {
+		t.Errorf("retitle-and-note must precede the completed close (note %d, close %d)", note, closeAt)
 	}
 }

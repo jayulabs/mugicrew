@@ -31,7 +31,7 @@ func TestLaunchMemberSectionForInitiativeParentedSignal(t *testing.T) {
 	rest := got[strings.Index(got, "## Member of an Initiative"):]
 	for _, want := range []string{"ws-ini — Big effort", "Everything ships.", "1. first (under way)", "2. second",
 		"- ws-a — signal sib [undecided] (signal)", "- ws-b — chart sib [api] (chart)",
-		`bd close ws-sig --reason "later:`, "bd supersede ws-sig --with <sibling>"} {
+		`bd close ws-sig --reason "later:`, "mugicrew duplicate ws-sig <sibling>"} {
 		if !strings.Contains(rest, want) {
 			t.Errorf("section missing %q:\n%s", want, rest)
 		}
@@ -41,7 +41,7 @@ func TestLaunchMemberSectionForInitiativeParentedSignal(t *testing.T) {
 			t.Errorf("section must not contain %q", bad)
 		}
 	}
-	if !strings.Contains(rest, "Never `bd supersede <signal> --with <initiative>`") {
+	if !strings.Contains(rest, "Never `mugicrew duplicate <signal> <initiative>`") {
 		t.Error("section must forbid superseding with the Initiative")
 	}
 	if strings.Index(rest, "ws-a —") > strings.Index(rest, "ws-b —") {

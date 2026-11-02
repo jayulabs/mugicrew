@@ -52,8 +52,20 @@ func installed(st looplock.Status) bool {
 // loopOpts is the menu's options for the loop's state, esc not included.
 func (m Model) loopOpts() []loopOpt {
 	if installed(m.loop) && !m.loopStarting {
-		return []loopOpt{{"s", "stop"}}
+		return m.withUpgrade([]loopOpt{{"s", "stop"}})
 	}
+	return m.withUpgrade(m.stateOpts())
+}
+
+// withUpgrade adds u while a Release notice is held.
+func (m Model) withUpgrade(opts []loopOpt) []loopOpt {
+	if m.releaseLatest == "" {
+		return opts
+	}
+	return append(slices.Clone(opts), loopOpt{"u", "upgrade"})
+}
+
+func (m Model) stateOpts() []loopOpt {
 	switch loopState(m.loop, m.loopStarting) {
 	case lkOff:
 		return []loopOpt{{"s", "start"}}
@@ -71,6 +83,8 @@ func (m Model) loopOpts() []loopOpt {
 // §3): dim off, green a plain on, warn otherwise. It reads the Status, never the text.
 func loopStateStyle(st looplock.Status) lipgloss.Style {
 	switch {
+	case st.State == looplock.Off && st.StoppedFor != "":
+		return warnSt
 	case st.State == looplock.Off:
 		return dimSt
 	case st.State == looplock.On && st.FailedRev == "":
@@ -200,11 +214,13 @@ func (m Model) loopMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.loopRestarting || !slices.ContainsFunc(m.loopOpts(), func(o loopOpt) bool { return o.key == k.String() }) {
 		return m, nil
 	}
-	if m.loopBusy && k.String() != "r" {
+	if m.loopBusy && k.String() != "r" && k.String() != "u" {
 		return m, nil
 	}
 	m = m.pop()
 	switch k.String() {
+	case "u":
+		return m.openUpgrade()
 	case "r":
 		m.setStatus(restartingLoop)
 		m.loopRestarting = true
@@ -346,5 +362,17 @@ func (m Model) loopSegment() string {
 	case lkStopDrain:
 		return warnSt.Render("loop draining")
 	}
+	if m.loop.StoppedFor != "" {
+		return warnSt.Render("loop stopped")
+	}
 	return dimSt.Render("loop off")
+}
+
+// statusText is the status line: a stopped loop's reason (a tripped doctor after an
+// unattended Upgrade), which stays until the next loop start, else the last result.
+func (m Model) statusText() string {
+	if m.loop.State == looplock.Off && m.loop.StoppedFor != "" {
+		return m.loop.StoppedFor
+	}
+	return m.status
 }

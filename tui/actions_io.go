@@ -28,6 +28,7 @@ import (
 	"jayulabs.org/mugicrew/loop"
 	"jayulabs.org/mugicrew/registry"
 	"jayulabs.org/mugicrew/route"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -315,7 +316,7 @@ func runHostCmd(self, id string, hold, out *os.File) *exec.Cmd {
 // left the TUI: run.failed, unclaim, release (ADR 0331).
 func spawnRunHost(r dispatch.Inflight) (*exec.Cmd, string, error) {
 	cmd, outPath, err := func() (*exec.Cmd, string, error) {
-		self, err := os.Executable()
+		self, err := selfexe.Path()
 		if err != nil {
 			return nil, "", err
 		}

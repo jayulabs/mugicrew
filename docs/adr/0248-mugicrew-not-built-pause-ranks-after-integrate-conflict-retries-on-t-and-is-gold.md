@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-10-17
+Amended by: ADR 0420 (a-build-behind-mainline-is-held…) (§2: `paused:behind-mainline` ranks after not-built and before unmet).
 Amends: ADR 0078 (failure-pause) §2/§5/§6/§7, ADR 0104 (integrate-conflict-pause-lifted-by-integrate) §4.
 
 ## Context

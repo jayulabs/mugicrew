@@ -18,7 +18,9 @@ type fakeView struct {
 	landed   map[string]Trailer
 	tips     map[string]string
 	blockers map[string][]Blocker
-	err      string // the method name that errors
+	contains map[string]bool // "sha@tip" → sha is an ancestor of tip
+	err      string          // the method name that errors
+	apart    map[string]bool // bead ids living in a different repo than every Checkpoint
 }
 
 func (f fakeView) fail(m string) error {
@@ -33,6 +35,10 @@ func (f fakeView) Landed(b bd.Bead) (Trailer, error)     { return f.landed[b.ID]
 func (f fakeView) CheckpointTip(id string) (string, error) {
 	return f.tips[id], f.fail("CheckpointTip")
 }
+func (f fakeView) Contains(_ bd.Bead, tip, sha string) (bool, error) {
+	return f.contains[ContainsKey(tip, sha)], f.fail("Contains")
+}
+func (f fakeView) SameRepo(a, b bd.Bead) bool            { return !f.apart[a.ID] && !f.apart[b.ID] }
 func (f fakeView) Blockers(b bd.Bead) ([]Blocker, error) { return f.blockers[b.ID], f.fail("Blockers") }
 func (f fakeView) Bead(id string) (bd.Bead, error) {
 	b, ok := f.beads[id]
@@ -189,6 +195,37 @@ func TestJudge(t *testing.T) {
 	}
 	add(tc{name: "inherits a chart's open blocker", b: inChart, frontier: []bd.Bead{}, view: chartBlocked, want: Verdict{Cause: CauseBlocked}, wantIDs: []string{"er"}})
 
+	// behind-mainline
+	cpBuild := build("bm", "open")
+	other := mk("ocp", contract.KindCheckpoint, "closed")
+	landedBlk := child(other, "lb", contract.KindBuild, "closed")
+	behind := fakeView{
+		beads:    map[string]bd.Bead{"cp": cp, "ocp": other},
+		tips:     map[string]string{"cp": "tip1"},
+		landed:   map[string]Trailer{"ocp": {Sha: "land1", Landed: true}},
+		blockers: map[string][]Blocker{"bm": {blk(landedBlk)}},
+	}
+	add(tc{name: "landed cross-checkpoint blocker off the tip is behind-mainline", b: cpBuild, view: behind, want: Verdict{Cause: CauseBehindMainline}, wantIDs: []string{"lb"}})
+	add(tc{name: "land sha on the tip is runnable", b: cpBuild, view: with(behind, func(v *fakeView) { v.contains = map[string]bool{"land1@tip1": true} }), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "same-checkpoint blocker never holds", b: cpBuild, view: with(behind, func(v *fakeView) {
+		v.blockers = map[string][]Blocker{"bm": {blk(closedBuild)}}
+		v.landed = map[string]Trailer{"cp": {Sha: "land1", Landed: true}}
+	}), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "container not landed never holds", b: cpBuild, view: with(behind, func(v *fakeView) { v.landed = nil }), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "carried checkpoint blocker holds", b: cpBuild, view: with(behind, func(v *fakeView) { v.blockers = map[string][]Blocker{"bm": {blk(other)}} }),
+		want: Verdict{Cause: CauseBehindMainline}, wantIDs: []string{"ocp"}})
+	add(tc{name: "unknown tip never holds", b: cpBuild, view: with(behind, func(v *fakeView) { v.tips = nil }), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "conditional blocker never holds", b: cpBuild, view: with(behind, func(v *fakeView) { v.blockers = map[string][]Blocker{"bm": {{Bead: landedBlk, Edge: EdgeConditional}}} }),
+		want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "a leaf outside a checkpoint never holds", b: leaf, view: with(behind, func(v *fakeView) { v.blockers = map[string][]Blocker{"rs": {blk(landedBlk)}} }), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "force waives behind-mainline", b: cpBuild, view: behind, in: Inputs{Force: true}, want: Verdict{Runnable: true, Action: ActionRun}}, ModeRunNow)
+	add(tc{name: "force is ignored in loop mode for behind-mainline", b: cpBuild, view: behind, in: Inputs{Force: true}, want: Verdict{Cause: CauseBehindMainline}, wantIDs: []string{"lb"}}, ModeLoop)
+	add(tc{name: "an open blocker still wins as blocked", b: cpBuild, frontier: []bd.Bead{}, view: with(behind, func(v *fakeView) { v.blockers = map[string][]Blocker{"bm": {blk(landedBlk), blk(errand)}} }),
+		want: Verdict{Cause: CauseBlocked}, wantIDs: []string{"er"}})
+	add(tc{name: "behind-mainline outranks paced", b: cpBuild, view: behind, in: Inputs{Paced: always}, want: Verdict{Cause: CauseBehindMainline}, wantIDs: []string{"lb"}}, ModeLoop)
+	add(tc{name: "cross-repo landed blocker is skipped, not an error", b: cpBuild, view: with(behind, func(v *fakeView) { v.apart = map[string]bool{"ocp": true}; v.err = "Contains" }), want: Verdict{Runnable: true, Action: ActionRun}})
+	add(tc{name: "failed ancestry read is an error", b: cpBuild, view: with(behind, func(v *fakeView) { v.err = "Contains" }), wantErr: true})
+
 	// paced
 	add(tc{name: "paced in loop", b: leaf, in: Inputs{Paced: always}, want: Verdict{Cause: CausePaced}}, ModeLoop)
 	add(tc{name: "run-now never sees pacing", b: leaf, in: Inputs{Paced: always}, want: Verdict{Runnable: true, Action: ActionRun}}, ModeRunNow)
@@ -232,6 +269,10 @@ func TestJudge(t *testing.T) {
 	// checkpoint
 	open := func(id string, k contract.Kind, s string) bd.Bead { return child(cp, id, k, s) }
 	add(tc{name: "in_progress critique is defect-open", b: cp, view: cpKids(atTip, open("c1", contract.KindCritique, "in_progress")), want: Verdict{Cause: CauseDefectOpen}, wantIDs: []string{"c1"}})
+	add(tc{name: "landed trailer wins over an open critique", b: cp, view: with(cpKids(atTip, open("c1", contract.KindCritique, "open")), func(v *fakeView) { v.landed = map[string]Trailer{"cp": {Sha: "s", Landed: true}} }),
+		want: Verdict{Runnable: true, Action: ActionLand}})
+	add(tc{name: "landed trailer wins over an open conflict", b: cp, view: with(cpKids(atTip, open("c2", contract.KindConflict, "open")), func(v *fakeView) { v.landed = map[string]Trailer{"cp": {Sha: "s", Landed: true}} }),
+		want: Verdict{Runnable: true, Action: ActionLand}})
 	add(tc{name: "deferred conflict is defect-open", b: cp, view: cpKids(atTip, open("c2", contract.KindConflict, "deferred")), want: Verdict{Cause: CauseDefectOpen}, wantIDs: []string{"c2"}})
 	add(tc{name: "defect-open outranks foreign landing", b: cp, view: with(cpKids(atTip, open("c1", contract.KindCritique, "open")), func(v *fakeView) { v.landed = map[string]Trailer{"cp": {Foreign: foreign}} }),
 		want: Verdict{Cause: CauseDefectOpen}, wantIDs: []string{"c1"}})
@@ -239,6 +280,10 @@ func TestJudge(t *testing.T) {
 		want: Verdict{Cause: CauseForeignLanding, Foreign: foreign}})
 	add(tc{name: "landed trailer rolls forward to land", b: cp, view: with(cpKids(atTip, open("l", contract.KindLanding, "open"), build("b2", "open")), func(v *fakeView) { v.landed = map[string]Trailer{"cp": {Sha: "s", Landed: true}} }),
 		want: Verdict{Runnable: true, Action: ActionLand}})
+	add(tc{name: "landed trailer reaches land past an open pivot off the frontier", b: cp, frontier: []bd.Bead{}, view: with(cpKids(atTip, closedBuild), func(v *fakeView) {
+		v.landed = map[string]Trailer{"cp": {Sha: "s", Landed: true}}
+		v.blockers = map[string][]Blocker{"cp": {blk(pivot)}}
+	}), want: Verdict{Runnable: true, Action: ActionLand}})
 	add(tc{name: "checkpoint landing open", b: cp, view: cpKids(atTip, open("l", contract.KindLanding, "open"), closedBuild, approved("tip1")), want: Verdict{Cause: CauseLandingOpen}, wantIDs: []string{"l"}})
 	add(tc{name: "approved at head, member open", b: cp, view: cpKids(atTip, build("b2", "open"), approved("tip1")), want: Verdict{Cause: CauseUndrained}, wantIDs: []string{"b2"}})
 	add(tc{name: "approved at head, member held", b: cp, view: with(cpKids(atTip, closedBuild, approved("tip1")), func(v *fakeView) { v.efforts = &git.EffortSet{Branches: map[string]bool{"b1": true}} }),
@@ -322,12 +367,15 @@ func TestJudgeHolderBranches(t *testing.T) {
 	}
 }
 
-func TestCausesIsClosedAt16(t *testing.T) {
+func TestCausesIsClosedAt17(t *testing.T) {
 	seen := map[Cause]bool{}
 	for _, c := range Causes {
 		seen[c] = true
 	}
-	if len(Causes) != 16 || len(seen) != 16 {
-		t.Errorf("Causes has %d entries, %d distinct, want 16", len(Causes), len(seen))
+	if len(Causes) != 17 || len(seen) != 17 {
+		t.Errorf("Causes has %d entries, %d distinct, want 17", len(Causes), len(seen))
+	}
+	if i := slices.Index(Causes, CauseBlocked); Causes[i+1] != CauseBehindMainline || Causes[i+2] != CausePaced {
+		t.Errorf("behind-mainline must sit right after blocked, ahead of paced: %v", Causes)
 	}
 }

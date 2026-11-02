@@ -185,7 +185,7 @@ func TestExecActionablePausedCheckpoint(t *testing.T) {
 	for _, r := range g.actionable() {
 		got = append(got, r.b.ID)
 	}
-	if !slices.Equal(got, []string{"ap", "pcp", "pap"}) { // pcp and pap sort by priority in the paused band
+	if !slices.Equal(got, []string{"ap", "pap", "pcp"}) { // pap inherits P1 from plain, so it sorts above pcp in the paused band
 		t.Errorf("actionable = %v", got)
 	}
 	if g.execList(nil)[0].title != "Actionable (3)" {
@@ -309,7 +309,7 @@ func TestDefogActionablePausedAFK(t *testing.T) {
 		got = append(got, r.key)
 	}
 	m = press(t, defogAt(t, press(t, defogAt(t, m, "i:"), runeKey(" ")), "ch"), runeKey(" ")) // unfold the tree: the AFK child's own row
-	if want := []string{"act:l", "act:afk", "act:both", "act:ch2", "act:nb"}; !slices.Equal(got, want) {
+	if want := []string{"act:l", "act:afk", "act:nb", "act:both", "act:ch2"}; !slices.Equal(got, want) {
 		t.Fatalf("Actionable = %v, want %v", got, want)
 	}
 	if tab.actN() != 5 { // the light-blue ●N
@@ -397,7 +397,7 @@ func TestDefogActionablePausedHomeTab(t *testing.T) {
 			t.Errorf("land carries chart %q, want dc", r.chart.ID)
 		}
 	}
-	if want := []string{"act:ndk", "act:land", "act:mrw", "act:pc", "act:fr"}; !slices.Equal(got, want) {
+	if want := []string{"act:ndk", "act:land", "act:mrw", "act:fr", "act:pc"}; !slices.Equal(got, want) {
 		t.Fatalf("Actionable = %v, want %v", got, want)
 	}
 	if tab.actN() != 5 || tab.g.defogBadge() != 0 {

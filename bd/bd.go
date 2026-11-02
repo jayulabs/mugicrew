@@ -156,8 +156,13 @@ func NewOffshoot(title, body, draftedBy, cause, edge, parent string) (string, er
 		args := unparentedArgs(Successor{Kind: contract.KindSignal, DraftedBy: draftedBy}, title, body)
 		return run(append(args, "--deps", deps)...)
 	}
-	s := Successor{Kind: contract.KindSignal, DraftedBy: draftedBy, Parent: parent, Title: stripTitle(title, "kind", string(contract.KindSignal)), Description: body}
-	return run(successorCreateArgs("", s, deps)...)
+	return run(offshootParentedArgs(Successor{Kind: contract.KindSignal, DraftedBy: draftedBy}, title, body, parent, deps)...)
+}
+
+// offshootParentedArgs is the create argv for an offshoot Signal s born a direct child of parent.
+func offshootParentedArgs(s Successor, title, body, parent, deps string) []string {
+	s.Parent, s.Title, s.Description = parent, stripTitle(title, "kind", string(contract.KindSignal)), body
+	return successorCreateArgs("", s, deps)
 }
 
 // NewSignalWithRef is NewSignal carrying an external ref (a jira-<KEY> intake).
@@ -183,40 +188,52 @@ func NewInitiative(title, body, ref string) (string, error) {
 }
 
 // NewRollback files a human Rollback of a landed Checkpoint (ADR 0047 §3): an
-// unparented kind:rollback task with one related edge to target. Returns the
-// new bead ID; on an edge failure the ID too, so the caller can name the orphan.
+// unparented kind:rollback task with one related edge to target, which rides the
+// create (--deps related:), so the Rollback is born with its edge or not at all.
+// Returns the new bead ID; on any error the ID is "".
 //
 // A nested target's context: and repo: labels are copied onto the Rollback, so the
 // tick scan can hold it paused:context on drift (ADR 0158, 0167). An unstamped
 // target adds no label. The caller passes the target it already loaded, so no read
 // here can fail the human's action.
 func NewRollback(title, body string, target Bead) (string, error) {
-	return newRelated(Successor{Kind: contract.KindRollback}, title, body, target)
+	return newRelated(Successor{Kind: contract.KindRollback}, title, body, target, true)
 }
 
-// newRelated files an unparented s bead carrying target's context and repo stamp,
-// then a related edge to target; on an edge failure the id comes back too.
-func newRelated(s Successor, title, body string, target Bead) (string, error) {
-	if dir := RepoStampOf(target); dir != "" && ContextOf(target) != "" {
+// newRelated files an unparented s bead and the related edge to target in the one
+// bd create, copying target's context and repo stamp when stamp is set. An error
+// returns id "".
+func newRelated(s Successor, title, body string, target Bead, stamp bool) (string, error) {
+	if dir := RepoStampOf(target); stamp && dir != "" && ContextOf(target) != "" {
 		s.Context, s.Repo = ContextOf(target), dir
 	}
-	id, err := run(unparentedArgs(s, title, body)...)
+	id, err := run(append(unparentedArgs(s, title, body), "--deps", "related:"+target.ID)...)
 	if err != nil {
 		return "", err
 	}
-	_, err = run("dep", "add", id, target.ID, "-t", "related")
-	return id, err
+	return id, nil
 }
 
 // NewCheckup files a human Checkup on target (ADR 0272 §2), shaped like
 // NewRollback: an unparented kind:checkup task, not a Draft, whose body names the
-// target and carries problem when given, then a related edge to target.
+// target and carries problem when given, the related edge to target riding the create.
 func NewCheckup(target Bead, problem string) (string, error) {
 	body := fmt.Sprintf("Target: %s (%s)", target.ID, target.Title)
 	if problem != "" {
 		body += "\n\nProblem: " + problem
 	}
-	return newRelated(Successor{Kind: contract.KindCheckup}, "Repair "+target.Title, body, target)
+	return newRelated(Successor{Kind: contract.KindCheckup}, "Repair "+target.Title, body, target, true)
+}
+
+// NewRetrospective files a human Retrospective on a finished target: an unparented
+// "Retrospective <title>" kind:discussion task, not a Draft, with the related edge to
+// target riding the create, so it is born with the edge or not at all. It copies no
+// context: or repo: label even from a stamped target: a stamp guards a bead that acts
+// on a repo (ADR 0167), and a Retrospective only reads sessions and drafts Signals.
+// spine is the target's spine ids. On any error the ID is "".
+func NewRetrospective(target Bead, spine []string) (string, error) {
+	body := "A Robin retrospective on " + target.ID + ", started from the TUI.\nTarget: " + target.ID + "\nSpine: " + strings.Join(spine, " ")
+	return newRelated(Successor{Kind: contract.KindDiscussion}, "Retrospective "+target.Title, body, target, false)
 }
 
 // OpenCheckupOn is target's open Checkup, if any (ADR 0272 §2: at most one): an
@@ -247,7 +264,7 @@ var cutBranch = git.CutBranch
 // checkpoint/<id> branch cut at main HEAD's SHA with no anchor, then the
 // kind:surgery leaf as its child, claimed so it starts idle and never enters bd
 // ready. A human create, not a Draft. On a mid-sequence failure the ids already
-// created come back too, so the caller can name the orphan (mirrors NewRollback).
+// created come back too, so the caller can name the orphan.
 // A non-empty initiative must be an open Initiative and files the Checkpoint as
 // its member (--parent, still no caused-by edge); required (Require Initiatives)
 // refuses an empty one. Both are checked before any create.
@@ -366,7 +383,9 @@ func ListAll() ([]Bead, error) { return core.List(Query{All: true}) }
 // fails them): open beads, closed members/Landings/Approvals of open Charts,
 // Checkpoints and Initiatives, closed Initiatives and their members, finished
 // Charts within 24 h with their children and caused-by Specs, and landed:
-// Landings within 24 h with their closed Checkpoints. It reads bd's internal
+// Landings within 24 h with their closed Checkpoints, and the closed Checkpoint of an
+// open Remnant, and a respin's lineage (the closed caused-by Remnant of an open
+// Checkpoint, its related landed Checkpoint and that one's caused-by Spec). It reads bd's internal
 // tables, so column names are the table names (depends_on_issue_id), not the
 // list JSON's. The first arm is status!='closed' rather than OpenSet's four statuses so
 // any other non-closed status (bd's pinned, hooked) still loads. The window clock is Dolt's; tabs re-apply their own over it.
@@ -386,7 +405,20 @@ union select d.depends_on_issue_id from dependencies d join issues i on i.id=d.i
  where d.type='parent-child' and i.status='closed' and l.label='kind:landing' and i.close_reason like 'landed: %'
   and i.closed_at>=utc_timestamp()-interval 24 hour and lp.label='kind:checkpoint' and p.status='closed'
 union select p.id from dependencies d join issues w on w.id=d.issue_id join labels l on l.issue_id=w.id join issues p on p.id=d.depends_on_issue_id
- where d.type='parent-child' and l.label='kind:mr-watch' and w.status!='closed' and p.status='closed'`
+ where d.type='parent-child' and l.label='kind:mr-watch' and w.status!='closed' and p.status='closed'
+union select p.id from dependencies d join issues r on r.id=d.issue_id join labels l on l.issue_id=r.id join issues p on p.id=d.depends_on_issue_id
+ where d.type='related' and l.label='kind:remnant' and r.status!='closed' and p.status='closed'
+union select r.id from dependencies d join issues c on c.id=d.issue_id join labels lc on lc.issue_id=c.id
+  join issues r on r.id=d.depends_on_issue_id join labels lr on lr.issue_id=r.id
+ where d.type='caused-by' and c.status!='closed' and lc.label='kind:checkpoint' and r.status='closed' and lr.label='kind:remnant'
+union select p.id from dependencies d join issues c on c.id=d.issue_id join labels lc on lc.issue_id=c.id
+  join issues r on r.id=d.depends_on_issue_id join labels lr on lr.issue_id=r.id
+  join dependencies d2 on d2.issue_id=r.id join issues p on p.id=d2.depends_on_issue_id
+ where d.type='caused-by' and c.status!='closed' and lc.label='kind:checkpoint' and lr.label='kind:remnant' and d2.type='related'
+union select s.id from dependencies d join issues c on c.id=d.issue_id join labels lc on lc.issue_id=c.id
+  join issues r on r.id=d.depends_on_issue_id join labels lr on lr.issue_id=r.id
+  join dependencies d2 on d2.issue_id=r.id join dependencies d3 on d3.issue_id=d2.depends_on_issue_id join issues s on s.id=d3.depends_on_issue_id
+ where d.type='caused-by' and c.status!='closed' and lc.label='kind:checkpoint' and lr.label='kind:remnant' and d2.type='related' and d3.type='caused-by'`
 
 // DefaultIDs is the ids of the default set (ADR 0232): the first of the slow
 // tier's two bd calls, ListByID the second.
@@ -632,6 +664,9 @@ const (
 	// PausedNotBuilt: a Build's backstop integrated but found no integrate trailer
 	// for it on its Checkpoint; a re-run that integrates lifts it (ADR 0248).
 	PausedNotBuilt = "not-built"
+	// PausedBehindMainline: a Build reported the Checkpoint branch lacks mainline code it
+	// needs and the backstop confirmed it; a human-requested rebase lifts it (ADR 0420).
+	PausedBehindMainline = "behind-mainline"
 	// PausedUnmet: Brook read a Latch's watched MR closed unmerged or missing (a 404);
 	// a human unpause, or a run-now whose re-read finds it open or merged, lifts it.
 	// Loop-written, so it pauses only its own bead and does not cascade.
@@ -647,8 +682,14 @@ const (
 const pausedPrefix = "paused:"
 
 // PauseRank is every known cause, highest first (ADR 0078, 0082, 0104 §4, 0123
-// §3, 0127 §6, 0248): it ranks PausedCauses and is the list the TUI's pause colours must cover.
-var PauseRank = []string{PausedManual, PausedAbandoned, PausedRecovering, PausedCheckup, PausedIntegrateConflict, PausedNotBuilt, PausedUnmet, PausedFailing, PausedContext, PausedProfile, PausedForeignHold}
+// §3, 0127 §6, 0248, 0420): it ranks PausedCauses and is the list the TUI's pause colours must cover.
+var PauseRank = []string{PausedManual, PausedAbandoned, PausedRecovering, PausedCheckup, PausedIntegrateConflict, PausedNotBuilt, PausedBehindMainline, PausedUnmet, PausedFailing, PausedContext, PausedProfile, PausedForeignHold}
+
+// BehindMainlineRemedy is the one phrase for the behind-mainline parent Checkpoint and its remedy,
+// shared by the pause line, the pause hint and the cause hint.
+func BehindMainlineRemedy(parent string) string {
+	return "checkpoint/" + parent + " is behind mainline — r requests a rebase"
+}
 
 // PauseNote is the pause line's words for cause on b: the cause itself, except
 // paused:context, which names the undeclared context and the three fixes (ADR 0158),
@@ -660,6 +701,9 @@ func PauseNote(b Bead, cause string) string {
 			note += ": " + w
 		}
 		return note
+	}
+	if cause == PausedBehindMainline {
+		return "behind-mainline (" + BehindMainlineRemedy(b.Parent) + ")"
 	}
 	if cause != PausedContext {
 		return cause
@@ -727,6 +771,32 @@ func PausedAncestor(b Bead, lookup func(id string) (Bead, error)) (string, error
 	return "", nil
 }
 
+// EffectivePriority is the most urgent of b's own priority and every open
+// container ancestor's (ADR 0410 §1). src is the nearest ancestor holding that
+// level, "" when b's own priority is effective (own wins ties). An ancestor
+// counts only if unclosed (a Draft is unclosed, a paused one still counts) and
+// a Checkpoint, Chart or Initiative. The walk stops at an empty parent, one
+// lookup lacks, or a cycle, and never errors: it uses what it has seen.
+func EffectivePriority(b Bead, lookup func(id string) (Bead, bool)) (level int, src string) {
+	level = b.Priority
+	seen := map[string]bool{b.ID: true}
+	for id := b.Parent; id != "" && !seen[id]; {
+		seen[id] = true
+		anc, ok := lookup(id)
+		if !ok {
+			break
+		}
+		switch anc.Kind {
+		case contract.KindCheckpoint, contract.KindChart, contract.KindInitiative:
+			if anc.Status != "closed" && anc.Priority < level {
+				level, src = anc.Priority, id
+			}
+		}
+		id = anc.Parent
+	}
+	return level, src
+}
+
 // PausedList lists every paused bead, closed included, with its parent — the one
 // extra read a loop tick makes so candidacy can see a paused ancestor (ADR 0081
 // §7). Closed is in so a manual-paused ancestor is always in the list.
@@ -756,6 +826,16 @@ func NotBuiltNote(id string) string {
 	return notBuiltFrom(cs)
 }
 
+// BehindMainlineReport is the newest "Behind mainline:" body when that comment is newer than id's
+// newest "Not built:" comment (a later Not built: wins), else "" — also on a failed read.
+func BehindMainlineReport(id string) string {
+	cs, err := Comments(id)
+	if err != nil {
+		return ""
+	}
+	return behindMainlineReportFrom(cs)
+}
+
 // RationaleNote is the body of id's newest "Rationale:" comment, prefix and
 // surrounding space trimmed; "" when none, or when the read fails (the close it
 // decorates must not wait on it). Mirrors NotBuiltNote.
@@ -778,10 +858,7 @@ type Comment struct {
 func Comments(id string) ([]Comment, error) { return core.Comments(id) }
 
 // AddComment appends text as a comment on id.
-func AddComment(id, text string) error {
-	_, err := run("comments", "add", id, text)
-	return err
-}
+func AddComment(id, text string) error { return core.AddComment(id, text) }
 
 func parseComments(js []byte) ([]Comment, error) {
 	var cs []Comment
@@ -792,6 +869,27 @@ func parseComments(js []byte) ([]Comment, error) {
 }
 
 func notBuiltFrom(cs []Comment) string { return newestNote(cs, "Not built:") }
+
+func behindMainlineFrom(cs []Comment) string { return newestNote(cs, "Behind mainline:") }
+
+// BehindMainlineNoteOf is the body of the newest "Behind mainline:" comment among cs, prefix
+// and surrounding space trimmed; "" when none. A caller with the comments cached (the TUI render path) never forks bd for it.
+func BehindMainlineNoteOf(cs []Comment) string { return behindMainlineFrom(cs) }
+
+// behindMainlineReportFrom is the newest Behind mainline: body unless a Not built:
+// comment sits after it.
+func behindMainlineReportFrom(cs []Comment) string {
+	for i := len(cs) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(cs[i].Text)
+		if strings.HasPrefix(t, "Not built:") {
+			return ""
+		}
+		if note, ok := strings.CutPrefix(t, "Behind mainline:"); ok {
+			return strings.TrimSpace(note)
+		}
+	}
+	return ""
+}
 
 func rationaleFrom(cs []Comment) string { return newestNote(cs, "Rationale:") }
 
@@ -816,6 +914,20 @@ func Reopen(id string) error {
 func Unpause(id, cause string) error {
 	_, err := run("label", "remove", id, pausedPrefix+cause)
 	return err
+}
+
+// SetField writes one whole field of id through the core, under the Serializer the
+// read-then-write runs under. A title-field value loses a leading kind prefix first (ADR 0097).
+func SetField(id string, f Field, value string, s Serializer) error {
+	if f == TitleField {
+		value = stripTitle(value, "id", id)
+	}
+	return core.SetField(id, f, value, s)
+}
+
+// SetDescription writes id's whole description through the core, under s.
+func SetDescription(id, body string, s Serializer) error {
+	return core.SetField(id, Description, body, s)
 }
 
 // Update runs `bd update <id> <args...>` — the TUI's edit escape hatch (spec
@@ -976,7 +1088,7 @@ func HoldForeign(cp Bead, foreign *git.ForeignLanding) error {
 				"`" + probe + "` may be run first to confirm the foreign land.",
 			Ask: "will you run the rename, the branch re-cuts and the loop restart after this Errand closes?",
 		}}, "")
-	_, created, err := SpawnBlockingErrand(cp.ID, "Foreign: "+foreign.Sha+"\n", cp.Title+": mainline holds a foreign land of this bead", body)
+	_, created, err := SpawnBlockingErrand(cp.ID, "Foreign: "+foreign.Sha+"\n", cp.Title+": mainline holds a foreign land of this bead", body, "")
 	if err != nil {
 		return err
 	}
@@ -988,13 +1100,14 @@ func HoldForeign(cp Bead, foreign *git.ForeignLanding) error {
 
 // AnchorSeams are the caller's seams for Anchor.
 type AnchorSeams struct {
-	Strategy  func() (string, error)                 // the Workspace's land strategy name
-	Show      func(string) (Bead, error)             // reads the Spec bead
-	Update    func(id string, args []string) error   // bd.Update's shape
-	Fetch     func() (string, error)                 // the Workspace's Forge main fetch
-	RepoFetch func(git.Repo) (string, error)         // a child's Forge main fetch (Repo.FetchMainline)
-	Landed    func(git.Repo, string) (string, error) // the legacy "Spec: <id>" landed-base read (Repo.LandedBase; "" = the Workspace)
-	Tip       func(git.Repo) (string, error)         // r's local mainline tip, lock- and fetch-free (Repo.ResolveProbeBase)
+	Strategy       func() (string, error)                    // the Workspace's land strategy name
+	Show           func(string) (Bead, error)                // reads the Spec bead
+	SetDescription func(id, body string, s Serializer) error // bd.SetDescription's shape
+	Under          Serializer                                // the pin write's exclusion; nil is a plain write
+	Fetch          func() (string, error)                    // the Workspace's Forge main fetch
+	RepoFetch      func(git.Repo) (string, error)            // a child's Forge main fetch (Repo.FetchMainline)
+	Landed         func(git.Repo, string) (string, error)    // the legacy "Spec: <id>" landed-base read (Repo.LandedBase; "" = the Workspace)
+	Tip            func(git.Repo) (string, error)            // r's local mainline tip, lock- and fetch-free (Repo.ResolveProbeBase)
 }
 
 // Anchor anchors a direct Spec in repo r ("" = the Workspace) under every land
@@ -1039,7 +1152,9 @@ func pinAnchor(s AnchorSeams, r git.Repo, tip func() (string, error), specID, tr
 	if sha, err = tip(); err != nil {
 		return "", err
 	}
-	_, err = SetLineIfUnset(s.Update, specID, b.Description, "Anchor:", git.AnchorPin(sha))
+	if next, ok := withLineIfUnset(b.Description, "Anchor:", git.AnchorPin(sha)); ok {
+		err = s.SetDescription(specID, next, s.Under)
+	}
 	return sha, err
 }
 
@@ -1047,11 +1162,20 @@ func pinAnchor(s AnchorSeams, r git.Repo, tip func() (string, error), specID, tr
 // so callers keep their seam) unless body already carries a key line: the one
 // set-if-unset body pin writer. It returns the body as it now stands.
 func SetLineIfUnset(update func(id string, args []string) error, id, body, key, line string) (string, error) {
-	if _, ok := git.ParseLine(body, key); ok {
+	next, ok := withLineIfUnset(body, key, line)
+	if !ok {
 		return body, nil
 	}
-	next := AppendBodyLine(body, line)
 	return next, update(id, []string{"--description", next})
+}
+
+// withLineIfUnset is body with line appended, and true, unless body already carries a
+// key line (then body, false): the derivation SetLineIfUnset and pinAnchor share.
+func withLineIfUnset(body, key, line string) (string, bool) {
+	if _, ok := git.ParseLine(body, key); ok {
+		return body, false
+	}
+	return AppendBodyLine(body, line), true
 }
 
 // AutoApprovedPrefix opens every auto-approved Approval History line.

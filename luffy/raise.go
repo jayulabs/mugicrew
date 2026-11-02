@@ -237,7 +237,7 @@ func RaiseFromErrand(errandID string, r RaiseRequest) error {
 		if err != nil {
 			return err
 		}
-		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindPivot, Title: draftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Metadata: string(meta)}, from)
+		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindPivot, Title: contract.DraftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Metadata: string(meta)}, from)
 		if err != nil {
 			return fail(err)
 		}
@@ -248,7 +248,7 @@ func RaiseFromErrand(errandID string, r RaiseRequest) error {
 		askDeps = append(askDeps, "discovered-from:"+m.Pivot)
 	}
 	for _, body := range r.Critiques {
-		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindCritique, Title: draftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Parent: host.ID}, askDeps...)
+		id, err := createRaiseDraft(bd.Successor{Kind: contract.KindCritique, Title: contract.DraftTitle(body, errand.Title), Description: body, DraftedBy: errand.ID, Parent: host.ID}, askDeps...)
 		if err != nil {
 			return fail(err)
 		}

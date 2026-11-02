@@ -159,6 +159,7 @@ func stubDrafts(t *testing.T, err error) *[]string {
 		endSession = origEnd
 	})
 	listDrafts = func(string) ([]bd.Bead, error) { return nil, nil }
+	swapSeam(t, &tieDrafts, func(string, ...contract.Kind) error { return nil })
 	swapSeam(t, &clearMetadata, func(string, string) error { return nil })
 	hupGrace = 50 * time.Millisecond
 	calls := &[]string{}
@@ -397,24 +398,25 @@ func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
 		readErr error
 		rc      int
 		steps   []string
+		reason  string // the Survey's close reason, "" when it is not closed
 	}{
-		{"pushed-back Chart closes the Survey", "closed", nil, nil, nil, 0, append(slices.Clip(pre), "publish s1 close s1", "delete chart/ch1")},
-		{"seeded fog closes the Survey", "open", nil, []string{"", "ch1"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
-		{"open Chart, stamped, no fog", "open", []string{contract.LabelDefogged}, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1")},
+		{"pushed-back Chart closes the Survey", "closed", nil, nil, nil, 0, append(slices.Clip(pre), "publish s1 close s1", "delete chart/ch1"), "pushed back: ch1"},
+		{"seeded fog closes the Survey", "open", nil, []string{"", "ch1"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1"), "seeded: ch1"},
+		{"open Chart, stamped, no fog", "open", []string{contract.LabelDefogged}, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1 close s1"), "defogged: ch1"},
 		{"stamped, fog Drafted", "open", []string{contract.LabelDefogged}, []string{"", "ch1"}, nil, 0,
-			append(slices.Clip(pre), "notes s1 stamp removed at settle: fog seeded", "unstamp ch1", "publish s1 close s1")},
-		{"no fog leaves the Survey for settle", "open", nil, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1", "release s1")},
-		{"failed Chart read keeps the session", "open", nil, nil, errors.New("bd: locked"), 1, pre},
+			append(slices.Clip(pre), "notes s1 stamp removed at settle: fog seeded", "unstamp ch1", "publish s1 close s1"), "seeded: ch1"},
+		{"no fog leaves the Survey for settle", "open", nil, []string{"", "other"}, nil, 0, append(slices.Clip(pre), "publish s1", "release s1"), ""},
+		{"failed Chart read keeps the session", "open", nil, nil, errors.New("bd: locked"), 1, pre, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eventlogtest.Capture(t)
 			steps := stubDrafts(t, nil)
 			t.Setenv("TMUX", "/s,1,2")
 			t.Setenv("TMUX_PANE", "%7")
-			status, pub := "in_progress", publish
+			status, pub, reason := "in_progress", publish, ""
 			publish = func(creator string, edges []bd.Edge, closing *bd.Closing) ([]string, error) {
 				if closing != nil {
-					status = "closed"
+					status, reason = "closed", closing.Reason
 				}
 				return pub(creator, edges, closing)
 			}
@@ -448,6 +450,9 @@ func TestHitlRunClosesSurveyOnPublish(t *testing.T) {
 			if !slices.Equal(*steps, tc.steps) {
 				t.Errorf("steps = %q, want %q", *steps, tc.steps)
 			}
+			if reason != tc.reason {
+				t.Errorf("close reason = %q, want %q", reason, tc.reason)
+			}
 		})
 	}
 }
@@ -468,6 +473,7 @@ func TestSurveyDoneRetryConverges(t *testing.T) {
 		return b, nil
 	}
 	listDrafts = func(string) ([]bd.Bead, error) { return []bd.Bead{{Parent: "ch1"}}, nil }
+	swapSeam(t, &tieDrafts, func(string, ...contract.Kind) error { return nil })
 	updateBead = func(id string, args []string) error {
 		if args[0] == "--remove-label" {
 			if failUnstamp {
@@ -481,13 +487,13 @@ func TestSurveyDoneRetryConverges(t *testing.T) {
 		steps = append(steps, "notes")
 		return nil
 	}
-	if _, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes}); err == nil {
+	if _, _, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes}); err == nil {
 		t.Fatal("first attempt: want the unstamp's error")
 	}
 	failUnstamp = false
-	done, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes})
-	if err != nil || !done {
-		t.Fatalf("retry = %v, %v; want true, nil", done, err)
+	done, reason, err := surveyDone(bd.Bead{ID: "s1", Parent: "ch1", Notes: notes})
+	if err != nil || !done || reason != "seeded: ch1" {
+		t.Fatalf("retry = %v, %q, %v; want true, \"seeded: ch1\", nil", done, reason, err)
 	}
 	if want := []string{"notes", "unstamp"}; !slices.Equal(steps, want) {
 		t.Errorf("steps = %q, want %q", steps, want)

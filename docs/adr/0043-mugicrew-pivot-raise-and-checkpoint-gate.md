@@ -33,6 +33,13 @@ grilling.
    Usopp's equivalent) then finds open pivots discovered-from that bead and
    idempotently adds the Checkpoint `blocks` edge and a `related` edge
    pivot → Spec, before the normal close. That pass spawns no Review/Approval.
+
+   > **Amended by ADR 0416 (mugicrew-a-pivot-s-host-is-its-raiser-s-checkpoint):**
+   > this agent-creates/Go-gates split is the member-raiser half of one rule. A
+   > non-member raiser (D4 reroute, D5 Errand) has its host recorded as
+   > `raise_checkpoint` by the Go verb that writes the Draft, and gates in
+   > `session.raiseSession`. The gate goes out in the raiser's publish batch at
+   > every door, and a reroute pivot is caused-by its Signal, not discovered-from it.
 4. **The raising bead closes normally**, reason `pivoted: <pivot>`. Its
    unfinished FR lives only in the pivot body: confirm/escalate re-derives it in
    the corrected Spec; dismiss (and amend, if kept) refiles it as a Critique on

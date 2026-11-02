@@ -1,6 +1,7 @@
 # ADR 0046: mugicrew pivot triage session shape
 
 Status: Accepted
+Amended by: ADR 0414 (mugicrew-pivot-dismiss-and-amend-are-go-verbs…) (§5: now names four sweep verbs)
 Amended by: ADR 0140 (§5: escalate's fresh Chart gets a Survey and no longer skips charting)
 Date: 2026-10-04
 

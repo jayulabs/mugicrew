@@ -269,3 +269,21 @@ func TestOffshootFilersPointAtSignalFiling(t *testing.T) {
 		}
 	}
 }
+
+// Spec mc-4cjq1 FR 1-10: sequence-number.md numbers a fresh file through the verb.
+func TestSequenceNumberNamesVerbPlaceholderCommitEscalationAndPrecedence(t *testing.T) {
+	dir, err := materialize(t.TempDir(), "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "sequence-number.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat := strings.Join(strings.Fields(string(b)), " ")
+	for _, want := range []string{"<!-- hand-kept · summarises", "mugicrew sequence next", "a placeholder of zeros at the rule's width", "`NNNN` matches no sequence rule", "Commit the file on your branch in the same step", "escalate if your prompt gives you a way to", "Never fall back to scanning by hand", "overrides ADR-FORMAT.md's Numbering section", "sequence-renumber.md, the backstop"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("sequence-number.md lacks %q", want)
+		}
+	}
+}

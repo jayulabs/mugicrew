@@ -15,9 +15,19 @@ A publish that changes only `site/**` doesn't run the release; the Pages workflo
    same value.
 2. In the launcher manifest (`npm/mugicrew/package.json`), bump the four
    `@jayulabs/mugicrew-*` `optionalDependencies` pins to that same value.
-3. Make both changes together, in one change on `stock/mugicrew`.
-4. Run `lineage publish mugicrew`.
-5. Watch the publish workflow on the public repo until it is green. The publish
+3. If this release needs a human step before it installs (a `mugicrew doctor
+   fix`, or a step in `docs/upgrading.md`), declare it in the launcher manifest in
+   the same edit, with a section in `docs/upgrading.md` to link:
+   `"mugicrew": { "humanStep": { "version": "<this version>", "doc":
+   "docs/upgrading.md#<anchor>" } }`. A loop opted into unattended Upgrade never
+   installs a marked release, nor any past it. When the next release no longer
+   needs one, remove the field in its bump. Only the launcher carries it. The bump that first ships unattended
+   Upgrade's swap survival sets it, with `"doc":
+   "docs/upgrading.md#upgrading-onto-the-first-swap-surviving-release"`, so loops
+   too old to survive a swap are never swapped unattended.
+4. Make all the changes together, in one change on `stock/mugicrew`.
+5. Run `lineage publish mugicrew`.
+6. Watch the publish workflow on the public repo until it is green. The publish
    job runs last, after the tests and smoke jobs.
 
 ## Lineage does not bump the version
@@ -34,6 +44,10 @@ bump for you. Choosing the version is your decision, made in steps 1 and 2.
 - **`pin mismatch: optionalDependencies @jayulabs/mugicrew-<platform> is <a>,
   mugicrew is <b>`** (build job). One of the launcher's four platform pins is not
   the launcher's own version. Fix the pins (step 2) and publish again.
+- **`human-step mismatch: …`** (build job). `mugicrew.humanStep.version` in the
+  launcher manifest isn't the version being published, or `humanStep.doc` isn't a
+  path under `docs/upgrading.md`. Fix or remove the marker (step 3) and publish
+  again.
 - **`Every @jayulabs/mugicrew* package at <version> is already published, so
   nothing was published. Bump the version in all five npm package manifests and
   re-publish; see docs/release.md.`** (publish job). Every package is already on

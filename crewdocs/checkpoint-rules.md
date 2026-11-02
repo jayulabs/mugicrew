@@ -27,13 +27,15 @@ A Critique is a defect on the Checkpoint's code, fixed test-first by Franky. It
 is a `kind:critique` member of the Checkpoint:
 
     bd create --type task --labels kind:critique,drafted-by:<your bead id> -s deferred --no-inherit-labels --parent <checkpointID> \
+      --deps discovered-from:<your bead id> \
       --title "<what's wrong>" --description "<the defect, where it is, and how to fix it>"
 
 If it fails with *already exists* or *1213*, re-run the same create: nothing was written, and the retry gets a fresh ID.
 
 `--no-inherit-labels` is MANDATORY: without it the Critique inherits
 kind:checkpoint and routes to the wrong owner. A Critique carrying a pivot's
-refiled FR also takes `--deps discovered-from:<pivotID>`.
+refiled FR takes `--deps discovered-from:<pivotID>` instead: the pivot is its
+raiser.
 
 ## Raising a pivot
 

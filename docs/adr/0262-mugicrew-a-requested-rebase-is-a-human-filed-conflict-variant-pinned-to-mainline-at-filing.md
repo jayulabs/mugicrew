@@ -1,5 +1,6 @@
 # A requested rebase is a human-filed `requested` variant of Conflict / Chart-conflict, pinned to mainline at filing
 
+Amended by: ADR 0420 (a-build-behind-mainline-is-held…) "Blocks no sibling".
 Amends: ADR 0102 (leaf-efforts-integrate-onto-ref-only-containers) §4 (adds a replace-mode user).
 
 A human sometimes needs an open container branch (`chart/*`, `checkpoint/*`) on current mainline before it lands: mainline gained a fix in-flight Builds and Reviews need, or drift should surface early. Containers are already rewritten today through the replace mode of ADR 0102 §4 (Conflict, Chart-conflict, and the Base-pinned Critique of ADR 0152 (a-failed-gate-build-files-a-base-pinned-critique…)), so a requested rebase reuses that path rather than adding a rewrite rule. Settled by grillings on the "Manually requested rebase of a Chart or Checkpoint branch" Chart:

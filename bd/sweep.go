@@ -7,11 +7,12 @@ import (
 )
 
 // IsWithdrawable reports whether withdraw takes b: an IsChainHead, or an unclosed
-// Errand or Latch that is not an unpublished Draft (Spec mc-xw3ez D1, mc-3cnhf.16 D6). IsChainHead stays
-// unchanged: a cancel's chain list and a release by chain head never see an Errand, which
+// Errand, Latch or defog bead (grilling, research, prototype) that is not an
+// unpublished Draft (Spec mc-xw3ez D1, mc-3cnhf.16 D6, mc-3cnhf.74 D3). IsChainHead
+// stays unchanged: a cancel's chain list and a release by chain head never see an Errand, which
 // cancel and release handle as a member (ADR 0349).
 func IsWithdrawable(b Bead, all []Bead) bool {
-	return IsChainHead(b, all) || ((b.Kind == contract.KindErrand || b.Kind == contract.KindLatch) && b.Unclosed() && !IsDraft(b))
+	return IsChainHead(b, all) || ((b.Kind == contract.KindErrand || b.Kind == contract.KindLatch || IsDefogKind(b.Kind)) && b.Unclosed() && !IsDraft(b))
 }
 
 // Sweep is the Errands a withdraw closes beyond its chain, the ones it spares and

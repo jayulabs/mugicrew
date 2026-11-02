@@ -2,6 +2,7 @@ package bd
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,5 +35,63 @@ func TestCliBatchRefusesUnknownVerb(t *testing.T) {
 	err := cli{}.Batch([]Op{{Verb: "bogus", ID: "x"}})
 	if err == nil || !strings.Contains(err.Error(), "not modelled") {
 		t.Fatalf("want not-modelled error, got %v", err)
+	}
+}
+
+func TestDepArgRendersBlocksReversedAndRefusesFrom(t *testing.T) {
+	for _, tc := range []struct {
+		d    Edge
+		want string
+	}{
+		{Edge{To: "x", Type: "blocks"}, "blocked-by:x"},
+		{Edge{To: "x"}, "blocked-by:x"},
+		{Edge{To: "x", Type: "conditional-blocks"}, "conditional-blocks:x"},
+		{Edge{To: "x", Type: "caused-by"}, "caused-by:x"},
+		{Edge{To: "x", Type: "discovered-from"}, "discovered-from:x"},
+	} {
+		if got, err := depArg(tc.d); err != nil || got != tc.want {
+			t.Errorf("depArg(%+v) = %q, %v; want %q", tc.d, got, err, tc.want)
+		}
+	}
+	if _, err := depArg(Edge{From: "y", To: "x", Type: "related"}); err == nil {
+		t.Error("depArg with From set succeeded, want a refusal")
+	}
+}
+
+func TestCLICreateRendersDepsAsOneEntryEach(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	var got []string
+	run = func(args ...string) (string, error) { got = args; return "x-1", nil }
+	_, err := cli{}.Create(CreateSpec{Title: "t", Deps: []Edge{{To: "a", Type: "blocks"}, {To: "b", Type: "caused-by"}}})
+	if err != nil || !slices.Contains(got, "blocked-by:a,caused-by:b") {
+		t.Errorf("argv = %v, %v; want --deps blocked-by:a,caused-by:b", got, err)
+	}
+	called := false
+	run = func(args ...string) (string, error) { called = true; return "", nil }
+	if _, err := (cli{}).Create(CreateSpec{Title: "t", Deps: []Edge{{From: "z", To: "a", Type: "related"}}}); err == nil || called {
+		t.Errorf("Create with From set = %v, exec %v; want a refusal before bd runs", err, called)
+	}
+}
+
+func TestCLICreatePassesPriorityOnlyWhenSet(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	var got []string
+	run = func(args ...string) (string, error) { got = args; return "x-1", nil }
+	for _, p := range []int{0, 2, 4} {
+		if _, err := (cli{}).Create(CreateSpec{Title: "t", Priority: &p}); err != nil {
+			t.Fatal(err)
+		}
+		i := slices.Index(got, "--priority")
+		if i < 0 || i+1 >= len(got) || got[i+1] != strconv.Itoa(p) {
+			t.Errorf("Priority P%d: argv = %v; want --priority %d", p, got, p)
+		}
+	}
+	if _, err := (cli{}).Create(CreateSpec{Title: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got, "--priority") {
+		t.Errorf("unset Priority: argv = %v; want no --priority", got)
 	}
 }

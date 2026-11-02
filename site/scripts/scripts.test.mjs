@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { check } from './check-build.mjs';
+import { check, LEARN_ROUTES } from './check-build.mjs';
 import { scan } from './denylist.mjs';
 import { checkStyle } from './check-style.mjs';
 import { checkHero } from './check-hero.mjs';
 import { checkGame } from './check-game.mjs';
+import { checkLearn } from './check-learn.mjs';
 import { checkTry } from './check-try.mjs';
 import { checkFramework, HEADINGS } from './check-framework.mjs';
 import { checkWorkspace, HEADINGS as WORKSPACE_HEADINGS } from './check-workspace.mjs';
@@ -20,7 +21,8 @@ const put = (d, f, s = '') => {
 
 test('check flags a missing route and an extra page', () => {
   const d = tmp();
-  for (const f of ['index', 'workspace', 'framework', 'game', 'try', '404']) put(d, f + '.html');
+  const learn = LEARN_ROUTES.map((r) => r.replace(/\.html$/, ''));
+  for (const f of ['index', 'workspace', 'framework', 'game', 'try', ...learn, '404']) put(d, f + '.html');
   put(d, 'README.html');
   const errs = check(d);
   assert.deepEqual(errs.sort(), ['missing route page try/install.html', 'unexpected page README.html']);
@@ -39,7 +41,7 @@ test('checkStyle wants header, footer and favicon on every route and no third-pa
   const d = tmp();
   const NPM = 'https://www.npmjs.com/package/@jayulabs/mugicrew';
   const page = (extra = '') => `<html><head><link rel="icon" href="/mugicrew/img/compass-rose.svg">${extra}</head><body><nav class="navbar"><a href="${NPM}">npm</a></nav><footer class="footer"><a href="https://github.com/jayulabs/mugicrew">GitHub</a><a href="${NPM}">npm</a></footer></body></html>`;
-  for (const f of ['index', 'workspace', 'framework', 'game', 'try', 'try/install']) put(d, f + '.html', page());
+  for (const f of ['index', 'workspace', 'framework', 'game', 'try', 'try/install', 'learn', 'learn/working-the-spine', 'learn/failure-modes', 'learn/bead-glossary', 'learn/cli-verbs']) put(d, f + '.html', page());
   assert.deepEqual(checkStyle(d), []);
   put(d, 'game.html', page('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces">'));
   put(d, 'assets/a.css', '@font-face{src:url(https://cdn.example.com/f.woff2)}');
@@ -131,4 +133,32 @@ test('checkWorkspace passes a conforming page', () => {
   const html = WORKSPACE_HEADINGS.map((h, i) => `<h2>${h}</h2>` + (i === 1 ? fig + '<div data-recording="grilling"></div>' : '') + (i === 3 ? fig : '') + (i === 4 ? '<div data-recording="approval"></div>' : '')).join('') +
     '<a href="/mugicrew/try">Try it</a><a href="/mugicrew/framework">See it as a framework</a><a href="/mugicrew/game">See it as a game</a>';
   assert.deepEqual(checkWorkspace(html), []);
+});
+
+test('checkLearn wants a sidebar on Learn, none on explainers, a Learn item everywhere and no ADR links', () => {
+  const d = tmp();
+  const nav = '<a class="navbar__item navbar__link" href="/mugicrew/learn">Learn</a>';
+  const side = '<div class="theme-doc-sidebar-container x"></div>';
+  const page = (extra = '') => `<html><body>${nav}${extra}</body></html>`;
+  for (const f of ['index', 'workspace', 'framework', 'game', 'try', 'try/install']) put(d, f + '.html', page());
+  put(d, 'learn.html', page(side));
+  assert.deepEqual(checkLearn(d), []);
+  put(d, 'learn.html', page());
+  assert.deepEqual(checkLearn(d), ['learn.html: no sidebar']);
+  put(d, 'learn.html', page(side + '<a href="/mugicrew/adr/0001-x">adr</a>'));
+  assert.ok(checkLearn(d).some((e) => e.startsWith('learn.html: links to an ADR')));
+  put(d, 'learn.html', page(side));
+  put(d, 'game.html', page(side));
+  assert.deepEqual(checkLearn(d), ['game.html: explainer page carries the Learn sidebar']);
+  put(d, 'game.html', '<html></html>');
+  assert.deepEqual(checkLearn(d), ['game.html: header has no Learn item']);
+});
+
+test('checkGlossary wants an anchored entry per kind, no ADR citation, and a built anchor', async () => {
+  const { checkGlossary } = await import('./check-glossary.mjs');
+  const md = '## Bead kinds\n\n- **Signal** — s.\n  - _Owner:_ Luffy\n  - _Structure:_ leaf\n';
+  assert.deepEqual(checkGlossary('### Signal {#signal}\n', md, '<h3 id="signal">'), []);
+  assert.deepEqual(checkGlossary(null, md, null), ['learn/bead-glossary.md is missing']);
+  assert.deepEqual(checkGlossary('x ADR 0001', md, null), ['bead glossary has no entry for Signal', 'bead glossary cites an ADR']);
+  assert.deepEqual(checkGlossary('### Signal {#signal}\n', md, '<h3>'), ['built bead glossary has no anchor #signal']);
 });

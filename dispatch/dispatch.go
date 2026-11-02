@@ -44,6 +44,7 @@ import (
 	"jayulabs.org/mugicrew/git"
 	"jayulabs.org/mugicrew/liveness"
 	"jayulabs.org/mugicrew/route"
+	"jayulabs.org/mugicrew/selfexe"
 	"jayulabs.org/mugicrew/session"
 )
 
@@ -644,7 +645,7 @@ func Reconcile(ctx contract.Ctx, crew contract.Crewmate, b bd.Bead, path string)
 // loop passes os.Stdout, the TUI passes a buffer so a background effort never
 // corrupts its alt-screen. A var so callers' tests avoid a real subprocess.
 var reconcileInWorktree = func(worktree, beadID, effortID string, out io.Writer) error {
-	self, err := os.Executable()
+	self, err := selfexe.Path()
 	if err != nil {
 		return err
 	}

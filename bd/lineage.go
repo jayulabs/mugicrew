@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"jayulabs.org/mugicrew/contract"
 )
 
 // lineageSQL is one flat read of the lineage: every edge Subtree and Spine walk
@@ -112,6 +114,10 @@ func (l *Lineage) stageKind(id string) string {
 	return k
 }
 
+func (l *Lineage) isRemnant(id string) bool {
+	return strings.TrimPrefix(l.kind[id], "kind:") == string(contract.KindRemnant)
+}
+
 // Spine is the ordered stages of the spine id sits on (ADR 0283, ADR 0284). Pure.
 func (l *Lineage) Spine(id string) ([]Stage, error) {
 	start := id
@@ -191,7 +197,7 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 	for seen := map[string]bool{}; !seen[root]; {
 		seen[root] = true
 		next := first(out(root, "caused-by"))
-		if l.stageKind(next) == "rollback" {
+		if l.stageKind(next) == "rollback" || l.isRemnant(next) {
 			next = first(out(next, "related")) // as SpecOf does
 		}
 		if next == "" {
@@ -249,6 +255,11 @@ func (l *Lineage) Spine(id string) ([]Stage, error) {
 			for _, r := range in(n, "related") {
 				if l.stageKind(r) == "rollback" {
 					add(r)
+				}
+				if l.isRemnant(r) { // its respin is caused-by the Remnant
+					for _, s := range in(r, "caused-by") {
+						add(s)
+					}
 				}
 			}
 		}

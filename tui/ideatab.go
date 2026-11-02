@@ -412,7 +412,7 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 			members[b.Parent] = append(members[b.Parent], &beads[i])
 		}
 	}
-	byCmp := func(a, b *bd.Bead) int { return beadCmp(*a, *b) }
+	byCmp := func(a, b *bd.Bead) int { return g.rowCmp(*a, *b) }
 	var ids []string
 	for id := range members {
 		ids = append(ids, id)
@@ -425,7 +425,7 @@ func ideaListHeld(g graphData, sessions map[string]session.Info, held func(strin
 			ids = append(ids, id) // a cut session keeps its Initiative listed
 		}
 	}
-	slices.SortStableFunc(ids, func(a, b string) int { return beadCmp(*inits[a], *inits[b]) })
+	slices.SortStableFunc(ids, func(a, b string) int { return g.rowCmp(*inits[a], *inits[b]) })
 	rows := []ideaRow{{create: true}}
 	group := func(h ideaRow, ms []*bd.Bead) {
 		if len(ms) == 0 {
@@ -665,7 +665,7 @@ func (g graphData) ideaBands() (wait, front, paused []ideaRow) {
 		}
 		return *r.init
 	}
-	cmp := func(a, b ideaRow) int { return beadCmp(bead(a), bead(b)) }
+	cmp := func(a, b ideaRow) int { return g.rowCmp(bead(a), bead(b)) }
 	slices.SortStableFunc(wait, cmp)
 	slices.SortStableFunc(front, cmp)
 	slices.SortStableFunc(paused, cmp)

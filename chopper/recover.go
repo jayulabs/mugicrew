@@ -19,6 +19,7 @@ import (
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
+	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/dispatch"
 	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/git"
@@ -206,6 +207,9 @@ func Take(id string) (Inventory, error) {
 			return inv, err
 		}
 		inv.Checkup = ck.ID
+	}
+	if b.Kind == contract.KindRemnant && b.Unclosed() {
+		return inv, nil // its Draft is the respin Checkpoint, published by the respin re-run, not recover; a closed Remnant's is stranded, so recover deletes it
 	}
 	inv.Drafts, err = drafts(id)
 	return inv, err

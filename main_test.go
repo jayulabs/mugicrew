@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"jayulabs.org/mugicrew/chopper"
 	"jayulabs.org/mugicrew/contexts"
 	"jayulabs.org/mugicrew/contract"
+	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 	"jayulabs.org/mugicrew/forge"
 	"jayulabs.org/mugicrew/git"
@@ -136,6 +138,7 @@ func TestWorkspaceArgsResolvesDashC(t *testing.T) {
 func TestRequireGraphRefusesUserVerbsAndExportsBeadsDir(t *testing.T) {
 	ws := t.TempDir()
 	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_ACTOR", "kept") // the shell's own, so the gate probes nothing
 	orig, origRoot := graphDir, git.RepoRoot
 	t.Cleanup(func() { graphDir, git.RepoRoot = orig, origRoot })
 	git.RepoRoot = func() (string, error) { return ws, nil }
@@ -177,6 +180,43 @@ func TestRequireGraphRefusesUserVerbsAndExportsBeadsDir(t *testing.T) {
 	out, err := exec.Command("sh", "-c", "echo $BEADS_DIR").Output()
 	if got := strings.TrimSpace(string(out)); err != nil || got != "/g/.beads" {
 		t.Errorf("a spawned child's BEADS_DIR = %q, %v; want /g/.beads", got, err)
+	}
+}
+
+// A user verb pins its bd actor as BEADS_ACTOR once the graph is exported, so
+// every child claims and closes as one actor; a shell's own BEADS_ACTOR wins and
+// an internal verb sets nothing. A degraded read's bare-name fallback is exported
+// the same way (bd.Actor() returns it as the name).
+func TestRequireGraphPinsBeadsActor(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	orig, origRoot := graphDir, git.RepoRoot
+	t.Cleanup(func() { graphDir, git.RepoRoot = orig, origRoot })
+	git.RepoRoot = func() (string, error) { return t.TempDir(), nil }
+	graphDir = func(string) (string, error) { return "/g/.beads", nil }
+	defer bd.PinActor("me@box")()
+
+	t.Setenv("BEADS_ACTOR", "")
+	if err := requireGraph([]string{"reconcile", "mc-1"}); err != nil || os.Getenv("BEADS_ACTOR") != "" {
+		t.Errorf("internal verb: err %v, BEADS_ACTOR %q; want nothing set", err, os.Getenv("BEADS_ACTOR"))
+	}
+	if err := requireGraph([]string{"loop", "start"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", "echo $BEADS_ACTOR").Output()
+	if got := strings.TrimSpace(string(out)); err != nil || got != "me@box" {
+		t.Errorf("a spawned child's BEADS_ACTOR = %q, %v; want me@box", got, err)
+	}
+
+	restore := bd.PinActor("bare")
+	defer restore()
+	t.Setenv("BEADS_ACTOR", "")
+	if err := requireGraph([]string{"checkup"}); err != nil || os.Getenv("BEADS_ACTOR") != "bare" {
+		t.Errorf("fallback actor: err %v, BEADS_ACTOR %q; want bare", err, os.Getenv("BEADS_ACTOR"))
+	}
+
+	t.Setenv("BEADS_ACTOR", "zed@dev")
+	if err := requireGraph([]string{"loop", "start"}); err != nil || os.Getenv("BEADS_ACTOR") != "zed@dev" {
+		t.Errorf("preset: err %v, BEADS_ACTOR %q; want zed@dev kept", err, os.Getenv("BEADS_ACTOR"))
 	}
 }
 
@@ -549,6 +589,77 @@ func TestRunPivotConfirmUsage(t *testing.T) {
 	}
 }
 
+// `mugicrew pivot dismiss` rejects each malformed call as a usage error, and a missing
+// --critique file as a read error, before bd is touched.
+func TestRunPivotDismissUsage(t *testing.T) {
+	for _, argv := range [][]string{
+		{},
+		{"--gist", "g", "--drafted-by", "ws-pv"}, // no pivot id
+		{"ws-pv", "--drafted-by", "ws-pv"},       // no --gist
+		{"ws-pv", "--gist", " ", "--drafted-by", "ws-pv"},                                         // empty --gist
+		{"ws-pv", "--gist", "g"},                                                                  // no --drafted-by
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "more"},                                 // stray positional
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--nope"},                               // unknown flag
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--rewrite", "ws-ask"},                  // no =<file>
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--rewrite", "=f.md"},                   // no ask
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--rewrite", "ws-ask="},                 // no file
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--rewrite", "a=f", "--rewrite", "a=g"}, // repeated ask
+	} {
+		log := fakeBd(t, "[]", "[]")
+		if err := runPivotDismiss(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runPivotDismiss(%q) = %v, want a usage error", argv, err)
+		}
+		if l := bdLog(t, log); l != "" {
+			t.Errorf("runPivotDismiss(%q) touched bd: %q", argv, l)
+		}
+	}
+	log := fakeBd(t, "[]", "[]")
+	missing := filepath.Join(t.TempDir(), "absent.md")
+	if err := runPivotDismiss([]string{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--critique", missing}); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing --critique file = %v, want a not-exist error", err)
+	}
+	if l := bdLog(t, log); l != "" {
+		t.Errorf("missing --critique file touched bd: %q", l)
+	}
+	if err := runPivotDismiss([]string{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv", "--rewrite", "ws-ask=" + missing}); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing --rewrite file = %v, want a not-exist error", err)
+	}
+	if l := bdLog(t, log); l != "" {
+		t.Errorf("missing --rewrite file touched bd: %q", l)
+	}
+}
+
+// `mugicrew pivot amend` rejects each malformed call as a usage error, and a missing
+// --critique file as a read error, before bd is touched.
+func TestRunPivotAmendUsage(t *testing.T) {
+	for _, argv := range [][]string{
+		{},
+		{"--gist", "g", "--amendment", "a", "--drafted-by", "ws-pv"},      // no pivot id
+		{"ws-pv", "--amendment", "a", "--drafted-by", "ws-pv"},            // no --gist
+		{"ws-pv", "--gist", "g", "--drafted-by", "ws-pv"},                 // no --amendment
+		{"ws-pv", "--gist", "g", "--amendment", " ", "--drafted-by", "x"}, // empty --amendment
+		{"ws-pv", "--gist", "g", "--amendment", "a"},                      // no --drafted-by
+		{"ws-pv", "--gist", "g", "--amendment", "a", "--drafted-by", "x", "more"},
+		{"ws-pv", "--gist", "g", "--amendment", "a", "--drafted-by", "x", "--nope"},
+	} {
+		log := fakeBd(t, "[]", "[]")
+		if err := runPivotAmend(argv); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+			t.Errorf("runPivotAmend(%q) = %v, want a usage error", argv, err)
+		}
+		if l := bdLog(t, log); l != "" {
+			t.Errorf("runPivotAmend(%q) touched bd: %q", argv, l)
+		}
+	}
+	log := fakeBd(t, "[]", "[]")
+	missing := filepath.Join(t.TempDir(), "absent.md")
+	if err := runPivotAmend([]string{"ws-pv", "--gist", "g", "--amendment", "a", "--drafted-by", "x", "--critique", missing}); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("missing --critique file = %v, want a not-exist error", err)
+	}
+	if l := bdLog(t, log); l != "" {
+		t.Errorf("missing --critique file touched bd: %q", l)
+	}
+}
+
 // `mugicrew pivot raise` takes exactly one errand id; anything else is a usage error
 // before bd is touched.
 func TestRunPivotRaiseUsage(t *testing.T) {
@@ -878,6 +989,35 @@ func TestServeLoopRestartExecs(t *testing.T) {
 	}
 }
 
+// An installed (unpinned) loop restarts onto the swapped file at its startup path
+// with the lock fd and no --rev, attached or detached (ADR 0406 §5).
+func TestExecRestartUnpinnedCarriesLockFdWithoutRev(t *testing.T) {
+	orig := execLoop
+	t.Cleanup(func() { execLoop = orig })
+	eventlogtest.Capture(t)
+	const bin = "/usr/lib/node_modules/@jayulabs/mugicrew/bin/mugicrew"
+	for _, detached := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "mugicrew", "loop.lock")
+		lk, err := looplock.Acquire(path, "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var argv []string
+		execLoop = func(_ string, a, _ []string) error { argv = a; return errors.New("no exec") }
+		execRestart(lk, &loop.Restart{Rev: "1.2.3", Bin: bin}, loopMarkers{detached: detached, lockFd: -1}, bin, time.Second)
+		lk.Close()
+		for _, a := range argv {
+			if strings.HasPrefix(a, revArg) {
+				t.Fatalf("detached=%v: argv %v carries a rev", detached, argv)
+			}
+		}
+		m, ok := parseLoopMarkers(argv[2:])
+		if !ok || m.detached != detached || m.rev != "" || m.lockFd < 0 {
+			t.Fatalf("argv %v parses to %+v, %v", argv, m, ok)
+		}
+	}
+}
+
 // A force stop has already logged its own effort.abandoned/loop.forced: serveLoop
 // adds neither loop.stopped nor loop.failed, and the process exits cleanly.
 func TestServeLoopForcedLogsNoStop(t *testing.T) {
@@ -1007,6 +1147,11 @@ func TestRunLoopStopForceWaitsWindow(t *testing.T) {
 // MUGICREW_TEST_MAIN set, the process runs main on its args instead of the tests.
 func TestMain(m *testing.M) {
 	if os.Getenv("MUGICREW_TEST_MAIN") != "" {
+		version = os.Getenv("MUGICREW_TEST_VERSION") // the re-exec'd binary's stamps
+		sourceRoot = os.Getenv("MUGICREW_TEST_SOURCE_ROOT")
+		if os.Getenv("MUGICREW_TEST_TTY") != "" {
+			stderrIsTTY = func() bool { return true }
+		}
 		main()
 		os.Exit(0)
 	}
@@ -1027,7 +1172,7 @@ func TestMain(m *testing.M) {
 	// Stamps in-process never read the machine's auto_approve.
 	loop.ReadAutoApprove = func() loop.AutoApprove { return loop.AutoApprove{Source: "default"} }
 	refuseLegacyTasks = func(string) error { return nil } // the real check shells out to bd
-	loop.StopWindow = 0 // tests send stop and force back to back; window tests set their own
+	loop.StopWindow = 0                                   // tests send stop and force back to back; window tests set their own
 	// A command-less pane of a throwaway tmux server runs $SHELL; a login zsh hung up
 	// mid-startup dumps core, so every server these tests start takes a minimal sh.
 	os.Setenv("SHELL", "/bin/sh")
@@ -1510,12 +1655,22 @@ func TestLoopMarkersRoundTrip(t *testing.T) {
 		{detached: true, lockFd: -1},
 		{rev: "abc", source: "/src/.git", lockFd: -1},
 		{detached: true, rev: "abc", source: "/src/.git", lockFd: 3},
-		{rev: "abc", lockFd: 0}, // a pre-ADR-0090 image's restart: no --source
+		{lockFd: 3},                 // an installed loop's restart
+		{detached: true, lockFd: 3}, // and its detached one
+		{rev: "abc", lockFd: 0},     // a pre-ADR-0090 image's restart: no --source
 		{rev: "abc", source: "/src/.git", watch: true, lockFd: -1},
 		{detached: true, rev: "abc", source: "/src/.git", watch: true, lockFd: 3},
 	} {
 		if got, ok := parseLoopMarkers(m.args()[1:]); !ok || got != m {
 			t.Errorf("parse(%v) = %+v, %v; want %+v", m.args(), got, ok, m)
+		}
+	}
+}
+
+func TestLoopMarkersRejectMalformedInstalledForm(t *testing.T) {
+	for _, argv := range [][]string{{lockFdArg}, {lockFdArg + "x"}, {lockFdArg + "-1"}, {lockFdArg + "3", watchArg}, {lockFdArg + "3", lockFdArg + "4"}} {
+		if m, ok := parseLoopMarkers(argv); ok {
+			t.Errorf("parse(%v) = %+v; want not markers", argv, m)
 		}
 	}
 }
@@ -1568,7 +1723,7 @@ func TestRunLoopVerbUsage(t *testing.T) {
 	for _, argv := range [][]string{{"bogus"}, {"start", "now"}, {"stop", "--force", "x"}, {"--force"}, {"status", "stop"}, {""}, {"stop --force"}, {"status", watchArg}, {watchArg, "start"}, {"stop", watchArg},
 		{"--rev="}, {revArg + "abc", detachedArg}, {detachedArg, revArg + "abc", "x"}, {detachedArg, detachedArg}, {sourceArg + "/s"},
 		{revArg + "abc", sourceArg}, {revArg + "abc", lockFdArg + "3", sourceArg + "/s"}, {detachedArg, sourceArg + "/s", revArg + "abc"},
-		{lockFdArg + "3"}, {revArg + "abc", lockFdArg}, {revArg + "abc", lockFdArg + "x"}, {revArg + "abc", lockFdArg + "-1"}, {lockFdArg + "3", revArg + "abc"}} {
+		{lockFdArg + "x"}, {lockFdArg + "-1"}, {lockFdArg + "3", "x"}, {revArg + "abc", lockFdArg}, {revArg + "abc", lockFdArg + "x"}, {revArg + "abc", lockFdArg + "-1"}, {lockFdArg + "3", revArg + "abc"}} {
 		err := runLoopVerb(argv)
 		if err == nil || !strings.HasPrefix(err.Error(), "usage:") {
 			t.Errorf("loop %v = %v; want usage", argv, err)
@@ -1585,7 +1740,8 @@ func TestRunLoopVerbUsage(t *testing.T) {
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(t.TempDir()))
 	eventlogtest.Capture(t)
 	for _, argv := range [][]string{{revArg + "abc"}, {detachedArg, revArg + "abc"}, {detachedArg, revArg + "abc", lockFdArg + "3"},
-		{detachedArg}, {revArg + "abc", sourceArg + "/s"}, {detachedArg, revArg + "abc", sourceArg + "/s", lockFdArg + "3"}} {
+		{detachedArg}, {revArg + "abc", sourceArg + "/s"}, {detachedArg, revArg + "abc", sourceArg + "/s", lockFdArg + "3"},
+		{lockFdArg + "3"}, {detachedArg, lockFdArg + "3"}} { // an installed restart's rev-less argv
 		if err := runLoopVerb(argv); err == nil || strings.HasPrefix(err.Error(), "usage:") || err.Error() == "built" {
 			t.Errorf("loop %v = %v; want routed to the loop, failing on the lock", argv, err)
 		}
@@ -2845,17 +3001,17 @@ func TestIntakeJiraWantsExactlyOneKey(t *testing.T) {
 
 func TestIntakeJiraReintakeSupersedesOntoCarrier(t *testing.T) {
 	_, filed := intakeWorkspace(t, "[jira]\nsite = \"acme.atlassian.net\"\n", `{"key":"ABC-1","fields":{"summary":"Fix it","status":{"name":"Open","statusCategory":{"key":"new"}}}}`)
-	oc, osup := jira.CarrierOf, jira.Supersede
-	t.Cleanup(func() { jira.CarrierOf, jira.Supersede = oc, osup })
+	oc, osup := jira.CarrierOf, jira.Retire
+	t.Cleanup(func() { jira.CarrierOf, jira.Retire = oc, osup })
 	var asked string
-	var edge [2]string
+	var edge [3]string
 	jira.CarrierOf = func(ref string) (bd.Bead, bool, error) { asked = ref; return bd.Bead{ID: "mc-old"}, true, nil }
-	jira.Supersede = func(old, n string) error { edge = [2]string{old, n}; return nil }
+	jira.Retire = func(old, n, why string) error { edge = [3]string{old, n, why}; return nil }
 	var out strings.Builder
 	if err := runIntakeJira([]string{"ABC-1"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if asked != "jira-ABC-1" || len(*filed) != 1 || edge != [2]string{"mc-new", "mc-old"} {
+	if asked != "jira-ABC-1" || len(*filed) != 1 || edge != [3]string{"mc-new", "mc-old", "duplicate: mc-old"} {
 		t.Errorf("asked %q, filed %d, edge %v", asked, len(*filed), edge)
 	}
 	if !strings.HasPrefix(out.String(), "mc-new\n") || !strings.Contains(out.String(), "mc-old") {
@@ -3169,6 +3325,8 @@ func TestBeadDetailBadWidthFailsOnStderr(t *testing.T) {
 // `mugicrew rebase` exit codes and stdout: refusals exit 1 and print to stderr; the
 // idempotent outcomes exit 0.
 func TestRunRebaseExitCodes(t *testing.T) {
+	t.Setenv(eventlog.EffortEnv, "")
+	t.Setenv("MUGICREW_HITL_PANE", "")
 	old := rebaseSeams
 	t.Cleanup(func() { rebaseSeams = old })
 	rebaseSeams = rebase.Seams{
@@ -3212,6 +3370,31 @@ func TestRunRebaseExitCodes(t *testing.T) {
 	var o, e strings.Builder
 	if code := runRebase([]string{"mc-c"}, &o, &e); code != 0 || o.String() != "already on mainline: b4se\n" {
 		t.Errorf("already on mainline: code %d out %q", code, o.String())
+	}
+}
+
+// A crewmate session (effort env or HITL pane) is refused before the argument count is
+// read and never reaches the filing seam.
+func TestRunRebaseRefusesCrewmate(t *testing.T) {
+	old := rebaseSeams
+	t.Cleanup(func() { rebaseSeams = old })
+	rebaseSeams = rebase.Seams{Show: func(string) (bd.Bead, error) {
+		t.Error("filing seam reached")
+		return bd.Bead{}, errors.New("unreachable")
+	}}
+	for _, env := range []string{eventlog.EffortEnv, "MUGICREW_HITL_PANE"} {
+		for _, argv := range [][]string{{"mc-c"}, nil, {"a", "b"}} {
+			t.Setenv(eventlog.EffortEnv, "")
+			t.Setenv("MUGICREW_HITL_PANE", "")
+			t.Setenv(env, "x,y")
+			var o, e strings.Builder
+			code := runRebase(argv, &o, &e)
+			if code != 1 || o.String() != "" || strings.Count(e.String(), "\n") != 1 ||
+				!strings.Contains(e.String(), "human-only") || !strings.Contains(e.String(), "ADR 0262") ||
+				!strings.Contains(e.String(), "r row") || !strings.Contains(e.String(), "offshoot Signal") {
+				t.Errorf("%s %v: code %d out %q err %q", env, argv, code, o.String(), e.String())
+			}
+		}
 	}
 }
 
@@ -3622,7 +3805,7 @@ func TestAutoExitAtResolvesFromTheSocket(t *testing.T) {
 	if got := autoExitAt(sock); got != loop.DefaultAutoExit {
 		t.Errorf("nothing set = %v, want the default", got)
 	}
-	writeAutoExit(t, filepath.Join(root, ".mugicrew", "config.toml"), "45s") // uncommitted, main checkout only
+	writeAutoExit(t, filepath.Join(root, ".mugicrew", "config.toml"), "45s")  // uncommitted, main checkout only
 	writeAutoExit(t, filepath.Join(linked, ".mugicrew", "config.toml"), "5m") // the linked tree's own copy
 	if got := autoExitAt(sock); got != 45*time.Second {
 		t.Errorf("shared layer = %v, want the main checkout's 45s", got)
@@ -3674,5 +3857,196 @@ func TestAutoExitAtNestedChildUsesTheWorkspace(t *testing.T) {
 	t.Chdir(filepath.Join(host, "child")) // a deliberately wrong cwd: the nested child repo
 	if got := autoExitAt(filepath.Join(common, "mugicrew", "tmux.sock")); got != 30*time.Second {
 		t.Errorf("nested child = %v, want the Workspace's 30s", got)
+	}
+}
+
+// `mugicrew duplicate <dup> <original>` closes through the reason-first door with
+// duplicate: <original>, and refuses a missing argument, dup == original and an
+// unknown id (the door's refusal) without a write.
+func TestRunDuplicate(t *testing.T) {
+	orb, osb, ocb, olh := retireBead, showBead, carryBeads, liveHeadOf
+	t.Cleanup(func() { retireBead, showBead, carryBeads, liveHeadOf = orb, osb, ocb, olh })
+	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Status: "open"}, nil }
+	liveHeadOf = func(id string) (string, bool, error) { return id, true, nil }
+	carryBeads = func(pred, succ string) ([]string, []bd.CarrySkip, error) { return nil, nil, nil }
+	var calls [][3]string
+	retireBead = func(old, n, reason string) error {
+		if n == "mc-typo" {
+			return errors.New("not found: mc-typo")
+		}
+		calls = append(calls, [3]string{old, n, reason})
+		return nil
+	}
+	for _, argv := range [][]string{nil, {"mc-a"}, {"mc-a", "mc-b", "mc-c"}, {"mc-a", ""}} {
+		err := runDuplicate(argv, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "usage: mugicrew duplicate <dup> <original>") {
+			t.Errorf("runDuplicate(%v) = %v, want the usage line", argv, err)
+		}
+	}
+	if err := runDuplicate([]string{"mc-a", "mc-a"}, io.Discard); err == nil {
+		t.Error("dup == original accepted")
+	}
+	if err := runDuplicate([]string{"mc-a", "mc-typo"}, io.Discard); err == nil {
+		t.Error("unknown original accepted")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("refusals wrote %v", calls)
+	}
+	if err := runDuplicate([]string{"mc-a", "mc-b"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][3]string{{"mc-a", "mc-b", "duplicate: mc-b"}}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+// The duplicate door carries the duplicate's ordering onto its original's live head
+// before it closes, prints the count and the head, skips the carry on a closed
+// duplicate, releases an ended chain with a record, and leaves the duplicate open when
+// the live-head read or the carry errors.
+func TestRunDuplicateCarries(t *testing.T) {
+	orb, osb, ocb, olh, oes := retireBead, showBead, carryBeads, liveHeadOf, endedSkips
+	t.Cleanup(func() { retireBead, showBead, carryBeads, liveHeadOf, endedSkips = orb, osb, ocb, olh, oes })
+	status := map[string]string{"mc-d": "open"}
+	showBead = func(id string) (bd.Bead, error) { return bd.Bead{ID: id, Status: status[id]}, nil }
+	var order []string
+	var cerr, herr error
+	head, found := "mc-h", true
+	liveHeadOf = func(id string) (string, bool, error) { return head, found, herr }
+	moved := []string{"mc-x", "mc-y"}
+	carryBeads = func(pred, succ string) ([]string, []bd.CarrySkip, error) {
+		order = append(order, "carry "+pred+" "+succ)
+		return moved, nil, cerr
+	}
+	endedSkips = func(pred string) ([]bd.CarrySkip, error) {
+		return []bd.CarrySkip{{Bead: "mc-x", Reason: "ended"}, {Bead: "mc-y", Reason: "ended"}}, nil
+	}
+	retireBead = func(old, n, reason string) error { order = append(order, "retire "+old+" "+n); return nil }
+	run := func() (string, error) {
+		order = nil
+		var buf strings.Builder
+		err := runDuplicate([]string{"mc-d", "mc-o"}, &buf)
+		return buf.String(), err
+	}
+	out, err := run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"carry mc-d mc-h", "retire mc-d mc-o"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	if want := "duplicate mc-d: closed duplicate of mc-o\ncarried 2 onto mc-h\n"; out != want {
+		t.Errorf("out = %q, want %q", out, want)
+	}
+	moved = nil
+	if out, _ = run(); strings.Contains(out, "carried") {
+		t.Errorf("nothing moved but out = %q", out)
+	}
+	moved, cerr = []string{"mc-x"}, errors.New("boom")
+	if _, err = run(); err == nil {
+		t.Error("carry error swallowed")
+	}
+	if want := []string{"carry mc-d mc-h"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("after carry error order = %v, want no retire", order)
+	}
+	cerr, herr = nil, errors.New("read failed")
+	if _, err = run(); err == nil {
+		t.Error("live-head read error swallowed")
+	}
+	if len(order) != 0 {
+		t.Errorf("after read error order = %v, want no carry or retire", order)
+	}
+	herr, found = nil, false
+	out, err = run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"retire mc-d mc-o"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("ended chain order = %v, want only the retire", order)
+	}
+	if want := "duplicate mc-d: closed duplicate of mc-o\nchain of mc-o ended: released 2\n"; out != want {
+		t.Errorf("ended out = %q, want %q", out, want)
+	}
+	found = true
+	status["mc-d"] = "closed"
+	if _, err = run(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"retire mc-d mc-o"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("closed duplicate order = %v, want only the retire", order)
+	}
+}
+
+// `mugicrew obsolete <bead> --by <decider>` prints one confirmation line, and refuses
+// a malformed command line without calling the door.
+func TestRunObsolete(t *testing.T) {
+	ob := obsoleteBead
+	t.Cleanup(func() { obsoleteBead = ob })
+	var calls [][2]string
+	obsoleteBead = func(target, decider string) error {
+		if decider == "mc-typo" {
+			return errors.New("not found: mc-typo")
+		}
+		calls = append(calls, [2]string{target, decider})
+		return nil
+	}
+	for _, argv := range [][]string{nil, {"mc-a"}, {"mc-a", "--by"}, {"mc-a", "mc-b"}, {"mc-a", "--with", "mc-b"}, {"mc-a", "--by", ""}, {"", "--by", "mc-b"}, {"mc-a", "--by", "mc-b", "x"}} {
+		err := runObsolete(argv, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "usage: mugicrew obsolete <bead> --by <decider>") {
+			t.Errorf("runObsolete(%v) = %v, want the usage line", argv, err)
+		}
+	}
+	if err := runObsolete([]string{"mc-a", "--by", "mc-typo"}, io.Discard); err == nil {
+		t.Error("door error swallowed")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("refusals wrote %v", calls)
+	}
+	var out strings.Builder
+	if err := runObsolete([]string{"mc-a", "--by", "mc-b"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := "obsolete mc-a: closed, made moot by mc-b\n"; out.String() != want {
+		t.Errorf("out = %q, want %q", out.String(), want)
+	}
+	if want := [][2]string{{"mc-a", "mc-b"}}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
+	}
+}
+
+// `mugicrew supersede <bead> --with <new>` prints one confirmation line, and refuses
+// a malformed command line without calling the door.
+func TestRunSupersede(t *testing.T) {
+	sb := supersedeBead
+	t.Cleanup(func() { supersedeBead = sb })
+	var calls [][2]string
+	supersedeBead = func(target, with string) error {
+		if with == "mc-typo" {
+			return errors.New("not found: mc-typo")
+		}
+		calls = append(calls, [2]string{target, with})
+		return nil
+	}
+	for _, argv := range [][]string{nil, {"mc-a"}, {"mc-a", "--with"}, {"mc-a", "mc-b"}, {"mc-a", "--by", "mc-b"}, {"mc-a", "--with", ""}, {"", "--with", "mc-b"}, {"mc-a", "--with", "mc-b", "x"}} {
+		err := runSupersede(argv, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "usage: mugicrew supersede <bead> --with <new>") {
+			t.Errorf("runSupersede(%v) = %v, want the usage line", argv, err)
+		}
+	}
+	if err := runSupersede([]string{"mc-a", "--with", "mc-typo"}, io.Discard); err == nil {
+		t.Error("door error swallowed")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("refusals wrote %v", calls)
+	}
+	var out strings.Builder
+	if err := runSupersede([]string{"mc-a", "--with", "mc-b"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := "superseded mc-a: closed, replaced by mc-b\n"; out.String() != want {
+		t.Errorf("out = %q, want %q", out.String(), want)
+	}
+	if want := [][2]string{{"mc-a", "mc-b"}}; !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v", calls, want)
 	}
 }

@@ -30,6 +30,10 @@ carried entirely by the Spec body — no ADR, no decision later beads lean on �
 and open no follow-up question. An answer that branches or needs an ADR is a
 design tree: the Signal gets a Chart.
 
+A Signal whose work is only fog-free steps in the external world (outside the
+bead graph and the code, such as creating a repo or minting a token) is sharp
+too: FAST LANE takes it as an Errand-only Spec, never a reject.
+
 You propose, the human disposes: they can always turn FAST LANE into a Chart,
 but a Chart into FAST LANE only if you can then write the complete Spec —
 insisting doesn't make it sharp.
@@ -79,6 +83,11 @@ Resolve the Signal one of six ways:
 1. Draft the full Spec body (Read crew doc spec-template.md: seven sections, in
    order), so Zoro slices it like any Spec. Write the draft to its body file
    and show it to the human inline, verbatim. %[4]s
+   For an Errand-only Spec, the body is the seven sections in order, then an
+   ## Errands section listing each Errand with its ordering lines and Steps body
+   as spec-template.md describes, and no Builds; Build-sliceable Implementation
+   Decisions and Testing Decisions each read "None: no Builds; this Spec lays
+   Errands only".
 2. Wait for an explicit yes or "Chart it" (→ ACCEPT). Minor edits at approval
    are fine (one settling an open design question is a clarification, above); rewrite the body file, re-render the pane and re-show the edited body verbatim before the yes.
 3. Only after the yes — approval IS Spec acceptance — pass the body file you
@@ -160,10 +169,14 @@ Signal is folded into the host instead of being rejected and hand-filed.
 
 ### REJECT — not worth doing
 
-No Chart:  bd close %[1]s --reason "why this Signal is not worth doing"
+No Chart:  bd close %[1]s --reason "rejected: <why>"
+
+Work outside the code is no reason to reject: offer the Errand-only Spec through FAST LANE instead.
+
+Any sub-reason (not wanted, by design, …) goes in the detail after "rejected: ", never as its own prefix.
 
 ### DUPLICATE — already covered by an existing bead
 
-Supersede it (keeps multi-report lineage):  bd supersede %[1]s --with <original-id>
+Close it duplicate: <original-id> and keep the multi-report lineage:  mugicrew duplicate %[1]s <original-id>
 
 Do exactly one of ACCEPT, FAST LANE, INITIATIVE, REJECT, DUPLICATE, or REROUTE before you finish.

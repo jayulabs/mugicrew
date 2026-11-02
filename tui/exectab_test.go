@@ -258,6 +258,19 @@ func TestExecLiveBadge(t *testing.T) {
 	}
 }
 
+// A Live-section AFK Build at effective P0 is drawn with the P0 colour.
+func TestExecLiveAFKRowKeepsP0Colour(t *testing.T) {
+	forceANSI256(t)
+	beads := []bd.Bead{
+		dbead("cpA", contract.KindCheckpoint, "open", "", 1, isContainer),
+		dbead("lv", contract.KindBuild, "in_progress", "cpA", 0),
+	}
+	m, _ := execModel(t, beads)
+	if v := m.View(); !strings.Contains(v, prio(0)) {
+		t.Errorf("Live AFK P0 not drawn in the P0 colour:\n%s", v)
+	}
+}
+
 // Rows carry marks and, after title and id, the relation hint.
 func TestExecRowHints(t *testing.T) {
 	m, _ := execModel(t, execFixture())
@@ -396,7 +409,7 @@ func TestExecBlockerHighlightAndFooter(t *testing.T) {
 	if n != 1 || len(footerRows(v)) > 0 {
 		t.Errorf("want one ! row and no footer, got %d:\n%s", n, ansi.Strip(v))
 	}
-	if !strings.Contains(v, tinted(pinkFg, 1).Render(prioText(3))+sep()+pinkFg.Render("t bl")) {
+	if !strings.Contains(v, prio(1)+pinkFg.Render("‹3")+sep()+pinkFg.Render("t bl")) {
 		t.Errorf("blocker title not pink:\n%s", v)
 	}
 	// fold cpA: bl leaves the list and lands in the footer

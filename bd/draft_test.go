@@ -21,9 +21,8 @@ import (
 func TestDraftCreateArgs(t *testing.T) {
 	s := Successor{Kind: contract.KindBuild, Title: "t", Description: "d", DraftedBy: "ws-spec"}
 	for name, args := range map[string][]string{
-		"successor":  successorCreateArgs("ws-pred", s),
-		"child":      childCreateArgs("ws-cp", s),
-		"discovered": discoveredCreateArgs("ws-pv", "ws-pred", s),
+		"successor": successorCreateArgs("ws-pred", s),
+		"child":     childCreateArgs("ws-cp", s),
 	} {
 		if !hasPair(args, "--status", "deferred") {
 			t.Errorf("%s: a Draft must be created --status deferred: %v", name, args)
@@ -350,5 +349,78 @@ func TestDeleteDraftsInitiativeHasNoBranchOutcome(t *testing.T) {
 	}
 	if !hasBranch("initiative/mc-ini") {
 		t.Error("an Initiative Draft must touch no branch")
+	}
+}
+
+// argvValue is the value after flag in args ("" when absent).
+func argvValue(args []string, flag string) string {
+	if i := indexOf(args, flag); i >= 0 && i+1 < len(args) {
+		return args[i+1]
+	}
+	return ""
+}
+
+// The CLI argv builders (CreateDraft, NewOffshoot…) and the CreateSpec builders
+// (the Spawn…IfAbsent family) encode one set of rules twice; they must not drift.
+func TestSpecArgsParity(t *testing.T) {
+	cases := []Successor{
+		{Kind: contract.KindBuild, Title: "t", Description: "d"},
+		{Kind: contract.KindChart, Title: "Chart: t", Description: "d", Container: true, Parent: "ws-init", Context: "c", Repo: "r"},
+		{Kind: contract.KindBuild, Title: "t", Description: "d", DraftedBy: "ws-spec", ExternalRef: "jira-1"},
+		{Kind: contract.KindBuild, Title: "t", Description: "d", CausedBy: "ws-a", DiscoveredFrom: "ws-b"},
+	}
+	for _, s := range cases {
+		args := successorCreateArgs("ws-pred", s, "discovered-from:ws-pv")
+		spec, err := successorSpec("ws-pred", s, Edge{Type: "discovered-from", To: "ws-pv"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkParity(t, "successor", args, spec, true)
+
+		args = childCreateArgs("ws-cp", s)
+		if spec, err = childSpec("ws-cp", s); err != nil {
+			t.Fatal(err)
+		}
+		checkParity(t, "child", args, spec, false)
+	}
+}
+
+func checkParity(t *testing.T, name string, args []string, spec CreateSpec, externalRef bool) {
+	t.Helper()
+	var deps []string
+	for _, d := range spec.Deps {
+		deps = append(deps, d.Type+":"+d.To)
+	}
+	want := []struct{ what, argv, spec string }{
+		{"type", argvValue(args, "--type"), spec.Type},
+		{"labels", argvValue(args, "--labels"), strings.Join(spec.Labels, ",")},
+		{"parent", argvValue(args, "--parent"), spec.Parent},
+		{"deps", argvValue(args, "--deps"), strings.Join(deps, ",")},
+		{"title", argvValue(args, "--title"), spec.Title},
+		{"description", argvValue(args, "--description"), spec.Description},
+		{"deferred", argvValue(args, "--status"), map[bool]string{true: "deferred"}[spec.Deferred]},
+	}
+	if externalRef {
+		want = append(want, struct{ what, argv, spec string }{"external ref", argvValue(args, "--external-ref"), spec.ExternalRef})
+	}
+	for _, c := range want {
+		if c.argv != c.spec {
+			t.Errorf("%s %s: argv %q, spec %q", name, c.what, c.argv, c.spec)
+		}
+	}
+	if (indexOf(args, "--no-inherit-labels") >= 0) != spec.NoInherit {
+		t.Errorf("%s: --no-inherit-labels disagrees with spec.NoInherit", name)
+	}
+}
+
+// A Spawn…IfAbsent cannot carry Successor.Metadata (a CreateSpec has none): it fails
+// rather than dropping it.
+func TestSpawnRefusesMetadata(t *testing.T) {
+	s := Successor{Kind: contract.KindBuild, Title: "t", Metadata: `{"a":1}`}
+	if _, err := successorSpec("ws-p", s); !errors.Is(err, errSpawnMetadata) {
+		t.Errorf("successorSpec err = %v, want errSpawnMetadata", err)
+	}
+	if _, err := childSpec("ws-p", s); !errors.Is(err, errSpawnMetadata) {
+		t.Errorf("childSpec err = %v, want errSpawnMetadata", err)
 	}
 }

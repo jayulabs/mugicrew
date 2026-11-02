@@ -20,14 +20,14 @@ func TestHoldTrailerlessNamesNestedMR(t *testing.T) {
 	t.Cleanup(func() { postLandClashes = oClash })
 	postLandClashes = func(string, string) ([]git.PostLandClash, error) { return nil, nil }
 	var key, title, body string
-	bd.SpawnBlockingErrand = func(_, k, ti, b string) (string, bool, error) { key, title, body = k, ti, b; return "t", true, nil }
-	holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", mrNaming{noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
+	bd.SpawnBlockingErrand = func(_, k, ti, b, _ string) (string, bool, error) { key, title, body = k, ti, b; return "t", true, nil }
+	holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", "", mrNaming{noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
 	if wantTitle := "C: merge request !7 merged without its trailer"; title != wantTitle ||
 		!strings.HasPrefix(body, "MR !7 for cp was merged at abc, but no \"Spec: x\" trailer reached mainline.\n") {
 		t.Errorf("workspace hold reworded: title %q body %q", title, body)
 	}
 	for path, want := range map[string]string{"grp/proj": "grp/proj!7", "": " !7"} {
-		holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", mrNaming{path: path, noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
+		holdTrailerless(bd.Bead{ID: "cp", Title: "C"}, "", "", mrNaming{path: path, noun: "merge request", label: "MR"}, "Spec: x", 7, "abc")
 		if key != "Merged MR: !7\n" || !strings.Contains(title, want) || !strings.Contains(body, want) {
 			t.Errorf("path %q: key %q title %q body %q", path, key, title, body)
 		}
@@ -57,7 +57,7 @@ func TestPipelineFailureNamesNestedMR(t *testing.T) {
 				r := &jinbeSeamRec{head: "cafef00d", jobs: c.jobs, targetSHA: "base9"}
 				stubJinbeSeams(t, r)
 				var title, body string
-				bd.SpawnBlockingErrand = func(_, _, ti, b string) (string, bool, error) { title, body = ti, b; return "t", true, nil }
+				bd.SpawnBlockingErrand = func(_, _, ti, b, _ string) (string, bool, error) { title, body = ti, b; return "t", true, nil }
 				l := openLanding("cafef00d")
 				l.Description += "\nMR: !7\nRetried: pipeline 42\n"
 				cp := bd.Bead{ID: "ws-cp", Kind: c.kind, Title: "Ship"}

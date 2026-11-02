@@ -90,13 +90,13 @@ func TestDraftRowIsDim(t *testing.T) {
 	if got := ansi.Strip(g.stateGlyph(d)); got != "draft" {
 		t.Errorf("Draft status slot = %q; want draft", got)
 	}
-	if st, plain := leafTitleStyle(d, true); plain || st.GetForeground() != dim {
+	if st, plain, _ := leafRestyle(d, true); plain || st.GetForeground() != dim {
 		t.Error("Draft leaf title not dim")
 	}
 	if st, plain := containerTitleStyle(g.beadByID("dch"), true); plain || st.GetForeground() != dim {
 		t.Error("Draft container title not dim")
 	}
-	if st, _ := leafTitleStyle(&bd.Bead{ID: "kid", Kind: contract.KindBuild, Status: "open", Parent: "dch"}, false); st.GetForeground() == dim {
+	if st, _, _ := leafRestyle(&bd.Bead{ID: "kid", Kind: contract.KindBuild, Status: "open", Parent: "dch"}, false); st.GetForeground() == dim {
 		t.Error("published child under a Draft is dimmed")
 	}
 }

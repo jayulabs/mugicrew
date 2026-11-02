@@ -234,7 +234,7 @@ func TestRenumberCheckpointReclashWidensBeadScope(t *testing.T) {
 		return "c", true, nil
 	}
 	head := func(string) (string, error) { return "tip", nil }
-	if err := fileConflict(openCheckpoint(), "base", []string{"c"}, head, false); err != nil {
+	if err := fileConflict(openCheckpoint(), "base", []string{"c"}, head, "ws-land"); err != nil {
 		t.Fatal(err)
 	}
 	if d := r.builds[0].Description; !strings.Contains(d, "own beads: ws-cp, ws-cp.1, ws-orig, ws-orig.1") {
@@ -243,7 +243,7 @@ func TestRenumberCheckpointReclashWidensBeadScope(t *testing.T) {
 
 	causedBy = func(string, contract.Kind) (string, bool, error) { return "", false, nil }
 	r.builds = nil
-	if err := fileConflict(openCheckpoint(), "base", []string{"c"}, head, false); err != nil {
+	if err := fileConflict(openCheckpoint(), "base", []string{"c"}, head, "ws-land"); err != nil {
 		t.Fatal(err)
 	}
 	if d := r.builds[0].Description; strings.Contains(d, "own beads") {

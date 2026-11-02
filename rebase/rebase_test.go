@@ -19,6 +19,7 @@ type rec struct {
 	repo             git.Repo
 	headRepo         git.Repo
 	order            []string
+	edges, unpaused  []string
 }
 
 // fake builds scripted seams over a single container.
@@ -46,6 +47,17 @@ func fake(c bd.Bead, r *rec) Seams {
 			return "mc-new", true, nil
 		},
 		FindOpenMR: func(git.Repo, string) (*forge.MR, error) { return nil, nil },
+		Members:    func(string) ([]bd.Bead, error) { return nil, nil },
+		AddBlocker: func(blocked, blocker string) error {
+			r.edges = append(r.edges, blocked+"<-"+blocker)
+			r.order = append(r.order, "edge:"+blocked)
+			return nil
+		},
+		Unpause: func(id, cause string) error {
+			r.unpaused = append(r.unpaused, id+":"+cause)
+			r.order = append(r.order, "lift:"+id)
+			return nil
+		},
 	}
 }
 
@@ -174,5 +186,62 @@ func TestRequestShowOutageIsAnErrorNotARefusal(t *testing.T) {
 	s.Show = func(string) (bd.Bead, error) { return bd.Bead{}, errors.New("dolt unreachable") }
 	if out, err := Request(s, "mc-c"); err == nil {
 		t.Fatalf("got %+v, nil; want the infrastructure error", out)
+	}
+}
+
+func TestRequestEdgesBehindMainlineMembers(t *testing.T) {
+	members := func(string) ([]bd.Bead, error) {
+		return []bd.Bead{
+			{ID: "mc-p", Status: "open", Labels: []string{"paused:behind-mainline"}},
+			{ID: "mc-q", Status: "open", Labels: []string{"paused:not-built"}},
+			{ID: "mc-r", Status: "open"},
+		}, nil
+	}
+	standing := func(s *Seams) {
+		s.Spawn = func(string, bd.Successor) (string, bool, error) { return "mc-old", false, nil }
+		show := s.Show
+		s.Show = func(id string) (bd.Bead, error) {
+			if id == "mc-old" {
+				return bd.Bead{ID: id, Title: "old", Description: "Base: b0\nvariant: requested"}, nil
+			}
+			return show(id)
+		}
+	}
+	tests := []struct {
+		name    string
+		kind    contract.Kind
+		tweak   func(*Seams)
+		blocker string
+		edged   int
+	}{
+		{"filed", contract.KindCheckpoint, nil, "mc-new", 1},
+		{"already requested", contract.KindCheckpoint, standing, "mc-old", 1},
+		{"chart writes no edges", contract.KindChart, nil, "", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &rec{}
+			s := fake(open(tc.kind), r)
+			s.Members = members
+			if tc.tweak != nil {
+				tc.tweak(&s)
+			}
+			out, err := Request(s, "mc-c")
+			if err != nil || len(out.Edged) != tc.edged {
+				t.Fatalf("got %+v, %v", out, err)
+			}
+			if tc.edged == 0 {
+				if len(r.edges)+len(r.unpaused) != 0 {
+					t.Errorf("edges %v unpaused %v on a chart", r.edges, r.unpaused)
+				}
+				return
+			}
+			if strings.Join(r.edges, ",") != "mc-p<-"+tc.blocker || strings.Join(r.unpaused, ",") != "mc-p:behind-mainline" {
+				t.Errorf("edges %v unpaused %v", r.edges, r.unpaused)
+			}
+			if strings.Join(r.order, ",") != "base,edge:mc-p,lift:mc-p" {
+				t.Errorf("order %v: edge must precede lift", r.order)
+			}
+		})
 	}
 }

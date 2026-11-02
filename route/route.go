@@ -15,6 +15,7 @@ import (
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contract"
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/nami"
 )
 
 // Placement is where a session's cwd lands (the Spec per-kind table).
@@ -149,11 +150,16 @@ func OnEffort(b bd.Bead) (Destination, bool, error) {
 // Critique) replace, cut at the pinned Tip their body carries (Spec D1, ADR 0102 §4).
 func leaf(b bd.Bead, c string) Destination {
 	d := Destination{Placement: Worktree, Branch: git.EffortBranch(b.ID), Container: c}
-	_, based := git.ParseBase(b.Description)
+	base, based := git.ParseBase(b.Description)
 	tip, tipped := git.ParseTip(b.Description)
 	if b.Kind == contract.KindChartConflict || b.Kind == contract.KindConflict || (b.Kind == contract.KindCritique && based && tipped) {
 		d.Mode = Replace
 		d.Tip = tip
+		// A replay Conflict's Tip: is the stranded branch's old head, which the respin
+		// container never held: it replaces the empty cut at its Base: (Spec mc-d8xi1 D6).
+		if based && b.Kind == contract.KindConflict && nami.BodyVariant(b.Description) == nami.ConflictReplay {
+			d.Tip = base
+		}
 	}
 	return d
 }

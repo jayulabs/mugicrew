@@ -21,6 +21,11 @@ tried it and picked:
    "this row" set from `?`, `?`-only ones included, in hint-rank order and drawn like
    the rest. They get no rule and no dimming. Rejected: a flat box in the hints bar's
    colours, and a header naming the bead.
+   *Amendment 2026-10-29 (Spec "Right-click menu lists detail and goto"):* the menu
+   also lists `d` wherever the tab honours it for the row, labelled `detail` or `close`
+   as the hints bar has it and placed by hint rank (rank 2, after enter/esc), and `g goto ›` last, below a `├───┤` rule in the accent
+   border colour, when the Goto menu has options for the bead. The rule is a drawn line,
+   not an item: the highlight never lands on it, and `g` is appended after the rank sort.
 3. **The menu's top-left corner sits on the pointer cell.** Where it would cross the
    right edge it flips left, so its right edge is the pointer column. Where it would
    cross the bottom it flips up, so its bottom line is the pointer line. Both flips can

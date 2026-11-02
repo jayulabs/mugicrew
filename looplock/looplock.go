@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/release"
 )
 
 // Loop states (ADR 0050). Off is never written: it is what an unheld lock reads.
@@ -37,7 +38,8 @@ const (
 // installed loop has only StorePath, its own executable (ADR 0295 §3); both are
 // empty for a holder that has not written its body. Watch marks a watched loop (ADR 0090
 // §4), and Source the git common dir it watches (§7). Inflight is a draining loop's
-// in-flight bead titles. RestartTo is the rev a restart drain will exec onto, and
+// in-flight bead titles. RestartTo is the rev a restart drain will exec onto (an unattended Upgrade's swap
+// drain writes the sentinel "new-binary" until the new binary's rev is known), and
 // FailedRev the main rev whose build failed (ADR 0063 §1–2); both empty otherwise.
 // A limited loop is live like an on one: it carries the in-flight titles too, and
 // ResetsAt (when the hold ends, before the resume's minute of slack) with LimitSource
@@ -52,6 +54,13 @@ type Status struct {
 	Inflight  []string `json:"inflight,omitempty"`
 	RestartTo string   `json:"restart_to,omitempty"`
 	FailedRev string   `json:"failed_rev,omitempty"`
+	// UpgradeFailed is the release whose unattended npm install failed; the loop
+	// keeps running and does not retry it. Older readers ignore it.
+	UpgradeFailed string `json:"upgrade_failed,omitempty"`
+	// StoppedFor is why an unattended Upgrade stopped the loop (a tripped doctor,
+	// naming mugicrew doctor fix). Unlike the rest of the body it is read once the
+	// lock is unheld too, until the next start rewrites the body.
+	StoppedFor string `json:"stopped_for,omitempty"`
 
 	ResetsAt    time.Time `json:"resets_at,omitzero"`
 	LimitSource string    `json:"limit_source,omitempty"`
@@ -84,6 +93,9 @@ type Line struct {
 // formatter behind Text and the TUI loop menu (ADR 0288 §4). Off, or a lock held with
 // pid 0 (body not yet written), is just the state line; empty sections are omitted.
 func (st Status) Lines() []Line {
+	if st.State == Off && st.StoppedFor != "" {
+		return []Line{{SecState, "state", st.State}, {SecStale, "stopped", st.StoppedFor}}
+	}
 	if st.State == Off || st.Pid == 0 {
 		return []Line{{SecState, "state", st.State}}
 	}
@@ -93,7 +105,7 @@ func (st Status) Lines() []Line {
 	}
 	ls := []Line{{SecState, "state", state}}
 	if st.RestartTo != "" {
-		ls = append(ls, Line{SecState, "restarting onto", "main " + Short(st.RestartTo)})
+		ls = append(ls, Line{SecState, "restarting onto", Onto(st.RestartTo)})
 	}
 	ls = append(ls, Line{SecState, "pid", fmt.Sprint(st.Pid)})
 	if st.Rev != "" {
@@ -112,6 +124,9 @@ func (st Status) Lines() []Line {
 	}
 	if st.FailedRev != "" {
 		ls = append(ls, Line{SecStale, "stale", fmt.Sprintf("build of main %s failed (see build.failed in events)", Short(st.FailedRev))})
+	}
+	if st.UpgradeFailed != "" {
+		ls = append(ls, Line{SecStale, "upgrade failed", fmt.Sprintf("npm install of %s failed; not retried unattended (see upgrade.failed in events)", st.UpgradeFailed)})
 	}
 	if st.Watch {
 		ls = append(ls, Line{SecWatch, "watching", strings.TrimSuffix(st.Source, "/.git") + " " + git.MainlineOf(st.Source)})
@@ -296,8 +311,8 @@ func Read(path string) (Status, error) {
 	defer f.Close()
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	switch {
-	case err == nil:
-		return Status{State: Off}, nil // Close drops the probe's lock
+	case err == nil: // Close drops the probe's lock
+		return Status{State: Off, StoppedFor: parse(f).StoppedFor}, nil
 	case errors.Is(err, syscall.EWOULDBLOCK):
 		return parse(f), nil
 	}
@@ -325,3 +340,19 @@ func parse(f *os.File) Status {
 
 // Short is r cut to seven characters, a rev as displayed.
 func Short(r string) string { return r[:min(7, len(r))] }
+
+// swapSentinel is the RestartTo a swap drain writes before it knows the new
+// binary's rev (loop.swapRestartTo).
+const swapSentinel = "new-binary"
+
+// Onto renders a RestartTo for a human: a rev reads "main <short>", the swap
+// sentinel "the new binary", and an upgrade drain's strict version "v<version>".
+func Onto(restartTo string) string {
+	switch {
+	case restartTo == swapSentinel:
+		return "the new binary"
+	case release.Strict(restartTo):
+		return "v" + restartTo
+	}
+	return "main " + Short(restartTo)
+}

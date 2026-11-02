@@ -6,6 +6,7 @@ package rebase
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"jayulabs.org/mugicrew/bd"
 	"jayulabs.org/mugicrew/contexts"
@@ -35,6 +36,10 @@ type Outcome struct {
 	Base      string
 	Reason    string
 	Warning   string
+	// MembersMayBePaused marks an AlreadyOnMain Checkpoint whose members may still be paused
+	// behind-mainline, which a rebase has nothing to clear; the caller words the follow-up.
+	MembersMayBePaused bool
+	Edged              []string // members paused behind-mainline now blocked by ID and unpaused (ADR 0420)
 }
 
 // Seams are Request's bd, git and forge reads, vars so tests script them.
@@ -50,6 +55,9 @@ type Seams struct {
 	IsAncestor func(r git.Repo, a, b string) bool
 	Spawn      func(parent string, s bd.Successor) (id string, created bool, err error)
 	FindOpenMR func(r git.Repo, branch string) (*forge.MR, error)
+	Members    func(id string) ([]bd.Bead, error) // a Checkpoint's children, any status
+	AddBlocker func(blocked, blocker string) error
+	Unpause    func(id, cause string) error
 }
 
 // Real is the production wiring.
@@ -70,6 +78,9 @@ var Real = Seams{
 	Head:       func(r git.Repo, ref string) (string, error) { return r.Head(ref) },
 	IsAncestor: func(r git.Repo, a, b string) bool { return r.IsAncestor(a, b) },
 	Spawn:      bd.SpawnChildIfAbsent,
+	Members:    bd.ListChildren,
+	AddBlocker: bd.Blocks,
+	Unpause:    bd.Unpause,
 	FindOpenMR: func(r git.Repo, branch string) (*forge.MR, error) {
 		p, err := r.ForgeProject()
 		if err != nil {
@@ -130,7 +141,11 @@ func Request(s Seams, id string) (Outcome, error) {
 		return Outcome{}, err
 	}
 	if s.IsAncestor(repo, base, tip) {
-		return Outcome{Result: AlreadyOnMain, Base: base}, nil
+		out := Outcome{Result: AlreadyOnMain, Base: base}
+		if c.Kind == contract.KindCheckpoint {
+			out.MembersMayBePaused = true
+		}
+		return out, nil
 	}
 	succ := bd.Successor{Kind: contract.KindConflict, Title: nami.RequestedCheckpointTitle(c.ID), Description: nami.RequestedCheckpointBody(c.ID, base, tip)}
 	if c.Kind == contract.KindChart {
@@ -155,6 +170,11 @@ func Request(s Seams, id string) (Outcome, error) {
 			out.Base, _ = git.ParseBase(kid.Description)
 		}
 	}
+	if c.Kind == contract.KindCheckpoint {
+		if out.Edged, err = edgeBehindMainline(s, c.ID, childID); err != nil {
+			return Outcome{}, err
+		}
+	}
 	if gitlab {
 		mr, err := s.FindOpenMR(repo, branch)
 		switch {
@@ -166,3 +186,31 @@ func Request(s Seams, id string) (Outcome, error) {
 	}
 	return out, nil
 }
+
+// edgeBehindMainline makes each open member of checkpoint labelled paused:behind-mainline wait on
+// rebaseID, then lifts that pause (ADR 0420): edge before lift, so a crash between the
+// two leaves the Build held, never free. Other members are left unblocked.
+func edgeBehindMainline(s Seams, checkpoint, rebaseID string) ([]string, error) {
+	kids, err := s.Members(checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	var edged []string
+	for _, k := range kids {
+		if !k.Open() || !slices.Contains(bd.PausedCauses(k), bd.PausedBehindMainline) {
+			continue
+		}
+		if err := s.AddBlocker(k.ID, rebaseID); err != nil {
+			return edged, err
+		}
+		if err := s.Unpause(k.ID, bd.PausedBehindMainline); err != nil {
+			return edged, err
+		}
+		edged = append(edged, k.ID)
+	}
+	return edged, nil
+}
+
+// MemberPauseHint is the callers' follow-up for an AlreadyOnMain Checkpoint with
+// MembersMayBePaused.
+const MemberPauseHint = "a Build still paused behind-mainline: bd label remove it"

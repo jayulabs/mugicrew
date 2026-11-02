@@ -32,6 +32,11 @@ graph, and you read them there first:
   kind:chart-conflict children (resolved rebases). None of them records a
   decision.
 
+  Synthesize decisions only from defog children closed with %[3]s.
+  A defog child closed %[4]s is skipped: it settled no
+  decision. A child with any other reason is legacy and read as before (no
+  migration).
+
 - **Prototype side-refs.** A prototype defog bead's artifact lives outside the
   bead body, at refs/mugicrew/prototypes/%[1]s. Read it for the exact validated
   mechanism (state machine, schema, type shape) — that mechanism is the decision,

@@ -46,6 +46,7 @@ var table = map[contract.Kind]Entry{
 	contract.KindSurvey:        {Owner: "nami", Mode: HITL, Container: false}, // the Chart's charting leaf: a human launches it, never the loop
 	contract.KindChartConflict: {Owner: "nami", Mode: AFK, Container: false},  // ADR 0011/0030, 0079/0080: Chart-land conflict, resolved by Nami's AFK arm
 	contract.KindSpec:          {Owner: "zoro", Mode: AFK, Container: false},  // FR1: an open Spec is an AFK leaf Zoro reconciles to a Checkpoint skeleton
+	contract.KindRemnant:       {Owner: "zoro", Mode: HITL, Container: false}, // the landed-early Checkpoint's stranded work: a human launches it, never the loop
 	contract.KindPivot:         {Owner: "zoro", Mode: HITL, Container: false}, // ADR 0043 (amends ADR 0005 §6): Inbox-surfaced, never dispatched AFK (FR26)
 
 	// Checkpoint tail, landed ahead of the owning packages — the loop

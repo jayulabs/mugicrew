@@ -62,14 +62,16 @@ const (
 // ForgeReviewCounts is the filed, folded and skipped note counts of a closed Forge Review.
 type ForgeReviewCounts struct{ Filed, Folded, Skipped int }
 
-var forgeReviewCountsRE = regexp.MustCompile(`^filed (\d+), folded (\d+), skipped (\d+)`)
+var forgeReviewCountsRE = regexp.MustCompile(`^(?:completed: )?filed (\d+), folded (\d+), skipped (\d+)`)
 
-// String renders c as the head of a Forge Review's close reason, followed by ": <rest>".
+// String renders c as the counts of a Forge Review's close reason, the full form being
+// "completed: filed <n>, folded <n>, skipped <n>; read through note <id>".
 func (c ForgeReviewCounts) String() string {
 	return fmt.Sprintf("filed %d, folded %d, skipped %d", c.Filed, c.Folded, c.Skipped)
 }
 
-// ParseForgeReviewCounts reads the counts off a close reason written with String.
+// ParseForgeReviewCounts reads the counts off a close reason written with String, at its start
+// (the legacy form) or right after a leading "completed: ". Any other reason has none.
 func ParseForgeReviewCounts(reason string) (ForgeReviewCounts, bool) {
 	m := forgeReviewCountsRE.FindStringSubmatch(reason)
 	if m == nil {

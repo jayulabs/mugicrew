@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"jayulabs.org/mugicrew/bd"
-	"jayulabs.org/mugicrew/contract"
 )
 
 // newOffshoot is the bd leg of `signal offshoot`; a var so tests fake it.
@@ -46,36 +45,10 @@ func runSignalOffshoot(argv []string, w io.Writer) error {
 		return fmt.Errorf("signal offshoot: cause %s: %w", *from, err)
 	}
 
-	// The container is the cause's Checkpoint or Chart parent, or an unclosed
-	// member Errand itself; the Initiative is the container's parent, else the
-	// cause's own Initiative parent (a Discussion supplies none).
-	var container, init bd.Bead
-	if cause.Parent != "" {
-		p, err := showBead(cause.Parent)
-		if err != nil {
-			return fmt.Errorf("signal offshoot: container of %s: %w", *from, err)
-		}
-		switch {
-		case p.Kind == contract.KindCheckpoint || p.Kind == contract.KindChart:
-			container = p
-		case p.Kind == contract.KindInitiative && cause.Kind != contract.KindDiscussion:
-			init = p
-			if cause.Kind == contract.KindErrand && cause.Unclosed() {
-				container = cause
-			}
-		}
+	parent, place, container, init, err := bd.OffshootPlacement(cause, showBead)
+	if err != nil {
+		return fmt.Errorf("signal offshoot: %w", err)
 	}
-	if container.ID != "" && init.ID == "" && container.Parent != "" {
-		// any status: a closed Initiative is not "no Initiative"
-		if init, err = bd.ParentInitiative(container, showBead); err != nil {
-			return fmt.Errorf("signal offshoot: initiative %s: %w", container.Parent, err)
-		}
-	}
-	orphan := cause.Title
-	if container.ID != "" {
-		orphan = container.Title
-	}
-	parent, place := bd.InitiativePlacement(init, orphan)
 	if parent != "" && outsideSet {
 		parent, place = "", "Initiative: outside (filer: "+*outside+")"
 	}

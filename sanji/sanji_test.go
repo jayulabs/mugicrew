@@ -93,6 +93,17 @@ func TestPrototypePromptDraftsFogBeforeClose(t *testing.T) {
 	}
 }
 
+// Spec mc-3cnhf.70 FR3, FR8, FR10: the prototype's defog create is born discovered-from
+// the prototype, with ordering written in the same create.
+func TestPrototypePromptDefogCreateCarriesDiscoveredFrom(t *testing.T) {
+	flat := strings.Join(strings.Fields(prototypePrompt("ws-proto", "/tmp/mugicrew-wt-1/wt")), " ")
+	for _, want := range []string{"--deps discovered-from:ws-proto --title", "discovered-from:ws-proto,blocked-by:<blocking-bead>"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("prototype prompt missing %q", want)
+		}
+	}
+}
+
 // Spec D9: the prototype session tends the Chart body through the
 // locked verb.
 func TestPrototypePromptTendsChartThroughVerb(t *testing.T) {
@@ -264,5 +275,15 @@ func TestPrototypePromptServesInStackedColumn(t *testing.T) {
 func TestPrototypePromptCarriesIntegrateExits(t *testing.T) {
 	if got := prototypePrompt("ws-proto", "/tmp/mugicrew-wt-1/wt"); !strings.Contains(got, contract.IntegrateExits()) {
 		t.Error("prototype prompt lacks the integrate exit block")
+	}
+}
+
+// Spec mc-3cnhf.74 FR 30: the prototype prompt's obsolete and superseded reasons are the bd constants.
+func TestPrototypePromptNamesBdBuiltCloseReasons(t *testing.T) {
+	flat := strings.Join(strings.Fields(prototypePrompt("mc-x", "/tmp/s")), " ")
+	for _, want := range []string{`(closes "` + bd.ObsoleteReason + ` <id>")`, `(closes "` + bd.SupersededReason + ` <new id>")`} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("prototype prompt must contain %q:\n%s", want, flat)
+		}
 	}
 }

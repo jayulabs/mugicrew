@@ -178,7 +178,7 @@ func TestGraphDetailPane(t *testing.T) {
 	}
 	m = press(t, m, runeKey("d"))
 	v := ansi.Strip(m.View())
-	for _, want := range []string{"○· BUILD P2 · Long description · long  AFK", "A long line of description"} {
+	for _, want := range []string{"○· BUILD P0‹2 · Long description · long  AFK", "A long line of description"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("detail lacks %q:\n%s", want, v)
 		}
@@ -254,10 +254,10 @@ func TestGraphDrawer(t *testing.T) {
 			t.Fatalf("w=%d: no rule or has [i/n]:\n%s", w, v)
 		}
 		top, bottom := strings.Join(ls[:rule], "\n"), strings.Join(ls[rule:], "\n")
-		if !strings.Contains(top, "└   ○· BUILD P2 · Long description · long") {
+		if !strings.Contains(top, "└   ○· BUILD P0‹2 · Long description · long") {
 			t.Errorf("w=%d: selected row not visible in the list:\n%s", w, v)
 		}
-		if !strings.Contains(bottom, "○· BUILD P2 · Long description · long") {
+		if !strings.Contains(bottom, "○· BUILD P0‹2 · Long description · long") {
 			t.Errorf("w=%d: detail below the rule missing:\n%s", w, v)
 		}
 		if !strings.Contains(ansi.Strip(press(t, m, runeKey("d")).View()), "Paused build") {

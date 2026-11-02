@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/chopper"
 	"jayulabs.org/mugicrew/contract"
 )
 
@@ -16,6 +17,7 @@ type checkupWorld struct {
 	target  bd.Bead
 	refusal error
 	open    *bd.Bead // the target's open Checkup
+	newErr  error    // the create's failure
 	calls   []string
 	problem string
 }
@@ -39,6 +41,9 @@ func (w *checkupWorld) wire(t *testing.T) {
 		},
 		New: func(_ bd.Bead, problem string) (string, error) {
 			w.calls, w.problem = append(w.calls, "new"), problem
+			if w.newErr != nil {
+				return "", w.newErr
+			}
 			return "mc-ck", nil
 		},
 		Fence:  func(id, cause string) error { w.calls = append(w.calls, "fence "+id+" "+cause); return nil },
@@ -87,6 +92,14 @@ func TestCheckupRefusalExits1WithItsMessageAndWritesNothing(t *testing.T) {
 	}
 }
 
+func TestCheckupFailedCreateLeavesTargetUnfenced(t *testing.T) {
+	w := &checkupWorld{target: bd.Bead{ID: "mc-t"}, newErr: errors.New("bd down")}
+	rc, msg := runCheckupT(t, w, "mc-t")
+	if rc != 1 || !strings.Contains(msg, "bd down") || !slices.Equal(w.calls, []string{"new"}) {
+		t.Errorf("rc %d, msg %q, calls %v; want only the failed create", rc, msg, w.calls)
+	}
+}
+
 func TestCheckupUsage(t *testing.T) {
 	for _, args := range [][]string{nil, {"a", "b"}, {"--problem"}, {"mc-t", "--force"}} {
 		w := &checkupWorld{target: bd.Bead{ID: "mc-t"}}
@@ -99,5 +112,91 @@ func TestCheckupUsage(t *testing.T) {
 func TestCheckupIsInTopLevelHelp(t *testing.T) {
 	if !strings.Contains(usage, "mugicrew checkup <bead>") {
 		t.Error("usage does not list checkup")
+	}
+}
+
+// closeWorld scripts runCheckup's close seams over one Checkup and records each write.
+type closeWorld struct {
+	ck    bd.Bead
+	other bool // another open Checkup holds the target
+	calls []string
+}
+
+func (w *closeWorld) run(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	orig := checkupCloseSeams
+	t.Cleanup(func() { checkupCloseSeams = orig })
+	checkupCloseSeams = checkupCloseIO{
+		ListByID: func(ids []string) ([]bd.Bead, error) {
+			if len(ids) != 1 || ids[0] != w.ck.ID {
+				return nil, nil
+			}
+			return []bd.Bead{w.ck}, nil
+		},
+		Closing: chopper.CheckupClosing{
+			Close:   func(id, reason string) error { w.calls = append(w.calls, "close "+id+" "+reason); return nil },
+			OpenOn:  func(string) (bd.Bead, bool, error) { return bd.Bead{}, w.other, nil },
+			Unpause: func(id, cause string) error { w.calls = append(w.calls, "unpause "+id+" "+cause); return nil },
+		},
+	}
+	var errb bytes.Buffer
+	return runCheckup(append([]string{"close"}, args...), &errb), errb.String()
+}
+
+func openCheckup() bd.Bead {
+	return bd.Bead{ID: "mc-ck", Kind: contract.KindCheckup, Status: "in_progress", Related: []string{"mc-t"}}
+}
+
+func TestCheckupCloseClosesAndLifts(t *testing.T) {
+	for _, reason := range []string{"repaired: fixed the label", "not a bead fault: nothing wrong"} {
+		w := &closeWorld{ck: openCheckup()}
+		if code, msg := w.run(t, "mc-ck", "--reason", reason); code != 0 {
+			t.Fatalf("%q: exit %d: %s", reason, code, msg)
+		}
+		want := []string{"close mc-ck " + reason, "unpause mc-t " + bd.PausedCheckup}
+		if !slices.Equal(w.calls, want) {
+			t.Errorf("%q: calls = %v, want %v", reason, w.calls, want)
+		}
+	}
+}
+
+func TestCheckupCloseKeepsHeldFence(t *testing.T) {
+	w := &closeWorld{ck: openCheckup(), other: true}
+	if code, _ := w.run(t, "mc-ck", "--reason", "repaired: x"); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if want := []string{"close mc-ck repaired: x"}; !slices.Equal(w.calls, want) {
+		t.Errorf("calls = %v, want %v", w.calls, want)
+	}
+}
+
+func TestCheckupCloseRefusals(t *testing.T) {
+	closed := openCheckup()
+	closed.Status = "closed"
+	notCheckup := openCheckup()
+	notCheckup.Kind = contract.KindSignal
+	for name, c := range map[string]struct {
+		ck   bd.Bead
+		args []string
+	}{
+		"bare repaired":     {openCheckup(), []string{"mc-ck", "--reason", "repaired:"}},
+		"blank detail":      {openCheckup(), []string{"mc-ck", "--reason", "not a bead fault:  "}},
+		"dropped":           {openCheckup(), []string{"mc-ck", "--reason", "dropped"}},
+		"arbitrary":         {openCheckup(), []string{"mc-ck", "--reason", "done"}},
+		"no reason":         {openCheckup(), []string{"mc-ck"}},
+		"no checkup":        {openCheckup(), []string{"--reason", "repaired: x"}},
+		"not a Checkup":     {notCheckup, []string{"mc-ck", "--reason", "repaired: x"}},
+		"closed Checkup":    {closed, []string{"mc-ck", "--reason", "repaired: x"}},
+		"unknown bead":      {openCheckup(), []string{"mc-zz", "--reason", "repaired: x"}},
+		"extra positionals": {openCheckup(), []string{"mc-ck", "mc-t", "--reason", "repaired: x"}},
+	} {
+		w := &closeWorld{ck: c.ck}
+		code, msg := w.run(t, c.args...)
+		if code != 1 || len(w.calls) != 0 {
+			t.Errorf("%s: exit %d, calls %v; want exit 1 and no writes", name, code, w.calls)
+		}
+		if !strings.Contains(msg, "repaired: <what changed>") {
+			t.Errorf("%s: stderr lacks the usage line: %q", name, msg)
+		}
 	}
 }

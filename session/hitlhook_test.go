@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/eventlog"
 	"jayulabs.org/mugicrew/eventlog/eventlogtest"
 )
 
@@ -235,5 +236,18 @@ func TestFinishRealTmux(t *testing.T) {
 	}
 	if got := opt("mc-y"); got != "" {
 		t.Errorf("unarmed @autofinish = %q after Finish, want unset", got)
+	}
+}
+
+func TestCalledByAgent(t *testing.T) {
+	for _, tc := range []struct {
+		effort, pane string
+		want         bool
+	}{{"", "", false}, {"mc-x", "", true}, {"", "/s,%1", true}, {"mc-x", "/s,%1", true}} {
+		t.Setenv(eventlog.EffortEnv, tc.effort)
+		t.Setenv(paneVar, tc.pane)
+		if got := CalledByAgent(); got != tc.want {
+			t.Errorf("effort %q pane %q: %v, want %v", tc.effort, tc.pane, got, tc.want)
+		}
 	}
 }

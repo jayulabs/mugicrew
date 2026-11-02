@@ -66,7 +66,16 @@ Out-of-scope; drop takes the line exactly as the body has it.
   new work splits as an offshoot Signal (signal-filing.md's Offshoot form), never a
   second Spec on this Chart.
 - **Obsolete the stale.** If the decision invalidates other defog beads, close
-  or supersede them rather than leaving them on the frontier.
+  each through its door rather than leaving it on the frontier, never a raw bd
+  close or bd supersede:
+  - moot, because your decision answers it: mugicrew obsolete <bead> --by
+    <your bead>, which closes it "obsolete: <your bead id>" and adds no
+    Decisions-so-far line;
+  - its question moved to another bead, or it duplicates one: mugicrew supersede
+    <bead> --with <new bead>, which closes it "superseded: <new bead id>" and
+    adds the supersedes edge.
+  Both refuse anything but an unclosed grilling, research or prototype. Dropping
+  a bead outright is the human's withdraw, never yours.
 
 ## 6. Record, integrate and close
 

@@ -155,6 +155,55 @@ func TestPausedAncestor(t *testing.T) {
 	}
 }
 
+// EffectivePriority (ADR 0410 §1): the most urgent of own and open container
+// ancestors; own wins ties, the nearest ancestor is the source, and a broken
+// chain uses what it saw.
+func TestEffectivePriority(t *testing.T) {
+	cp := func(id string, pri int, parent string) Bead {
+		return Bead{ID: id, Kind: contract.KindCheckpoint, Priority: pri, Parent: parent, Status: "open"}
+	}
+	for _, c := range []struct {
+		name      string
+		own       int
+		parent    string
+		beads     []Bead
+		wantLevel int
+		wantSrc   string
+	}{
+		{"own wins", 0, "p", []Bead{cp("p", 2, "")}, 0, ""},
+		{"no parent", 2, "", nil, 2, ""},
+		{"Checkpoint parent wins", 2, "p", []Bead{cp("p", 0, "")}, 0, "p"},
+		{"Initiative grandparent through a Chart wins", 2, "ch", []Bead{
+			{ID: "ch", Kind: contract.KindChart, Priority: 2, Parent: "in", Status: "open"},
+			{ID: "in", Kind: contract.KindInitiative, Priority: 1, Status: "open"},
+		}, 1, "in"},
+		{"closed ancestor ignored", 2, "p", []Bead{{ID: "p", Kind: contract.KindCheckpoint, Priority: 0, Status: "closed"}}, 2, ""},
+		{"Draft ancestor counts", 2, "p", []Bead{{ID: "p", Kind: contract.KindCheckpoint, Priority: 0, Status: "deferred"}}, 0, "p"},
+		{"paused ancestor counts", 2, "p", []Bead{{ID: "p", Kind: contract.KindCheckpoint, Priority: 1, Status: "open", Labels: []string{"paused:manual"}}}, 1, "p"},
+		{"non-container parent ignored", 2, "p", []Bead{{ID: "p", Kind: contract.KindBuild, Priority: 0, Status: "open"}}, 2, ""},
+		{"non-container does not stop the walk", 2, "p", []Bead{
+			{ID: "p", Kind: contract.KindBuild, Priority: 0, Status: "open", Parent: "g"}, cp("g", 1, ""),
+		}, 1, "g"},
+		{"tie keeps own as source", 1, "p", []Bead{cp("p", 1, "")}, 1, ""},
+		{"nearer of two equal ancestors is the source", 2, "p", []Bead{cp("p", 0, "g"), cp("g", 0, "")}, 0, "p"},
+		{"farther, more urgent ancestor wins", 2, "p", []Bead{cp("p", 1, "g"), cp("g", 0, "")}, 0, "g"},
+		{"missing parent", 2, "gone", nil, 2, ""},
+		{"missing grandparent keeps what it saw", 2, "p", []Bead{cp("p", 1, "gone")}, 1, "p"},
+		{"cycle", 2, "p", []Bead{cp("p", 1, "g"), cp("g", 0, "p")}, 0, "g"},
+		{"cycle back to self", 2, "p", []Bead{cp("p", 1, "b")}, 1, "p"},
+	} {
+		byID := map[string]Bead{}
+		for _, x := range c.beads {
+			byID[x.ID] = x
+		}
+		b := Bead{ID: "b", Priority: c.own, Parent: c.parent}
+		level, src := EffectivePriority(b, func(id string) (Bead, bool) { x, ok := byID[id]; return x, ok })
+		if level != c.wantLevel || src != c.wantSrc {
+			t.Errorf("%s: EffectivePriority = %d, %q; want %d, %q", c.name, level, src, c.wantLevel, c.wantSrc)
+		}
+	}
+}
+
 // PausedList reads every paused bead, closed included, in one uncapped list.
 func TestPausedListArgv(t *testing.T) {
 	var argv []string
@@ -374,8 +423,8 @@ func TestUpdateStripsTitle(t *testing.T) {
 	}
 }
 
-// NewRollback (ADR 0047 §3): an unparented kind:rollback create, then one related
-// edge from the new bead to the target Checkpoint.
+// NewRollback (ADR 0047 §3): one unparented kind:rollback create carrying the
+// related edge to the target Checkpoint (--deps), and no dep add.
 func TestNewRollbackArgs(t *testing.T) {
 	var calls [][]string
 	orun := run
@@ -391,8 +440,7 @@ func TestNewRollbackArgs(t *testing.T) {
 	}
 	want := [][]string{
 		{"create", "--type", "task", "--labels", "kind:rollback", "--no-inherit-labels",
-			"--title", "Roll back X", "--description", "broke prod", "--silent"},
-		{"dep", "add", "ws-rb", "ws-cp", "-t", "related"},
+			"--title", "Roll back X", "--description", "broke prod", "--silent", "--deps", "related:ws-cp"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("argv = %v\nwant %v", calls, want)
@@ -417,6 +465,19 @@ func TestNewRollbackCopiesNestedLabels(t *testing.T) {
 	}
 	if got := created[slices.Index(created, "--labels")+1]; got != "kind:rollback,context:vendor,repo:vendor/x" {
 		t.Errorf("labels = %q", got)
+	}
+	if got := created[slices.Index(created, "--deps")+1]; got != "related:ws-cp" {
+		t.Errorf("deps = %q", got)
+	}
+}
+
+// A failed create files nothing: no id, an error.
+func TestNewRollbackFailedCreate(t *testing.T) {
+	orun := run
+	t.Cleanup(func() { run = orun })
+	run = func(args ...string) (string, error) { return "", errors.New("boom") }
+	if id, err := NewRollback("Roll back X", "broke", Bead{ID: "ws-cp"}); err == nil || id != "" {
+		t.Errorf("failed create = %q, %v; want no id and an error", id, err)
 	}
 }
 
@@ -580,7 +641,7 @@ func TestReviewDue(t *testing.T) {
 			`[{"id":"p1","status":"open","labels":["kind:pivot"]}]`, false},
 		{"approved approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", "approved")}, nil, "[]", false},
 		{"rework approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", "rework: mc-1")}, nil, "[]", true},
-		{"obsoleted approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", "Approval obsoleted: moved")}, nil, "[]", true},
+		{"obsoleted approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", ApprovalObsoletedReason)}, nil, "[]", true},
 		{"obsolete: approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kidReason("a1", contract.KindApproval, "Commit: tip", "obsolete: x")}, nil, "[]", true},
 		{"empty-reason approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kid("a1", "closed", contract.KindApproval, "Commit: tip")}, nil, "[]", true},
 		{"open approval at head", []string{kid("b1", "closed", contract.KindBuild, ""), kid("a1", "open", contract.KindApproval, "Commit: tip")}, nil, "[]", false},
@@ -914,7 +975,7 @@ func TestHoldForeignNamesTheNestedContext(t *testing.T) {
 	o := SpawnBlockingErrand
 	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b, _ string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Labels: []string{"context:kid", "repo:kid"}}, f)
 	if !strings.HasPrefix(body, `Mainline of context kid holds "Checkpoint: x"`) {
@@ -1013,7 +1074,7 @@ func TestDefaultIDsIsOneFlatUnionQuery(t *testing.T) {
 	if len(calls) != 1 || calls[0][0] != "sql" || strings.Contains(calls[0][len(calls[0])-1], "with ") {
 		t.Errorf("calls = %v", calls)
 	}
-	for _, want := range []string{"depends_on_issue_id", "kind:landing", "'caused-by'", "kind:mr-watch"} {
+	for _, want := range []string{"depends_on_issue_id", "kind:landing", "'caused-by'", "kind:mr-watch", "kind:remnant"} {
 		if !strings.Contains(defaultIDsSQL, want) {
 			t.Errorf("sql lacks %q", want)
 		}
@@ -1114,6 +1175,19 @@ func TestDefaultSetClientSideComputation(t *testing.T) {
 	}
 }
 
+// A respin's lineage (closed Remnant, its landed Checkpoint, their Spec) is in the default set.
+func TestDefaultIDsSQLLoadsRespinLineage(t *testing.T) {
+	for _, want := range []string{
+		"d.type='caused-by' and c.status!='closed' and lc.label='kind:checkpoint' and r.status='closed' and lr.label='kind:remnant'",
+		"d2.type='related'",
+		"d3.type='caused-by'",
+	} {
+		if !strings.Contains(defaultIDsSQL, want) {
+			t.Errorf("sql lacks %q", want)
+		}
+	}
+}
+
 func TestKindsReadsLabelsTable(t *testing.T) {
 	old := run
 	t.Cleanup(func() { run = old })
@@ -1167,8 +1241,8 @@ func anchorRig(strategy, body string, landedErr error) (AnchorSeams, *[]string, 
 	return AnchorSeams{
 		Strategy: func() (string, error) { return strategy, nil },
 		Show:     func(string) (Bead, error) { return Bead{Description: body}, nil },
-		Update: func(_ string, a []string) error {
-			body = a[1]
+		SetDescription: func(_, b string, _ Serializer) error {
+			body = b
 			return nil
 		},
 		Fetch:     func() (string, error) { calls = append(calls, "fetch ws"); return "forge", nil },
@@ -1215,8 +1289,8 @@ func TestAnchor(t *testing.T) {
 }
 
 // NewCheckup (ADR 0272 §2): an unparented kind:checkup create carrying the target's
-// context and repo stamp, then one related edge; the body names the target and the
-// --problem line; a failed edge returns the created id.
+// context and repo stamp and the related edge in that one call (no dep add); the
+// body names the target and the --problem line; a failed create returns no id.
 func TestNewCheckup(t *testing.T) {
 	var calls [][]string
 	orun := run
@@ -1236,18 +1310,50 @@ func TestNewCheckup(t *testing.T) {
 	}
 	want := [][]string{
 		{"create", "--type", "task", "--labels", "kind:checkup,context:vendor,repo:vendor/x", "--no-inherit-labels",
-			"--title", "Repair Odd bead", "--description", "Target: ws-t (Odd bead)\n\nProblem: wrong edge", "--silent"},
-		{"dep", "add", "ws-ck", "ws-t", "-t", "related"},
+			"--title", "Repair Odd bead", "--description", "Target: ws-t (Odd bead)\n\nProblem: wrong edge", "--silent", "--deps", "related:ws-t"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("argv = %v\nwant %v", calls, want)
 	}
-	calls, fail = nil, "dep"
-	if id, err = NewCheckup(Bead{ID: "ws-t", Title: "T"}, ""); err == nil || id != "ws-ck" {
-		t.Errorf("edge failure = %q, %v; want the orphan id and an error", id, err)
+	calls, fail = nil, "create"
+	if id, err = NewCheckup(Bead{ID: "ws-t", Title: "T"}, ""); err == nil || id != "" {
+		t.Errorf("failed create = %q, %v; want no id and an error", id, err)
 	}
 	if got := calls[0][slices.Index(calls[0], "--description")+1]; got != "Target: ws-t (T)" {
 		t.Errorf("no --problem body = %q", got)
+	}
+}
+
+// NewRetrospective: an unparented kind:discussion create carrying the related edge in
+// that one call and no context/repo stamp even from a stamped target; a failed create
+// returns no id.
+func TestNewRetrospective(t *testing.T) {
+	var calls [][]string
+	orun := run
+	t.Cleanup(func() { run = orun })
+	fail := ""
+	run = func(args ...string) (string, error) {
+		calls = append(calls, args)
+		if args[0] == fail {
+			return "", errors.New("boom")
+		}
+		return "ws-rt", nil
+	}
+	target := Bead{ID: "ws-t", Title: "Done spec", Labels: []string{"kind:spec", "context:vendor", "repo:vendor/x"}}
+	id, err := NewRetrospective(target, []string{"ws-t", "ws-x"})
+	if err != nil || id != "ws-rt" {
+		t.Fatalf("NewRetrospective = %q, %v", id, err)
+	}
+	want := [][]string{
+		{"create", "--type", "task", "--labels", "kind:discussion", "--no-inherit-labels",
+			"--title", "Retrospective Done spec", "--description", "A Robin retrospective on ws-t, started from the TUI.\nTarget: ws-t\nSpine: ws-t ws-x", "--silent", "--deps", "related:ws-t"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("argv = %v\nwant %v", calls, want)
+	}
+	calls, fail = nil, "create"
+	if id, err = NewRetrospective(target, nil); err == nil || id != "" {
+		t.Errorf("failed create = %q, %v; want no id and an error", id, err)
 	}
 }
 
@@ -1312,7 +1418,7 @@ func TestHoldForeignBodyCarriesSteps(t *testing.T) {
 	o := SpawnBlockingErrand
 	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b, _ string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Kind: "checkpoint"}, f)
 	lines := strings.Split(body, "\n")
@@ -1345,7 +1451,7 @@ func TestHoldForeignNestedHintsContext(t *testing.T) {
 	o := SpawnBlockingErrand
 	t.Cleanup(func() { SpawnBlockingErrand = o })
 	var body string
-	SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	SpawnBlockingErrand = func(_, _, _, b, _ string) (string, bool, error) { body = b; return "t", true, nil }
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	HoldForeign(Bead{ID: "cp", Kind: "checkpoint", Labels: []string{"context:nest", "repo:nest"}}, f)
 	if !strings.Contains(body, "`mugicrew probe foreign --context nest`") {
@@ -1375,12 +1481,67 @@ func TestHoldForeignReturnsNilOnceAlreadyFiled(t *testing.T) {
 	o := SpawnBlockingErrand
 	t.Cleanup(func() { SpawnBlockingErrand = o })
 	created := true
-	SpawnBlockingErrand = func(_, _, _, _ string) (string, bool, error) { c := created; created = false; return "t", c, nil }
+	SpawnBlockingErrand = func(_, _, _, _, raiser string) (string, bool, error) {
+		if raiser != "" {
+			t.Errorf("HoldForeign passed raiser %q, want none", raiser)
+		}
+		c := created
+		created = false
+		return "t", c, nil
+	}
 	f := &git.ForeignLanding{Trailer: "Checkpoint: x", Ours: "a", Theirs: "b", Sha: "f00d"}
 	if err := HoldForeign(Bead{ID: "cp"}, f); err != error(f) {
 		t.Fatalf("first call = %v, want the refusal", err)
 	}
 	if err := HoldForeign(Bead{ID: "cp"}, f); err != nil {
 		t.Fatalf("second call = %v, want nil", err)
+	}
+}
+
+// A Checkup read in the list row shape carries its related target; the verb
+// `mugicrew checkup close` reads that shape, since bd show's dependency shape
+// (id + dependency_type) does not parse into Related.
+func TestParseBeadsListRowCarriesRelated(t *testing.T) {
+	blob := `[{"id":"mc-ck","status":"open","labels":["kind:checkup"],"dependencies":[{"issue_id":"mc-ck","depends_on_id":"mc-t","type":"related"}]}]`
+	beads, err := parseBeads([]byte(blob))
+	if err != nil || len(beads) != 1 || !slices.Equal(beads[0].Related, []string{"mc-t"}) {
+		t.Errorf("beads %+v, err %v; want Related [mc-t]", beads, err)
+	}
+}
+
+// behind-mainline ranks after not-built and before unmet (ADR 0420 amending ADR 0248 §2).
+func TestPausedBehindMainlineRank(t *testing.T) {
+	if i, j, k := slices.Index(PauseRank, PausedNotBuilt), slices.Index(PauseRank, PausedBehindMainline), slices.Index(PauseRank, PausedUnmet); !(i < j && j == k-1) {
+		t.Errorf("PauseRank = %q", PauseRank)
+	}
+	b := Bead{Labels: []string{"paused:unmet", "paused:behind-mainline", "paused:not-built"}}
+	if got, want := PausedCauses(b), []string{PausedNotBuilt, PausedBehindMainline, PausedUnmet}; !slices.Equal(got, want) {
+		t.Errorf("PausedCauses = %q, want %q", got, want)
+	}
+}
+
+func TestBehindMainlineFrom(t *testing.T) {
+	cs, _ := parseComments([]byte(`[{"text":"Behind mainline: old"},{"text":"hi"},{"text":"  Behind mainline:  no helper \n"}]`))
+	if got := behindMainlineFrom(cs); got != "no helper" {
+		t.Errorf("got %q", got)
+	}
+	if got := behindMainlineFrom([]Comment{{Text: "Not built: x"}}); got != "" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// The report counts only while no Not built: comment sits after it.
+func TestBehindMainlineReportFrom(t *testing.T) {
+	for name, c := range map[string]struct {
+		cs   []Comment
+		want string
+	}{
+		"behind newest":   {[]Comment{{Text: "Not built: a"}, {Text: "Behind mainline: b"}, {Text: "hi"}}, "b"},
+		"not built newer": {[]Comment{{Text: "Behind mainline: b"}, {Text: "Not built: a"}}, ""},
+		"none":            {[]Comment{{Text: "hi"}}, ""},
+	} {
+		if got := behindMainlineReportFrom(c.cs); got != c.want {
+			t.Errorf("%s: got %q, want %q", name, got, c.want)
+		}
 	}
 }

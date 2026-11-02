@@ -46,6 +46,7 @@ const (
 	KindInitiative    Kind = "initiative" // Luffy-owned HITL container above the spine: branchless, no land; member chains are its children (ADR 0128, 0135)
 	KindDiscussion    Kind = "discussion" // Robin-owned HITL leaf: a human-started read-only session that explains the Workspace and drafts Signals and bodyless Initiatives (ADR 0194, ADR 0381 (robin-may-draft-a-bodyless-initiative…))
 	KindCheckup       Kind = "checkup"    // Chopper-owned HITL leaf: a human-started session that diagnoses and repairs one broken bead (ADR 0272)
+	KindRemnant       Kind = "remnant"    // Zoro-owned HITL leaf: the in-flight work a Forge merge left off mainline when it landed a Checkpoint early; no parent, related to the landed Checkpoint
 )
 
 // The Checkpoint tail kinds, in spine order: a landed Spec's Checkpoint
@@ -81,7 +82,7 @@ const KindLatch Kind = "latch"
 // it, so a new Kind must be added here to join the title backstop (ADR 0097).
 var Kinds = []Kind{
 	KindSignal, KindGrilling, KindResearch, KindChart, KindSurvey, KindChartConflict, KindSpec,
-	KindCheckpoint, KindPrototype, KindErrand, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup,
+	KindCheckpoint, KindPrototype, KindErrand, KindPivot, KindRollback, KindSurgery, KindInitiative, KindDiscussion, KindCheckup, KindRemnant,
 	KindBuild, KindReview, KindForgeReview, KindCritique, KindConflict, KindApproval, KindLanding, KindMRWatch, KindLatch,
 }
 
@@ -465,4 +466,34 @@ func IntegrateExits() string {
 		"- Exit %d or %d: the container was rewritten past your cut or is off its pin. Never repair or rebase branches by hand.\n"+
 		"- Any exit but %[1]d or a resolved %[2]d (%[6]d is transient): note the output on your bead, leave it open and stop.",
 		ExitIntegrated, ExitConflict, ExitLanded, ExitNoCutPoint, ExitOffPin, ExitTransient)
+}
+
+// DraftTitle titles a Draft from its body: the first heading, else the first non-blank
+// line (a pivot's is its "FR:" line), else fallback, clipped to 100 runes. Luffy's reroute
+// and Zoro's refiled Critique share it.
+func DraftTitle(body, fallback string) string {
+	first := ""
+	for _, l := range strings.Split(body, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if h := strings.TrimLeft(l, "#"); h != l {
+			return clipTitle(strings.TrimSpace(h))
+		}
+		if first == "" {
+			first = l
+		}
+	}
+	if first == "" {
+		return fallback
+	}
+	return clipTitle(first)
+}
+
+func clipTitle(s string) string {
+	if r := []rune(s); len(r) > 100 {
+		return string(r[:100])
+	}
+	return s
 }

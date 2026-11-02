@@ -15,6 +15,21 @@ Re-run the rebase to reproduce the conflict:
 
     git rebase {{.Base}}        # replay the branch's commits onto the base; the conflict resurfaces
 
+If the bead body says `variant: replay`, a respin's stranded work did not replay
+cleanly onto mainline and the Checkpoint was cut there with no seed commit. Do NOT
+`git rebase {{.Base}}`: your effort branch is already the empty cut at the base.
+Instead:
+
+1. Three-way merge the stranded range onto the base, writing the result as a tree:
+   `git merge-tree --write-tree --merge-base=<Replay-from> {{.Base}} <Tip>` (the
+   `Replay-from:` and `Tip:` lines of the bead body; no ancestry between them is needed).
+   If it conflicts, it prints the tree with conflict markers: check that tree out
+   (`git read-tree` / `git checkout <tree> -- .`), resolve every marker by the steps below.
+2. Commit ONE seed commit with the body's `Seed-subject:` as its subject and each
+   `Seed-trailer:` line as a trailer (`Replayed: <Replay-from>..<Tip>` and
+   `Remnant: <id>`), then run `mugicrew integrate` as below. Its clean integrate
+   unblocks the respin's re-filed members.
+
 If the bead body says `variant: requested`, a human asked for this rebase and no
 land failed: rebase onto the base and resolve any conflicts as below. A clean
 rebase with nothing to resolve is a complete result.

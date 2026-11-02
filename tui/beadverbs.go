@@ -76,7 +76,7 @@ func (m Model) beadVerbRoute(k tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 		next, cmd := m.dropKey(g, *b)
 		return next, cmd, true
 	case key.Matches(k, keyWithdrawKey):
-		next, cmd := m.withdrawKey(g, *b)
+		next, cmd := m.xPress(g, *b)
 		return next, cmd, true
 	case key.Matches(k, keyPrio):
 		next, cmd := m.bumpPriority(*b, prioDir(k))
@@ -112,8 +112,8 @@ func beadVerbBindings(g graphData, b *bd.Bead, role rowRole) (hinted, extra []ke
 		if l := g.xHint(b); l != "" {
 			add(verbKey("x", l))
 		}
-		if g.xOffers(b) {
-			add(xBinding(b))
+		if t := g.xTargetOf(b); t != xNone {
+			add(xBinding(t))
 		}
 		for _, kb := range formBindings(g.beads, b) {
 			add(kb)

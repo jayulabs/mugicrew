@@ -386,12 +386,8 @@ func (m Model) rollbackForm(msg rollbackMsg) Model {
 		next, cmd := m.startWrite(msg.id, "filing", func() writeDoneMsg {
 			id, err := newRollback(title, d.inputs[1].text, target)
 			return writeDoneMsg{msg.id, func(m Model) (tea.Model, tea.Cmd) {
-				switch {
-				case id == "" && err != nil:
+				if err != nil {
 					return m.retry(d, "create", err)
-				case err != nil: // filed, but unrelated: no badge until the edge is added by hand
-					m.setStatus("filed Rollback " + id + " without its related edge: " + err.Error())
-					return m, m.load()
 				}
 				return m.doneOrErr("create", "filed Rollback "+id+" of "+msg.id, nil)
 			}}

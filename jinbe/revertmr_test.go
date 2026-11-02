@@ -46,6 +46,9 @@ func TestRevertMergedWithoutTrailerHoldsOnAErrand(t *testing.T) {
 	if !slices.Equal(r.errands, []string{"ws-rb|Merged MR: !9\n"}) || !strings.Contains(r.errandBody, "Reverts-Checkpoint: ws-cp") {
 		t.Errorf("errands %q body %q, want one Errand blocking the Rollback naming the trailer", r.errands, r.errandBody)
 	}
+	if !slices.Equal(r.raisers, []string{""}) {
+		t.Errorf("raisers %q, want none for the revert MR's trailerless hold", r.raisers)
+	}
 	if len(r.closed) != 0 || r.fetches != 2 {
 		t.Errorf("closed %v fetches %d, want an open Rollback after a second fetch", r.closed, r.fetches)
 	}
@@ -69,7 +72,7 @@ func TestRevertCloseAfterSuccessorResumesFixForward(t *testing.T) {
 	r.successors = []bd.Successor{{Description: git.ConflictPin(&git.RevertConflict{Base: "forgesha", Paths: []string{"a.go"}})}}
 	stubRollbackSeams(t, r)
 	tick(t, r)
-	if r.reasons["ws-rb"] != bd.FixForwardReason+" revert conflicted" || r.reasons["ws-rb"] == "abandoned: revert MR closed" {
+	if r.reasons["ws-rb"] != bd.FixForwardCloseReason("ws-new") || r.reasons["ws-rb"] == "abandoned: revert MR closed" {
 		t.Errorf("reasons %v, want the fix-forward close, not an abandon", r.reasons)
 	}
 }
@@ -138,7 +141,7 @@ func TestRevertConflictedRebuildFixesForwardThenClosesMR(t *testing.T) {
 			if !slices.Equal(r.mrClosed, []int{9}) || !slices.Equal(r.closedAtSet, []string{"1"}) {
 				t.Errorf("MR closes %v with %v successors, want !9 closed after the successor", r.mrClosed, r.closedAtSet)
 			}
-			if r.reasons["ws-rb"] != bd.FixForwardReason+" revert conflicted" {
+			if r.reasons["ws-rb"] != bd.FixForwardCloseReason("ws-new") {
 				t.Errorf("reasons %v", r.reasons)
 			}
 			if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"revert.conflict", "handoff.done", "revert.mr_closed"}) {
@@ -163,7 +166,7 @@ func TestRevertMovedMainTrial(t *testing.T) {
 	stubRollbackSeams(t, r)
 	revertOnto = func(string, string, string) (string, error) { return "", &git.RevertConflict{Base: "forgesha"} }
 	tick(t, r)
-	if r.reasons["ws-rb"] != bd.FixForwardReason+" revert conflicted" {
+	if r.reasons["ws-rb"] != bd.FixForwardCloseReason("ws-new") {
 		t.Errorf("reasons %v, want a fix-forward", r.reasons)
 	}
 	r = moved()
@@ -193,6 +196,9 @@ func TestRevertRedPipelineRetriesOnceThenHolds(t *testing.T) {
 		if !slices.Equal(r.retries, []int{42}) || !slices.Equal(r.errands, []string{"ws-rb|Pipeline: 42\n"}) {
 			t.Errorf("infra=%v retries %v errands %v, want one retry and one Errand", infra, r.retries, r.errands)
 		}
+		if !slices.Equal(r.raisers, []string{""}) {
+			t.Errorf("raisers %q, want none for a Rollback's revert-pipeline hold", r.raisers)
+		}
 		if !strings.Contains(r.errandBody, "https://gl/p/42") || !strings.Contains(r.errandBody, "tail of job 5") {
 			t.Errorf("errand body = %q, want the URL and the job tail", r.errandBody)
 		}
@@ -220,7 +226,7 @@ func TestRevertHeldRollbackResolves(t *testing.T) {
 	r.mr.State, r.mr.MergeCommitSHA = "merged", "mergesha"
 	stubRollbackSeams(t, r)
 	tick(t, r)
-	if len(r.successors) != 1 || len(r.reasons) != 1 || r.reasons["ws-rb"] != "" {
+	if len(r.successors) != 1 || len(r.reasons) != 1 || r.reasons["ws-rb"] != "handed off: ws-new" {
 		t.Errorf("successors %v reasons %v, want a handoff", r.successors, r.reasons)
 	}
 	r = held()
@@ -244,7 +250,7 @@ func TestRevertFirstBuildConflictFixesForward(t *testing.T) {
 	if r.branches["checkpoint/ws-new"] != "forgesha" || r.seeds != 0 {
 		t.Errorf("branches %v seeds %d, want the successor cut at the fetched main unseeded", r.branches, r.seeds)
 	}
-	if r.reasons["ws-rb"] != bd.FixForwardReason+" revert conflicted" {
+	if r.reasons["ws-rb"] != bd.FixForwardCloseReason("ws-new") {
 		t.Errorf("reasons %v", r.reasons)
 	}
 	if got := eventlogtest.Names(*evs); !slices.Equal(got, []string{"revert.conflict", "handoff.done"}) {

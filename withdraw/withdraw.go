@@ -247,6 +247,13 @@ func plan(target string, all []bd.Bead, o Opts) (Plan, error) {
 		if len(o.Release) > 0 {
 			return Plan{}, fmt.Errorf("--release applies to an Initiative cancel, not a withdraw of %s", target)
 		}
+		if bd.IsDefogKind(t.Kind) { // dropped alone: no sweep, no releases, the Chart and siblings untouched
+			if cc, open := bd.OpenChartConflictIn(target, all); open {
+				return Plan{}, bd.ChartConflictRefusal("withdraw", target, cc)
+			}
+			p.Kind, p.Set = KindWithdraw, []bd.Bead{t}
+			break
+		}
 		if t.Kind == contract.KindLatch { // dropped alone: what it blocks is released, not swept or refused
 			p.Kind, p.Set = KindWithdraw, []bd.Bead{t}
 			p.LatchReleases = bd.IDs(bd.Filter(all, func(x bd.Bead) bool { return x.Unclosed() && slices.Contains(x.BlockedBy, target) }))
@@ -264,7 +271,7 @@ func plan(target string, all []bd.Bead, o Opts) (Plan, error) {
 		}
 		p.Set = append(errands, p.Set...) // swept, then before-closed Errands first; the target stays last
 	default:
-		return Plan{}, fmt.Errorf("%s is not a chain head, an Errand or a Latch: only an unclosed Signal, Chart, Spec, Checkpoint or Rollback with nothing caused by it, an unclosed Errand, an unclosed Latch, or an unclosed Initiative, can be dropped", target)
+		return Plan{}, fmt.Errorf("%s is not a chain head, an Errand, a Latch or a defog bead: only an unclosed Signal, Chart, Spec, Checkpoint or Rollback with nothing caused by it, an unclosed Errand, an unclosed Latch, an unclosed grilling, research or prototype, or an unclosed Initiative, can be dropped", target)
 	}
 	if o.InFlight != nil {
 		p.Refusals = append(p.Refusals, inFlightRefusals(bd.Filter(p.Set, o.InFlight))...)
@@ -416,7 +423,7 @@ func run(target string, want Kind, o Opts) (Result, error) {
 		}
 	}
 	ids := bd.IDs(p.Set)
-	reason := "withdrawn"
+	reason := bd.WithdrawnReason
 	if p.Kind == KindCancel {
 		reason = "cancelled: " + target
 	}

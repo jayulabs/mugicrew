@@ -34,16 +34,6 @@ func depTargets(id, direction, typ string) ([]Bead, error) {
 	return beads, nil
 }
 
-// depAddArgsIfAbsent is the pure argv for `from depends-on to` of type typ, or nil
-// when existing (from's down-targets of that type) already holds it — the
-// idempotency guard, so a re-run tail adds no edge.
-func depAddArgsIfAbsent(existing []Bead, from, to, typ string) []string {
-	if hasTarget(existing, to) {
-		return nil
-	}
-	return []string{"dep", "add", from, to, "-t", typ}
-}
-
 // hasTarget reports whether a depTargets read holds the bead id.
 func hasTarget(targets []Bead, id string) bool {
 	for _, b := range targets {
@@ -59,10 +49,10 @@ func addEdgeIfAbsent(from, to, typ string) error {
 	if err != nil {
 		return err
 	}
-	if args := depAddArgsIfAbsent(existing, from, to, typ); args != nil {
-		_, err = run(args...)
+	if hasTarget(existing, to) {
+		return nil
 	}
-	return err
+	return core.AddEdge(from, to, typ)
 }
 
 // HasEdge reports whether from already depends on to along an edge of typ — the
@@ -167,6 +157,25 @@ func OpenBlockers(id string) ([]Bead, error) {
 	return slices.DeleteFunc(targets, func(b Bead) bool { return !b.Open() }), nil
 }
 
+// SplitBlockers is id's blocks targets from one edge read, split into the open ones
+// (OpenBlockers) and the closed ones: the landed code a Build waits on, which the open
+// list drops (ADR 0420).
+func SplitBlockers(id string) (open, closed []Bead, err error) {
+	targets, err := depTargets(id, "down", "blocks")
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, b := range targets {
+		switch {
+		case b.Open():
+			open = append(open, b)
+		case b.Status == "closed":
+			closed = append(closed, b)
+		}
+	}
+	return open, closed, nil
+}
+
 // PivotsDiscoveredFrom is the open pivots discovered-from a raiser bead — what the
 // Franky/Usopp tails read after the agent returns (raise wiring, Impl Decision 3).
 func PivotsDiscoveredFrom(id string) ([]Bead, error) {
@@ -183,7 +192,7 @@ func openOfKindAlong(id, direction, typ string, kind contract.Kind) ([]Bead, err
 
 // PivotCheckpoint walks the gate edge in reverse: the Checkpoint a pivot blocks.
 func PivotCheckpoint(pivotID string) (string, bool, error) {
-	return kindAlong(pivotID, "up", "blocks", contract.KindCheckpoint)
+	return kindAlong(pivotID, Up, "blocks", contract.KindCheckpoint)
 }
 
 // GateTargets is every bead a pivot blocks, any status — the reverse gate walk
@@ -193,11 +202,11 @@ func GateTargets(pivotID string) ([]Bead, error) { return depTargets(pivotID, "u
 
 // PivotSpec is the Spec a pivot is related to — Zoro.Launch's second resolved id.
 func PivotSpec(pivotID string) (string, bool, error) {
-	return kindAlong(pivotID, "down", "related", contract.KindSpec)
+	return kindAlong(pivotID, Down, "related", contract.KindSpec)
 }
 
-func kindAlong(id, direction, typ string, want contract.Kind) (string, bool, error) {
-	targets, err := depTargets(id, direction, typ)
+func kindAlong(id string, direction Dir, typ string, want contract.Kind) (string, bool, error) {
+	targets, err := depTargets(id, string(direction), typ)
 	if err != nil {
 		return "", false, err
 	}
@@ -216,21 +225,6 @@ func firstOfKind(beads []Bead, want contract.Kind) (string, bool) {
 	return "", false
 }
 
-// supersedeArgs is the pure argv sequence for Supersede(old, new): nil when old
-// already carries supersedes→new (the re-run no-op); otherwise a `dep remove` first
-// when old→new already exists as another type (bd holds one edge per ordered pair
-// and rejects supersede over it), then the supersede.
-func supersedeArgs(superseded, all []Bead, old, newID string) [][]string {
-	if hasTarget(superseded, newID) {
-		return nil
-	}
-	var cmds [][]string
-	if hasTarget(all, newID) {
-		cmds = append(cmds, []string{"dep", "remove", old, newID})
-	}
-	return append(cmds, []string{"supersede", old, "--with", newID})
-}
-
 // Supersede records old supersedes→newID (FR47, ADR 0043 §8). Build-time check:
 // `bd supersede` on an already-closed old (reconcileSpec closed the
 // Spec before the pivot was raised) adds the edge and leaves it closed — no
@@ -244,18 +238,37 @@ func Supersede(old, newID string) error {
 	if err != nil {
 		return err
 	}
-	for _, args := range supersedeArgs(superseded, all, old, newID) {
-		if _, err := run(args...); err != nil {
+	if hasTarget(superseded, newID) {
+		return nil
+	}
+	if hasTarget(all, newID) { // bd holds one edge per ordered pair and rejects supersede over it
+		if err := core.RemoveEdge(old, newID); err != nil {
 			return err
 		}
 	}
-	return nil
+	return core.Supersede(old, newID)
 }
 
-// discoveredCreateArgs is successorCreateArgs plus a discovered-from edge to the
-// origin (the pivot a sweep acts for) — the key SpawnDiscoveredIfAbsent finds it by.
-func discoveredCreateArgs(originID, predID string, s Successor) []string {
-	return successorCreateArgs(predID, s, "discovered-from:"+originID)
+// Retire is the reason-first supersede door (Spec D5, ADR 0399): it closes old with
+// reason when old is still open, then records old supersedes→newID. An unknown newID is
+// refused before any write; a re-run after a crash finds old closed and adds only the
+// edge, and an old already carrying the edge is a no-op. The close is forced because bd
+// refuses a plain close of a bead with an open blocker while supersede does not (the
+// contract suite settles it), and retiring a duplicate must not be refused by ordering.
+func Retire(old, newID, reason string) error {
+	if _, err := Show(newID); err != nil {
+		return fmt.Errorf("retire %s: %w", old, err)
+	}
+	b, err := Show(old)
+	if err != nil {
+		return err
+	}
+	if b.Unclosed() {
+		if err := core.Close([]string{old}, reason, true); err != nil {
+			return err
+		}
+	}
+	return Supersede(old, newID)
 }
 
 // SpawnDiscoveredIfAbsent creates a bead of s.Kind caused-by predID and
@@ -271,11 +284,16 @@ func SpawnDiscoveredIfAbsent(originID, predID string, s Successor) (id string, c
 	if id, ok := firstOfKind(found, s.Kind); ok {
 		return id, false, nil
 	}
-	id, err = run(discoveredCreateArgs(originID, predID, s)...)
+	spec, err := stampedSpec(predID, s, Edge{Type: "discovered-from", To: originID})
+	if err != nil {
+		return "", false, err
+	}
+	id, err = core.Create(spec)
 	return id, err == nil, err
 }
 
-// SpawnOffshootSignalIfAbsent files an unparented Signal discovered-from originID
+// SpawnOffshootSignalIfAbsent files a Signal discovered-from originID, placed in the
+// origin's open Initiative as `signal offshoot` would place it (see createLoopOffshoot),
 // unless one (any status) already is: external work found mid-run, gated by intake
 // like any other (idempotent, so a re-run of the finding bead files it once).
 func SpawnOffshootSignalIfAbsent(originID, title, body string) (id string, created bool, err error) {
@@ -286,7 +304,7 @@ func SpawnOffshootSignalIfAbsent(originID, title, body string) (id string, creat
 	if id, ok := firstOfKind(found, contract.KindSignal); ok {
 		return id, false, nil
 	}
-	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindSignal}, title, body), "--deps", "discovered-from:"+originID)...)
+	id, err = createLoopOffshoot(originID, title, body)
 	return id, err == nil, err
 }
 
@@ -327,6 +345,27 @@ func signalTitled(beads []Bead, title string) (string, bool) {
 	return "", false
 }
 
+// createLoopOffshoot files the loop's offshoot Signal in one bd create: open (never a
+// Draft: no session would publish it), discovered-from cause, no order edge and no outside
+// opt-out, a direct child of the cause's open Initiative when OffshootPlacement finds one.
+// The body ends Order: none above the verb's Initiative: line.
+func createLoopOffshoot(cause, title, body string) (string, error) {
+	c, err := Show(cause)
+	if err != nil {
+		return "", fmt.Errorf("offshoot cause %s: %w", cause, err)
+	}
+	parent, line, _, _, err := OffshootPlacement(c, Show)
+	if err != nil {
+		return "", err
+	}
+	body += "\n\nOrder: none\n" + line
+	deps := "discovered-from:" + cause
+	if parent == "" {
+		return run(append(unparentedArgs(Successor{Kind: contract.KindSignal}, title, body), "--deps", deps)...)
+	}
+	return run(offshootParentedArgs(Successor{Kind: contract.KindSignal}, title, body, parent, deps)...)
+}
+
 // SpawnOffshootSignalTitledIfAbsent is SpawnOffshootSignalIfAbsent keyed on the
 // title instead of any Signal: the origin may already carry a crewmate's own offshoot
 // Signal (a Draft, published or closed) that must not stand in for this one.
@@ -339,7 +378,7 @@ func SpawnOffshootSignalTitledIfAbsent(originID, title, body string) (id string,
 	if id, ok := signalTitled(found, title); ok {
 		return id, false, nil
 	}
-	id, err = run(append(unparentedArgs(Successor{Kind: contract.KindSignal}, title, body), "--deps", "discovered-from:"+originID)...)
+	id, err = createLoopOffshoot(originID, title, body)
 	return id, err == nil, err
 }
 
@@ -400,3 +439,17 @@ func BlockersOfKind(id string, kind contract.Kind) ([]Bead, error) {
 // Blocking is the beads that wait on id through a blocks edge, closed ones included
 // (`bd dep list --direction=up -t blocks`): a Hold Errand's blocked bead, however far it got.
 func Blocking(id string) ([]Bead, error) { return depTargets(id, "up", "blocks") }
+
+// DiscoveredFromTargets is the beads id is discovered-from, any status (`bd dep list --direction=down
+// -t discovered-from`): where a bead came from.
+func DiscoveredFromTargets(id string) ([]Bead, error) {
+	return depTargets(id, "down", "discovered-from")
+}
+
+// DiscoveredByTargets is the beads discovered-from id, any status (`bd dep list --direction=up
+// -t discovered-from`): what a bead raised.
+func DiscoveredByTargets(id string) ([]Bead, error) { return depTargets(id, "up", "discovered-from") }
+
+// CausedByTargets is the beads id is caused-by, any status (`bd dep list --direction=down -t
+// caused-by`): the Signal a reroute's Ask came from.
+func CausedByTargets(id string) ([]Bead, error) { return depTargets(id, "down", "caused-by") }

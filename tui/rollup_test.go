@@ -68,7 +68,7 @@ func TestRollupWords(t *testing.T) {
 		{"empty tips give no approved", nil, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip))}, nil, nil, "review due", 11, ""},
 		{"at-tip open Approval vetoes review due", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "open", pinned(tip))}, nil, nil, "awaiting approval", 7, ""},
 		{"at-tip rework Approval is not approved and gets a fresh review", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("rework: mc-1"), pinned(tip))}, nil, nil, "review due", 11, ""},
-		{"at-tip Approval obsoleted is not approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("Approval obsoleted: tip moved"), pinned(tip))}, nil, nil, "review due", 11, ""},
+		{"at-tip Approval obsoleted is not approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith(bd.ApprovalObsoletedReason), pinned(tip))}, nil, nil, "review due", 11, ""},
 		{"at-tip empty-reason Approval is not approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", pinned(tip))}, nil, nil, "review due", 11, ""},
 		{"an earlier Landing does not block approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip), closedOn(epoch.Add(2*time.Hour))), k("l", contract.KindLanding, "closed", closedWith("obsolete: conflict"), madeAt(epoch.Add(time.Hour)), closedOn(epoch.Add(time.Hour)))}, nil, nil, "approved", 10, ""},
 		{"a Landing spawned after the Approval blocks approved", at, []bd.Bead{k("m", contract.KindBuild, "closed"), k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip)), k("l", contract.KindLanding, "closed", closedWith("obsolete: conflict"))}, nil, nil, "idle ⚠", 13, ""},
@@ -160,7 +160,7 @@ func TestRollupQualifiers(t *testing.T) {
 		{"approved Approval is not re-review", at, []bd.Bead{k("a", contract.KindApproval, "closed", closedWith("approved"), pinned(tip)), k("b", contract.KindBuild, "open")}, ""},
 		{"round then re-review then stale pin", at, []bd.Bead{rev("r1"), rev("r2"), k("l", contract.KindLanding, "closed", closedWith("obsolete: build failed")), k("a", contract.KindApproval, "open", pinned("deadbeef00"))}, "round 2 · re-review · stale pin"},
 		{"approve… Approval is spent, not approved", at, []bd.Bead{k("a", contract.KindApproval, "closed", closedWith("approve: ok"), pinned(tip)), k("b", contract.KindBuild, "open")}, "re-review"},
-		{"Approval obsoleted is spent, not approved", at, []bd.Bead{k("a", contract.KindApproval, "closed", closedWith("Approval obsoleted: tip moved"), pinned(tip)), k("b", contract.KindBuild, "open")}, "re-review"},
+		{"Approval obsoleted is spent, not approved", at, []bd.Bead{k("a", contract.KindApproval, "closed", closedWith(bd.ApprovalObsoletedReason), pinned(tip)), k("b", contract.KindBuild, "open")}, "re-review"},
 		{"pin at tip is not stale", at, []bd.Bead{k("a", contract.KindApproval, "open", pinned(tip))}, ""},
 		{"empty tip map is not stale", nil, []bd.Bead{k("a", contract.KindApproval, "open", pinned("deadbeef00"))}, ""},
 	}

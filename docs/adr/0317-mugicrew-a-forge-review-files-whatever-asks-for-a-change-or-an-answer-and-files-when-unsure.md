@@ -1,6 +1,6 @@
 # ADR 0317: A Forge Review files whatever asks for a change or an answer, and files when unsure
 
-Status: Accepted
+Status: Accepted; §7 superseded by ADR 0410 (mugicrew-effective-priority-is-the-most-urgent…)
 Date: 2026-10-20
 
 Chart mc-xw289 (Actionable Merge Request comments are filed deduplicated and

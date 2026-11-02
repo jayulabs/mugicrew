@@ -16,7 +16,7 @@ func pipelineErrandBody(t *testing.T, name, path string, kind contract.Kind, rea
 	r := &jinbeSeamRec{head: "cafef00d", jobs: []forge.Job{{ID: 5, Name: "unit", WebURL: "https://gl/j/5", FailureReason: reason}}}
 	stubJinbeSeams(t, r)
 	var body string
-	bd.SpawnBlockingErrand = func(_, _, _, b string) (string, bool, error) { body = b; return "t", true, nil }
+	bd.SpawnBlockingErrand = func(_, _, _, b, _ string) (string, bool, error) { body = b; return "t", true, nil }
 	var err error
 	if name == "revert" || name == "revert-infra" {
 		rb := bd.Bead{ID: "ws-rb", Title: "Ship", Description: "Retried: pipeline 42\nMR link: https://gl/mr/7\n"}

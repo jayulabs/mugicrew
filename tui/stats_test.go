@@ -31,6 +31,7 @@ func statEvents() []eventlog.Event {
 func statsModel(t *testing.T) Model {
 	t.Helper()
 	m := sized(t, 120, 30)
+	m, _ = send(t, m, loadedMsg{}) // Stats waits for the first snapshot
 	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: statEvents(), digest: statEvents()})
 	m, _ = send(t, m, runeKey("#"))
 	return m
@@ -338,6 +339,7 @@ func modeEvents() []eventlog.Event {
 
 func TestStatsModeCycle(t *testing.T) {
 	m := sized(t, 120, 30)
+	m, _ = send(t, m, loadedMsg{})
 	m, _ = send(t, m, logsMsg{path: "/log", changed: true, events: modeEvents(), digest: modeEvents()})
 	m, _ = send(t, m, runeKey("#"))
 	plan := func(m Model) string {

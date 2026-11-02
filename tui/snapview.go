@@ -32,8 +32,22 @@ func (v snapView) Efforts() (*git.EffortSet, error) {
 // row never sees a foreign landing.
 func (v snapView) Landed(b bd.Bead) (loop.Trailer, error) {
 	sha, ok := v.g.landed[b.ID]
+	if !ok {
+		sha, ok = v.g.blockLanded[b.ID]
+	}
 	return loop.Trailer{Sha: sha, Landed: ok}, nil
 }
+
+// Contains answers from the refresh's ancestry facts; an unread pair counts as contained, so
+// the row never holds on a guess (the press-time read is the authoritative gate).
+func (v snapView) Contains(_ bd.Bead, tip, sha string) (bool, error) {
+	in, read := v.g.contains[loop.ContainsKey(tip, sha)]
+	return in || !read, nil
+}
+
+// SameRepo is always true: the snapshot does no repo resolution, and an ancestry fact it
+// never read counts as contained, so a cross-repo pair never holds a row.
+func (v snapView) SameRepo(_, _ bd.Bead) bool { return true }
 
 // CheckpointTip is "" for an unknown tip, which pins nothing.
 func (v snapView) CheckpointTip(id string) (string, error) { return v.g.cpTips[id], nil }
@@ -43,15 +57,19 @@ func (v snapView) CheckpointTip(id string) (string, error) { return v.g.cpTips[i
 func (v snapView) Blockers(b bd.Bead) ([]loop.Blocker, error) {
 	var out []loop.Blocker
 	for _, id := range b.BlockedBy {
-		i := v.g.beadIndex(id)
-		if i < 0 {
+		var t bd.Bead
+		if i := v.g.beadIndex(id); i >= 0 {
+			t = v.g.beads[i]
+		} else if x, ok := v.g.behind[id]; ok {
+			t = x
+		} else {
 			continue
 		}
 		edge := loop.EdgeBlocks
 		if slices.Contains(b.CondBlockedBy, id) {
 			edge = loop.EdgeConditional
 		}
-		out = append(out, loop.Blocker{Bead: v.g.beads[i], Edge: edge})
+		out = append(out, loop.Blocker{Bead: t, Edge: edge})
 	}
 	return out, nil
 }
@@ -63,6 +81,9 @@ func (v snapView) Bead(id string) (bd.Bead, error) {
 		return v.g.beads[i], nil
 	}
 	if b, ok := v.g.ancestors[id]; ok {
+		return b, nil
+	}
+	if b, ok := v.g.behind[id]; ok {
 		return b, nil
 	}
 	return bd.Bead{ID: id, Title: id}, nil

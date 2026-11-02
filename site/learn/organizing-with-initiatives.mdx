@@ -1,0 +1,102 @@
+---
+id: organizing-with-initiatives
+title: Organizing with Initiatives
+---
+
+import SurfaceTabs from '@site/src/components/SurfaceTabs';
+
+# Organizing with Initiatives
+
+An [Initiative](/learn/bead-glossary#initiative) groups several chains of work (each [Signal](/learn/bead-glossary#signal) → [Chart](/learn/bead-glossary#chart) → [Spec](/learn/bead-glossary#spec) → [Checkpoint](/learn/bead-glossary#checkpoint) chain) so one large effort can span several Checkpoints. Each member Checkpoint lands on its own; the Initiative has no branch and no land. Single-Checkpoint work never needs one, unless your Workspace turns on [Require Initiatives](#require-initiatives).
+
+A bead belongs to at most one Initiative. Once a Signal is a member, the beads born from it join too, and so do the [Errands](/learn/bead-glossary#errand) ordered against a member.
+
+## File an Initiative
+
+You file an Initiative through the reconcile that ends a Signal's triage. In triage the crew settles the Initiative's body, which must carry a `## Done when` finish line, and reconciles the Signal into the new Initiative. You can also start an Initiative of your own from the TUI; the crew then writes its body.
+
+<SurfaceTabs
+  tui={<ol>
+    <li>Press <code>n</code> to open the New menu, then <code>i</code> for New Initiative.</li>
+    <li>Fill in the form (a ref field appears when <a href="#enforce-external-id">Enforce external ID</a> is on) and submit it. The new Initiative shows on the Initiatives tab (key <code>5</code>).</li>
+    <li>To reconcile a Signal into one at triage, press <code>4</code> for the Graph tab, put the cursor on the Signal and press <code>enter</code>. The triage session runs the reconcile for you.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">{`# triage a Signal in an interactive session; it ends in the reconcile
+mugicrew signal triage <signal-id>`}</code></pre>}
+/>
+
+## Adopt a chain
+
+Adoption pulls an existing chain into an Initiative by its unclosed head. The chain's closed predecessors stay where they are, as lineage.
+
+<SurfaceTabs
+  tui={<ol>
+    <li>Press <code>4</code> for the Graph tab and put the cursor on the chain's head.</li>
+    <li>Press <code>a</code>, pick the Initiative from the list and press <code>enter</code>. The status line reports <code>adopted</code> and the Initiative.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">mugicrew initiative adopt &lt;head&gt; &lt;initiative&gt;</code></pre>}
+/>
+
+## Release a chain
+
+Release moves a chain out of its Initiative. To move it to another Initiative, release it, then adopt it there.
+
+<SurfaceTabs
+  tui={<ol>
+    <li>On the Graph tab, put the cursor on an unclosed member.</li>
+    <li>Press <code>A</code>. The status line reports <code>released</code> and the Initiative it left.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">mugicrew initiative release &lt;head&gt;</code></pre>}
+/>
+
+With Require Initiatives on, a release that would leave a spine bead outside any Initiative is refused.
+
+## Cancel an Initiative
+
+Cancelling closes every unclosed member chain and then the Initiative itself, as cancelled; landed work stays. It is refused while a member effort is in flight. A cancel needs a reason, and you can release chains to keep them rather than close them.
+
+<SurfaceTabs
+  tui={<ol>
+    <li>Put the cursor on the Initiative and press <code>X</code>. The dialog lists the member chains, each marked close.</li>
+    <li>Press <code>r</code> on a chain to release it instead of closing it, or <code>c</code> to close it again.</li>
+    <li>Press <code>tab</code> and type the reason, press <code>tab</code> again to leave the line, then <code>enter</code> to review.</li>
+    <li>Press <code>y</code> or <code>enter</code> to cancel.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">mugicrew initiative cancel &lt;initiative&gt; --why "reason" [--release &lt;head&gt;]... [--discard]</code></pre>}
+/>
+
+To drop one chain and leave the Initiative going, withdraw it instead:
+
+<SurfaceTabs
+  tui={<p>Press <code>X</code> on the chain's row.</p>}
+  cli={<pre><code className="language-bash">mugicrew withdraw &lt;head&gt;</code></pre>}
+/>
+
+## Require Initiatives
+
+With Require Initiatives on, every spine bead below intake belongs to an Initiative. It is enforced at triage, on `mugicrew surgery new` and on release. Work already outside an Initiative is grandfathered. Both settings live in the checked-in `.mugicrew/config.toml`; see [Config options](/learn/customization/configuration) for the file.
+
+<SurfaceTabs
+  tui={<ol>
+    <li>Edit <code>.mugicrew/config.toml</code> to set <code>required = true</code> under <code>[initiatives]</code>; the TUI cannot change it.</li>
+    <li>Press <code>*</code> for the Settings tab. The Initiatives row shows <code>required on</code> and the file it came from.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">mugicrew init workspace --require-initiatives true</code></pre>}
+/>
+
+## Enforce external ID
+
+Enforce external ID needs Require Initiatives. Each Initiative born while it is on carries a non-empty, unique external ref, the id of the issue it mirrors. Set the ref of an Initiative born without one:
+
+<SurfaceTabs
+  tui={<p>The TUI has no key for it; use the CLI.</p>}
+  cli={<pre><code className="language-bash">bd update &lt;id&gt; --external-ref R</code></pre>}
+/>
+
+<SurfaceTabs
+  tui={<ol>
+    <li>Edit <code>.mugicrew/config.toml</code> to set <code>external_ref = true</code> beside <code>required = true</code> under <code>[initiatives]</code>.</li>
+    <li>Press <code>*</code> for the Settings tab. The Initiatives row shows <code>external ref on</code>, and the New Initiative form now asks for a ref.</li>
+  </ol>}
+  cli={<pre><code className="language-bash">mugicrew init workspace --require-initiatives true --external-ref true</code></pre>}
+/>

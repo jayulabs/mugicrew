@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"jayulabs.org/mugicrew/internal/isolate"
 	"jayulabs.org/mugicrew/looplock"
 	"jayulabs.org/mugicrew/release"
 )
@@ -24,7 +25,7 @@ func newUpgradeRig(t *testing.T, install release.Install) *upgradeRig {
 	t.Cleanup(func() {
 		version, sourceRoot, release.Fetch, release.Classify, release.RunNpm, release.RunDoctor, upgradeLockPath = oldV, oldS, oldF, oldC, oldN, oldD, oldL
 	})
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolate.Dirs(t)
 	version, sourceRoot = "1.0.0", ""
 	release.Fetch = func() (release.Info, error) { return release.Info{Latest: "1.1.0"}, nil }
 	release.Classify = func() release.Install { return install }

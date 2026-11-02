@@ -38,11 +38,14 @@ func block(t *testing.T, doc, header string) string {
 	return ""
 }
 
-func TestPublishWorkflowIgnoresSitePaths(t *testing.T) {
+func TestPublishWorkflowRunsEveryCandidateAndMainPush(t *testing.T) {
 	doc := readWorkflow(t, ".github/workflows/publish.yml")
 	push := block(t, doc, "  push:")
-	if !strings.Contains(push, "paths-ignore:") || !strings.Contains(push, "'site/**'") {
-		t.Errorf("publish.yml push trigger lacks paths-ignore: ['site/**']:\n%s", push)
+	if strings.Contains(push, "paths-ignore:") || strings.Contains(push, "paths:") {
+		t.Errorf("publish.yml push trigger filters paths, so a site-only push gets no checks:\n%s", push)
+	}
+	if !strings.Contains(push, "branches: [main, candidate]") {
+		t.Errorf("publish.yml push trigger lacks branches: [main, candidate]:\n%s", push)
 	}
 	if !strings.Contains(block(t, doc, "on:"), "workflow_dispatch:") {
 		t.Error("publish.yml lost workflow_dispatch")

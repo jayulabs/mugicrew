@@ -6,7 +6,8 @@ which publishes the five `@jayulabs` packages: the four platform packages
 (`mugicrew-linux-x64`, `mugicrew-linux-arm64`, `mugicrew-darwin-arm64`,
 `mugicrew-darwin-x64`) and the launcher (`mugicrew`).
 
-A publish that changes only `site/**` doesn't run the release; the Pages workflow deploys it.
+A publish that changes only `site/**` runs the tests and smoke jobs, publishes nothing
+to npm, and Pages deploys it.
 
 ## Procedure
 
@@ -26,9 +27,10 @@ A publish that changes only `site/**` doesn't run the release; the Pages workflo
    "docs/upgrading.md#upgrading-onto-the-first-swap-surviving-release"`, so loops
    too old to survive a swap are never swapped unattended.
 4. Make all the changes together, in one change on `stock/mugicrew`.
-5. Run `lineage publish mugicrew`.
-6. Watch the publish workflow on the public repo until it is green. The publish
-   job runs last, after the tests and smoke jobs.
+5. Run `lineage publish mugicrew`. It pushes the candidate branch.
+6. Wait for the candidate's run of the publish workflow to go green, then run
+   `lineage publish mugicrew` again. It pushes `main`, which reruns the suite
+   and then publishes. The publish job runs last, after the tests and smoke jobs.
 
 ## Lineage does not bump the version
 
@@ -54,6 +56,17 @@ bump for you. Choosing the version is your decision, made in steps 1 and 2.
   npm at that version, usually because the bump was forgotten. Bump the version
   and pins (steps 1 and 2) and run `lineage publish mugicrew` again. The job
   fails before it publishes anything.
+
+- **The push to `main` is refused** (relayed by `lineage publish`). The public
+  repo's ruleset refuses a push until its SHA carries every required check from a
+  push run. Three cases:
+  - *Pending.* The candidate's run hasn't finished. Wait for it, then publish again.
+  - *Flake.* A check failed for a reason unrelated to the change. Re-run the
+    failed jobs on the candidate's run, then publish again.
+  - *Real failure.* A check failed because of the change. Fix it on
+    `stock/mugicrew` and publish again, which pushes a new candidate.
+  A renamed job or matrix cell leaves a required check that nothing reports, so
+  `main` stays refused until the ruleset is edited to match.
 
 ## Recovery
 

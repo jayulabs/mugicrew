@@ -2,11 +2,12 @@ name: publish
 
 on:
   push:
-    branches: [main]
-    # a site-only publish is deployed by pages.yml and does not run the release
-    paths-ignore: ['site/**']
-  # branch runs (Checkpoint verification) never reach publish: it only runs from main.
-  # A manual dispatch on main passes that gate too, so it publishes.
+    # no paths filter: a site-only push must run the full suite too, or its required
+    # checks stay pending and the push to main is refused (ADR 0097)
+    branches: [main, candidate]
+  # A candidate push runs the full pre-publish suite as the darwin gate before main; the
+  # publish job runs only from main. A manual dispatch on main still publishes, but its
+  # checks don't satisfy the ruleset.
   workflow_dispatch:
 
 permissions:
@@ -342,6 +343,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # enough history to diff the push's before against its SHA
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -355,4 +359,5 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./npm/mugicrew/package.json').version")
-          bash .github/publish-npm.sh ./dist "$VERSION" "${{ github.event_name }}"
+          bash .github/publish-npm.sh ./dist "$VERSION" "${{ github.event_name }}" \
+            "${{ github.event.before }}" "${{ github.sha }}"

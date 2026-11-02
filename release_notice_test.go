@@ -10,8 +10,37 @@ import (
 	"testing"
 	"time"
 
+	"jayulabs.org/mugicrew/internal/isolate"
 	"jayulabs.org/mugicrew/release"
 )
+
+// seedRelease writes a release cache saying latest is out, under cache (the
+// dir os.UserCacheDir resolves), where release.CachePath reads it.
+func seedRelease(t *testing.T, cache, latest string) {
+	t.Helper()
+	dir := filepath.Join(cache, "mugicrew")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(map[string]any{"checked_at": time.Now(), "latest": latest})
+	if err := os.WriteFile(filepath.Join(dir, "release.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// noBdPath is a PATH holding git (the child's `ps` runs in a git repo) and no bd.
+func noBdPath(t *testing.T) string {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(git, filepath.Join(dir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 // noticeRun re-execs this binary as `mugicrew ps` in a fresh repo, an npm build
 // at 1.0.0 whose cache already says 2.0.0 is out, and returns its stderr. env
@@ -22,16 +51,14 @@ func noticeRun(t *testing.T, env ...string) string {
 	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
-	cache := t.TempDir()
-	dir := filepath.Join(cache, "mugicrew")
-	os.MkdirAll(dir, 0o755)
-	b, _ := json.Marshal(map[string]any{"checked_at": time.Now(), "latest": "2.0.0"})
-	os.WriteFile(filepath.Join(dir, "release.json"), b, 0o644)
+	iso, _, cache := isolate.Env(t)
+	seedRelease(t, cache, "2.0.0")
 	self, _ := os.Executable()
 	cmd := exec.Command(self, "ps")
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "MUGICREW_TEST_MAIN=1", "MUGICREW_TEST_VERSION=1.0.0", "MUGICREW_TEST_TTY=1",
-		"XDG_CACHE_HOME="+cache, "MUGICREW_EFFORT=", "MUGICREW_RELEASE_NOTICE=", "BEADS_DIR="+t.TempDir())
+	cmd.Env = append(os.Environ(), iso...)
+	cmd.Env = append(cmd.Env, "MUGICREW_TEST_MAIN=1", "MUGICREW_TEST_VERSION=1.0.0", "MUGICREW_TEST_TTY=1",
+		"PATH="+noBdPath(t), "MUGICREW_EFFORT=", "MUGICREW_RELEASE_NOTICE=", "BEADS_DIR="+t.TempDir())
 	cmd.Env = append(cmd.Env, env...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -76,15 +103,14 @@ func TestReleaseNoticeConfigOptOut(t *testing.T) {
 	exec.Command("git", "-C", repo, "init", "-q").Run()
 	os.MkdirAll(filepath.Join(repo, ".mugicrew"), 0o755)
 	os.WriteFile(filepath.Join(repo, ".mugicrew", "config.toml"), []byte("[release]\nnotice = false\n"), 0o644)
-	cache := t.TempDir()
-	os.MkdirAll(filepath.Join(cache, "mugicrew"), 0o755)
-	b, _ := json.Marshal(map[string]any{"checked_at": time.Now(), "latest": "2.0.0"})
-	os.WriteFile(filepath.Join(cache, "mugicrew", "release.json"), b, 0o644)
+	iso, _, cache := isolate.Env(t)
+	seedRelease(t, cache, "2.0.0")
 	self, _ := os.Executable()
 	cmd := exec.Command(self, "ps")
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "MUGICREW_TEST_MAIN=1", "MUGICREW_TEST_VERSION=1.0.0", "MUGICREW_TEST_TTY=1",
-		"XDG_CACHE_HOME="+cache, "MUGICREW_EFFORT=", "MUGICREW_RELEASE_NOTICE=", "BEADS_DIR="+t.TempDir())
+	cmd.Env = append(os.Environ(), iso...)
+	cmd.Env = append(cmd.Env, "MUGICREW_TEST_MAIN=1", "MUGICREW_TEST_VERSION=1.0.0", "MUGICREW_TEST_TTY=1",
+		"PATH="+noBdPath(t), "MUGICREW_EFFORT=", "MUGICREW_RELEASE_NOTICE=", "BEADS_DIR="+t.TempDir())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Run()
@@ -108,13 +134,7 @@ func TestReleaseNoticeSkipsVersionAndHelp(t *testing.T) {
 }
 
 func TestTUIReleaseCheck(t *testing.T) {
-	cache := t.TempDir()
-	dir := filepath.Join(cache, "mugicrew")
-	os.MkdirAll(dir, 0o755)
-	write := func(latest string) {
-		b, _ := json.Marshal(map[string]any{"checked_at": time.Now(), "latest": latest})
-		os.WriteFile(filepath.Join(dir, "release.json"), b, 0o644)
-	}
+	_, cache := isolate.Dirs(t)
 	oldV, oldS := version, sourceRoot
 	t.Cleanup(func() { version, sourceRoot = oldV, oldS })
 	for _, c := range []struct {
@@ -129,8 +149,7 @@ func TestTUIReleaseCheck(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			version, sourceRoot = c.running, c.src
-			write(c.cached)
-			t.Setenv("XDG_CACHE_HOME", cache)
+			seedRelease(t, cache, c.cached)
 			t.Setenv("MUGICREW_EFFORT", c.effort)
 			t.Setenv("MUGICREW_RELEASE_NOTICE", c.off)
 			if got := tuiReleaseCheck(); got != c.want {
@@ -141,9 +160,7 @@ func TestTUIReleaseCheck(t *testing.T) {
 }
 
 func TestUnattendedUpgradeGate(t *testing.T) {
-	cfg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", cfg)
-	t.Setenv("HOME", cfg)
+	cfg, _ := isolate.Dirs(t)
 	t.Setenv("MUGICREW_EFFORT", "")
 	t.Setenv("MUGICREW_RELEASE_NOTICE", "")
 	t.Setenv("MUGICREW_UNATTENDED_UPGRADE", "")
@@ -196,7 +213,7 @@ func TestUnattendedUpgradeGate(t *testing.T) {
 func TestInstalledUpgraderBacksOffAfterFailedRead(t *testing.T) {
 	oldF, oldN := release.Fetch, release.Now
 	t.Cleanup(func() { release.Fetch, release.Now = oldF, oldN })
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	isolate.Dirs(t)
 	now := time.Now()
 	release.Now = func() time.Time { return now }
 	calls := 0

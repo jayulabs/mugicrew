@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/git"
+	"jayulabs.org/mugicrew/internal/isolate"
 	"maps"
 	"os"
 	"os/exec"
@@ -483,9 +484,7 @@ func TestUnattendedUpgrade(t *testing.T) {
 		{"local ignored", "", "", "[upgrade]\nunattended = true\n", false},
 		{"workspace cannot flip personal off", "[upgrade]\nunattended = true\n", "[upgrade]\nunattended = false\n", "[upgrade]\nunattended = false\n", true},
 	} {
-		cfg := t.TempDir()
-		t.Setenv("XDG_CONFIG_HOME", cfg)
-		t.Setenv("HOME", cfg)
+		cfg, _ := isolate.Dirs(t)
 		if tc.personal != "" {
 			os.MkdirAll(filepath.Join(cfg, "mugicrew"), 0o755)
 			os.WriteFile(filepath.Join(cfg, "mugicrew", "config.toml"), []byte(tc.personal), 0o644)

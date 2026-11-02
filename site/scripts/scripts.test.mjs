@@ -6,7 +6,6 @@ import path from 'node:path';
 import { check, LEARN_ROUTES } from './check-build.mjs';
 import { scan } from './denylist.mjs';
 import { checkStyle } from './check-style.mjs';
-import { checkHero } from './check-hero.mjs';
 import { checkGame } from './check-game.mjs';
 import { checkLearn } from './check-learn.mjs';
 import { checkTry } from './check-try.mjs';
@@ -56,23 +55,6 @@ test('checkStyle wants header, footer and favicon on every route and no third-pa
   assert.ok(wrong.some((e) => e.startsWith('workspace.html: footer has no link')));
   assert.ok(errs.includes('try.html: no footer'));
   assert.ok(errs.includes('try.html: favicon is not the compass rose'));
-});
-
-test('checkHero wants the hero sections in order and the three doors in lens order', () => {
-  const d = tmp();
-  const door = (n, to) => `<a class="door" href="/mugicrew${to}"><span>Course 0${n}</span></a>`;
-  const VIDEO =
-    '<video class="loop-video" autoplay loop muted playsinline poster="/mugicrew/recordings/hero-loop.jpg"><source src="/mugicrew/recordings/hero-loop.mp4" type="video/mp4"></video>';
-  put(d, 'recordings/hero-loop.mp4');
-  put(d, 'recordings/hero-loop.jpg');
-  const page = (doors) =>
-    `<h2 id="what-it-is"></h2><svg class="chart-figure"></svg><div data-recording="hero-loop">${VIDEO}</div><code>npm i -g @jayulabs/mugicrew</code><a href="/mugicrew/try">Try it</a><div id="doors">${doors}</div>`;
-  put(d, 'index.html', page(door(1, '/workspace') + door(2, '/framework') + door(3, '/game')));
-  assert.deepEqual(checkHero(d), []);
-  put(d, 'index.html', page(door(2, '/framework') + door(1, '/workspace') + door(3, '/game')));
-  assert.ok(checkHero(d).some((e) => e.includes('out of order')));
-  put(d, 'index.html', '<h2 id="what-it-is"></h2>');
-  assert.ok(checkHero(d).includes('index.html: no install line'));
 });
 
 test('checkGame wants the six headings in order, two captioned diagrams, the links and no crewmate', () => {

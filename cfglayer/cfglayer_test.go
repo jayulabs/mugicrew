@@ -203,6 +203,45 @@ func TestSequenceRulesSelectByRepo(t *testing.T) {
 	}
 }
 
+// A linked worktree lacking the child dir still matches the child repo (checked out
+// at the Workspace root) to its context; a config with no repo = entry makes no git call.
+func TestSequenceRulesChildAtWorkspaceRoot(t *testing.T) {
+	git1 := func(dir string, a ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t"}, a...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", a, err, out)
+		}
+	}
+	root := workspace(t, "[context.c]\nrepo = \"vendor/c\"\nsequences = [\"c/{n}.sql\"]\n", "")
+	git1(root, "commit", "-q", "--allow-empty", "-m", "x")
+	child := filepath.Join(root, "vendor", "c")
+	os.MkdirAll(child, 0o755)
+	git1(child, "init", "-q")
+	wt := filepath.Join(t.TempDir(), "wt")
+	git1(root, "worktree", "add", "-q", wt)
+	os.MkdirAll(filepath.Join(wt, ".mugicrew"), 0o755)
+	if err := os.WriteFile(SharedPath(wt), []byte("[context.c]\nrepo = \"vendor/c\"\nsequences = [\"c/{n}.sql\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "vendor", "c")); err == nil {
+		t.Fatal("worktree unexpectedly has the child")
+	}
+	rules, err := SequenceRules(wt, git.Repo(child))
+	if want := []string{git.ADRRule.Template, "c/{n}.sql"}; err != nil || !slices.Equal(templates(rules), want) {
+		t.Errorf("rules = %v, %v; want %v", templates(rules), err, want)
+	}
+
+	plain := workspace(t, "sequences = [\"top/{n}.sql\"]\n", "")
+	log := countGit(t)
+	rules, err = SequenceRules(plain, git.Repo(child))
+	if want := []string{git.ADRRule.Template}; err != nil || !slices.Equal(templates(rules), want) {
+		t.Errorf("no-context rules = %v, %v; want %v", templates(rules), err, want)
+	}
+	if b, _ := os.ReadFile(log); strings.Contains(string(b), "worktree list") {
+		t.Errorf("Workspace-root lookup ran without a repo = entry:\n%s", b)
+	}
+}
+
 func TestJiraSiteLocalTableWins(t *testing.T) {
 	for _, tc := range []struct{ name, shared, local, want, src string }{
 		{"none", "gate = \"x\"\n", "", "", "shared"},

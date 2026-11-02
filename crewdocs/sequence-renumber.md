@@ -1,10 +1,11 @@
-<!-- hand-kept · summarises ADR 0030 (adr-number-collision-guard) §5, ADR 0079 §1 (escalate only on an unreadable referent), ADR 0088 (this doc's split), ADR 0219 (the-adr-number-guard-is-a-numbered-file-clash-check…), ADR 0225 (a-forge-merged-number-clash-is-renumbered…), ADR 0397 (mugicrew-a-renumber-only-head-is-the-approved-squash-replayed…), ADR 0398 (mugicrew-a-carried-approval-is-a-go-written-successor…) -->
+<!-- hand-kept · summarises ADR 0030 (adr-number-collision-guard) §5, ADR 0079 §1 (escalate only on an unreadable referent), ADR 0088 (this doc's split), ADR 0219 (the-adr-number-guard-is-a-numbered-file-clash-check…), ADR 0225 (a-forge-merged-number-clash-is-renumbered…), ADR 0397 (mugicrew-a-renumber-only-head-is-the-approved-squash-replayed…), ADR 0398 (mugicrew-a-carried-approval-is-a-go-written-successor…), ADR 0424 (mugicrew-the-clash-guard-also-flags-two-files…) -->
 
 # Renumbering clashing numbered files
 
 A branch landing on mainline (a Chart or a Checkpoint) clashes when it adds a
 numbered file whose number some other file in the same sequence already holds
-on mainline: an ADR (`docs/adr/NNNN-<slug>.md`, the built-in example) or any
+on mainline, or when it adds two files under one number itself (the later-added
+one moves, the earlier keeps the number): an ADR (`docs/adr/NNNN-<slug>.md`, the built-in example) or any
 file a configured sequence matches (e.g. `db/migration/V{n}__*.sql`). **Mainline
 numbers are fixed; the landing branch moves.** A clean rebase alone does not
 resolve a clash.
@@ -27,12 +28,11 @@ container's subtree, as your prompt names them.
    container landing ahead of you cannot take it (reading only mainline's max,
    `git ls-tree --name-only {{MAINLINE}} <its-dir>`, loses that race and costs a
    Review, an Approval and a Landing per lap). It
-   skips your own branch and your own file's other laps; gaps are fine. If it
+   skips your own file's other laps, counts your branch's other adds
+   there, and gaps are fine. If it
    fails (no rule, two rules, the number outgrows its width), escalate. Move the
-   branch's clashing files to consecutive numbers up from the printed one,
-   preserving their original order (the lowest colliding file gets the printed
-   number; if the branch also added non-colliding files that would now sort out
-   of order, move those up too). Mainline's numbers stay fixed.
+   clashing files to consecutive numbers up from the printed one, preserving
+   their original order. Mainline's numbers stay fixed.
 3. Rename each file (`git mv`) keeping its directory, prefix and the rest of
    its name; change only the captured digits, at the renamed file's own width
    (`0007` → `0012`, never `12`). If the new path would leave the sequence's
@@ -60,7 +60,8 @@ mugicrew's invariants above win on what (mainline numbers fixed, the branch
 moves, sweep scope, escalate on ambiguity). A conflict between them escalates.
 
 The clash is resolved when no file the branch adds shares a number with another
-file in its own number space on mainline.
+file in its own number space on mainline, nor with another file the branch itself
+adds.
 
 A line whose referent (the branch's file or mainline's) can't be told apart by
 reading it is the one renumbering call not to guess: a wrong guess silently

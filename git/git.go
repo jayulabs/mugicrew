@@ -2951,7 +2951,65 @@ func (r Repo) numberClashes(branch, base string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return seqClashes(rules, strings.Split(added, "\n"), strings.Split(onMain, "\n"))
+	ordered, err := r.introductionOrder(rules, mb, branch, strings.Split(added, "\n"))
+	if err != nil {
+		return nil, err
+	}
+	return seqClashes(rules, ordered, strings.Split(onMain, "\n"))
+}
+
+// introductionOrder sorts added by the first-parent commit of mb..branch that
+// introduces each path, oldest first, paths from one commit (an Integrate merge's
+// files included) by path. Only paths that two share a number-space slot can
+// change the clash result, but ordering every rule-matching path costs one log
+// each, so only those sharing a (rule, dir, number) slot are logged.
+func (r Repo) introductionOrder(rules []Rule, mb, branch string, added []string) ([]string, error) {
+	type slot struct {
+		rule     int
+		dir, key string
+	}
+	bySlot := map[slot][]string{}
+	for _, p := range added {
+		i, err := ruleOf(rules, p)
+		if err != nil {
+			return nil, err
+		}
+		if i >= 0 {
+			dir, key, _ := seqParts(rules[i], p)
+			bySlot[slot{i, dir, key}] = append(bySlot[slot{i, dir, key}], p)
+		}
+	}
+	chain, err := r.run("rev-list", "--first-parent", mb+".."+branch)
+	if err != nil {
+		return nil, err
+	}
+	rank := map[string]int{} // rev-list is newest first: the newest commit gets the largest rank
+	for i, c := range strings.Fields(chain) {
+		rank[c] = len(strings.Fields(chain)) - i
+	}
+	age := map[string]int{} // smaller is earlier; 0 for a path not in a shared slot
+	for _, group := range bySlot {
+		if len(group) < 2 {
+			continue
+		}
+		for _, p := range group {
+			out, err := r.run("log", "--first-parent", "--diff-filter=A", "--no-renames", "--format=%H", mb+".."+branch, "--", p)
+			if err != nil {
+				return nil, err
+			}
+			if cs := strings.Fields(out); len(cs) > 0 {
+				age[p] = rank[cs[len(cs)-1]]
+			}
+		}
+	}
+	ordered := slices.Clone(added)
+	slices.SortStableFunc(ordered, func(a, b string) int {
+		if c := cmp.Compare(age[a], age[b]); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
+	})
+	return ordered, nil
 }
 
 // ResolveCheckFailed is CheckResolved's typed failure (ADR 0080 §3–4): the
@@ -3717,7 +3775,9 @@ func (r Repo) PostLandClashesAt(landed, merge string) ([]PostLandClash, error) {
 	mainline := strings.Split(onMain, "\n")
 	// A path no longer on the tip (a landed renumber moved it) is a settled clash.
 	addedOnTip := slices.DeleteFunc(strings.Split(added, "\n"), func(p string) bool { return !slices.Contains(mainline, p) })
-	slots, err := seqSlotClashes(rules, addedOnTip, mainline)
+	// Mainline before the land: the tip less what the landed commit added, so a
+	// pair the commit adds under one number reads as an intra-branch clash.
+	slots, err := seqSlotClashes(rules, addedOnTip, slices.DeleteFunc(slices.Clone(mainline), func(p string) bool { return slices.Contains(addedOnTip, p) }))
 	if err != nil || len(slots) == 0 {
 		return nil, err
 	}
@@ -3728,6 +3788,18 @@ func (r Repo) PostLandClashesAt(landed, merge string) ([]PostLandClash, error) {
 	var out []PostLandClash
 	for _, s := range slots {
 		pc := PostLandClash{Added: s.Added, Mainline: tip}
+		if s.Branch {
+			// one squash commit adds the pair: the later path moves
+			by, err := r.landedBy(ours)
+			if err != nil {
+				return nil, err
+			}
+			for _, o := range s.Others {
+				pc.Others, pc.Commits, pc.LandedBy = append(pc.Others, o), append(pc.Commits, ours), append(pc.LandedBy, by)
+			}
+			out = append(out, pc)
+			continue
+		}
 		for _, o := range s.Others {
 			c, err := r.introducedAt(tip, o)
 			if err != nil {

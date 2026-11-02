@@ -246,47 +246,89 @@ pre {
   font-size: 1.15rem;
 }
 
-.hero-page__doors {
+.hero-page__split {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-  padding: 0;
-  list-style: none;
+  grid-template-columns: 5fr 6fr;
+  gap: 2.5rem;
+  align-items: center;
+  padding-top: 3rem;
+  padding-bottom: 2.5rem;
 }
 
-.hero-page__door {
+.hero-page__split h1 {
+  font-size: 3.4rem;
+}
+
+.hero-page__facts {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.hero-page__media .loop-video {
+  margin: 0;
+  box-shadow: 10px 10px 0 var(--sea);
+}
+
+.hero-page__learn {
   display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  height: 100%;
-  padding: 1rem;
-  border: 4px double var(--ink);
-  background: var(--parchment-deep);
-  color: var(--ink);
+  align-items: center;
+  gap: 1.25rem;
+  padding: 1.1rem max(1rem, calc((100vw - 1140px) / 2));
+  background: var(--ink);
+  color: var(--parchment);
+  border-top: 4px double var(--parchment);
+  border-bottom: 4px double var(--parchment);
+  outline: 4px solid var(--ink);
 }
 
-.hero-page__door:hover {
-  border-color: var(--accent);
-  color: var(--ink);
+.hero-page__learn:hover {
+  color: var(--parchment);
   text-decoration: none;
 }
 
-.hero-page__course {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--accent);
+.hero-page__verbs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2.5rem;
+  padding-top: 3rem;
+  padding-bottom: 2rem;
 }
 
-.hero-page__door strong {
-  font-family: var(--font-display);
-  font-size: 1.15rem;
+.hero-page__verb h2 {
+  font-size: 1.6rem;
 }
 
-@media (max-width: 800px) {
-  .hero-page__doors {
+.hero-page__note,
+.hero-page__disclosure {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.hero-page__disclosure {
+  border-top: 4px double var(--ink);
+  padding-top: 1rem;
+  margin-bottom: 2rem;
+}
+
+@media (max-width: 900px) {
+  .hero-page__verbs {
     grid-template-columns: 1fr;
+    gap: 1.5rem;
+    padding-top: 2rem;
+  }
+
+  .hero-page__split {
+    grid-template-columns: 1fr;
+    padding-top: 1.5rem;
+  }
+
+  .hero-page__split h1 {
+    font-size: 2.5rem;
+  }
+
+  .hero-page__learn {
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 }
 

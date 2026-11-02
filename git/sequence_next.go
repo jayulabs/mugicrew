@@ -14,8 +14,9 @@ type branchAdds struct {
 
 // seqNext is the pure core of `mugicrew sequence next`: the number a renumber of p
 // moves to, one above the max over mainline's files in p's directory under p's rule
-// and every file another branch adds there, printed at p's own width. head is what
-// the current branch adds: a file an other branch adds with the same directory and
+// and every file another branch adds there and every other file the current branch adds
+// there (p itself, matched by path, excluded), printed at p's own width. head is
+// what the current branch adds: a file an other branch adds with the same directory and
 // slug as one of those is the same file on another lap and is skipped. p matching no
 // rule, two, or a result that leaves the rule (9999 → 10000 under {n:4}) is an error;
 // gaps are accepted.
@@ -56,6 +57,14 @@ func seqNext(rules []Rule, p string, mainline, head []string, others []branchAdd
 			return "", err
 		}
 	}
+	for _, f := range head {
+		if f == p {
+			continue
+		}
+		if err := see(f); err != nil {
+			return "", err
+		}
+	}
 	for _, o := range others {
 		for _, f := range o.Added {
 			if ownSlugs[seqSlug(rule, f)] {
@@ -89,7 +98,7 @@ var openBranchPrefixes = []string{"refs/heads/checkpoint/", "refs/heads/chart/",
 // SequenceNext is seqNext over repo r's local refs: p is repo-relative, mainline is
 // its trunk's files, and each other checkpoint/*, chart/* or effort/* branch adds
 // what diff --diff-filter=A shows from its merge-base with mainline. HEAD's branch
-// is skipped, its own adds feed the same-slug exemption. No bead is read.
+// is skipped as an other, its own adds feed the same-slug exemption and the max. No bead is read.
 func (r Repo) SequenceNext(p string) (string, error) {
 	rules, err := SequenceRules(r)
 	if err != nil {

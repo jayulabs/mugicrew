@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -222,6 +223,11 @@ func TestSeqNext(t *testing.T) {
 			{"refs/heads/effort/c", []string{"docs/adr/0420-me.md"}},
 			{"refs/heads/chart/b", []string{"docs/adr/0397-other.md"}},
 		}, "0398", ""},
+		{"head's own higher same-directory add is cleared", "docs/adr/0381-me.md", []string{"docs/adr/0381-me.md", "docs/adr/0410-sib.md"}, []branchAdds{
+			{"refs/heads/chart/b", []string{"docs/adr/0397-other.md"}},
+		}, "0411", ""},
+		{"p itself as head's max is excluded", "docs/adr/0450-me.md", []string{"docs/adr/0450-me.md"}, nil, "0396", ""},
+		{"head's adds in another directory or rule are ignored", "docs/adr/0381-me.md", []string{"docs/adr/0381-me.md", "apps/x/docs/adr/0990-s.md", "db/migration/V99__s.sql"}, nil, "0396", ""},
 		{"same slug in another directory is not the same file", "docs/adr/0381-me.md", []string{"docs/adr/0381-me.md"}, []branchAdds{
 			{"refs/heads/effort/c", []string{"apps/x/docs/adr/0420-me.md"}},
 		}, "0396", ""},
@@ -274,4 +280,131 @@ func TestSequenceNextRealGit(t *testing.T) {
 	if err != nil || got != "0006" {
 		t.Errorf("SequenceNext = %q, %v; want 0006", got, err)
 	}
+	// The branch's own other add clears too: 0008 beats the other branch's 0005.
+	add("docs/adr/0008-sibling.md")
+	got, err = Repo("").SequenceNext("docs/adr/0003-mine.md")
+	if err != nil || got != "0009" {
+		t.Errorf("SequenceNext with own sibling = %q, %v; want 0009", got, err)
+	}
+}
+
+func TestSeqClashesIntraBranch(t *testing.T) {
+	rules := []Rule{ADRRule, mustRule(t, "db/migration/V{n}__*.sql")}
+	const a = " (rule **/docs/adr/{n:4}-*.md) (vs this branch's "
+	for _, tc := range []struct {
+		name          string
+		added, main   []string
+		want          []string
+		wantErrSubstr string
+	}{
+		{"two adds, one line for the later", []string{"docs/adr/0005-a.md", "docs/adr/0005-b.md"}, nil,
+			[]string{"docs/adr/0005-b.md" + a + "docs/adr/0005-a.md)"}, ""},
+		{"three adds, two lines each listing earlier siblings", []string{"docs/adr/0005-a.md", "docs/adr/0005-b.md", "docs/adr/0005-c.md"}, nil,
+			[]string{"docs/adr/0005-b.md" + a + "docs/adr/0005-a.md)", "docs/adr/0005-c.md" + a + "docs/adr/0005-a.md, docs/adr/0005-b.md)"}, ""},
+		{"introduction order, not path order, picks the keeper", []string{"docs/adr/0005-z.md", "docs/adr/0005-a.md"}, nil,
+			[]string{"docs/adr/0005-a.md" + a + "docs/adr/0005-z.md)"}, ""},
+		{"same number in different directories", []string{"docs/adr/0005-a.md", "apps/x/docs/adr/0005-b.md"}, nil, nil, ""},
+		{"same number under different rules", []string{"docs/adr/0005-a.md", "db/migration/V5__b.sql"}, nil, nil, ""},
+		{"equal by value across widths is one slot", []string{"db/migration/V5__a.sql", "db/migration/V05__b.sql"}, nil,
+			[]string{"db/migration/V05__b.sql (rule db/migration/V{n}__*.sql) (vs this branch's db/migration/V5__a.sql)"}, ""},
+		{"mainline number wins: only mainline lines, siblings included", []string{"docs/adr/0005-a.md", "docs/adr/0005-b.md"}, []string{"docs/adr/0005-m.md"},
+			[]string{
+				"docs/adr/0005-a.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0005-m.md)",
+				"docs/adr/0005-b.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0005-m.md)",
+			}, ""},
+		{"same-path hit is skipped", []string{"docs/adr/0005-a.md"}, []string{"docs/adr/0005-a.md"}, nil, ""},
+		{"same path on mainline holds the slot for a sibling", []string{"docs/adr/0005-a.md", "docs/adr/0005-b.md"}, []string{"docs/adr/0005-a.md"},
+			[]string{"docs/adr/0005-b.md (rule **/docs/adr/{n:4}-*.md) (vs mainline docs/adr/0005-a.md)"}, ""},
+	} {
+		got, err := seqClashes(rules, tc.added, tc.main)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("%s: = %q, %v; want %q", tc.name, got, err, tc.want)
+		}
+	}
+	overlap := []Rule{ADRRule, mustRule(t, "docs/adr/{n:4}-*.md")}
+	if _, err := seqClashes(overlap, []string{"docs/adr/0005-a.md", "docs/adr/0005-b.md"}, nil); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Errorf("overlap err = %v, want an overlap error", err)
+	}
+}
+
+// The introducing commit along the branch's first-parent chain decides the keeper;
+// one commit (or one merge) bringing both falls back to path order.
+func TestNumberClashesIntroductionOrder(t *testing.T) {
+	line := func(mover, keeper string) string {
+		return "docs/adr/0002-" + mover + ".md (rule **/docs/adr/{n:4}-*.md) (vs this branch's docs/adr/0002-" + keeper + ".md)"
+	}
+	check := func(t *testing.T, want string) {
+		t.Helper()
+		base := mustGit(t, "rev-parse", Mainline())
+		got, err := numberClashes("HEAD", base)
+		if err != nil || len(got) != 1 || got[0] != want {
+			t.Fatalf("numberClashes = %q, %v; want [%q]", got, err, want)
+		}
+	}
+	t.Run("the later commit's file moves even when its path sorts first", func(t *testing.T) {
+		newRepo(t)
+		mustGit(t, "checkout", "-b", "effort/x")
+		addADR(t, "0002-z.md")
+		addADR(t, "0002-a.md")
+		check(t, line("a", "z"))
+	})
+	t.Run("one commit adding both: path order", func(t *testing.T) {
+		newRepo(t)
+		mustGit(t, "checkout", "-b", "effort/x")
+		os.MkdirAll("docs/adr", 0o755)
+		writeFile(t, "docs/adr/0002-z.md", "z\n")
+		writeFile(t, "docs/adr/0002-a.md", "a\n")
+		mustGit(t, "add", ".")
+		mustGit(t, "commit", "-m", "both")
+		check(t, line("z", "a"))
+	})
+	t.Run("an Integrate-style merge bringing both in: path order", func(t *testing.T) {
+		newRepo(t)
+		mustGit(t, "checkout", "-b", "checkpoint/x")
+		commitFile(t, "keep.txt", "k\n")
+		mustGit(t, "checkout", "-b", "effort/y")
+		addADR(t, "0002-z.md")
+		addADR(t, "0002-a.md")
+		mustGit(t, "checkout", "checkpoint/x")
+		commitFile(t, "other.txt", "o\n")
+		mustGit(t, "merge", "--no-ff", "-m", "integrate", "effort/y")
+		check(t, line("z", "a"))
+	})
+}
+
+func TestLandProbeAndCheckResolvedIntraBranchClash(t *testing.T) {
+	const want = "docs/adr/0002-b.md (rule **/docs/adr/{n:4}-*.md) (vs this branch's docs/adr/0002-a.md)"
+	scene := func(t *testing.T) {
+		newRepo(t)
+		addADR(t, "0001-base.md")
+		mustGit(t, "checkout", "-b", "chart/x")
+		addADR(t, "0002-a.md")
+		addADR(t, "0002-b.md")
+		mustGit(t, "checkout", Mainline())
+	}
+	t.Run("Land refuses", func(t *testing.T) {
+		scene(t)
+		var c *NumberClash
+		_, err := Land("chart/x", TrailerFor("chart", "x"), LandLocal)
+		if !errors.As(err, &c) || !slices.Equal(c.Clashes, []string{want}) {
+			t.Fatalf("Land = %v, want one intra-branch clash", err)
+		}
+	})
+	t.Run("ProbeConflict reports it", func(t *testing.T) {
+		scene(t)
+		base, err := ResolveProbeBase()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c *NumberClash
+		if err := ProbeConflict("chart/x", base); !errors.As(err, &c) || !slices.Equal(c.Clashes, []string{want}) {
+			t.Fatalf("ProbeConflict = %v, want one intra-branch clash", err)
+		}
+	})
+	t.Run("CheckResolved fails assertion 2", func(t *testing.T) {
+		scene(t)
+		base := mustGit(t, "rev-parse", Mainline())
+		mustGit(t, "checkout", "chart/x")
+		wantCheckFailure(t, CheckResolved(base, mustGit(t, "rev-parse", "HEAD")), 2, want)
+	})
 }

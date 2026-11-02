@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/git"
 )
 
@@ -50,10 +52,39 @@ func runSequence(argv []string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	n, err := git.Repo(top).SequenceNext(filepath.ToSlash(rel))
+	repo, rel, err := sequenceRepo(top, filepath.ToSlash(rel))
+	if err != nil {
+		return err
+	}
+	n, err := repo.SequenceNext(rel)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(w, n)
 	return err
+}
+
+// sequenceRepo is the repo that judges rel (slash path under top, the current worktree)
+// and the path within it. A path whose leading segments name a declared repo = dir that
+// is not a repo root in this worktree is judged in the child at the Workspace root; a
+// child checked out in neither is an error naming the context, never "matches no rule".
+// Everything else is top's own. The repo table is read only when the config declares one.
+func sequenceRepo(top, rel string) (git.Repo, string, error) {
+	for name, dir := range cfglayer.Repos(top) {
+		rest, ok := strings.CutPrefix(rel, strings.TrimSuffix(filepath.ToSlash(dir), "/")+"/")
+		if !ok || git.IsRepoRoot(filepath.Join(top, dir)) {
+			continue
+		}
+		wsRoot := top
+		if cd, err := git.CommonDirOf(top); err == nil {
+			if r, err := git.RepoRootAt(cd); err == nil {
+				wsRoot = r
+			}
+		}
+		if child := filepath.Join(wsRoot, dir); git.IsRepoRoot(child) {
+			return git.Repo(child), rest, nil
+		}
+		return "", "", fmt.Errorf("sequence next: context %s's repo %s/ is not checked out here or at %s", name, dir, wsRoot)
+	}
+	return git.Repo(top), rel, nil
 }

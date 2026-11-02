@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -141,18 +142,27 @@ func ruleOf(rules []Rule, p string) (int, error) {
 	return hit, nil
 }
 
-// slotClash is one added path and the other mainline paths holding its number.
+// slotClash is one added path and the other paths holding its number: mainline
+// paths, or (Branch) the earlier paths the same branch adds.
 type slotClash struct {
 	Added, Rule string
 	Others      []string
+	Branch      bool // an intra-branch clash: Others are the branch's own earlier adds
 }
 
-// seqSlotClashes is the pure core of numberClashes and PostLandClashes: each
-// added path whose number (by value, in its own directory, under its rule)
-// mainline already holds under a DIFFERENT path. Same-path hits are skipped — an
-// add/add of one path is a textual conflict Land's rebase already catches, and
-// it is also what a re-run sees after the Chart itself landed. A path matching
-// two rules is an error, not a clash.
+// seqSlotClashes is the pure core of numberClashes and PostLandClashes. added is
+// in introduction order (earliest first, path order breaking ties). Two kinds of
+// clash:
+//   - mainline: an added path whose number (by value, in its own directory, under
+//     its rule) mainline already holds under a DIFFERENT path;
+//   - intra-branch: for a number mainline does not hold at all, every added path
+//     but the first in a shared slot, its Others the earlier paths of the slot.
+//
+// Mainline wins: a slot mainline holds gets no intra-branch line, so a file is
+// never reported twice. Same-path hits are skipped — an add/add of one path is a
+// textual conflict Land's rebase already catches, and it is also what a re-run
+// sees after the Chart itself landed. A path matching two rules is an error, not
+// a clash.
 func seqSlotClashes(rules []Rule, added, mainline []string) ([]slotClash, error) {
 	type slot struct {
 		rule     int
@@ -170,6 +180,7 @@ func seqSlotClashes(rules []Rule, added, mainline []string) ([]slotClash, error)
 		}
 	}
 	var clashes []slotClash
+	seen := map[slot][]string{} // earlier added paths per slot mainline doesn't hold
 	for _, p := range added {
 		i, err := ruleOf(rules, p)
 		if err != nil {
@@ -179,25 +190,41 @@ func seqSlotClashes(rules []Rule, added, mainline []string) ([]slotClash, error)
 			continue
 		}
 		dir, key, _ := seqParts(rules[i], p)
-		var others []string
-		for _, m := range byNum[slot{i, dir, key}] {
-			if m != p {
-				others = append(others, m)
+		s := slot{i, dir, key}
+		if len(byNum[s]) > 0 {
+			var others []string
+			for _, m := range byNum[s] {
+				if m != p {
+					others = append(others, m)
+				}
 			}
+			if len(others) > 0 {
+				clashes = append(clashes, slotClash{Added: p, Rule: rules[i].Template, Others: others})
+			}
+			continue
 		}
-		if len(others) > 0 {
-			clashes = append(clashes, slotClash{p, rules[i].Template, others})
+		if slices.Contains(seen[s], p) {
+			continue
 		}
+		if len(seen[s]) > 0 {
+			clashes = append(clashes, slotClash{Added: p, Rule: rules[i].Template, Others: slices.Clone(seen[s]), Branch: true})
+		}
+		seen[s] = append(seen[s], p)
 	}
 	return clashes, nil
 }
 
-// seqClashes is seqSlotClashes rendered as "added (rule T) (vs mainline p, ...)".
+// seqClashes is seqSlotClashes rendered as "added (rule T) (vs mainline p, ...)"
+// or, for an intra-branch clash, "added (rule T) (vs this branch's p, ...)".
 func seqClashes(rules []Rule, added, mainline []string) ([]string, error) {
 	cs, err := seqSlotClashes(rules, added, mainline)
 	var out []string
 	for _, c := range cs {
-		out = append(out, fmt.Sprintf("%s (rule %s) (vs mainline %s)", c.Added, c.Rule, strings.Join(c.Others, ", ")))
+		vs := "mainline"
+		if c.Branch {
+			vs = "this branch's"
+		}
+		out = append(out, fmt.Sprintf("%s (rule %s) (vs %s %s)", c.Added, c.Rule, vs, strings.Join(c.Others, ", ")))
 	}
 	return out, err
 }

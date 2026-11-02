@@ -1,95 +1,84 @@
 import React from 'react';
 import Layout from '@theme/Layout';
 import Link from '@docusaurus/Link';
-import SpineDiagram from '../components/SpineDiagram';
 import Recording from '../components/Recording';
 
-const DOORS = [
+const TAGLINE = 'Build software with decisions instead of code.';
+
+const VERBS = [
   {
-    to: '/workspace',
-    course: 'Course 01',
-    name: 'The problem-solving workspace',
-    question: 'What is it like to get a real problem solved with it?',
+    heading: 'Capture your ideas as signals.',
+    body: 'Anything can be a signal. A vague idea, a passing thought, an error log, a full spec—a signal can be as big or small as you want. Agents will help you refine the signals into actionable goals.',
   },
   {
-    to: '/framework',
-    course: 'Course 02',
-    name: 'The technical framework',
-    question: 'How does it work under the hood?',
+    heading: 'Chart the course and clear the fog.',
+    body: 'Your agent keeps track of key decisions until it reaches a shared understanding of your goal.',
   },
   {
-    to: '/game',
-    course: 'Course 03',
-    name: 'The creative strategy game',
-    question: 'Why does using it feel like playing a strategy game?',
+    heading: 'Let agents handle everything else.',
+    body: 'No need to manually delegate—the agents will keep track of what\'s next. You only need to pay attention to things that actually need your judgment.',
+  },
+  {
+    heading: 'Work on any codebase.',
+    body: 'Use it on any new or existing codebase, mono-repo or nested multi-repo, and any language.',
+  },
+  {
+    heading: 'Use your existing code harness.',
+    body: (
+      <>
+        Runs the same <code>claude</code> harness you&apos;re already using.
+      </>
+    ),
+    note: 'Note: Support for other harnesses is planned.',
   },
 ];
-
-const TAGLINE =
-  'A crew of agents that carries an idea to a landed commit in your repo, with you approving each turn.';
 
 export default function Home() {
   return (
     <Layout title="mugicrew" description={TAGLINE}>
-      <main className="container margin-vert--lg hero-page">
-        <section>
-          <h1>mugicrew</h1>
-          <h2 id="what-it-is">What mugicrew is, in one breath</h2>
-          <p className="hero-page__lede">{TAGLINE}</p>
-          <p>
-            You hand it a rough idea, an error log or an alert. The crew charts the open questions,
-            writes one plan, builds it on a branch and reviews it, and nothing reaches your main
-            branch until you say so.
-          </p>
+      <main className="hero-page">
+      <div className="container">
+        <section className="hero-page__split">
+          <div className="hero-page__copy">
+            <h1>mugicrew</h1>
+            <p id="what-it-is" className="hero-page__lede">{TAGLINE}</p>
+            <p>Free and open-source forever.</p>
+            <pre className="hero-page__install">
+              <code>npm i -g @jayulabs/mugicrew</code>
+            </pre>
+            <p className="hero-page__facts">
+              Beta · Linux and macOS · <Link to="/try/install">Full install guide &rarr;</Link>
+            </p>
+            <p>
+              <Link to="/try">Try it &rarr;</Link>
+            </p>
+          </div>
+          <div className="hero-page__media">
+            <Recording
+              name="hero-loop"
+              label="Recording of the mugicrew TUI moving from the Inbox through a Chart and a Checkpoint to the Graph"
+            />
+          </div>
         </section>
-
-        <section>
-          <h2>The spine, at a glance</h2>
-          <p>
-            Every piece of work travels the same road. A Signal is charted into a plan, the plan
-            becomes a Checkpoint, and the Checkpoint is built, reviewed and landed.
-          </p>
-          <SpineDiagram />
-        </section>
-
-        <section>
-          <h2>See it running</h2>
-          <p>One Signal moving from the Inbox, through a Chart and a Checkpoint, to the Graph.</p>
-          <Recording
-            name="hero-loop"
-            label="Recording of the mugicrew TUI moving from the Inbox through a Chart and a Checkpoint to the Graph"
-          />
-        </section>
-
-        <section>
-          <h2>Install it</h2>
-          <p>One command, then you are in the crew.</p>
-          <pre className="hero-page__install">
-            <code>npm i -g @jayulabs/mugicrew</code>
-          </pre>
-          <p>
-            <Link to="/try">Try it &rarr;</Link>
-          </p>
-        </section>
-
-        <section>
-          <h2 id="doors">One machine, three ways to see it</h2>
-          <p>
-            These are three lenses on the same machine, not three products. Pick the question that
-            brought you here.
-          </p>
-          <ol className="hero-page__doors">
-            {DOORS.map((d) => (
-              <li key={d.to}>
-                <Link className="hero-page__door" to={d.to}>
-                  <span className="hero-page__course">{d.course}</span>
-                  <strong>{d.name}</strong>
-                  <em>{d.question}</em>
-                </Link>
-              </li>
-            ))}
-          </ol>
-        </section>
+      </div>
+      <Link className="hero-page__learn" to="/learn">
+        <span>First time with mugicrew?</span>
+        <strong>Start learning &rarr;</strong>
+      </Link>
+      <div className="container">
+        <div className="hero-page__verbs">
+          {VERBS.map(({ heading, body, note }) => (
+            <section key={heading} className="hero-page__verb">
+              <h2>{heading}</h2>
+              <p>{body}</p>
+              {note && <p className="hero-page__note">{note}</p>}
+            </section>
+          ))}
+        </div>
+        <p className="hero-page__disclosure">
+          AI Content Disclosure: No generated text was used for any content on this page.
+        </p>
+      </div>
       </main>
     </Layout>
   );

@@ -587,7 +587,9 @@ var launchTUI = session.LaunchTUI
 // human's terminal (spec §7.2). The Signal's registry owner, Luffy (ADR 0129),
 // formats the command via the harness; this verb runs it interactively — the
 // second Launch invoker alongside the TUI. The six outcomes happen inside the
-// session, not here.
+// session, not here. Like the TUI's HITL launch it claims the Signal before it
+// writes any bd state or starts anything, and settles the claim on every exit
+// (runInteractive); a held Signal is refused.
 func runSignalTriage(argv []string) error {
 	if len(argv) != 1 {
 		return errors.New("usage: mugicrew signal triage <id>")
@@ -622,15 +624,11 @@ func triage(p dispatch.Profiled, bead bd.Bead) error {
 	if !ok {
 		return fmt.Errorf("signal triage: expected an agent command, got %T", lc)
 	}
-	// Run the session in the tree its kind routes to: a Signal triage
-	// is a leaf, so this is repo-root cwd; the setup/teardown mirrors the TUI so an
-	// in-tree kind opened here would get its worktree too. Teardown is unconditional.
-	cwd, teardown, err := resolveCwd(bead)
-	if err != nil {
-		return err
-	}
-	defer teardown()
-	return runInteractive(ac, cwd, bead, profile)
+	// The session runs in the tree its kind routes to: a Signal triage is a leaf,
+	// so this is repo-root cwd; the setup/teardown mirrors the TUI so an in-tree
+	// kind opened here would get its worktree too. runInteractive resolves it after
+	// the claim and the leftover-Drafts delete; teardown is unconditional.
+	return runInteractive(ac, func() (string, func(), error) { return resolveCwd(bead) }, bead, profile)
 }
 
 // runInteractive execs a launch command in the human's TTY (their shell supplies
@@ -638,20 +636,40 @@ func triage(p dispatch.Profiled, bead bd.Bead) error {
 // verb (spec §7.2). Thin wiring over os/exec — the argv is composed and tested in
 // the harness; this only sets the cwd and hands the process the terminal. Like the
 // TUI launch, it brackets the session with hitl.launched / hitl.exited (Spec FR29)
-// — events go to the log file, never the TTY streams — and ends it
-// like hitl-run: a dead run's leftover Drafts are deleted before the launch, and a
-// clean exit publishes the session's Drafts (ADR 0059 §4, §6). A failed exit keeps
-// them; the next launch deletes them. The profile's env (ac.Env) goes on top of
-// ours, never into argv, and a named profile ("" = the built-in) is on hitl.*.
-func runInteractive(ac contract.AgentCommand, cwd string, b bd.Bead, profile string) error {
+// — events go to the log file, never the TTY streams — and ends it like hitl-run:
+// a dead run's leftover Drafts are deleted before the launch, and a clean exit
+// publishes the session's Drafts (ADR 0059 §4, §6). A failed exit keeps them; the
+// next launch deletes them. It claims the Signal first, as the TUI launch does
+// (bd.Claim, ADR 0052), so every Signal site the session reaches runs under its
+// claim: a held Signal (another actor's, or already in_progress under this one)
+// is refused with nothing deleted or launched. Every exit after the claim settles
+// it (settleTriage), a failed exit too: unlike hitl-run there is no pane to
+// resume, so a kept claim would only block the next launch. The profile's env
+// (ac.Env) goes on top of ours, never into argv, and a named profile ("" = the
+// built-in) is on hitl.*.
+func runInteractive(ac contract.AgentCommand, resolve func() (string, func(), error), b bd.Bead, profile string) (err error) {
 	if len(ac.Argv) == 0 {
 		return errors.New("launch command has empty argv")
 	}
-	// ponytail: deletes by creator, so a still-resumable tmux session on the same
-	// Signal loses its Drafts too; guard on session.Sessions() if both ever coexist.
+	if cerr := eventlog.RecordClaim(b, "claim.taken", bd.Claim(b.ID)); cerr != nil {
+		var held *bd.HeldError
+		switch {
+		case errors.As(cerr, &held):
+			return fmt.Errorf("%s is claimed by %s — not launched; drop its session, or run: bd unclaim %s --force once %s is gone", b.ID, held.Holder, b.ID, held.Holder)
+		case errors.Is(cerr, bd.ErrClaimedSince):
+			return fmt.Errorf("%s is already in_progress under this actor (a live TUI session, or a stranded claim) — not launched; drop its session, or run: bd unclaim %s", b.ID, b.ID)
+		}
+		return fmt.Errorf("claim: %w", cerr)
+	}
+	defer func() { err = errors.Join(err, settleTriage(b)) }()
 	if err := dropDrafts(b); err != nil {
 		return err
 	}
+	cwd, teardown, err := resolve()
+	if err != nil {
+		return err
+	}
+	defer teardown()
 	cmd := exec.Command(ac.Argv[0], ac.Argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -670,7 +688,7 @@ func runInteractive(ac contract.AgentCommand, cwd string, b bd.Bead, profile str
 	}
 	slog.Info("hitl.launched", attrs...)
 	readCost := claudecode.MeterCost(ac.SessionID)
-	err := interactiveExec(cmd)
+	err = interactiveExec(cmd)
 	metered := readCost()
 	cost, follow := session.Handoff(attrs, metered, spawnFollower)
 	if err == nil {
@@ -679,6 +697,23 @@ func runInteractive(ac contract.AgentCommand, cwd string, b bd.Bead, profile str
 	follow()
 	eventlog.RecordHitlExited(append(attrs, cost...), err)
 	return err
+}
+
+// settleTriage releases the claim runInteractive took, only while the Signal is
+// still in_progress: a Signal the publish (or the session) closed is left alone.
+// It reproduces hitl-run's Signal settle (session's settle also covers kinds that
+// don't apply here) and records claim.released. A Signal already out of
+// in_progress records nothing, so a claim.taken with no claim.released means
+// the publish (or the session) closed the Signal.
+func settleTriage(b bd.Bead) error {
+	cur, err := bd.Show(b.ID)
+	if err != nil {
+		return eventlog.RecordClaim(b, "claim.released", err)
+	}
+	if cur.Status != "in_progress" {
+		return nil
+	}
+	return eventlog.RecordClaim(b, "claim.released", bd.Unclaim(b.ID))
 }
 
 // spawnFollower is session.SpawnFollower; a var so tests spawn nothing.

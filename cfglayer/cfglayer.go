@@ -238,7 +238,8 @@ type sequenceLayer struct {
 // SequenceRules is the numbered-sequence rule set for repo r (the empty Repo is the
 // cwd's, i.e. the Workspace repo): the built-in ADR rule, then the shared layer's
 // top-level sequences = [...] for the Workspace repo, or [context.<name>] sequences
-// for the child repo = <name> that r is. The local layer is never read, and the file
+// for the child repo = <name> that r is (its dir under root, or under the Workspace root
+// when root is a worktree lacking it). The local layer is never read, and the file
 // is read now, not from a landing base. Unlike Decode, a missing file is built-in
 // only but a malformed one is an error, as is any unusable rule, naming the rule and
 // the file: a Land that can't tell what to enforce must refuse, not skip (ADR 0214).
@@ -261,8 +262,26 @@ func SequenceRules(root string, r git.Repo) ([]git.Rule, error) {
 	if r != "" {
 		if own, _ := sameRepo(root, string(r)); !own {
 			decl = nil
+			wsRoot, wsDone := "", false
 			for _, c := range l.Context {
-				if same, _ := sameRepo(filepath.Join(root, c.Repo), string(r)); c.Repo != "" && same {
+				if c.Repo == "" {
+					continue
+				}
+				same, _ := sameRepo(filepath.Join(root, c.Repo), string(r))
+				if !same {
+					// The dir may be checked out only at the Workspace root, not in this
+					// worktree; look it up once, and only once a repo = entry exists.
+					if !wsDone {
+						wsDone = true
+						if cd, err := git.CommonDirOf(root); err == nil {
+							wsRoot, _ = git.RepoRootAt(cd)
+						}
+					}
+					if wsRoot != "" && wsRoot != root {
+						same, _ = sameRepo(filepath.Join(wsRoot, c.Repo), string(r))
+					}
+				}
+				if same {
 					decl = c.Sequences
 					break
 				}

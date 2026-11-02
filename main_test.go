@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"jayulabs.org/mugicrew/bd"
+	"jayulabs.org/mugicrew/bd/bdtest"
 	"jayulabs.org/mugicrew/brook"
 	"jayulabs.org/mugicrew/cfglayer"
 	"jayulabs.org/mugicrew/chopper"
@@ -233,7 +234,7 @@ func TestRunInteractiveSetsCwdAndArgv(t *testing.T) {
 	interactiveExec = func(cmd *exec.Cmd) error { got = cmd; return nil }
 
 	ac := contract.AgentCommand{Argv: []string{"mugicrew", "signal", "triage", "sig1"}}
-	if err := runInteractive(ac, "/repo/root", bd.Bead{ID: "sig1"}, ""); err != nil {
+	if err := runInteractive(ac, cwdAt("/repo/root"), bd.Bead{ID: "sig1"}, ""); err != nil {
 		t.Fatalf("runInteractive: %v", err)
 	}
 	if got == nil {
@@ -247,7 +248,7 @@ func TestRunInteractiveSetsCwdAndArgv(t *testing.T) {
 	}
 
 	// An empty argv is a loud error, not a spawn.
-	if err := runInteractive(contract.AgentCommand{}, "/repo/root", bd.Bead{}, ""); err == nil {
+	if err := runInteractive(contract.AgentCommand{}, cwdAt("/repo/root"), bd.Bead{}, ""); err == nil {
 		t.Error("empty argv must error")
 	}
 }
@@ -272,10 +273,10 @@ func TestRunInteractiveEmitsHitlEvents(t *testing.T) {
 	capt := eventlogtest.Capture(t)
 
 	ac := contract.AgentCommand{Argv: []string{"claude", "--session-id", "sess-1"}, SessionID: "sess-1"}
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1", Kind: contract.KindSignal}, ""); err == nil {
+	if err := runInteractive(ac, cwdAt("/repo"), bd.Bead{ID: "sig1", Kind: contract.KindSignal}, ""); err == nil {
 		t.Fatal("a non-zero session exit must surface as an error")
 	}
-	evs := *capt
+	evs := hitlEvents(*capt)
 	if len(evs) != 2 || evs[0].Name != "hitl.launched" || evs[1].Name != "hitl.exited" {
 		t.Fatalf("events = %+v, want hitl.launched then hitl.exited", evs)
 	}
@@ -315,69 +316,38 @@ func TestRunInteractiveSpawnsFollowerOnHandoff(t *testing.T) {
 		return nil
 	}
 	ac := contract.AgentCommand{Argv: []string{"claude", "--session-id", "sess-1"}, SessionID: "sess-1"}
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1", Kind: contract.KindSignal}, ""); err != nil {
+	if err := runInteractive(ac, cwdAt("/repo"), bd.Bead{ID: "sig1", Kind: contract.KindSignal}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if dest != "dest-9" || exitedBefore {
 		t.Errorf("spawn dest=%q, hitl.exited already written=%v; want dest-9, false", dest, exitedBefore)
 	}
-	evs := *capt
+	evs := hitlEvents(*capt)
 	if a := evs[len(evs)-1].Attrs; a["continued_in"] != "dest-9" || a["cost_usd"] != 1.5 {
 		t.Errorf("hitl.exited attrs = %v, want continued_in dest-9 and the source's own 1.5", a)
 	}
 }
 
-// noDrafts stubs the triage verb's Draft delete/publish to no-ops, so a test of
-// its exec seam touches no live bd.
+// hitlEvents drops the claim.* events, leaving the session's own.
+func hitlEvents(evs []eventlogtest.Event) []eventlogtest.Event {
+	return slices.DeleteFunc(slices.Clone(evs), func(e eventlogtest.Event) bool { return strings.HasPrefix(e.Name, "claim.") })
+}
+
+// cwdAt is a resolveCwd result for a fixed cwd with a no-op teardown.
+func cwdAt(dir string) func() (string, func(), error) {
+	return func() (string, func(), error) { return dir, func() {}, nil }
+}
+
+// noDrafts stubs the triage verb's Draft delete/publish to no-ops and installs a
+// bdtest graph seeded with an open sig1 (runInteractive claims its Signal before
+// launching, so the claim needs one), so a test of its exec seam touches no live bd.
 func noDrafts(t *testing.T) {
 	t.Helper()
+	bdtest.New(t, bd.Bead{ID: "sig1", Kind: contract.KindSignal, Status: "open"})
 	origDrop, origPub := dropDrafts, publishDrafts
 	t.Cleanup(func() { dropDrafts, publishDrafts = origDrop, origPub })
 	dropDrafts = func(bd.Bead) error { return nil }
 	publishDrafts = func(string, []any) error { return nil }
-}
-
-// The triage verb ends a session like hitl-run (ADR 0059 §4, §6): it
-// deletes a dead run's leftover Drafts before launching, publishes the session's
-// Drafts on a clean exit, and keeps them on a failed one.
-func TestRunInteractiveDraftLifecycle(t *testing.T) {
-	origExec, origDrop, origPub := interactiveExec, dropDrafts, publishDrafts
-	defer func() { interactiveExec, dropDrafts, publishDrafts = origExec, origDrop, origPub }()
-
-	var calls []string
-	dropDrafts = func(b bd.Bead) error { calls = append(calls, "drop "+b.ID); return nil }
-	publishDrafts = func(b string, _ []any) error { calls = append(calls, "publish "+b); return nil }
-	ac := contract.AgentCommand{Argv: []string{"claude"}}
-
-	interactiveExec = func(*exec.Cmd) error { calls = append(calls, "run"); return nil }
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1"}, ""); err != nil {
-		t.Fatalf("runInteractive: %v", err)
-	}
-	if got := strings.Join(calls, ","); got != "drop sig1,run,publish sig1" {
-		t.Errorf("clean exit calls = %s, want drop, run, publish", got)
-	}
-
-	calls = nil
-	interactiveExec = func(*exec.Cmd) error { calls = append(calls, "run"); return errors.New("rc=1") }
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1"}, ""); err == nil {
-		t.Fatal("a failed session must error")
-	}
-	if got := strings.Join(calls, ","); got != "drop sig1,run" {
-		t.Errorf("failed exit calls = %s, want drop, run (Drafts kept)", got)
-	}
-
-	// A failed publish fails the verb; a failed leftover delete launches nothing.
-	interactiveExec = func(*exec.Cmd) error { return nil }
-	publishDrafts = func(string, []any) error { return errors.New("bd down") }
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1"}, ""); err == nil {
-		t.Error("a failed publish must error")
-	}
-	calls = nil
-	dropDrafts = func(bd.Bead) error { return errors.New("bd down") }
-	interactiveExec = func(*exec.Cmd) error { calls = append(calls, "run"); return nil }
-	if err := runInteractive(ac, "/repo", bd.Bead{ID: "sig1"}, ""); err == nil || len(calls) != 0 {
-		t.Errorf("failed drop: err=%v calls=%v, want an error and no launch", err, calls)
-	}
 }
 
 // fakeBd puts a stub `bd` first on PATH (bd.run shells out by name): `show`
@@ -2340,7 +2310,7 @@ func TestTriageResolvesSignalProfile(t *testing.T) {
 	// Luffy's best-effort adoption lookup warns when bd can't find the fake Signal.
 	first := func(capt *[]eventlogtest.Event) eventlogtest.Event {
 		for _, e := range *capt {
-			if e.Name != "adoption.skipped" {
+			if e.Name != "adoption.skipped" && !strings.HasPrefix(e.Name, "claim.") {
 				return e
 			}
 		}

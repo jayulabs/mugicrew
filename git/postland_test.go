@@ -116,14 +116,14 @@ func TestPostLandClashesOrdersByFirstParentAncestry(t *testing.T) {
 		addADR(t, "0002-x.md")
 		wantMoved(t, y) // x's newest add is after y's: y is earlier
 	})
-	t.Run("both adds in one first-parent commit are skipped", func(t *testing.T) {
+	t.Run("both adds in one first-parent commit: the path-later one moves (ADR 0424)", func(t *testing.T) {
 		newRepo(t)
 		addADR(t, "0001-base.md")
 		writeFile(t, adrX, "x\n")
 		writeFile(t, adrY, "y\n")
 		mustGit(t, "add", "-A")
 		mustGit(t, "commit", "-m", "both")
-		wantMoved(t, head(t))
+		wantMoved(t, head(t), adrY+" vs "+adrX)
 	})
 	t.Run("a duplicate the landed commit did not add is never reported", func(t *testing.T) {
 		newRepo(t)
@@ -280,4 +280,36 @@ func TestIsEmptyCommit(t *testing.T) {
 	if empty, err := IsEmptyCommit(head(t)); err != nil || !empty {
 		t.Errorf("stamp commit: empty = %v, %v", empty, err)
 	}
+}
+
+// A squash land adding two same-number files is one clash: the path-later file
+// moves, the keeper is its Other, the landed commit parallel to it.
+func TestPostLandClashesFlagsTwoFilesOneLandAdds(t *testing.T) {
+	newRepo(t)
+	addADR(t, "0001-base.md")
+	addADR(t, "0002-x.md")
+	addADR(t, "0002-y.md")
+	h := head(t)
+	// both files in one commit: rewrite as a single squash
+	mustGit(t, "reset", "--soft", "HEAD~2")
+	mustGit(t, "commit", "-m", "land both")
+	h = head(t)
+	cs, err := PostLandClashes(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || cs[0].Added != adrY || !reflect.DeepEqual(cs[0].Others, []string{adrX}) ||
+		!reflect.DeepEqual(cs[0].Commits, []string{h}) || len(cs[0].LandedBy) != 1 {
+		t.Fatalf("PostLandClashes = %+v, want one: %s vs %s at %s", cs, adrY, adrX, h)
+	}
+
+	t.Run("a pair already on mainline before the land yields none", func(t *testing.T) {
+		addADR(t, "0003-z.md")
+		wantMoved(t, head(t))
+	})
+	t.Run("a moved path absent from the tip yields none", func(t *testing.T) {
+		mustGit(t, "mv", adrY, "docs/adr/0009-y.md")
+		mustGit(t, "commit", "-m", "renumber")
+		wantMoved(t, h)
+	})
 }
